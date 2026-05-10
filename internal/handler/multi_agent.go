@@ -63,7 +63,7 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 		// 为避免 UI 看到“取消错误 + cancelled 文案”两条回复，这里直接丢弃取消对应的 error。
 		if eventType == "error" && baseCtx != nil {
 			cause := context.Cause(baseCtx)
-			if errors.Is(cause, ErrTaskCancelled) {
+			if errors.Is(cause, ErrTaskCancelled) || errors.Is(cause, multiagent.ErrInterruptContinue) {
 				return
 			}
 		}
@@ -184,31 +184,71 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 	}
 	taskOwned = true
 
-	progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
-	taskCtx = mcp.WithMCPConversationID(taskCtx, conversationID)
-	taskCtx = mcp.WithToolRunRegistry(taskCtx, h.tasks)
-	taskCtx = multiagent.WithHITLToolInterceptor(taskCtx, func(ctx context.Context, toolName, arguments string) (string, error) {
-		return h.interceptHITLForEinoTool(ctx, cancelWithCause, conversationID, assistantMessageID, sendEvent, toolName, arguments)
-	})
+	// 同一 HTTP 流内多段 Run（如中断并继续）合并 MCP execution id，供最终 response / 库表与工具芯片展示完整列表
+	var cumulativeMCPExecutionIDs []string
 
-	result, runErr = multiagent.RunDeepAgent(
-		taskCtx,
-		h.config,
-		&h.config.MultiAgent,
-		h.agent,
-		h.logger,
-		conversationID,
-		curFinalMessage,
-		curHistory,
-		roleTools,
-		progressCallback,
-		h.agentsMarkdownDir,
-		orch,
-	)
-	timeoutCancel()
+	for {
+		progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
+		taskCtxLoop := mcp.WithMCPConversationID(taskCtx, conversationID)
+		taskCtxLoop = mcp.WithToolRunRegistry(taskCtxLoop, h.tasks)
+		taskCtxLoop = multiagent.WithHITLToolInterceptor(taskCtxLoop, func(ctx context.Context, toolName, arguments string) (string, error) {
+			return h.interceptHITLForEinoTool(ctx, cancelWithCause, conversationID, assistantMessageID, sendEvent, toolName, arguments)
+		})
 
-	if runErr != nil {
+		result, runErr = multiagent.RunDeepAgent(
+			taskCtxLoop,
+			h.config,
+			&h.config.MultiAgent,
+			h.agent,
+			h.logger,
+			conversationID,
+			curFinalMessage,
+			curHistory,
+			roleTools,
+			progressCallback,
+			h.agentsMarkdownDir,
+			orch,
+		)
+		timeoutCancel()
+
+		if result != nil && len(result.MCPExecutionIDs) > 0 {
+			cumulativeMCPExecutionIDs = mergeMCPExecutionIDLists(cumulativeMCPExecutionIDs, result.MCPExecutionIDs)
+		}
+
+		if runErr == nil {
+			break
+		}
+
 		cause := context.Cause(baseCtx)
+		if errors.Is(cause, multiagent.ErrInterruptContinue) {
+			if shouldPersistEinoAgentTraceAfterRunError(baseCtx) {
+				h.persistEinoAgentTraceForResume(conversationID, result)
+			}
+			note := h.tasks.TakeInterruptContinueNote(conversationID)
+			icSummary := interruptContinueTimelineSummary(note)
+			progressCallback("user_interrupt_continue", icSummary, map[string]interface{}{
+				"conversationId": conversationID,
+				"rawReason":      strings.TrimSpace(note),
+				"emptyReason":    strings.TrimSpace(note) == "",
+				"kind":           "no_active_mcp_tool",
+			})
+			inject := formatInterruptContinueUserMessage(note)
+			// 不写入 messages 表为 user 气泡：避免主对话流出现大段模板；说明已由 user_interrupt_continue 记入助手 process_details（迭代详情）。
+			if hist, err := h.loadHistoryFromAgentTrace(conversationID); err == nil && len(hist) > 0 {
+				curHistory = hist
+			}
+			curFinalMessage = inject
+			sendEvent("progress", "已合并用户补充与最新轨迹，正在继续推理…", map[string]interface{}{
+				"conversationId": conversationID,
+				"source":         "interrupt_continue",
+			})
+			h.tasks.UpdateTaskStatus(conversationID, "running")
+			baseCtx, cancelWithCause = context.WithCancelCause(context.Background())
+			h.tasks.BindTaskCancel(conversationID, cancelWithCause)
+			taskCtx, timeoutCancel = context.WithTimeout(baseCtx, 600*time.Minute)
+			continue
+		}
+
 		if shouldPersistEinoAgentTraceAfterRunError(baseCtx) {
 			h.persistEinoAgentTraceForResume(conversationID, result)
 		}
@@ -270,8 +310,8 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 
 	if assistantMessageID != "" {
 		mcpIDsJSON := ""
-		if len(result.MCPExecutionIDs) > 0 {
-			jsonData, _ := json.Marshal(result.MCPExecutionIDs)
+		if len(cumulativeMCPExecutionIDs) > 0 {
+			jsonData, _ := json.Marshal(cumulativeMCPExecutionIDs)
 			mcpIDsJSON = string(jsonData)
 		}
 		_, _ = h.db.Exec(
@@ -294,7 +334,7 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 		effectiveOrch = config.NormalizeMultiAgentOrchestration(o)
 	}
 	sendEvent("response", result.Response, map[string]interface{}{
-		"mcpExecutionIds": result.MCPExecutionIDs,
+		"mcpExecutionIds": cumulativeMCPExecutionIDs,
 		"conversationId":  conversationID,
 		"messageId":       assistantMessageID,
 		"agentMode":       "eino_" + effectiveOrch,
@@ -404,6 +444,52 @@ func (h *AgentHandler) persistEinoAgentTraceForResume(conversationID string, res
 	if err := h.db.SaveAgentTrace(conversationID, result.LastAgentTraceInput, result.LastAgentTraceOutput); err != nil {
 		h.logger.Warn("保存 Eino 续跑上下文失败", zap.String("conversationId", conversationID), zap.Error(err))
 	}
+}
+
+// mergeMCPExecutionIDLists 去重合并多段 Run 的 MCP execution id（顺序：先 dst 后 more）。
+func mergeMCPExecutionIDLists(dst []string, more []string) []string {
+	seen := make(map[string]struct{}, len(dst)+len(more))
+	out := make([]string, 0, len(dst)+len(more))
+	add := func(ids []string) {
+		for _, id := range ids {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	add(dst)
+	add(more)
+	return out
+}
+
+// interruptContinueTimelineSummary 时间线 / process_details 中展示的简短正文（完整模板已写入另一条用户消息）。
+func interruptContinueTimelineSummary(note string) string {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return "用户选择「中断并继续」，未填写说明；已按默认渗透补充模板合并上下文并续跑。"
+	}
+	return "用户中断说明（原文）：\n\n" + note
+}
+
+// formatInterruptContinueUserMessage 将「中断并继续」弹窗中的说明格式化为新一轮 user 消息（渗透场景下强调路径补充与端口复扫）。
+func formatInterruptContinueUserMessage(note string) string {
+	var b strings.Builder
+	b.WriteString("【用户补充 / 中断后继续】\n")
+	if s := strings.TrimSpace(note); s != "" {
+		b.WriteString(s)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("【请在本轮落实】\n")
+	b.WriteString("- 将用户提供的接口路径、参数、业务变化纳入后续测试与推理。\n")
+	b.WriteString("- 若资产或目标信息有更新，请对目标重新执行端口/服务探测，再基于新结果规划下一步。\n")
+	b.WriteString("- 在已有轨迹基础上推进，避免无意义重复已完成的步骤。\n")
+	return strings.TrimSpace(b.String())
 }
 
 func multiAgentHTTPErrorStatus(err error) (int, string) {

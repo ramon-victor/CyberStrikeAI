@@ -46,7 +46,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 	sendEvent := func(eventType, message string, data interface{}) {
 		if eventType == "error" && baseCtx != nil {
 			cause := context.Cause(baseCtx)
-			if errors.Is(cause, ErrTaskCancelled) {
+			if errors.Is(cause, ErrTaskCancelled) || errors.Is(cause, multiagent.ErrInterruptContinue) {
 				return
 			}
 		}
@@ -175,29 +175,68 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 	}
 	taskOwned = true
 
-	progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
-	taskCtx = mcp.WithMCPConversationID(taskCtx, conversationID)
-	taskCtx = mcp.WithToolRunRegistry(taskCtx, h.tasks)
-	taskCtx = multiagent.WithHITLToolInterceptor(taskCtx, func(ctx context.Context, toolName, arguments string) (string, error) {
-		return h.interceptHITLForEinoTool(ctx, cancelWithCause, conversationID, assistantMessageID, sendEvent, toolName, arguments)
-	})
+	var cumulativeMCPExecutionIDs []string
 
-	result, runErr = multiagent.RunEinoSingleChatModelAgent(
-		taskCtx,
-		h.config,
-		&h.config.MultiAgent,
-		h.agent,
-		h.logger,
-		conversationID,
-		curFinalMessage,
-		curHistory,
-		roleTools,
-		progressCallback,
-	)
-	timeoutCancel()
+	for {
+		progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
+		taskCtxLoop := mcp.WithMCPConversationID(taskCtx, conversationID)
+		taskCtxLoop = mcp.WithToolRunRegistry(taskCtxLoop, h.tasks)
+		taskCtxLoop = multiagent.WithHITLToolInterceptor(taskCtxLoop, func(ctx context.Context, toolName, arguments string) (string, error) {
+			return h.interceptHITLForEinoTool(ctx, cancelWithCause, conversationID, assistantMessageID, sendEvent, toolName, arguments)
+		})
 
-	if runErr != nil {
+		result, runErr = multiagent.RunEinoSingleChatModelAgent(
+			taskCtxLoop,
+			h.config,
+			&h.config.MultiAgent,
+			h.agent,
+			h.logger,
+			conversationID,
+			curFinalMessage,
+			curHistory,
+			roleTools,
+			progressCallback,
+		)
+		timeoutCancel()
+
+		if result != nil && len(result.MCPExecutionIDs) > 0 {
+			cumulativeMCPExecutionIDs = mergeMCPExecutionIDLists(cumulativeMCPExecutionIDs, result.MCPExecutionIDs)
+		}
+
+		if runErr == nil {
+			break
+		}
+
 		cause := context.Cause(baseCtx)
+		if errors.Is(cause, multiagent.ErrInterruptContinue) {
+			if shouldPersistEinoAgentTraceAfterRunError(baseCtx) {
+				h.persistEinoAgentTraceForResume(conversationID, result)
+			}
+			note := h.tasks.TakeInterruptContinueNote(conversationID)
+			icSummary := interruptContinueTimelineSummary(note)
+			progressCallback("user_interrupt_continue", icSummary, map[string]interface{}{
+				"conversationId": conversationID,
+				"rawReason":      strings.TrimSpace(note),
+				"emptyReason":    strings.TrimSpace(note) == "",
+				"kind":           "no_active_mcp_tool",
+			})
+			inject := formatInterruptContinueUserMessage(note)
+			// 不写入 messages 表为 user 气泡：避免主对话流出现大段模板；说明已由 user_interrupt_continue 记入助手 process_details（迭代详情）。
+			if hist, err := h.loadHistoryFromAgentTrace(conversationID); err == nil && len(hist) > 0 {
+				curHistory = hist
+			}
+			curFinalMessage = inject
+			sendEvent("progress", "已合并用户补充与最新轨迹，正在继续推理…", map[string]interface{}{
+				"conversationId": conversationID,
+				"source":         "interrupt_continue",
+			})
+			h.tasks.UpdateTaskStatus(conversationID, "running")
+			baseCtx, cancelWithCause = context.WithCancelCause(context.Background())
+			h.tasks.BindTaskCancel(conversationID, cancelWithCause)
+			taskCtx, timeoutCancel = context.WithTimeout(baseCtx, 600*time.Minute)
+			continue
+		}
+
 		if shouldPersistEinoAgentTraceAfterRunError(baseCtx) {
 			h.persistEinoAgentTraceForResume(conversationID, result)
 		}
@@ -259,8 +298,8 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 
 	if assistantMessageID != "" {
 		mcpIDsJSON := ""
-		if len(result.MCPExecutionIDs) > 0 {
-			jsonData, _ := json.Marshal(result.MCPExecutionIDs)
+		if len(cumulativeMCPExecutionIDs) > 0 {
+			jsonData, _ := json.Marshal(cumulativeMCPExecutionIDs)
 			mcpIDsJSON = string(jsonData)
 		}
 		_, _ = h.db.Exec(
@@ -279,7 +318,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 	}
 
 	sendEvent("response", result.Response, map[string]interface{}{
-		"mcpExecutionIds": result.MCPExecutionIDs,
+		"mcpExecutionIds": cumulativeMCPExecutionIDs,
 		"conversationId":  conversationID,
 		"messageId":       assistantMessageID,
 		"agentMode":       "eino_single",

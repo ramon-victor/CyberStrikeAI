@@ -1789,27 +1789,51 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 			return
 		}
 		execID := h.tasks.ActiveMCPExecutionID(req.ConversationID)
-		if execID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "当前没有正在执行的 MCP 工具（例如模型尚在推理、尚未发起工具调用）。请等待工具开始执行后再试，或使用「彻底停止」结束整轮任务。"})
-			return
-		}
 		note := strings.TrimSpace(req.Reason)
-		if !h.agent.CancelMCPToolExecutionWithNote(execID, note) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "未找到进行中的工具执行或该调用已结束"})
+		if execID != "" {
+			if !h.agent.CancelMCPToolExecutionWithNote(execID, note) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "未找到进行中的工具执行或该调用已结束"})
+				return
+			}
+			h.logger.Info("对话页仅终止当前 MCP 工具",
+				zap.String("conversationId", req.ConversationID),
+				zap.String("executionId", execID),
+				zap.Bool("hasNote", note != ""),
+			)
+			c.JSON(http.StatusOK, gin.H{
+				"status":              "tool_abort_requested",
+				"conversationId":      req.ConversationID,
+				"executionId":         execID,
+				"message":             "已请求终止当前工具调用；工具返回后本轮推理将继续（与 MCP 监控页终止一致）。",
+				"continueAfter":       true,
+				"interruptWithNote":   note != "",
+				"continueWithoutTool": false,
+			})
 			return
 		}
-		h.logger.Info("对话页仅终止当前 MCP 工具",
+		// 无进行中的 MCP 工具（模型纯推理/流式输出阶段）：取消当前上下文并由 Eino 流式处理器合并用户补充后自动续跑。
+		h.tasks.SetInterruptContinueNote(req.ConversationID, note)
+		ok, err := h.tasks.CancelTask(req.ConversationID, multiagent.ErrInterruptContinue)
+		if err != nil {
+			h.logger.Error("中断并继续（无工具）失败", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "未找到正在执行的任务"})
+			return
+		}
+		h.logger.Info("对话页中断并继续（无 MCP 工具，将自动续跑）",
 			zap.String("conversationId", req.ConversationID),
-			zap.String("executionId", execID),
 			zap.Bool("hasNote", note != ""),
 		)
 		c.JSON(http.StatusOK, gin.H{
-			"status":            "tool_abort_requested",
-			"conversationId":    req.ConversationID,
-			"executionId":       execID,
-			"message":           "已请求终止当前工具调用；工具返回后本轮推理将继续（与 MCP 监控页终止一致）。",
-			"continueAfter":     true,
-			"interruptWithNote": note != "",
+			"status":              "interrupt_continue_scheduled",
+			"conversationId":      req.ConversationID,
+			"message":             "已请求暂停当前推理；用户补充将合并到上下文并自动继续执行（无需整轮停止）。",
+			"continueAfter":       true,
+			"interruptWithNote":   note != "",
+			"continueWithoutTool": true,
 		})
 		return
 	}
@@ -2900,6 +2924,11 @@ func (h *AgentHandler) loadHistoryFromAgentTrace(conversationID string) ([]agent
 		// 解析tool_call_id（tool角色消息）
 		if toolCallID, ok := msgMap["tool_call_id"].(string); ok {
 			msg.ToolCallID = toolCallID
+		}
+		if tn, ok := msgMap["tool_name"].(string); ok && strings.TrimSpace(tn) != "" {
+			msg.ToolName = strings.TrimSpace(tn)
+		} else if tn, ok := msgMap["name"].(string); ok && strings.TrimSpace(tn) != "" && strings.EqualFold(msg.Role, "tool") {
+			msg.ToolName = strings.TrimSpace(tn)
 		}
 
 		agentMessages = append(agentMessages, msg)
