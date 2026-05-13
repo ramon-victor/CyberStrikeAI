@@ -17,9 +17,24 @@ function _t(key, opts) {
     return key;
 }
 
+/** 判断当前语言是否为英文 */
+function _isEnLang() {
+    const locale = (typeof window.__locale === 'string' ? window.__locale : '') ||
+        (typeof window.i18next !== 'undefined' ? (window.i18next.language || '') : '');
+    return locale.toLowerCase().startsWith('en');
+}
+
+/** 获取角色的显示名称（根据当前语言） */
+function getRoleDisplayName(role) {
+    if (_isEnLang() && role.name_en) return role.name_en;
+    return role.name || '';
+}
+
 /** 角色配置中的描述：trim，并把误存为 i18n key 的字面量视为空 */
 function rolePlainDescription(role) {
-    const raw = typeof role.description === 'string' ? role.description.trim() : '';
+    const raw = _isEnLang() && role.description_en
+        ? role.description_en.trim()
+        : (typeof role.description === 'string' ? role.description.trim() : '');
     if (!raw) return '';
     if (raw === 'roles.noDescription' || raw === 'roles.noDescriptionShort') return '';
     return raw;
@@ -155,7 +170,7 @@ function updateRoleSelectorDisplay() {
         roleSelectorIcon.textContent = icon;
         const isDefaultRole = selectedRole.name === '默认' || !selectedRole.name;
         const displayName = isDefaultRole && typeof window.t === 'function'
-            ? window.t('chat.defaultRole') : (selectedRole.name || (typeof window.t === 'function' ? window.t('chat.defaultRole') : '默认'));
+            ? window.t('chat.defaultRole') : (getRoleDisplayName(selectedRole) || (typeof window.t === 'function' ? window.t('chat.defaultRole') : '默认'));
         // 非默认角色时避免被 i18n 的 data-i18n 覆盖成“默认”
         roleSelectorText.setAttribute('data-i18n-skip-text', isDefaultRole ? 'false' : 'true');
         roleSelectorText.textContent = displayName;
@@ -225,7 +240,7 @@ function renderRoleSelectionSidebar() {
         roleItem.innerHTML = `
             <div class="role-selection-item-icon-main">${icon}</div>
             <div class="role-selection-item-content-main">
-                <div class="role-selection-item-name-main">${escapeHtml(role.name)}</div>
+                <div class="role-selection-item-name-main">${escapeHtml(getRoleDisplayName(role))}</div>
                 <div class="role-selection-item-description-main">${escapeHtml(description)}</div>
             </div>
             ${isSelected ? '<div class="role-selection-checkmark-main">✓</div>' : ''}

@@ -193,7 +193,8 @@ function wsUpdateRoleSelectorDisplay() {
         for (var i = 0; i < wsRolesCache.length; i++) {
             if (wsRolesCache[i].name === cur) {
                 iconEl.textContent = wsRolesCache[i].icon || '\ud83d\udd35';
-                textEl.textContent = cur;
+                var r = wsRolesCache[i];
+                textEl.textContent = (typeof _isEnLang === 'function' && _isEnLang() && r.name_en) ? r.name_en : cur;
                 return;
             }
         }
@@ -224,10 +225,12 @@ function wsRenderRoleList() {
             if (!r.enabled) continue;
             if (r.name === '默认') continue; // 已在上方硬编码默认角色，跳过 API 返回的默认项
             var sel = (r.name === cur) ? ' selected' : '';
+            var displayName = (typeof _isEnLang === 'function' && _isEnLang() && r.name_en) ? r.name_en : r.name;
+            var displayDesc = (typeof _isEnLang === 'function' && _isEnLang() && r.description_en) ? r.description_en : (r.description || '');
             html += '<button type="button" class="role-selection-item-main' + sel + '" onclick="wsSelectRole(\'' + r.name.replace(/'/g, "\\'") + '\')">' +
                 '<div class="role-selection-item-icon-main">' + (r.icon || '\ud83d\udd35') + '</div>' +
-                '<div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + r.name + '</div>' +
-                '<div class="role-selection-item-description-main">' + (r.description || '').substring(0, 60) + '</div></div>' +
+                '<div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + displayName + '</div>' +
+                '<div class="role-selection-item-description-main">' + displayDesc.substring(0, 60) + '</div></div>' +
                 (sel ? '<div class="role-selection-checkmark-main">\u2713</div>' : '') +
                 '</button>';
         }

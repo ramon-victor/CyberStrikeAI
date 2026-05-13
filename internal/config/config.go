@@ -1284,11 +1284,13 @@ type RolesConfig struct {
 
 // RoleConfig 单个角色配置
 type RoleConfig struct {
-	Name        string   `yaml:"name" json:"name"`                       // 角色名称
-	Description string   `yaml:"description" json:"description"`         // 角色描述
-	UserPrompt  string   `yaml:"user_prompt" json:"user_prompt"`         // 用户提示词(追加到用户消息前)
-	Icon        string   `yaml:"icon,omitempty" json:"icon,omitempty"`   // 角色图标（可选）
-	Tools       []string `yaml:"tools,omitempty" json:"tools,omitempty"` // 关联的工具列表（toolKey格式，如 "toolName" 或 "mcpName::toolName"）
-	MCPs        []string `yaml:"mcps,omitempty" json:"mcps,omitempty"`   // 向后兼容：关联的MCP服务器列表（已废弃，使用tools替代）
-	Enabled     bool     `yaml:"enabled" json:"enabled"`                 // 是否启用
+	Name           string   `yaml:"name" json:"name"`                                       // 角色名称
+	NameEn         string   `yaml:"name_en,omitempty" json:"name_en,omitempty"`             // 英文角色名称（可选）
+	Description    string   `yaml:"description" json:"description"`                         // 角色描述
+	DescriptionEn  string   `yaml:"description_en,omitempty" json:"description_en,omitempty"` // 英文角色描述（可选）
+	UserPrompt     string   `yaml:"user_prompt" json:"user_prompt"`                         // 用户提示词(追加到用户消息前)
+	Icon           string   `yaml:"icon,omitempty" json:"icon,omitempty"`                   // 角色图标（可选）
+	Tools          []string `yaml:"tools,omitempty" json:"tools,omitempty"`                 // 关联的工具列表（toolKey格式，如 "toolName" 或 "mcpName::toolName"）
+	MCPs           []string `yaml:"mcps,omitempty" json:"mcps,omitempty"`                   // 向后兼容：关联的MCP服务器列表（已废弃，使用tools替代）
+	Enabled        bool     `yaml:"enabled" json:"enabled"`                                 // 是否启用
 }
