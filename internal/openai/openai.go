@@ -28,6 +28,9 @@ type Client struct {
 type APIError struct {
 	StatusCode int
 	Body       string
+	// RetryAfter is populated from the Retry-After response header (if present) so that
+	// the retry layer can honour provider-issued rate-limit hints.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -80,7 +83,9 @@ func (c *Client) UpdateConfig(cfg *config.OpenAIConfig) {
 	c.config = cfg
 }
 
-// ChatCompletion 调用 /chat/completions 接口。
+// ChatCompletion 调用 /chat/completions 接口（带自动重试）。
+// 对于 HTTP 429、500、502、503、504 及网络瞬时错误，最多重试 5 次，
+// 退避延迟依次为 10 s、20 s、40 s、80 s、160 s（附加 ±20 % 抖动）。
 func (c *Client) ChatCompletion(ctx context.Context, payload interface{}, out interface{}) error {
 	if c == nil {
 		return fmt.Errorf("openai client is not initialized")
@@ -108,74 +113,77 @@ func (c *Client) ChatCompletion(ctx context.Context, payload interface{}, out in
 	c.logger.Debug("sending OpenAI chat completion request",
 		zap.Int("payloadSizeKB", len(body)/1024))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build openai request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-
-	requestStart := time.Now()
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("call openai api: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyChan := make(chan []byte, 1)
-	errChan := make(chan error, 1)
-	go func() {
-		responseBody, err := io.ReadAll(resp.Body)
+	return withRetry(ctx, c.logger, "ChatCompletion", func() (time.Duration, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
 		if err != nil {
-			errChan <- err
-			return
+			return 0, fmt.Errorf("build openai request: %w", err)
 		}
-		bodyChan <- responseBody
-	}()
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
 
-	var respBody []byte
-	select {
-	case respBody = <-bodyChan:
-	case err := <-errChan:
-		return fmt.Errorf("read openai response: %w", err)
-	case <-ctx.Done():
-		return fmt.Errorf("read openai response timeout: %w", ctx.Err())
-	case <-time.After(25 * time.Minute):
-		return fmt.Errorf("read openai response timeout (25m)")
-	}
+		requestStart := time.Now()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return 0, fmt.Errorf("call openai api: %w", err)
+		}
+		defer resp.Body.Close()
 
-	c.logger.Debug("received OpenAI response",
-		zap.Int("status", resp.StatusCode),
-		zap.Duration("duration", time.Since(requestStart)),
-		zap.Int("responseSizeKB", len(respBody)/1024),
-	)
+		bodyChan := make(chan []byte, 1)
+		errChan := make(chan error, 1)
+		go func() {
+			responseBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			bodyChan <- responseBody
+		}()
 
-	if resp.StatusCode != http.StatusOK {
-		c.logger.Warn("OpenAI chat completion returned non-200",
+		var respBody []byte
+		select {
+		case respBody = <-bodyChan:
+		case err := <-errChan:
+			return 0, fmt.Errorf("read openai response: %w", err)
+		case <-ctx.Done():
+			return 0, fmt.Errorf("read openai response timeout: %w", ctx.Err())
+		case <-time.After(25 * time.Minute):
+			return 0, fmt.Errorf("read openai response timeout (25m)")
+		}
+
+		c.logger.Debug("received OpenAI response",
 			zap.Int("status", resp.StatusCode),
-			zap.String("body", string(respBody)),
+			zap.Duration("duration", time.Since(requestStart)),
+			zap.Int("responseSizeKB", len(respBody)/1024),
 		)
-		return &APIError{
-			StatusCode: resp.StatusCode,
-			Body:       string(respBody),
-		}
-	}
 
-	if out != nil {
-		if err := json.Unmarshal(respBody, out); err != nil {
-			c.logger.Error("failed to unmarshal OpenAI response",
-				zap.Error(err),
+		if resp.StatusCode != http.StatusOK {
+			c.logger.Warn("OpenAI chat completion returned non-200",
+				zap.Int("status", resp.StatusCode),
 				zap.String("body", string(respBody)),
 			)
-			return fmt.Errorf("unmarshal openai response: %w", err)
+			return retryAfterFromResponse(resp), &APIError{
+				StatusCode: resp.StatusCode,
+				Body:       string(respBody),
+			}
 		}
-	}
 
-	return nil
+		if out != nil {
+			if err := json.Unmarshal(respBody, out); err != nil {
+				c.logger.Error("failed to unmarshal OpenAI response",
+					zap.Error(err),
+					zap.String("body", string(respBody)),
+				)
+				return 0, fmt.Errorf("unmarshal openai response: %w", err)
+			}
+		}
+
+		return 0, nil
+	})
 }
 
 // ChatCompletionStream 调用 /chat/completions 的流式模式（stream=true），并在每个 delta 到达时回调 onDelta。
 // 返回最终拼接的 content（只拼 content delta；工具调用 delta 未做处理）。
+// 重试策略：仅在尚未向调用方回调任何 delta 时才重试，避免重复输出内容。
 func (c *Client) ChatCompletionStream(ctx context.Context, payload interface{}, onDelta func(delta string) error) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("openai client is not initialized")
@@ -200,34 +208,7 @@ func (c *Client) ChatCompletionStream(ctx context.Context, payload interface{}, 
 		return "", fmt.Errorf("marshal openai payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("build openai request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-
-	requestStart := time.Now()
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("call openai api: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// 非200：读完 body 返回
-	if resp.StatusCode != http.StatusOK {
-		respBody, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			c.logger.Warn("failed to read OpenAI error response body", zap.Error(readErr))
-		}
-		return "", &APIError{
-			StatusCode: resp.StatusCode,
-			Body:       string(respBody),
-		}
-	}
-
 	type streamDelta struct {
-		// OpenAI 兼容流式通常使用 content；但部分兼容实现可能用 text。
 		Content string `json:"content,omitempty"`
 		Text    string `json:"text,omitempty"`
 	}
@@ -244,72 +225,137 @@ func (c *Client) ChatCompletionStream(ctx context.Context, payload interface{}, 
 		} `json:"error,omitempty"`
 	}
 
-	reader := bufio.NewReader(resp.Body)
-	var full strings.Builder
-	fullText := ""
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries+1; attempt++ {
+		if attempt > 1 {
+			if !isTransientError(lastErr) {
+				return "", lastErr
+			}
+			delay := computeRetryDelay(attempt-1, lastErr)
+			logRetryAttempt(c.logger, "ChatCompletionStream", attempt-1, lastErr, delay)
+			select {
+			case <-ctx.Done():
+				return "", fmt.Errorf("ChatCompletionStream: context cancelled: %w", ctx.Err())
+			case <-time.After(delay):
+			}
+		}
 
-	// 典型 SSE 结构：
-	// data: {...}\n\n
-	// data: [DONE]\n\n
-	for {
-		line, readErr := reader.ReadString('\n')
-		if readErr != nil {
-			if readErr == io.EOF {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return "", fmt.Errorf("build openai request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+
+		requestStart := time.Now()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("call openai api: %w", err)
+			continue
+		}
+
+		// 非200：读完 body 后进入重试判断
+		if resp.StatusCode != http.StatusOK {
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = &APIError{
+				StatusCode: resp.StatusCode,
+				Body:       string(respBody),
+				RetryAfter: retryAfterFromResponse(resp),
+			}
+			c.logger.Warn("OpenAI stream returned non-200",
+				zap.Int("status", resp.StatusCode),
+				zap.String("body", string(respBody)),
+			)
+			continue
+		}
+
+		// 200: start streaming – only retry if no delta has been sent yet.
+		var deltasSent bool
+		var full strings.Builder
+		fullText := ""
+		reader := bufio.NewReader(resp.Body)
+		var streamErr error
+
+		// 典型 SSE 结构：
+		// data: {...}\n\n
+		// data: [DONE]\n\n
+		for {
+			line, readErr := reader.ReadString('\n')
+			if readErr != nil {
+				if readErr == io.EOF {
+					break
+				}
+				streamErr = fmt.Errorf("read openai stream: %w", readErr)
 				break
 			}
-			return full.String(), fmt.Errorf("read openai stream: %w", readErr)
-		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if !strings.HasPrefix(trimmed, "data:") {
-			continue
-		}
-		dataStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-		if dataStr == "[DONE]" {
-			break
-		}
-
-		var chunk streamResponse
-		if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
-			// 解析失败跳过（兼容各种兼容层的差异）
-			continue
-		}
-		if chunk.Error != nil && strings.TrimSpace(chunk.Error.Message) != "" {
-			return full.String(), fmt.Errorf("openai stream error: %s", chunk.Error.Message)
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-
-		delta := chunk.Choices[0].Delta.Content
-		if delta == "" {
-			delta = chunk.Choices[0].Delta.Text
-		}
-		if delta == "" {
-			continue
-		}
-
-		var deltaOut string
-		fullText, deltaOut = normalizeStreamingDelta(fullText, delta)
-		if deltaOut == "" {
-			continue
-		}
-		full.WriteString(deltaOut)
-		if onDelta != nil {
-			if err := onDelta(deltaOut); err != nil {
-				return full.String(), err
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
 			}
+			if !strings.HasPrefix(trimmed, "data:") {
+				continue
+			}
+			dataStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if dataStr == "[DONE]" {
+				break
+			}
+
+			var chunk streamResponse
+			if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
+				continue
+			}
+			if chunk.Error != nil && strings.TrimSpace(chunk.Error.Message) != "" {
+				streamErr = fmt.Errorf("openai stream error: %s", chunk.Error.Message)
+				break
+			}
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+
+			delta := chunk.Choices[0].Delta.Content
+			if delta == "" {
+				delta = chunk.Choices[0].Delta.Text
+			}
+			if delta == "" {
+				continue
+			}
+
+			var deltaOut string
+			fullText, deltaOut = normalizeStreamingDelta(fullText, delta)
+			if deltaOut == "" {
+				continue
+			}
+			full.WriteString(deltaOut)
+			if onDelta != nil {
+				if cbErr := onDelta(deltaOut); cbErr != nil {
+					resp.Body.Close()
+					return full.String(), cbErr
+				}
+			}
+			deltasSent = true
 		}
+		resp.Body.Close()
+
+		if streamErr == nil {
+			c.logger.Debug("received OpenAI stream completion",
+				zap.Duration("duration", time.Since(requestStart)),
+				zap.Int("contentLen", full.Len()),
+			)
+			if attempt > 1 {
+				c.logger.Info("ChatCompletionStream succeeded after retry", zap.Int("attempt", attempt))
+			}
+			return full.String(), nil
+		}
+
+		// Stream error: only retry if no content was emitted.
+		if deltasSent {
+			return full.String(), streamErr
+		}
+		lastErr = streamErr
 	}
 
-	c.logger.Debug("received OpenAI stream completion",
-		zap.Duration("duration", time.Since(requestStart)),
-		zap.Int("contentLen", full.Len()),
-	)
-
-	return full.String(), nil
+	return "", fmt.Errorf("ChatCompletionStream failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // StreamToolCall 流式工具调用的累积结果（arguments 以字符串形式拼接，留给上层再解析为 JSON）。
@@ -322,6 +368,7 @@ type StreamToolCall struct {
 }
 
 // ChatCompletionStreamWithToolCalls 流式模式：同时把 content delta 实时回调，并在结束后返回 tool_calls 和 finish_reason。
+// 重试策略：仅在尚未向调用方回调任何 delta 时才重试，避免重复输出内容。
 func (c *Client) ChatCompletionStreamWithToolCalls(
 	ctx context.Context,
 	payload interface{},
@@ -348,31 +395,6 @@ func (c *Client) ChatCompletionStreamWithToolCalls(
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", nil, "", fmt.Errorf("marshal openai payload: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return "", nil, "", fmt.Errorf("build openai request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
-
-	requestStart := time.Now()
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", nil, "", fmt.Errorf("call openai api: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			c.logger.Warn("failed to read OpenAI error response body", zap.Error(readErr))
-		}
-		return "", nil, "", &APIError{
-			StatusCode: resp.StatusCode,
-			Body:       string(respBody),
-		}
 	}
 
 	// delta tool_calls 的增量结构
@@ -402,6 +424,8 @@ func (c *Client) ChatCompletionStreamWithToolCalls(
 			Type    string `json:"type"`
 		} `json:"error,omitempty"`
 	}
+	// Use a local alias to avoid forward reference inside the struct.
+	type streamResponse2Choices = streamChoice2
 
 	type toolCallAccum struct {
 		id   string
@@ -409,129 +433,192 @@ func (c *Client) ChatCompletionStreamWithToolCalls(
 		name string
 		args strings.Builder
 	}
-	toolCallAccums := make(map[int]*toolCallAccum)
 
-	reader := bufio.NewReader(resp.Body)
-	var full strings.Builder
-	fullText := ""
-	finishReason := ""
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries+1; attempt++ {
+		if attempt > 1 {
+			if !isTransientError(lastErr) {
+				return "", nil, "", lastErr
+			}
+			delay := computeRetryDelay(attempt-1, lastErr)
+			logRetryAttempt(c.logger, "ChatCompletionStreamWithToolCalls", attempt-1, lastErr, delay)
+			select {
+			case <-ctx.Done():
+				return "", nil, "", fmt.Errorf("ChatCompletionStreamWithToolCalls: context cancelled: %w", ctx.Err())
+			case <-time.After(delay):
+			}
+		}
 
-	for {
-		line, readErr := reader.ReadString('\n')
-		if readErr != nil {
-			if readErr == io.EOF {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return "", nil, "", fmt.Errorf("build openai request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+
+		requestStart := time.Now()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("call openai api: %w", err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = &APIError{
+				StatusCode: resp.StatusCode,
+				Body:       string(respBody),
+				RetryAfter: retryAfterFromResponse(resp),
+			}
+			c.logger.Warn("OpenAI stream (tool_calls) returned non-200",
+				zap.Int("status", resp.StatusCode),
+				zap.String("body", string(respBody)),
+			)
+			continue
+		}
+
+		toolCallAccums := make(map[int]*toolCallAccum)
+		var full strings.Builder
+		fullText := ""
+		finishReason := ""
+		var deltasSent bool
+		reader := bufio.NewReader(resp.Body)
+		var streamErr error
+
+		for {
+			line, readErr := reader.ReadString('\n')
+			if readErr != nil {
+				if readErr == io.EOF {
+					break
+				}
+				streamErr = fmt.Errorf("read openai stream: %w", readErr)
 				break
 			}
-			return full.String(), nil, finishReason, fmt.Errorf("read openai stream: %w", readErr)
-		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if !strings.HasPrefix(trimmed, "data:") {
-			continue
-		}
-		dataStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-		if dataStr == "[DONE]" {
-			break
-		}
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
+			}
+			if !strings.HasPrefix(trimmed, "data:") {
+				continue
+			}
+			dataStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if dataStr == "[DONE]" {
+				break
+			}
 
-		var chunk streamResponse2
-		if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
-			// 兼容：解析失败跳过
-			continue
-		}
-		if chunk.Error != nil && strings.TrimSpace(chunk.Error.Message) != "" {
-			return full.String(), nil, finishReason, fmt.Errorf("openai stream error: %s", chunk.Error.Message)
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
+			var chunk streamResponse2
+			if err := json.Unmarshal([]byte(dataStr), &chunk); err != nil {
+				continue
+			}
+			if chunk.Error != nil && strings.TrimSpace(chunk.Error.Message) != "" {
+				streamErr = fmt.Errorf("openai stream error: %s", chunk.Error.Message)
+				break
+			}
+			if len(chunk.Choices) == 0 {
+				continue
+			}
 
-		choice := chunk.Choices[0]
-		if choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != "" {
-			finishReason = strings.TrimSpace(*choice.FinishReason)
-		}
+			choice := chunk.Choices[0]
+			if choice.FinishReason != nil && strings.TrimSpace(*choice.FinishReason) != "" {
+				finishReason = strings.TrimSpace(*choice.FinishReason)
+			}
 
-		delta := choice.Delta
+			delta := choice.Delta
 
-		content := delta.Content
-		if content == "" {
-			content = delta.Text
-		}
-		if content != "" {
-			var contentOut string
-			fullText, contentOut = normalizeStreamingDelta(fullText, content)
-			if contentOut != "" {
-				full.WriteString(contentOut)
-				if onContentDelta != nil {
-					if err := onContentDelta(contentOut); err != nil {
-						return full.String(), nil, finishReason, err
+			content := delta.Content
+			if content == "" {
+				content = delta.Text
+			}
+			if content != "" {
+				var contentOut string
+				fullText, contentOut = normalizeStreamingDelta(fullText, content)
+				if contentOut != "" {
+					full.WriteString(contentOut)
+					if onContentDelta != nil {
+						if cbErr := onContentDelta(contentOut); cbErr != nil {
+							resp.Body.Close()
+							return full.String(), nil, finishReason, cbErr
+						}
+					}
+					deltasSent = true
+				}
+			}
+
+			if len(delta.ToolCalls) > 0 {
+				for _, tc := range delta.ToolCalls {
+					acc, ok := toolCallAccums[tc.Index]
+					if !ok {
+						acc = &toolCallAccum{}
+						toolCallAccums[tc.Index] = acc
+					}
+					if tc.ID != "" {
+						acc.id = tc.ID
+					}
+					if tc.Type != "" {
+						acc.typ = tc.Type
+					}
+					if tc.Function.Name != "" {
+						acc.name = tc.Function.Name
+					}
+					if tc.Function.Arguments != "" {
+						acc.args.WriteString(tc.Function.Arguments)
 					}
 				}
+				deltasSent = true
+			}
+		}
+		resp.Body.Close()
+
+		if streamErr != nil && deltasSent {
+			return full.String(), nil, finishReason, streamErr
+		}
+		if streamErr != nil {
+			lastErr = streamErr
+			continue
+		}
+
+		// 组装 tool calls
+		indices := make([]int, 0, len(toolCallAccums))
+		for idx := range toolCallAccums {
+			indices = append(indices, idx)
+		}
+		for i := 0; i < len(indices); i++ {
+			for j := i + 1; j < len(indices); j++ {
+				if indices[j] < indices[i] {
+					indices[i], indices[j] = indices[j], indices[i]
+				}
 			}
 		}
 
-		if len(delta.ToolCalls) > 0 {
-			for _, tc := range delta.ToolCalls {
-				acc, ok := toolCallAccums[tc.Index]
-				if !ok {
-					acc = &toolCallAccum{}
-					toolCallAccums[tc.Index] = acc
-				}
-				if tc.ID != "" {
-					acc.id = tc.ID
-				}
-				if tc.Type != "" {
-					acc.typ = tc.Type
-				}
-				if tc.Function.Name != "" {
-					acc.name = tc.Function.Name
-				}
-				if tc.Function.Arguments != "" {
-					acc.args.WriteString(tc.Function.Arguments)
-				}
-			}
+		toolCalls := make([]StreamToolCall, 0, len(indices))
+		for _, idx := range indices {
+			acc := toolCallAccums[idx]
+			toolCalls = append(toolCalls, StreamToolCall{
+				Index:           idx,
+				ID:              acc.id,
+				Type:            acc.typ,
+				FunctionName:    acc.name,
+				FunctionArgsStr: acc.args.String(),
+			})
 		}
-	}
 
-	// 组装 tool calls
-	indices := make([]int, 0, len(toolCallAccums))
-	for idx := range toolCallAccums {
-		indices = append(indices, idx)
-	}
-	// 手写简单排序（避免额外 import）
-	for i := 0; i < len(indices); i++ {
-		for j := i + 1; j < len(indices); j++ {
-			if indices[j] < indices[i] {
-				indices[i], indices[j] = indices[j], indices[i]
-			}
+		c.logger.Debug("received OpenAI stream completion (tool_calls)",
+			zap.Duration("duration", time.Since(requestStart)),
+			zap.Int("contentLen", full.Len()),
+			zap.Int("toolCalls", len(toolCalls)),
+			zap.String("finishReason", finishReason),
+		)
+
+		if strings.TrimSpace(finishReason) == "" {
+			finishReason = "stop"
 		}
-	}
 
-	toolCalls := make([]StreamToolCall, 0, len(indices))
-	for _, idx := range indices {
-		acc := toolCallAccums[idx]
-		tc := StreamToolCall{
-			Index:           idx,
-			ID:              acc.id,
-			Type:            acc.typ,
-			FunctionName:    acc.name,
-			FunctionArgsStr: acc.args.String(),
+		if attempt > 1 {
+			c.logger.Info("ChatCompletionStreamWithToolCalls succeeded after retry", zap.Int("attempt", attempt))
 		}
-		toolCalls = append(toolCalls, tc)
+		return full.String(), toolCalls, finishReason, nil
 	}
 
-	c.logger.Debug("received OpenAI stream completion (tool_calls)",
-		zap.Duration("duration", time.Since(requestStart)),
-		zap.Int("contentLen", full.Len()),
-		zap.Int("toolCalls", len(toolCalls)),
-		zap.String("finishReason", finishReason),
-	)
-
-	if strings.TrimSpace(finishReason) == "" {
-		finishReason = "stop"
-	}
-
-	return full.String(), toolCalls, finishReason, nil
+	return "", nil, "", fmt.Errorf("ChatCompletionStreamWithToolCalls failed after %d retries: %w", maxRetries, lastErr)
 }

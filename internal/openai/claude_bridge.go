@@ -419,7 +419,7 @@ func claudeStopReasonToOpenAI(reason string) string {
 // Claude HTTP Calls (non-streaming & streaming)
 // ============================================================
 
-// claudeChatCompletion 执行非流式 Claude API 调用，返回转换后的 OpenAI 格式 JSON。
+// claudeChatCompletion 执行非流式 Claude API 调用，返回转换后的 OpenAI 格式 JSON（带自动重试）。
 func (c *Client) claudeChatCompletion(ctx context.Context, payload interface{}, out interface{}) error {
 	claudeReq, err := convertOpenAIToClaude(payload)
 	if err != nil {
@@ -441,57 +441,60 @@ func (c *Client) claudeChatCompletion(ctx context.Context, payload interface{}, 
 		zap.String("model", claudeReq.Model),
 		zap.Int("payloadSizeKB", len(body)/1024))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("claude bridge: build request: %w", err)
-	}
-	c.setClaudeHeaders(req)
+	return withRetry(ctx, c.logger, "claudeChatCompletion", func() (time.Duration, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/messages", bytes.NewReader(body))
+		if err != nil {
+			return 0, fmt.Errorf("claude bridge: build request: %w", err)
+		}
+		c.setClaudeHeaders(req)
 
-	requestStart := time.Now()
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("claude bridge: call api: %w", err)
-	}
-	defer resp.Body.Close()
+		requestStart := time.Now()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return 0, fmt.Errorf("claude bridge: call api: %w", err)
+		}
+		defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("claude bridge: read response: %w", err)
-	}
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return 0, fmt.Errorf("claude bridge: read response: %w", err)
+		}
 
-	c.logger.Debug("received Claude response",
-		zap.Int("status", resp.StatusCode),
-		zap.Duration("duration", time.Since(requestStart)),
-		zap.Int("responseSizeKB", len(respBody)/1024),
-	)
-
-	if resp.StatusCode != http.StatusOK {
-		c.logger.Warn("Claude chat completion returned non-200",
+		c.logger.Debug("received Claude response",
 			zap.Int("status", resp.StatusCode),
-			zap.String("body", string(respBody)),
+			zap.Duration("duration", time.Since(requestStart)),
+			zap.Int("responseSizeKB", len(respBody)/1024),
 		)
-		return &APIError{
-			StatusCode: resp.StatusCode,
-			Body:       string(respBody),
+
+		if resp.StatusCode != http.StatusOK {
+			c.logger.Warn("Claude chat completion returned non-200",
+				zap.Int("status", resp.StatusCode),
+				zap.String("body", string(respBody)),
+			)
+			return retryAfterFromResponse(resp), &APIError{
+				StatusCode: resp.StatusCode,
+				Body:       string(respBody),
+			}
 		}
-	}
 
-	// 转换为 OpenAI 格式
-	oaiJSON, err := claudeToOpenAIResponseJSON(respBody)
-	if err != nil {
-		return err
-	}
-
-	if out != nil {
-		if err := json.Unmarshal(oaiJSON, out); err != nil {
-			return fmt.Errorf("claude bridge: unmarshal converted response: %w", err)
+		// 转换为 OpenAI 格式
+		oaiJSON, err := claudeToOpenAIResponseJSON(respBody)
+		if err != nil {
+			return 0, err
 		}
-	}
 
-	return nil
+		if out != nil {
+			if err := json.Unmarshal(oaiJSON, out); err != nil {
+				return 0, fmt.Errorf("claude bridge: unmarshal converted response: %w", err)
+			}
+		}
+
+		return 0, nil
+	})
 }
 
 // claudeChatCompletionStream 流式调用 Claude API，将 Claude SSE 转换为 OpenAI 兼容的 delta 回调。
+// 重试策略：仅在尚未向调用方回调任何 delta 时才重试。
 func (c *Client) claudeChatCompletionStream(ctx context.Context, payload interface{}, onDelta func(delta string) error) (string, error) {
 	claudeReq, err := convertOpenAIToClaude(payload)
 	if err != nil {
@@ -509,95 +512,137 @@ func (c *Client) claudeChatCompletionStream(ctx context.Context, payload interfa
 		baseURL = "https://api.anthropic.com"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("claude bridge: build request: %w", err)
-	}
-	c.setClaudeHeaders(req)
-
-	requestStart := time.Now()
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("claude bridge: call api: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return "", fmt.Errorf("claude bridge: read error response: %w", readErr)
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries+1; attempt++ {
+		if attempt > 1 {
+			if !isTransientError(lastErr) {
+				return "", lastErr
+			}
+			delay := computeRetryDelay(attempt-1, lastErr)
+			logRetryAttempt(c.logger, "claudeChatCompletionStream", attempt-1, lastErr, delay)
+			select {
+			case <-ctx.Done():
+				return "", fmt.Errorf("claudeChatCompletionStream: context cancelled: %w", ctx.Err())
+			case <-time.After(delay):
+			}
 		}
-		return "", &APIError{
-			StatusCode: resp.StatusCode,
-			Body:       string(respBody),
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/messages", bytes.NewReader(body))
+		if err != nil {
+			return "", fmt.Errorf("claude bridge: build request: %w", err)
 		}
-	}
+		c.setClaudeHeaders(req)
 
-	reader := bufio.NewReader(resp.Body)
-	var full strings.Builder
-	fullText := ""
+		requestStart := time.Now()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("claude bridge: call api: %w", err)
+			continue
+		}
 
-	for {
-		line, readErr := reader.ReadString('\n')
-		if readErr != nil {
-			if readErr == io.EOF {
+		if resp.StatusCode != http.StatusOK {
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = &APIError{
+				StatusCode: resp.StatusCode,
+				Body:       string(respBody),
+				RetryAfter: retryAfterFromResponse(resp),
+			}
+			c.logger.Warn("Claude stream returned non-200",
+				zap.Int("status", resp.StatusCode),
+				zap.String("body", string(respBody)),
+			)
+			continue
+		}
+
+		reader := bufio.NewReader(resp.Body)
+		var full strings.Builder
+		fullText := ""
+		var deltasSent bool
+		var streamErr error
+
+		for {
+			line, readErr := reader.ReadString('\n')
+			if readErr != nil {
+				if readErr == io.EOF {
+					break
+				}
+				streamErr = fmt.Errorf("claude bridge: read stream: %w", readErr)
 				break
 			}
-			return full.String(), fmt.Errorf("claude bridge: read stream: %w", readErr)
-		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || !strings.HasPrefix(trimmed, "data:") {
-			continue
-		}
-		dataStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-		if dataStr == "[DONE]" {
-			break
-		}
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || !strings.HasPrefix(trimmed, "data:") {
+				continue
+			}
+			dataStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if dataStr == "[DONE]" {
+				break
+			}
 
-		var event map[string]interface{}
-		if err := json.Unmarshal([]byte(dataStr), &event); err != nil {
-			continue
-		}
+			var event map[string]interface{}
+			if err := json.Unmarshal([]byte(dataStr), &event); err != nil {
+				continue
+			}
 
-		eventType, _ := event["type"].(string)
+			eventType, _ := event["type"].(string)
 
-		switch eventType {
-		case "content_block_delta":
-			delta, _ := event["delta"].(map[string]interface{})
-			deltaType, _ := delta["type"].(string)
-			if deltaType == "text_delta" {
-				text, _ := delta["text"].(string)
-				if text != "" {
-					var textOut string
-					fullText, textOut = normalizeStreamingDelta(fullText, text)
-					if textOut == "" {
-						continue
-					}
-					full.WriteString(textOut)
-					if onDelta != nil {
-						if err := onDelta(textOut); err != nil {
-							return full.String(), err
+			switch eventType {
+			case "content_block_delta":
+				delta, _ := event["delta"].(map[string]interface{})
+				deltaType, _ := delta["type"].(string)
+				if deltaType == "text_delta" {
+					text, _ := delta["text"].(string)
+					if text != "" {
+						var textOut string
+						fullText, textOut = normalizeStreamingDelta(fullText, text)
+						if textOut == "" {
+							continue
 						}
+						full.WriteString(textOut)
+						if onDelta != nil {
+							if cbErr := onDelta(textOut); cbErr != nil {
+								resp.Body.Close()
+								return full.String(), cbErr
+							}
+						}
+						deltasSent = true
 					}
 				}
+			case "error":
+				errData, _ := event["error"].(map[string]interface{})
+				msg, _ := errData["message"].(string)
+				streamErr = fmt.Errorf("claude stream error: %s", msg)
 			}
-		case "error":
-			errData, _ := event["error"].(map[string]interface{})
-			msg, _ := errData["message"].(string)
-			return full.String(), fmt.Errorf("claude stream error: %s", msg)
+
+			if streamErr != nil {
+				break
+			}
 		}
+		resp.Body.Close()
+
+		if streamErr == nil {
+			c.logger.Debug("received Claude stream completion",
+				zap.Duration("duration", time.Since(requestStart)),
+				zap.Int("contentLen", full.Len()),
+			)
+			if attempt > 1 {
+				c.logger.Info("claudeChatCompletionStream succeeded after retry", zap.Int("attempt", attempt))
+			}
+			return full.String(), nil
+		}
+
+		if deltasSent {
+			return full.String(), streamErr
+		}
+		lastErr = streamErr
 	}
 
-	c.logger.Debug("received Claude stream completion",
-		zap.Duration("duration", time.Since(requestStart)),
-		zap.Int("contentLen", full.Len()),
-	)
-
-	return full.String(), nil
+	return "", fmt.Errorf("claudeChatCompletionStream failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // claudeChatCompletionStreamWithToolCalls 流式调用 Claude API，同时处理 content delta 和 tool_calls，
 // 返回值与 OpenAI 版本完全一致：(content, toolCalls, finishReason, error)。
+// 重试策略：仅在尚未向调用方回调任何 delta 时才重试。
 func (c *Client) claudeChatCompletionStreamWithToolCalls(
 	ctx context.Context,
 	payload interface{},
@@ -619,35 +664,6 @@ func (c *Client) claudeChatCompletionStreamWithToolCalls(
 		baseURL = "https://api.anthropic.com"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		return "", nil, "", fmt.Errorf("claude bridge: build request: %w", err)
-	}
-	c.setClaudeHeaders(req)
-
-	requestStart := time.Now()
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", nil, "", fmt.Errorf("claude bridge: call api: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return "", nil, "", fmt.Errorf("claude bridge: read error response: %w", readErr)
-		}
-		return "", nil, "", &APIError{
-			StatusCode: resp.StatusCode,
-			Body:       string(respBody),
-		}
-	}
-
-	reader := bufio.NewReader(resp.Body)
-	var full strings.Builder
-	fullText := ""
-	finishReason := ""
-
 	// 追踪当前正在构建的 content blocks
 	type toolAccum struct {
 		id    string
@@ -655,121 +671,194 @@ func (c *Client) claudeChatCompletionStreamWithToolCalls(
 		args  strings.Builder
 		index int
 	}
-	var currentToolCalls []toolAccum
-	currentBlockIndex := -1
-	currentBlockType := ""
 
-	for {
-		line, readErr := reader.ReadString('\n')
-		if readErr != nil {
-			if readErr == io.EOF {
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries+1; attempt++ {
+		if attempt > 1 {
+			if !isTransientError(lastErr) {
+				return "", nil, "", lastErr
+			}
+			delay := computeRetryDelay(attempt-1, lastErr)
+			logRetryAttempt(c.logger, "claudeChatCompletionStreamWithToolCalls", attempt-1, lastErr, delay)
+			select {
+			case <-ctx.Done():
+				return "", nil, "", fmt.Errorf("claudeChatCompletionStreamWithToolCalls: context cancelled: %w", ctx.Err())
+			case <-time.After(delay):
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/messages", bytes.NewReader(body))
+		if err != nil {
+			return "", nil, "", fmt.Errorf("claude bridge: build request: %w", err)
+		}
+		c.setClaudeHeaders(req)
+
+		requestStart := time.Now()
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("claude bridge: call api: %w", err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = &APIError{
+				StatusCode: resp.StatusCode,
+				Body:       string(respBody),
+				RetryAfter: retryAfterFromResponse(resp),
+			}
+			c.logger.Warn("Claude stream (tool_calls) returned non-200",
+				zap.Int("status", resp.StatusCode),
+				zap.String("body", string(respBody)),
+			)
+			continue
+		}
+
+		reader := bufio.NewReader(resp.Body)
+		var full strings.Builder
+		fullText := ""
+		finishReason := ""
+		var deltasSent bool
+		var currentToolCalls []toolAccum
+		currentBlockIndex := -1
+		currentBlockType := ""
+		var streamErr error
+
+		for {
+			line, readErr := reader.ReadString('\n')
+			if readErr != nil {
+				if readErr == io.EOF {
+					break
+				}
+				streamErr = fmt.Errorf("claude bridge: read stream: %w", readErr)
 				break
 			}
-			return full.String(), nil, finishReason, fmt.Errorf("claude bridge: read stream: %w", readErr)
-		}
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || !strings.HasPrefix(trimmed, "data:") {
-			continue
-		}
-		dataStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-		if dataStr == "[DONE]" {
-			break
-		}
-
-		var event map[string]interface{}
-		if err := json.Unmarshal([]byte(dataStr), &event); err != nil {
-			continue
-		}
-
-		eventType, _ := event["type"].(string)
-
-		switch eventType {
-		case "content_block_start":
-			idx, _ := event["index"].(float64)
-			currentBlockIndex = int(idx)
-			cb, _ := event["content_block"].(map[string]interface{})
-			blockType, _ := cb["type"].(string)
-			currentBlockType = blockType
-
-			if blockType == "tool_use" {
-				id, _ := cb["id"].(string)
-				name, _ := cb["name"].(string)
-				currentToolCalls = append(currentToolCalls, toolAccum{
-					id:    id,
-					name:  name,
-					index: currentBlockIndex,
-				})
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || !strings.HasPrefix(trimmed, "data:") {
+				continue
+			}
+			dataStr := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if dataStr == "[DONE]" {
+				break
 			}
 
-		case "content_block_delta":
-			delta, _ := event["delta"].(map[string]interface{})
-			deltaType, _ := delta["type"].(string)
+			var event map[string]interface{}
+			if err := json.Unmarshal([]byte(dataStr), &event); err != nil {
+				continue
+			}
 
-			if deltaType == "text_delta" {
-				text, _ := delta["text"].(string)
-				if text != "" {
-					var textOut string
-					fullText, textOut = normalizeStreamingDelta(fullText, text)
-					if textOut == "" {
-						continue
-					}
-					full.WriteString(textOut)
-					if onContentDelta != nil {
-						if err := onContentDelta(textOut); err != nil {
-							return full.String(), nil, finishReason, err
+			eventType, _ := event["type"].(string)
+
+			switch eventType {
+			case "content_block_start":
+				idx, _ := event["index"].(float64)
+				currentBlockIndex = int(idx)
+				cb, _ := event["content_block"].(map[string]interface{})
+				blockType, _ := cb["type"].(string)
+				currentBlockType = blockType
+
+				if blockType == "tool_use" {
+					id, _ := cb["id"].(string)
+					name, _ := cb["name"].(string)
+					currentToolCalls = append(currentToolCalls, toolAccum{
+						id:    id,
+						name:  name,
+						index: currentBlockIndex,
+					})
+					deltasSent = true
+				}
+
+			case "content_block_delta":
+				delta, _ := event["delta"].(map[string]interface{})
+				deltaType, _ := delta["type"].(string)
+
+				if deltaType == "text_delta" {
+					text, _ := delta["text"].(string)
+					if text != "" {
+						var textOut string
+						fullText, textOut = normalizeStreamingDelta(fullText, text)
+						if textOut == "" {
+							continue
 						}
+						full.WriteString(textOut)
+						if onContentDelta != nil {
+							if cbErr := onContentDelta(textOut); cbErr != nil {
+								resp.Body.Close()
+								return full.String(), nil, finishReason, cbErr
+							}
+						}
+						deltasSent = true
+					}
+				} else if deltaType == "input_json_delta" {
+					partialJSON, _ := delta["partial_json"].(string)
+					if partialJSON != "" && currentBlockType == "tool_use" && len(currentToolCalls) > 0 {
+						currentToolCalls[len(currentToolCalls)-1].args.WriteString(partialJSON)
 					}
 				}
-			} else if deltaType == "input_json_delta" {
-				partialJSON, _ := delta["partial_json"].(string)
-				if partialJSON != "" && currentBlockType == "tool_use" && len(currentToolCalls) > 0 {
-					currentToolCalls[len(currentToolCalls)-1].args.WriteString(partialJSON)
+
+			case "content_block_stop":
+				// block 完成，不需要特殊处理
+
+			case "message_delta":
+				delta, _ := event["delta"].(map[string]interface{})
+				if sr, ok := delta["stop_reason"].(string); ok {
+					finishReason = claudeStopReasonToOpenAI(sr)
 				}
+
+			case "message_stop":
+				// 消息完成
+
+			case "error":
+				errData, _ := event["error"].(map[string]interface{})
+				msg, _ := errData["message"].(string)
+				streamErr = fmt.Errorf("claude stream error: %s", msg)
 			}
 
-		case "content_block_stop":
-			// block 完成，不需要特殊处理
-
-		case "message_delta":
-			delta, _ := event["delta"].(map[string]interface{})
-			if sr, ok := delta["stop_reason"].(string); ok {
-				finishReason = claudeStopReasonToOpenAI(sr)
+			if streamErr != nil {
+				break
 			}
-
-		case "message_stop":
-			// 消息完成
-
-		case "error":
-			errData, _ := event["error"].(map[string]interface{})
-			msg, _ := errData["message"].(string)
-			return full.String(), nil, finishReason, fmt.Errorf("claude stream error: %s", msg)
 		}
+		resp.Body.Close()
+
+		if streamErr != nil && deltasSent {
+			return full.String(), nil, finishReason, streamErr
+		}
+		if streamErr != nil {
+			lastErr = streamErr
+			continue
+		}
+
+		// 转换 tool calls 为 OpenAI 格式的 StreamToolCall
+		var toolCalls []StreamToolCall
+		for i, tc := range currentToolCalls {
+			toolCalls = append(toolCalls, StreamToolCall{
+				Index:           i,
+				ID:              tc.id,
+				Type:            "function",
+				FunctionName:    tc.name,
+				FunctionArgsStr: tc.args.String(),
+			})
+		}
+
+		if finishReason == "" {
+			finishReason = "stop"
+		}
+
+		c.logger.Debug("received Claude stream completion (tool_calls)",
+			zap.Duration("duration", time.Since(requestStart)),
+			zap.Int("contentLen", full.Len()),
+			zap.Int("toolCalls", len(toolCalls)),
+			zap.String("finishReason", finishReason),
+		)
+
+		if attempt > 1 {
+			c.logger.Info("claudeChatCompletionStreamWithToolCalls succeeded after retry", zap.Int("attempt", attempt))
+		}
+		return full.String(), toolCalls, finishReason, nil
 	}
 
-	// 转换 tool calls 为 OpenAI 格式的 StreamToolCall
-	var toolCalls []StreamToolCall
-	for i, tc := range currentToolCalls {
-		toolCalls = append(toolCalls, StreamToolCall{
-			Index:           i,
-			ID:              tc.id,
-			Type:            "function",
-			FunctionName:    tc.name,
-			FunctionArgsStr: tc.args.String(),
-		})
-	}
-
-	if finishReason == "" {
-		finishReason = "stop"
-	}
-
-	c.logger.Debug("received Claude stream completion (tool_calls)",
-		zap.Duration("duration", time.Since(requestStart)),
-		zap.Int("contentLen", full.Len()),
-		zap.Int("toolCalls", len(toolCalls)),
-		zap.String("finishReason", finishReason),
-	)
-
-	return full.String(), toolCalls, finishReason, nil
+	return "", nil, "", fmt.Errorf("claudeChatCompletionStreamWithToolCalls failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // ============================================================

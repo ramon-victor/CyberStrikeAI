@@ -1,4 +1,4 @@
-package agent
+﻿package agent
 
 import (
 	"context"
@@ -1175,55 +1175,9 @@ func (a *Agent) isRetryableError(err error) bool {
 	return false
 }
 
-// callOpenAI 调用OpenAI API（带重试机制）
+// callOpenAI 调用OpenAI API。重试逻辑由 openai.Client 统一处理（最多5次，指数退避）。
 func (a *Agent) callOpenAI(ctx context.Context, messages []ChatMessage, tools []Tool) (*OpenAIResponse, error) {
-	maxRetries := 3
-	var lastErr error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		response, err := a.callOpenAISingle(ctx, messages, tools)
-		if err == nil {
-			if attempt > 0 {
-				a.logger.Info("OpenAI API调用重试成功",
-					zap.Int("attempt", attempt+1),
-					zap.Int("maxRetries", maxRetries),
-				)
-			}
-			return response, nil
-		}
-
-		lastErr = err
-
-		// 如果不是可重试的错误，直接返回
-		if !a.isRetryableError(err) {
-			return nil, err
-		}
-
-		// 如果不是最后一次重试，等待后重试
-		if attempt < maxRetries-1 {
-			// 指数退避：2s, 4s, 8s...
-			backoff := time.Duration(1<<uint(attempt+1)) * time.Second
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second // 最大30秒
-			}
-			a.logger.Warn("OpenAI API调用失败，准备重试",
-				zap.Error(err),
-				zap.Int("attempt", attempt+1),
-				zap.Int("maxRetries", maxRetries),
-				zap.Duration("backoff", backoff),
-			)
-
-			// 检查上下文是否已取消
-			select {
-			case <-ctx.Done():
-				return nil, fmt.Errorf("上下文已取消: %w", ctx.Err())
-			case <-time.After(backoff):
-				// 继续重试
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("重试%d次后仍然失败: %w", maxRetries, lastErr)
+	return a.callOpenAISingle(ctx, messages, tools)
 }
 
 // callOpenAISingle 单次调用OpenAI API（不包含重试逻辑）
@@ -1272,58 +1226,9 @@ func (a *Agent) callOpenAISingleStreamText(ctx context.Context, messages []ChatM
 	return a.openAIClient.ChatCompletionStream(ctx, reqBody, onDelta)
 }
 
-// callOpenAIStreamText 调用OpenAI流式模式（带重试），仅在“未输出任何 delta”时才允许重试，避免重复发送已下发的内容。
+// callOpenAIStreamText 调用OpenAI流式模式。重试逻辑（含 deltasSent 保护）由 openai.Client 统一处理。
 func (a *Agent) callOpenAIStreamText(ctx context.Context, messages []ChatMessage, tools []Tool, onDelta func(delta string) error) (string, error) {
-	maxRetries := 3
-	var lastErr error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		var deltasSent bool
-		full, err := a.callOpenAISingleStreamText(ctx, messages, tools, func(delta string) error {
-			deltasSent = true
-			return onDelta(delta)
-		})
-		if err == nil {
-			if attempt > 0 {
-				a.logger.Info("OpenAI stream 调用重试成功",
-					zap.Int("attempt", attempt+1),
-					zap.Int("maxRetries", maxRetries),
-				)
-			}
-			return full, nil
-		}
-
-		lastErr = err
-		// 已经开始输出了 delta，避免重复内容：直接失败让上层处理。
-		if deltasSent {
-			return "", err
-		}
-
-		if !a.isRetryableError(err) {
-			return "", err
-		}
-
-		if attempt < maxRetries-1 {
-			backoff := time.Duration(1<<uint(attempt+1)) * time.Second
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second
-			}
-			a.logger.Warn("OpenAI stream 调用失败，准备重试",
-				zap.Error(err),
-				zap.Int("attempt", attempt+1),
-				zap.Int("maxRetries", maxRetries),
-				zap.Duration("backoff", backoff),
-			)
-
-			select {
-			case <-ctx.Done():
-				return "", fmt.Errorf("上下文已取消: %w", ctx.Err())
-			case <-time.After(backoff):
-			}
-		}
-	}
-
-	return "", fmt.Errorf("重试%d次后仍然失败: %w", maxRetries, lastErr)
+	return a.callOpenAISingleStreamText(ctx, messages, tools, onDelta)
 }
 
 // callOpenAISingleStreamWithToolCalls 单次调用OpenAI流式模式（带工具调用解析），不包含重试逻辑。
@@ -1392,65 +1297,14 @@ func (a *Agent) callOpenAISingleStreamWithToolCalls(
 	return response, nil
 }
 
-// callOpenAIStreamWithToolCalls 调用OpenAI流式模式（带重试），仅当还没有输出任何 content delta 时才允许重试。
+// callOpenAIStreamWithToolCalls 调用OpenAI流式模式（含工具调用）。重试逻辑由 openai.Client 统一处理。
 func (a *Agent) callOpenAIStreamWithToolCalls(
 	ctx context.Context,
 	messages []ChatMessage,
 	tools []Tool,
 	onContentDelta func(delta string) error,
 ) (*OpenAIResponse, error) {
-	maxRetries := 3
-	var lastErr error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		deltasSent := false
-		resp, err := a.callOpenAISingleStreamWithToolCalls(ctx, messages, tools, func(delta string) error {
-			deltasSent = true
-			if onContentDelta != nil {
-				return onContentDelta(delta)
-			}
-			return nil
-		})
-		if err == nil {
-			if attempt > 0 {
-				a.logger.Info("OpenAI stream 调用重试成功",
-					zap.Int("attempt", attempt+1),
-					zap.Int("maxRetries", maxRetries),
-				)
-			}
-			return resp, nil
-		}
-
-		lastErr = err
-		if deltasSent {
-			// 已经开始输出了 delta：避免重复发送
-			return nil, err
-		}
-
-		if !a.isRetryableError(err) {
-			return nil, err
-		}
-		if attempt < maxRetries-1 {
-			backoff := time.Duration(1<<uint(attempt+1)) * time.Second
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second
-			}
-			a.logger.Warn("OpenAI stream 调用失败，准备重试",
-				zap.Error(err),
-				zap.Int("attempt", attempt+1),
-				zap.Int("maxRetries", maxRetries),
-				zap.Duration("backoff", backoff),
-			)
-
-			select {
-			case <-ctx.Done():
-				return nil, fmt.Errorf("上下文已取消: %w", ctx.Err())
-			case <-time.After(backoff):
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("重试%d次后仍然失败: %w", maxRetries, lastErr)
+	return a.callOpenAISingleStreamWithToolCalls(ctx, messages, tools, onContentDelta)
 }
 
 // ToolExecutionResult 工具执行结果
