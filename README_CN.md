@@ -26,7 +26,7 @@
 
 </details>
 
-CyberStrikeAI 是一款 **AI 原生安全测试平台**，基于 Go 构建，集成了 100+ 安全工具、智能编排引擎、角色化测试与预设安全测试角色、Skills 技能系统与专业测试技能，以及完整的测试生命周期管理能力。通过原生 MCP 协议与 AI 智能体，支持从对话指令到漏洞发现、攻击链分析、知识检索与结果可视化的全流程自动化，为安全团队提供可审计、可追溯、可协作的专业测试环境。
+CyberStrikeAI 是一款 **AI 原生安全测试平台**，基于 Go 构建，集成了 100+ 安全工具、智能编排引擎、角色化测试与预设安全测试角色、Skills 技能系统与专业测试技能、完整的测试生命周期管理能力，以及面向 **授权场景** 的 **内置轻量 C2（Command & Control，指挥与控制）** 能力（监听器、加密通信、会话与任务、实时事件、REST 与 MCP 协同）。通过原生 MCP 协议与 AI 智能体，支持从对话指令到漏洞发现、攻击链分析、知识检索与结果可视化的全流程自动化，为安全团队提供可审计、可追溯、可协作的专业测试环境。
 
 
 ## 界面与集成预览
@@ -120,6 +120,7 @@ CyberStrikeAI 是一款 **AI 原生安全测试平台**，基于 Go 构建，集
 - 📱 **机器人**：支持钉钉、飞书长连接，在手机端与 CyberStrikeAI 对话（配置与命令详见 [机器人使用说明](docs/robot.md)）
 - 🧑‍⚖️ **人机协同（HITL）**：对话页侧栏配置协同模式与免审批工具白名单；全局列表在 `config.yaml` 的 `hitl.tool_whitelist`；点「应用」可将新增工具合并写入配置文件且**无需重启**即可生效；导航 **人机协同** 页处理待审批工具调用
 - 🐚 **WebShell 管理**：添加与管理 WebShell 连接（兼容冰蝎/蚁剑等），通过虚拟终端执行命令、内置文件管理进行文件操作，并提供按连接维度保存历史的 AI 助手标签页；支持 PHP/ASP/ASPX/JSP 及自定义类型，可配置请求方法与命令参数。
+- 📡 **内置 C2**：面向 AI 协同的轻量 **C2**——**多种监听器**（TCP 反向、HTTP/HTTPS Beacon、WebSocket）、**加密** Beacon 信道、**会话与任务**队列及持久化、**Payload** 辅助（一键命令 / 构建 / 下载）、**SSE** 实时事件、REST（`/api/c2/*`）及智能体侧 **一组 C2 MCP 工具**（如 `c2_listener`、`c2_session`、**`c2_task`**、`c2_task_manage`、`c2_payload`、`c2_event`、`c2_profile`、`c2_file`）；敏感操作可对接 **人机协同（HITL）**，并支持 OPSEC 类规则（如命令拒绝正则）。**仅限授权测试。**
 
 ## 插件（Plugins）
 
@@ -225,7 +226,7 @@ docker compose up -d --build
 ### CyberStrikeAI 版本更新（无兼容性问题）
 
 1. （首次使用）启用脚本：`chmod +x upgrade.sh`
-2. 一键升级：`./upgrade.sh`（可选参数：`--tag vX.Y.Z`、`--no-venv`、`--preserve-custom`、`--yes`）
+2. 一键升级：`./upgrade.sh`（可选参数：`--tag vX.Y.Z`、`--no-venv`、`--yes`）。本地的 `tools/`、`roles/`、`skills/` 会始终保留不被覆盖。
 3. 脚本会备份你的 `config.yaml` 和 `data/`，从 GitHub Release 升级代码，更新 `config.yaml` 的 `version` 字段后重启服务。
 
 推荐的一键指令：
@@ -254,6 +255,7 @@ docker compose up -d --build
 - **漏洞管理**：在测试过程中创建、更新和跟踪发现的漏洞。支持按严重程度（严重/高/中/低/信息）、状态（待确认/已确认/已修复/误报）和对话进行过滤，查看统计信息并导出发现。
 - **批量任务管理**：创建任务队列，批量添加多个任务，执行前可编辑或删除任务，然后依次顺序执行。每个任务会作为独立对话执行，支持完整的状态跟踪（待执行/执行中/已完成/失败/已取消）和执行历史。
 - **WebShell 管理**：添加并管理 WebShell 连接（PHP/ASP/ASPX/JSP 或自定义类型）。使用虚拟终端执行命令（带命令历史与快捷命令），使用文件管理浏览、读取、编辑、上传与删除目标文件，并支持按路径导航和名称过滤。连接信息持久化存储于 SQLite，支持 GET/POST 及可配置命令参数（兼容冰蝎/蚁剑等）。
+- **内置 C2**：在 Web 界面或 `/api/c2/*` 创建/启动 **监听器**、生成 **Payload**、查看 **会话**、下发 **任务** 并订阅 **事件（SSE）**。智能体与外部客户端通过 **C2 MCP 工具族**（含 **`c2_task`** 等）编排；开启人机协同时，高风险任务可走审批。**仅用于已获明确授权的目标。**
 - **可视化配置**：在界面中切换模型、启停工具、设置迭代次数等。
 - **人机协同（HITL）**：侧栏设置协同模式与免审批工具（逗号或换行）；全局白名单见 `config.yaml` 的 `hitl.tool_whitelist`。点「**应用**」可写浏览器/服务端并合并新增工具进配置（**无需重启**）。**新对话**保留侧栏选择；导航 **人机协同** 处理待审批。从侧栏删掉工具不会自动从配置文件移除全局项，需手改 `config.yaml`。
 
@@ -335,6 +337,12 @@ docker compose up -d --build
 - **AI 助手**：在 **AI 助手** 标签页中与智能体对话，由系统自动结合当前 WebShell 连接执行工具与命令，侧边栏展示该连接下的所有历史会话，支持多轮追踪与查看。
 - **连通性测试**：使用 **测试连通性** 可在执行命令前通过一次 `echo 1` 调用校验 Shell 地址、密码与命令参数是否正确。
 - **持久化**：所有 WebShell 连接与相关 AI 会话均保存在 SQLite（与对话共用数据库），服务重启后仍可继续使用。
+
+### 内置 C2（Command & Control）
+- **定位**：平台内置的 **AI 原生** C2 能力栈——监听器接入植入体（Beacon），服务端以 SQLite 持久化 **会话** 与 **任务**，通过 **事件总线** 推送变更（含 **SSE**），并由鉴权后的 **REST** 与 MCP 统一对外。
+- **监听器与传输**：支持 `tcp_reverse`、`http_beacon`、`https_beacon`、`websocket`；按监听器独立密钥；数据库中标记为运行中的监听器可在 **服务重启后尝试恢复**。
+- **与智能体联动**：通过 **`c2_task` 等 C2 MCP 工具** 与现有对话/多代理工具链协同；在会话策略需要时，危险任务类型可走既有 **人机协同（HITL）** 审批流。
+- **安全提示**：**仅**在实验环境或 **已获完整书面授权** 的对抗演练中使用；结合网络隔离、强鉴权及 HITL/白名单等策略管控风险。
 
 ### MCP 全场景
 - **Web 模式**：自带 HTTP MCP 服务供前端调用。
@@ -493,6 +501,7 @@ CyberStrikeAI 支持通过三种传输模式连接外部 MCP 服务器：
 - **漏洞管理 API**：通过 `/api/vulnerabilities` 端点管理漏洞：`GET /api/vulnerabilities`（列表，支持过滤）、`POST /api/vulnerabilities`（创建）、`GET /api/vulnerabilities/:id`（获取）、`PUT /api/vulnerabilities/:id`（更新）、`DELETE /api/vulnerabilities/:id`（删除）、`GET /api/vulnerabilities/stats`（统计）。
 - **批量任务 API**：通过 `/api/batch-tasks` 端点管理批量任务队列：`POST /api/batch-tasks`（创建队列）、`GET /api/batch-tasks`（列表）、`GET /api/batch-tasks/:queueId`（获取队列）、`POST /api/batch-tasks/:queueId/start`（开始执行）、`POST /api/batch-tasks/:queueId/cancel`（取消）、`DELETE /api/batch-tasks/:queueId`（删除队列）、`POST /api/batch-tasks/:queueId/tasks`（添加任务）、`PUT /api/batch-tasks/:queueId/tasks/:taskId`（更新任务）、`DELETE /api/batch-tasks/:queueId/tasks/:taskId`（删除任务）。任务依次顺序执行，每个任务创建独立对话，支持完整状态跟踪。
 - **WebShell API**：通过 `/api/webshell/connections`（GET 列表、POST 创建、PUT 更新、DELETE 删除）及 `/api/webshell/exec`（执行命令）、`/api/webshell/fileop`（列出/读取/写入/删除文件）管理 WebShell 连接与执行操作。
+- **C2 API**：在 `/api/c2/*` 管理监听器、会话、任务、Payload、文件与事件（如监听器增删改查/启停、会话休眠、任务创建/取消/等待、Payload 构建/下载、事件流等）。
 - **任务控制**：支持暂停/终止长任务、修改参数后重跑、流式获取日志。
 - **安全管理**：`/api/auth/change-password` 可即时轮换口令；建议在暴露 MCP 端口时配合网络层 ACL。
 
@@ -598,7 +607,7 @@ enabled: true
 ```
 CyberStrikeAI/
 ├── cmd/                 # Web 服务、MCP stdio 入口及辅助工具
-├── internal/            # Agent、MCP 核心、路由与执行器
+├── internal/            # Agent、MCP 核心、路由、C2（`internal/c2`）与执行器
 ├── web/                 # 前端静态资源与模板
 ├── tools/               # YAML 工具目录（含 100+ 示例）
 ├── roles/               # 角色配置文件目录（含 12+ 预设安全测试角色）

@@ -1,6 +1,8 @@
 // 设置相关功能
 let currentConfig = null;
 let allTools = [];
+let alwaysVisibleToolNames = new Set();
+let alwaysVisibleBuiltinToolNames = new Set();
 // 全局工具状态映射，用于保存用户在所有页面的修改
 // key: 唯一工具标识符（toolKey），value: { enabled: boolean, is_external: boolean, external_mcp: string }
 let toolStateMap = new Map();
@@ -26,6 +28,42 @@ let toolsPagination = {
     total: 0,
     totalPages: 0
 };
+
+let c2NavSyncedOnce = false;
+
+/** 首次进入仪表盘等页面前拉一次配置，隐藏侧栏 C2（避免禁用后仍显示） */
+window.syncC2NavOnceFromServer = async function syncC2NavOnceFromServer() {
+    if (c2NavSyncedOnce || typeof apiFetch === 'undefined') {
+        return;
+    }
+    c2NavSyncedOnce = true;
+    try {
+        const r = await apiFetch('/api/config');
+        if (r.ok) {
+            const cfg = await r.json();
+            syncC2NavFromConfig(cfg);
+        }
+    } catch (_) {
+        /* ignore */
+    }
+};
+
+// 根据 C2 是否启用显示主导航 C2 入口与仪表盘 C2 区块（与 /api/config 的 c2.enabled 一致）
+function syncC2NavFromConfig(cfg) {
+    const on = cfg && cfg.c2 && cfg.c2.enabled !== false;
+    const nav = document.getElementById('nav-c2');
+    if (nav) {
+        nav.style.display = on ? '' : 'none';
+    }
+    const dash = document.getElementById('dashboard-section-c2');
+    if (dash) {
+        if (!on) {
+            dash.hidden = true;
+        } else {
+            dash.removeAttribute('hidden');
+        }
+    }
+}
 
 // 切换设置分类
 function switchSettingsSection(section) {
@@ -100,6 +138,14 @@ async function loadConfig(loadTools = true) {
         }
         
         currentConfig = await response.json();
+        const alwaysVisibleList = currentConfig?.multi_agent?.tool_search_always_visible_effective_tools;
+        const alwaysVisibleConfigured = currentConfig?.multi_agent?.tool_search_always_visible_tools;
+        alwaysVisibleToolNames = new Set(Array.isArray(alwaysVisibleList) ? alwaysVisibleList.filter(Boolean) : []);
+        alwaysVisibleBuiltinToolNames = new Set(
+            alwaysVisibleToolNames.size > 0 && Array.isArray(alwaysVisibleConfigured)
+                ? Array.from(alwaysVisibleToolNames).filter(name => !alwaysVisibleConfigured.includes(name))
+                : []
+        );
         
         // 填充OpenAI配置
         const providerEl = document.getElementById('openai-provider');
@@ -112,6 +158,27 @@ async function loadConfig(loadTools = true) {
         const maxTokensEl = document.getElementById('openai-max-total-tokens');
         if (maxTokensEl) {
             maxTokensEl.value = currentConfig.openai.max_total_tokens || 120000;
+        }
+        const orm = currentConfig.openai && currentConfig.openai.reasoning ? currentConfig.openai.reasoning : {};
+        const orModeEl = document.getElementById('openai-reasoning-mode');
+        if (orModeEl) {
+            const mv = (orm.mode || 'auto').toString().trim().toLowerCase();
+            orModeEl.value = ['auto', 'on', 'off'].includes(mv) ? mv : 'auto';
+        }
+        const orEffEl = document.getElementById('openai-reasoning-effort');
+        if (orEffEl) {
+            const ev = (orm.effort || '').toString().trim().toLowerCase();
+            orEffEl.value = ['', 'low', 'medium', 'high', 'max'].includes(ev) ? ev : '';
+        }
+        const orProfEl = document.getElementById('openai-reasoning-profile');
+        if (orProfEl) {
+            const pv = (orm.profile || 'auto').toString().trim().toLowerCase();
+            const ok = ['auto', 'deepseek_compat', 'openai_compat', 'output_config_effort'];
+            orProfEl.value = ok.includes(pv) ? pv : 'auto';
+        }
+        const orAllowEl = document.getElementById('openai-reasoning-allow-client');
+        if (orAllowEl) {
+            orAllowEl.checked = orm.allow_client_reasoning !== false;
         }
 
         // 填充FOFA配置
@@ -264,6 +331,12 @@ async function loadConfig(loadTools = true) {
             }
         }
 
+        const c2EnabledCb = document.getElementById('c2-enabled');
+        if (c2EnabledCb) {
+            c2EnabledCb.checked = currentConfig.c2?.enabled !== false;
+        }
+        syncC2NavFromConfig(currentConfig);
+
         // 填充机器人配置
         const robots = currentConfig.robots || {};
         const wecom = robots.wecom || {};
@@ -395,10 +468,13 @@ async function loadToolsList(page = 1, searchKeyword = '') {
     }
 }
 
+// 每行有两类复选框：行首「启用工具」与名称旁「常驻」；统计/全选只应针对行首启用复选框
+const TOOL_ENABLE_CHECKBOX_SELECTOR = '#tools-list .tool-item > input[type="checkbox"]';
+
 // 保存当前页的工具状态到全局映射
 function saveCurrentPageToolStates() {
     document.querySelectorAll('#tools-list .tool-item').forEach(item => {
-        const checkbox = item.querySelector('input[type="checkbox"]');
+        const checkbox = item.querySelector(':scope > input[type="checkbox"]');
         const toolKey = item.dataset.toolKey; // 使用唯一标识符
         const toolName = item.dataset.toolName;
         const isExternal = item.dataset.isExternal === 'true';
@@ -498,6 +574,8 @@ function renderToolsList() {
             is_external: tool.is_external || false,
             external_mcp: tool.external_mcp || ''
         };
+        const alwaysVisibleChecked = alwaysVisibleToolNames.has(tool.name);
+        const alwaysVisibleLocked = alwaysVisibleBuiltinToolNames.has(tool.name);
         
         // 外部工具标签，显示来源信息（可点击跳转到对应 MCP 卡片）
         let externalBadge = '';
@@ -521,6 +599,11 @@ function renderToolsList() {
                 <div class="tool-item-name">
                     ${escapeHtml(tool.name)}
                     ${externalBadge}
+                    <label class="tool-resident-toggle" title="${typeof window.t === 'function' ? window.t('mcp.alwaysVisibleHint') : '始终常驻在 Tool Search 可见列表'}" onclick="event.stopPropagation()">
+                        <input type="checkbox" ${alwaysVisibleChecked ? 'checked' : ''} ${alwaysVisibleLocked ? 'disabled' : ''} onchange="handleToolAlwaysVisibleChange('${escapeHtml(tool.name)}', this.checked)" />
+                        <span>${typeof window.t === 'function' ? window.t('mcp.alwaysVisibleLabel') : '常驻'}</span>
+                    </label>
+                    ${alwaysVisibleLocked ? `<span class="external-tool-badge" title="${typeof window.t === 'function' ? window.t('mcp.alwaysVisibleBuiltinHint') : '后端内置工具默认常驻，不可关闭'}">${typeof window.t === 'function' ? window.t('mcp.alwaysVisibleBuiltinLabel') : '内置默认'}</span>` : ''}
                     <span class="tool-expand-icon">▶</span>
                 </div>
                 <div class="tool-item-desc">${escapeHtml(tool.description || (typeof window.t === 'function' ? window.t('mcp.noDescription') : '无描述'))}</div>
@@ -716,9 +799,19 @@ function handleToolCheckboxChange(toolKey, enabled) {
     updateToolsStats();
 }
 
+function handleToolAlwaysVisibleChange(toolName, alwaysVisible) {
+    const name = (toolName || '').trim();
+    if (!name) return;
+    if (alwaysVisible) {
+        alwaysVisibleToolNames.add(name);
+    } else {
+        alwaysVisibleToolNames.delete(name);
+    }
+}
+
 // 全选工具
 function selectAllTools() {
-    document.querySelectorAll('#tools-list input[type="checkbox"]').forEach(checkbox => {
+    document.querySelectorAll(TOOL_ENABLE_CHECKBOX_SELECTOR).forEach(checkbox => {
         checkbox.checked = true;
         // 更新全局状态映射
         const toolItem = checkbox.closest('.tool-item');
@@ -742,7 +835,7 @@ function selectAllTools() {
 
 // 全不选工具
 function deselectAllTools() {
-    document.querySelectorAll('#tools-list input[type="checkbox"]').forEach(checkbox => {
+    document.querySelectorAll(TOOL_ENABLE_CHECKBOX_SELECTOR).forEach(checkbox => {
         checkbox.checked = false;
         // 更新全局状态映射
         const toolItem = checkbox.closest('.tool-item');
@@ -799,9 +892,9 @@ async function updateToolsStats() {
     // 先保存当前页的状态到全局映射
     saveCurrentPageToolStates();
     
-    // 计算当前页的启用工具数
-    const currentPageEnabled = Array.from(document.querySelectorAll('#tools-list input[type="checkbox"]:checked')).length;
-    const currentPageTotal = document.querySelectorAll('#tools-list input[type="checkbox"]').length;
+    // 计算当前页的启用工具数（仅行首「启用」复选框，不含「常驻」）
+    const currentPageEnabled = Array.from(document.querySelectorAll(`${TOOL_ENABLE_CHECKBOX_SELECTOR}:checked`)).length;
+    const currentPageTotal = document.querySelectorAll(TOOL_ENABLE_CHECKBOX_SELECTOR).length;
     
     // 计算所有工具的启用数
     let totalEnabled = 0;
@@ -886,9 +979,11 @@ async function updateToolsStats() {
     }
     
     const tStats = typeof window.t === 'function' ? window.t : (k) => k;
+    const pinnedCount = alwaysVisibleToolNames.size;
     statsEl.innerHTML = `
         <span title="${tStats('mcp.currentPageEnabled')}">✅ ${tStats('mcp.currentPageEnabled')}: <strong>${currentPageEnabled}</strong> / ${currentPageTotal}</span>
         <span title="${tStats('mcp.totalEnabled')}">📊 ${tStats('mcp.totalEnabled')}: <strong>${totalEnabled}</strong> / ${totalTools}</span>
+        <span title="${tStats('mcp.alwaysVisibleHint')}">📌 ${tStats('mcp.alwaysVisibleLabel')}: <strong>${pinnedCount}</strong></span>
     `;
 }
 
@@ -943,6 +1038,9 @@ async function applySettings() {
         const knowledgeEnabled = knowledgeEnabledCheckbox ? knowledgeEnabledCheckbox.checked : true;
         
         // 收集知识库配置
+        const c2EnabledCheckbox = document.getElementById('c2-enabled');
+        const c2Enabled = c2EnabledCheckbox ? c2EnabledCheckbox.checked : true;
+
         const knowledgeConfig = {
             enabled: knowledgeEnabled,
             base_path: document.getElementById('knowledge-base-path')?.value.trim() || 'knowledge_base',
@@ -988,13 +1086,22 @@ async function applySettings() {
         };
         
         const wecomAgentIdVal = document.getElementById('robot-wecom-agent-id')?.value.trim();
+        const prevOpenai = (currentConfig && currentConfig.openai) ? currentConfig.openai : {};
         const config = {
             openai: {
+                ...prevOpenai,
                 provider: provider,
                 api_key: apiKey,
                 base_url: baseUrl,
                 model: model,
-                max_total_tokens: parseInt(document.getElementById('openai-max-total-tokens')?.value) || 120000
+                max_total_tokens: parseInt(document.getElementById('openai-max-total-tokens')?.value) || 120000,
+                reasoning: {
+                    ...(prevOpenai.reasoning || {}),
+                    mode: document.getElementById('openai-reasoning-mode')?.value || 'auto',
+                    effort: (document.getElementById('openai-reasoning-effort')?.value || '').trim(),
+                    profile: document.getElementById('openai-reasoning-profile')?.value || 'auto',
+                    allow_client_reasoning: document.getElementById('openai-reasoning-allow-client')?.checked !== false
+                }
             },
             fofa: {
                 email: document.getElementById('fofa-email')?.value.trim() || '',
@@ -1016,6 +1123,9 @@ async function applySettings() {
                 };
             })(),
             knowledge: knowledgeConfig,
+            c2: {
+                enabled: c2Enabled
+            },
             robots: {
                 wecom: {
                     enabled: document.getElementById('robot-wecom-enabled')?.checked === true,
@@ -1143,6 +1253,15 @@ async function applySettings() {
             : '配置已成功应用！';
         alert(successMsg);
         try {
+            const cfgResp = await apiFetch('/api/config');
+            if (cfgResp.ok) {
+                const fresh = await cfgResp.json();
+                syncC2NavFromConfig(fresh);
+            }
+        } catch (e) {
+            console.warn('refresh C2 nav after apply', e);
+        }
+        try {
             if (typeof initChatAgentModeFromConfig === 'function') {
                 await initChatAgentModeFromConfig();
             }
@@ -1230,6 +1349,13 @@ async function saveToolsConfig() {
         const config = {
             openai: currentConfig.openai || {},
             agent: currentConfig.agent || {},
+            multi_agent: {
+                enabled: currentConfig?.multi_agent?.enabled === true,
+                robot_use_multi_agent: currentConfig?.multi_agent?.robot_use_multi_agent === true,
+                batch_use_multi_agent: currentConfig?.multi_agent?.batch_use_multi_agent === true,
+                plan_execute_loop_max_iterations: Number(currentConfig?.multi_agent?.plan_execute_loop_max_iterations || 0),
+                tool_search_always_visible_tools: Array.from(alwaysVisibleToolNames).filter(name => !alwaysVisibleBuiltinToolNames.has(name))
+            },
             tools: []
         };
         

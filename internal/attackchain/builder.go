@@ -301,7 +301,7 @@ func (b *Builder) formatProcessDetailsForAttackChain(details []database.ProcessD
 		// 目标：以主 agent（编排器）视角输出整轮迭代
 		// - 保留：编排器工具调用/结果、对子代理的 task 调度、子代理最终回复（不含推理）
 		// - 丢弃：thinking/planning/progress 等噪声、子代理的工具细节与推理过程
-		if d.EventType == "progress" || d.EventType == "thinking" || d.EventType == "planning" {
+		if d.EventType == "progress" || d.EventType == "thinking" || d.EventType == "reasoning_chain" || d.EventType == "planning" {
 			continue
 		}
 
@@ -811,8 +811,8 @@ func (b *Builder) callAIForChainGeneration(ctx context.Context, prompt string) (
 				"content": prompt,
 			},
 		},
-		"temperature": 0.3,
-		"max_tokens":  8000,
+		"temperature":           0.3,
+		"max_completion_tokens": 80000,
 	}
 
 	var apiResponse struct {

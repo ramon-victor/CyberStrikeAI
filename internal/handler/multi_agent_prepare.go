@@ -55,13 +55,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest) (*multiAgentPr
 		if getErr != nil {
 			agentHistoryMessages = []agent.ChatMessage{}
 		} else {
-			agentHistoryMessages = make([]agent.ChatMessage, 0, len(historyMessages))
-			for _, msg := range historyMessages {
-				agentHistoryMessages = append(agentHistoryMessages, agent.ChatMessage{
-					Role:    msg.Role,
-					Content: msg.Content,
-				})
-			}
+			agentHistoryMessages = dbMessagesToAgentChatMessages(historyMessages)
 		}
 	}
 
@@ -73,12 +67,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest) (*multiAgentPr
 			h.logger.Warn("WebShell AI 助手：未找到连接", zap.String("id", req.WebShellConnectionID), zap.Error(errConn))
 			return nil, fmt.Errorf("未找到该 WebShell 连接")
 		}
-		remark := conn.Remark
-		if remark == "" {
-			remark = conn.URL
-		}
-		webshellContext := fmt.Sprintf("[WebShell 助手上下文] 当前连接 ID：%s，备注：%s。可用工具（仅在该连接上操作时使用，connection_id 填 \"%s\"）：webshell_exec、webshell_file_list、webshell_file_read、webshell_file_write、record_vulnerability、list_knowledge_risk_types、search_knowledge_base。Skills 包请使用 Eino 多代理内置 `skill` 工具。\n\n用户请求：%s",
-			conn.ID, remark, conn.ID, req.Message)
+		webshellContext := BuildWebshellAssistantContext(conn, WebshellSkillHintMultiAgent, req.Message)
 		// WebShell 模式下如果同时指定了角色，追加角色 user_prompt（工具集仍仅限 webshell 专用工具）
 		if req.Role != "" && req.Role != "默认" && h.config != nil && h.config.Roles != nil {
 			if role, exists := h.config.Roles[req.Role]; exists && role.Enabled && role.UserPrompt != "" {

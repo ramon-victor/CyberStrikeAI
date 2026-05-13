@@ -26,6 +26,11 @@ const DRAFT_SAVE_DELAY = 500; // 500ms防抖延迟
 // 对话文件上传相关（后端会拼接路径与内容发给大模型，前端不再重复发文件列表）
 const MAX_CHAT_FILES = 10;
 const CHAT_FILE_DEFAULT_PROMPT = '请根据上传的文件内容进行分析。';
+/** 与 handler.formatInterruptContinueUserMessage 首段一致；主对话不展示，仅迭代详情（user_interrupt_continue） */
+const CHAT_INTERRUPT_CONTINUE_USER_PREFIX = '【用户补充 / 中断后继续】';
+function isInterruptContinueInjectChatMessage(content) {
+    return typeof content === 'string' && content.trimStart().startsWith(CHAT_INTERRUPT_CONTINUE_USER_PREFIX);
+}
 /**
  * 对话附件：选文件后异步 POST /api/chat-uploads，发送时只传 serverPath（绝对路径），请求体不再内联大文件内容。
  * @type {{ id: number, fileName: string, mimeType: string, serverPath: string|null, uploading: boolean, uploadPercent: number, uploadPromise: Promise<void>|null, uploadError: string|null }[]}
@@ -35,6 +40,8 @@ let chatAttachmentSeq = 0;
 
 // 对话模式：react = 原生 ReAct（/agent-loop）；eino_single = Eino ADK 单代理（/api/eino-agent/stream）；deep / plan_execute / supervisor = Eino 多代理（/api/multi-agent/stream，请求体 orchestration）
 const AGENT_MODE_STORAGE_KEY = 'cyberstrike-chat-agent-mode';
+const REASONING_MODE_LS = 'cyberstrike-chat-reasoning-mode';
+const REASONING_EFFORT_LS = 'cyberstrike-chat-reasoning-effort';
 const CHAT_AGENT_MODE_REACT = 'react';
 const CHAT_AGENT_MODE_EINO_SINGLE = 'eino_single';
 const CHAT_AGENT_EINO_MODES = ['deep', 'plan_execute', 'supervisor'];
@@ -50,6 +57,28 @@ const HITL_MODE_APPROVAL = 'approval';
 const HITL_MODE_REVIEW_EDIT = 'review_edit';
 const HITL_MODE_OPTIONS = [HITL_MODE_OFF, HITL_MODE_APPROVAL, HITL_MODE_REVIEW_EDIT];
 let hitlApplyFeedbackTimer = null;
+
+/** 非阻塞提示（与 chat-files-toast 样式共用） */
+function showChatToast(message, type) {
+    const text = message == null ? '' : String(message);
+    if (!text) return;
+    const el = document.createElement('div');
+    el.className = 'chat-files-toast' + (type === 'error' ? ' chat-toast--error' : '');
+    el.setAttribute('role', 'status');
+    el.textContent = text;
+    document.body.appendChild(el);
+    requestAnimationFrame(function () {
+        el.classList.add('chat-files-toast-visible');
+    });
+    const hideMs = type === 'error' ? 4500 : 2600;
+    setTimeout(function () {
+        el.classList.remove('chat-files-toast-visible');
+        setTimeout(function () { el.remove(); }, 300);
+    }, hideMs);
+}
+if (typeof window !== 'undefined') {
+    window.showChatToast = showChatToast;
+}
 
 function normalizeOrchestrationClient(s) {
     const v = String(s || '').trim().toLowerCase().replace(/-/g, '_');
@@ -293,7 +322,7 @@ function showHitlApplyFeedback(text, isError, partial) {
     }
     if (!el) {
         if (text && isError) {
-            alert(text);
+            showChatToast(text, 'error');
         }
         return;
     }
@@ -465,6 +494,131 @@ function syncAgentModeFromValue(value) {
         const v = el.getAttribute('data-value');
         el.classList.toggle('selected', v === value);
     });
+    syncReasoningRowVisibility(value);
+}
+
+function syncReasoningRowVisibility(modeVal) {
+    const wrap = document.getElementById('chat-reasoning-wrapper');
+    if (!wrap) return;
+    const show = modeVal === CHAT_AGENT_MODE_EINO_SINGLE || (multiAgentAPIEnabled && chatAgentModeIsEino(modeVal));
+    wrap.style.display = show ? '' : 'none';
+    if (!show) {
+        closeChatReasoningPanel();
+    } else {
+        updateChatReasoningSummary();
+    }
+}
+
+function reasoningSummaryModeLabel(mode) {
+    const m = (mode || 'default').trim();
+    const t = (typeof window.t === 'function') ? window.t : function (k) { return k; };
+    switch (m) {
+        case 'off': return t('chat.reasoningModeOff');
+        case 'on': return t('chat.reasoningModeOn');
+        case 'auto': return t('chat.reasoningModeAuto');
+        default: return t('chat.reasoningSummaryFollow');
+    }
+}
+
+function updateChatReasoningSummary() {
+    const el = document.getElementById('chat-reasoning-summary');
+    const modeEl = document.getElementById('chat-reasoning-mode');
+    const effEl = document.getElementById('chat-reasoning-effort');
+    if (!el || !modeEl) return;
+    const mode = (modeEl.value || 'default').trim();
+    const effort = effEl && effEl.value ? String(effEl.value).trim() : '';
+    const t = (typeof window.t === 'function') ? window.t : function (k) { return k; };
+    const modePart = reasoningSummaryModeLabel(mode);
+    const effPart = effort || t('chat.reasoningSummaryDash');
+    el.textContent = modePart + ' / ' + effPart;
+}
+
+function closeChatReasoningPanel() {
+    const wrap = document.getElementById('chat-reasoning-wrapper');
+    const toggle = document.getElementById('conversation-reasoning-toggle');
+    if (wrap) wrap.classList.add('conversation-reasoning-collapsed');
+    if (toggle) toggle.setAttribute('aria-expanded', 'false');
+}
+
+function toggleConversationReasoningCard() {
+    const wrap = document.getElementById('chat-reasoning-wrapper');
+    const toggle = document.getElementById('conversation-reasoning-toggle');
+    if (!wrap || !toggle) return;
+    wrap.classList.toggle('conversation-reasoning-collapsed');
+    const collapsed = wrap.classList.contains('conversation-reasoning-collapsed');
+    toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    if (!collapsed) {
+        if (typeof closeAgentModePanel === 'function') {
+            closeAgentModePanel();
+        }
+        if (typeof closeRoleSelectionPanel === 'function') {
+            closeRoleSelectionPanel();
+        }
+        updateChatReasoningSummary();
+    }
+}
+
+function toggleChatReasoningPanel() {
+    toggleConversationReasoningCard();
+}
+
+function restoreChatReasoningControlsFromStorage() {
+    try {
+        const m = document.getElementById('chat-reasoning-mode');
+        const e = document.getElementById('chat-reasoning-effort');
+        if (m) {
+            const v = localStorage.getItem(REASONING_MODE_LS);
+            if (v && ['default', 'off', 'on', 'auto'].indexOf(v) !== -1) {
+                m.value = v;
+            }
+        }
+        if (e) {
+            const v = localStorage.getItem(REASONING_EFFORT_LS);
+            if (v !== null && ['', 'low', 'medium', 'high', 'max'].indexOf(v) !== -1) {
+                e.value = v;
+            }
+        }
+        updateChatReasoningSummary();
+    } catch (err) { /* ignore */ }
+}
+
+function persistChatReasoningPrefs() {
+    try {
+        const m = document.getElementById('chat-reasoning-mode');
+        const elEff = document.getElementById('chat-reasoning-effort');
+        if (m) localStorage.setItem(REASONING_MODE_LS, m.value || 'default');
+        if (elEff) localStorage.setItem(REASONING_EFFORT_LS, elEff.value || '');
+        updateChatReasoningSummary();
+    } catch (err) { /* ignore */ }
+}
+
+/** 供 WebShell 等复用：在 Eino 路径下返回 reasoning 请求片段或 undefined */
+function buildReasoningRequestPayload() {
+    const wrap = document.getElementById('chat-reasoning-wrapper');
+    if (!wrap || wrap.style.display === 'none') {
+        return undefined;
+    }
+    const modeEl = document.getElementById('chat-reasoning-mode');
+    const effEl = document.getElementById('chat-reasoning-effort');
+    if (!modeEl) return undefined;
+    const mode = (modeEl.value || 'default').trim();
+    const effort = effEl && effEl.value ? String(effEl.value).trim() : '';
+    if (mode === 'default' && !effort) {
+        return undefined;
+    }
+    const o = {};
+    if (mode !== 'default') o.mode = mode;
+    if (effort) o.effort = effort;
+    return Object.keys(o).length ? o : undefined;
+}
+
+if (typeof window !== 'undefined') {
+    window.persistChatReasoningPrefs = persistChatReasoningPrefs;
+    window.buildReasoningRequestPayload = buildReasoningRequestPayload;
+    window.closeChatReasoningPanel = closeChatReasoningPanel;
+    window.toggleChatReasoningPanel = toggleChatReasoningPanel;
+    window.toggleConversationReasoningCard = toggleConversationReasoningCard;
+    window.updateChatReasoningSummary = updateChatReasoningSummary;
 }
 
 function closeAgentModePanel() {
@@ -485,6 +639,9 @@ function toggleAgentModePanel() {
     if (isOpen) {
         closeAgentModePanel();
         return;
+    }
+    if (typeof closeChatReasoningPanel === 'function') {
+        closeChatReasoningPanel();
     }
     if (typeof closeRoleSelectionPanel === 'function') {
         closeRoleSelectionPanel();
@@ -536,6 +693,8 @@ async function initChatAgentModeFromConfig() {
         } catch (e) { /* ignore */ }
         sel.value = stored;
         syncAgentModeFromValue(stored);
+        restoreChatReasoningControlsFromStorage();
+        syncReasoningRowVisibility(stored);
     } catch (e) {
         console.warn('initChatAgentModeFromConfig', e);
     }
@@ -547,6 +706,9 @@ document.addEventListener('languagechange', function () {
     const v = hid.value;
     if (v === CHAT_AGENT_MODE_REACT || chatAgentModeIsEinoSingle(v) || chatAgentModeIsEino(v)) {
         syncAgentModeFromValue(v);
+    }
+    if (typeof updateChatReasoningSummary === 'function') {
+        updateChatReasoningSummary();
     }
 });
 
@@ -732,6 +894,10 @@ async function sendMessage() {
             mimeType: a.mimeType || '',
             serverPath: a.serverPath
         }));
+    }
+    const reasoningPayload = buildReasoningRequestPayload();
+    if (reasoningPayload) {
+        body.reasoning = reasoningPayload;
     }
     // 发送后清空附件列表
     chatAttachments = [];
@@ -1678,7 +1844,10 @@ function refreshSystemReadyMessageBubbles() {
     if (typeof marked !== 'undefined') {
         try {
             marked.setOptions({ breaks: true, gfm: true });
-            const parsed = marked.parse(text);
+            const src = typeof window.normalizeAssistantMarkdownSource === 'function'
+                ? window.normalizeAssistantMarkdownSource(text)
+                : text;
+            const parsed = marked.parse(src, { async: false });
             formattedContent = typeof DOMPurify !== 'undefined'
                 ? DOMPurify.sanitize(parsed, defaultSanitizeConfig)
                 : parsed;
@@ -1769,7 +1938,10 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
                 breaks: true,
                 gfm: true,
             });
-            return marked.parse(raw);
+            const src = typeof window.normalizeAssistantMarkdownSource === 'function'
+                ? window.normalizeAssistantMarkdownSource(raw)
+                : raw;
+            return marked.parse(src, { async: false });
         } catch (e) {
             console.error('Markdown 解析失败:', e);
             return null;
@@ -2201,6 +2373,8 @@ function renderProcessDetails(messageId, processDetails) {
             }
         } else if (eventType === 'thinking') {
             itemTitle = agPx + '🤔 ' + (typeof window.t === 'function' ? window.t('chat.aiThinking') : 'AI思考');
+        } else if (eventType === 'reasoning_chain') {
+            itemTitle = agPx + '🔗 ' + (typeof window.t === 'function' ? window.t('chat.reasoningChain') : '推理过程');
         } else if (eventType === 'planning') {
             if (typeof window.einoMainStreamPlanningTitle === 'function') {
                 itemTitle = window.einoMainStreamPlanningTitle(data);
@@ -2237,6 +2411,10 @@ function renderProcessDetails(messageId, processDetails) {
             itemTitle = agPx + '🧑‍⚖️ HITL · ' + hitlMsg;
         } else if (eventType === 'progress') {
             itemTitle = typeof window.translateProgressMessage === 'function' ? window.translateProgressMessage(detail.message || '') : (detail.message || '');
+        } else if (eventType === 'user_interrupt_continue') {
+            itemTitle = typeof window.t === 'function'
+                ? window.t('chat.userInterruptContinueTitle')
+                : '⏸️ 用户中断并继续';
         }
         
         addTimelineItem(timeline, eventType, {
@@ -2446,7 +2624,24 @@ async function showMCPDetail(executionId) {
                     }
                 }
             } else {
-                responseElement.textContent = typeof window.t === 'function' ? window.t('chat.noResponseData') : '暂无响应数据';
+                if (normalizedStatus === 'running') {
+                    responseElement.textContent = typeof window.t === 'function' ? window.t('mcpDetailModal.runningNoResponseYet') : '尚无返回，工具可能仍在执行。若长时间无响应，可在下方终止本次调用。';
+                } else {
+                    responseElement.textContent = typeof window.t === 'function' ? window.t('chat.noResponseData') : '暂无响应数据';
+                }
+            }
+
+            const abortSection = document.getElementById('detail-abort-section');
+            const abortBtn = document.getElementById('detail-abort-btn');
+            if (abortSection && abortBtn) {
+                if (normalizedStatus === 'running') {
+                    abortSection.style.display = 'block';
+                    abortBtn.dataset.execId = exec.id || '';
+                    abortBtn.textContent = typeof window.t === 'function' ? window.t('mcpDetailModal.abortBtn') : '终止工具';
+                } else {
+                    abortSection.style.display = 'none';
+                    delete abortBtn.dataset.execId;
+                }
             }
             
             // 显示模态框
@@ -2462,6 +2657,101 @@ async function showMCPDetail(executionId) {
 // 关闭MCP详情模态框
 function closeMCPDetail() {
     document.getElementById('mcp-detail-modal').style.display = 'none';
+}
+
+/** 从详情模态框触发：取消当前进行中的 MCP 工具调用 */
+async function abortMCPToolExecutionFromDetail() {
+    const btn = document.getElementById('detail-abort-btn');
+    const id = btn && btn.dataset.execId;
+    if (!id) {
+        return;
+    }
+    await cancelMCPToolExecution(id, { refreshDetail: true });
+}
+
+/**
+ * 打开 MCP 工具终止弹窗（说明会经服务端加上「用户终止说明」标题块后与工具输出合并给模型）
+ * @param {string} executionId
+ * @param {{ refreshDetail?: boolean }} [options]
+ */
+function openMcpToolAbortModal(executionId, options = {}) {
+    window.__mcpToolAbortContext = { executionId: executionId, options: options || {} };
+    const ta = document.getElementById('mcp-tool-abort-note');
+    if (ta) {
+        ta.value = '';
+    }
+    const m = document.getElementById('mcp-tool-abort-modal');
+    if (m) {
+        m.style.display = 'block';
+    }
+}
+
+function closeMcpToolAbortModal() {
+    window.__mcpToolAbortContext = null;
+    const m = document.getElementById('mcp-tool-abort-modal');
+    if (m) {
+        m.style.display = 'none';
+    }
+}
+
+async function submitMcpToolAbortModal() {
+    const ctx = window.__mcpToolAbortContext;
+    if (!ctx || !ctx.executionId) {
+        closeMcpToolAbortModal();
+        return;
+    }
+    const note = (document.getElementById('mcp-tool-abort-note') && document.getElementById('mcp-tool-abort-note').value || '').trim();
+    const executionId = ctx.executionId;
+    const options = ctx.options || {};
+    closeMcpToolAbortModal();
+    await cancelMCPToolExecutionSubmit(executionId, note, options);
+}
+
+/**
+ * 提交终止请求（body: { note }）
+ * @param {string} executionId
+ * @param {string} userNote
+ * @param {{ refreshDetail?: boolean }} [options]
+ */
+async function cancelMCPToolExecutionSubmit(executionId, userNote, options = {}) {
+    if (!executionId) {
+        return;
+    }
+    try {
+        const res = await apiFetch(`/api/monitor/execution/${encodeURIComponent(executionId)}/cancel`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ note: userNote || '' }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(body.error || body.message || res.statusText);
+        }
+        const okMsg = typeof window.t === 'function' ? window.t('mcpDetailModal.abortSuccess') : '已发送终止请求';
+        alert(okMsg);
+        if (options.refreshDetail && typeof showMCPDetail === 'function') {
+            await showMCPDetail(executionId);
+        }
+        if (typeof refreshMonitorPanel === 'function') {
+            const page = (typeof monitorState !== 'undefined' && monitorState.pagination && monitorState.pagination.page) ? monitorState.pagination.page : 1;
+            await refreshMonitorPanel(page);
+        }
+    } catch (e) {
+        const failMsg = typeof window.t === 'function' ? window.t('mcpDetailModal.abortFailed') : '终止失败';
+        alert(failMsg + ': ' + (e && e.message ? e.message : String(e)));
+    }
+}
+
+/**
+ * 取消单次 MCP 工具执行（监控页「终止」）。弹出说明框后提交；仅取消该次 tools/call，不停止整条对话/迭代任务。
+ * @param {string} executionId
+ * @param {{ refreshDetail?: boolean }} [options]
+ */
+async function cancelMCPToolExecution(executionId, options = {}) {
+    if (!executionId) {
+        return;
+    }
+    openMcpToolAbortModal(executionId, options);
 }
 
 // 复制详情面板中的内容
@@ -2741,7 +3031,7 @@ async function loadConversation(conversationId) {
         const conversation = await response.json();
         
         if (!response.ok) {
-            alert('加载对话失败: ' + (conversation.error || '未知错误'));
+            showChatToast('加载对话失败: ' + (conversation.error || '未知错误'), 'error');
             return;
         }
         if (seq !== loadConversationRequestSeq) {
@@ -2841,6 +3131,9 @@ async function loadConversation(conversationId) {
 
             // 渲染单条消息的辅助函数
             const renderOneMessage = (msg) => {
+                if (msg.role === 'user' && isInterruptContinueInjectChatMessage(msg.content)) {
+                    return;
+                }
                 let displayContent = msg.content;
                 if (msg.role === 'assistant' && msg.content === '处理中...' && msg.processDetails && msg.processDetails.length > 0) {
                     for (let i = msg.processDetails.length - 1; i >= 0; i--) {
@@ -2852,7 +3145,11 @@ async function loadConversation(conversationId) {
                     }
                 }
 
-                const messageId = addMessage(msg.role, displayContent, msg.mcpExecutionIds || [], null, msg.createdAt);
+                // 消息时间口径：
+                // - user: createdAt 即可（发送后不会再更新）
+                // - assistant: 如果后端提供 updatedAt（任务完成时写回），优先用它，避免占位消息“任务开始时间”误导
+                const msgTime = (msg && msg.role === 'assistant' && msg.updatedAt) ? msg.updatedAt : (msg ? msg.createdAt : null);
+                const messageId = addMessage(msg.role, displayContent, msg.mcpExecutionIds || [], null, msgTime);
                 const messageEl = document.getElementById(messageId);
                 if (messageEl && msg && msg.id) {
                     messageEl.dataset.backendMessageId = String(msg.id);
@@ -2945,7 +3242,7 @@ async function loadConversation(conversationId) {
         }
     } catch (error) {
         console.error('加载对话失败:', error);
-        alert('加载对话失败: ' + error.message);
+        showChatToast('加载对话失败: ' + (error && error.message ? error.message : String(error)), 'error');
     }
 }
 
@@ -3081,6 +3378,39 @@ function updateActiveConversation() {
 }
 
 // ==================== 攻击链可视化功能 ====================
+
+// 生成节点图标的 data URL（用于 Cytoscape background-image）
+// 返回一个精美的渐变色方块 + 白色矢量图标
+function _acBuildNodeIconDataUrl(iconType, color, colorDark) {
+    let iconPath = '';
+    if (iconType === 'target') {
+        iconPath = 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm0-14c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6-2.69-6-6-6zm0 10c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4z';
+    } else if (iconType === 'action') {
+        iconPath = 'M7 2v11h3v9l7-12h-4l4-8z';
+    } else if (iconType === 'vulnerability') {
+        iconPath = 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-1 6h2v6h-2V7zm0 8h2v2h-2v-2z';
+    } else {
+        iconPath = 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z';
+    }
+    // 64x64 的图标方块（渐变 + 圆角 + 白色矢量图标）
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+<defs>
+<linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+<stop offset="0%" stop-color="${color}"/>
+<stop offset="100%" stop-color="${colorDark}"/>
+</linearGradient>
+</defs>
+<rect x="0" y="0" width="64" height="64" rx="14" fill="url(#g)"/>
+<g transform="translate(14 14) scale(1.5)"><path d="${iconPath}" fill="#FFFFFF"/></g>
+</svg>`;
+    // 使用 base64 编码（btoa 在浏览器中原生支持）
+    try {
+        return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
+    } catch (e) {
+        // 兜底：URL 编码
+        return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    }
+}
 
 let attackChainCytoscape = null;
 let currentAttackChainConversationId = null;
@@ -3303,78 +3633,119 @@ function renderAttackChain(chainData) {
     // 准备Cytoscape数据
     const elements = [];
     
-    // 添加节点，并预计算文字颜色和边框颜色，同时为类型标签准备数据
+    // 添加节点，并预计算样式信息（与导出保持一致的主题色）
     chainData.nodes.forEach(node => {
         const riskScore = node.risk_score || 0;
         const nodeType = node.type || '';
-        
-        // 根据节点类型设置类型标签文本和标识符（使用更现代的设计）
-        let typeLabel = '';
-        let typeBadge = '';
-        let typeColor = '';
+        const metadata = node.metadata || {};
+
+        // 统一的主题系统（与导出一致）
+        let typeLabel = '节点';
+        let typeEn = 'NODE';
+        let typeColor = '#334155';      // 主文字色
+        let accentColor = '#94a3b8';    // 强调色（图标/边框）
+        let accentDark = '#475569';     // 深色版本
+        let bgGradientStart = '#FFFFFF';
+        let bgGradientEnd = '#F8FAFC';
+        let iconType = 'default';       // 图标类型
+
         if (nodeType === 'target') {
             typeLabel = '目标';
-            typeBadge = '○';  // 使用空心圆，更现代
-            typeColor = '#1976d2';  // 蓝色
+            typeEn = 'TARGET';
+            typeColor = '#312E81';
+            accentColor = '#4F46E5';
+            accentDark = '#3730A3';
+            bgGradientStart = '#FFFFFF';
+            bgGradientEnd = '#F5F3FF';
+            iconType = 'target';
         } else if (nodeType === 'action') {
             typeLabel = '行动';
-            typeBadge = '▷';  // 使用更简洁的三角形
-            typeColor = '#f57c00';  // 橙色
+            typeEn = 'ACTION';
+            const findings = metadata.findings || [];
+            const hasFindings = Array.isArray(findings) && findings.length > 0;
+            const isFailedInsight = (metadata.status || '') === 'failed_insight';
+            if (hasFindings && !isFailedInsight) {
+                typeColor = '#064E3B';
+                accentColor = '#10B981';
+                accentDark = '#047857';
+                bgGradientStart = '#FFFFFF';
+                bgGradientEnd = '#ECFDF5';
+            } else {
+                typeColor = '#334155';
+                accentColor = '#64748B';
+                accentDark = '#475569';
+                bgGradientStart = '#FFFFFF';
+                bgGradientEnd = '#F8FAFC';
+            }
+            iconType = 'action';
         } else if (nodeType === 'vulnerability') {
             typeLabel = '漏洞';
-            typeBadge = '◇';  // 使用空心菱形，更精致
-            typeColor = '#d32f2f';  // 红色
-        } else {
-            typeLabel = nodeType;
-            typeBadge = '•';
-            typeColor = '#666';
+            typeEn = 'VULNERABILITY';
+            if (riskScore >= 80) {
+                typeColor = '#881337';
+                accentColor = '#E11D48';
+                accentDark = '#BE123C';
+                bgGradientStart = '#FFFFFF';
+                bgGradientEnd = '#FFF1F2';
+            } else if (riskScore >= 60) {
+                typeColor = '#7C2D12';
+                accentColor = '#EA580C';
+                accentDark = '#C2410C';
+                bgGradientStart = '#FFFFFF';
+                bgGradientEnd = '#FFF7ED';
+            } else if (riskScore >= 40) {
+                typeColor = '#713F12';
+                accentColor = '#CA8A04';
+                accentDark = '#A16207';
+                bgGradientStart = '#FFFFFF';
+                bgGradientEnd = '#FEFCE8';
+            } else {
+                typeColor = '#134E4A';
+                accentColor = '#0D9488';
+                accentDark = '#0F766E';
+                bgGradientStart = '#FFFFFF';
+                bgGradientEnd = '#F0FDFA';
+            }
+            iconType = 'vulnerability';
         }
-        
-        // 根据风险分数计算文字颜色和边框颜色
-        let textColor, borderColor, textOutlineWidth, textOutlineColor;
-        if (riskScore >= 80) {
-            // 红色背景：白色文字，白色边框
-            textColor = '#fff';
-            borderColor = '#fff';
-            textOutlineWidth = 1;
-            textOutlineColor = '#333';
-        } else if (riskScore >= 60) {
-            // 橙色背景：白色文字，白色边框
-            textColor = '#fff';
-            borderColor = '#fff';
-            textOutlineWidth = 1;
-            textOutlineColor = '#333';
-        } else if (riskScore >= 40) {
-            // 黄色背景：深色文字，深色边框
-            textColor = '#333';
-            borderColor = '#cc9900';
-            textOutlineWidth = 2;
-            textOutlineColor = '#fff';
-        } else {
-            // 绿色背景：深绿色文字，深色边框
-            textColor = '#1a5a1a';
-            borderColor = '#5a8a5a';
-            textOutlineWidth = 2;
-            textOutlineColor = '#fff';
+
+        // 为每个节点生成图标 background-image（data URL）
+        const iconSvg = _acBuildNodeIconDataUrl(iconType, accentColor, accentDark);
+
+        // 计算徽章文本（右上角）
+        let badgeText = '';
+        if (nodeType === 'vulnerability' && riskScore > 0) {
+            const rl = riskScore >= 80 ? '严重' : riskScore >= 60 ? '高' : riskScore >= 40 ? '中' : '低';
+            badgeText = rl + ' · ' + riskScore;
+        } else if (nodeType === 'action') {
+            const findings = metadata.findings || [];
+            if (Array.isArray(findings) && findings.length > 0 && metadata.status !== 'failed_insight') {
+                badgeText = '发现 ' + findings.length;
+            } else if (metadata.status === 'failed_insight') {
+                badgeText = '有线索';
+            }
+        } else if (nodeType === 'target') {
+            badgeText = '主目标';
         }
-        
-        // 保存节点数据，使用原始标签（样式中会添加类型标签）
+
         elements.push({
             data: {
                 id: node.id,
-                label: node.label,  // 原始标签
-                originalLabel: node.label,  // 保存原始标签用于搜索
+                label: node.label,
+                originalLabel: node.label,
                 type: nodeType,
-                typeLabel: typeLabel,  // 保存类型标签文本
-                typeBadge: typeBadge,  // 保存类型标识符
-                typeColor: typeColor,  // 保存类型颜色
+                typeLabel: typeLabel,
+                typeEn: typeEn,
+                typeColor: typeColor,
+                accentColor: accentColor,
+                accentDark: accentDark,
+                bgGradientStart: bgGradientStart,
+                bgGradientEnd: bgGradientEnd,
+                iconDataUrl: iconSvg,
+                badgeText: badgeText,
                 riskScore: riskScore,
                 toolExecutionId: node.tool_execution_id || '',
-                metadata: node.metadata || {},
-                textColor: textColor,
-                borderColor: borderColor,
-                textOutlineWidth: textOutlineWidth,
-                textOutlineColor: textOutlineColor
+                metadata: metadata
             }
         });
     });
@@ -3408,7 +3779,7 @@ function renderAttackChain(chainData) {
         }
     });
     
-    // 初始化Cytoscape
+    // 初始化Cytoscape - 现代卡片式节点设计（图标 + 文字 + 徽章）
     attackChainCytoscape = cytoscape({
         container: container,
         elements: elements,
@@ -3416,167 +3787,133 @@ function renderAttackChain(chainData) {
             {
                 selector: 'node',
                 style: {
-                    // 参考图二：现代化卡片设计，清晰的视觉层次
+                    // 节点 label：两行文字（类型英文 | 主标题）
                     'label': function(ele) {
+                        const typeEn = ele.data('typeEn') || '';
                         const typeLabel = ele.data('typeLabel') || '';
                         const label = ele.data('label') || '';
-                        // 简洁的两行显示：类型标签 + 内容
-                        return typeLabel + '\n' + label;
+                        const badgeText = ele.data('badgeText') || '';
+                        // 第一行：TYPE_EN · 类型（小字）
+                        // 第二行：主标题（大字）
+                        // 第三行：徽章文字（彩色提示）
+                        let line1 = typeEn + '  ·  ' + typeLabel;
+                        if (badgeText) line1 += '  [' + badgeText + ']';
+                        return line1 + '\n' + label;
                     },
-                    // 合理的节点尺寸，参考图二
                     'width': function(ele) {
                         const type = ele.data('type');
-                        if (type === 'target') return isComplexGraph ? 280 : 320;
-                        if (type === 'vulnerability') return isComplexGraph ? 260 : 300;
-                        return isComplexGraph ? 240 : 280;
+                        if (type === 'target') return isComplexGraph ? 300 : 360;
+                        if (type === 'vulnerability') return isComplexGraph ? 280 : 340;
+                        return isComplexGraph ? 260 : 320;
                     },
                     'height': function(ele) {
-                        const type = ele.data('type');
-                        if (type === 'target') return isComplexGraph ? 100 : 120;
-                        if (type === 'vulnerability') return isComplexGraph ? 90 : 110;
-                        return isComplexGraph ? 80 : 100;
+                        return isComplexGraph ? 84 : 100;
                     },
                     'shape': 'round-rectangle',
-                    // 现代化背景：白色卡片 + 左侧彩色条
-                    'background-color': '#FFFFFF',
+                    // 浅色渐变背景（白色到主题色极淡）
+                    'background-fill': 'linear-gradient',
+                    'background-gradient-direction': 'to-bottom-right',
+                    'background-gradient-stop-colors': function(ele) {
+                        return (ele.data('bgGradientStart') || '#FFFFFF') + ' ' +
+                               (ele.data('bgGradientEnd') || '#F8FAFC');
+                    },
+                    'background-gradient-stop-positions': '0 100',
                     'background-opacity': 1,
-                    // 左侧彩色条效果（通过边框实现）
-                    'border-width': function(ele) {
-                        const type = ele.data('type');
-                        return 0;  // 无边框，使用背景色块
+                    // 左侧类型图标（SVG dataURL 作为背景图）
+                    'background-image': function(ele) {
+                        return ele.data('iconDataUrl') || 'none';
                     },
-                    'border-color': 'transparent',
-                    // 文字样式：清晰易读
-                    'color': '#2C3E50',  // 深蓝灰色，专业感
+                    'background-image-containment': 'inside',
+                    'background-fit': 'none',
+                    'background-image-opacity': 1,
+                    'background-width': '36px',
+                    'background-height': '36px',
+                    'background-position-x': '18px',
+                    'background-position-y': '50%',
+                    'background-offset-y': '0',
+                    'background-clip': 'node',
+                    'bounds-expansion': 0,
+                    // 边框：主题色柔和
+                    'border-width': 1.5,
+                    'border-color': function(ele) {
+                        return ele.data('accentColor') || '#94a3b8';
+                    },
+                    'border-opacity': 0.5,
+                    // 文字样式
+                    'color': '#0f172a',
                     'font-size': function(ele) {
-                        const type = ele.data('type');
-                        if (type === 'target') return isComplexGraph ? '14px' : '16px';
-                        if (type === 'vulnerability') return isComplexGraph ? '13px' : '15px';
-                        return isComplexGraph ? '13px' : '15px';
+                        return isComplexGraph ? '13px' : '14px';
                     },
-                    'font-weight': '600',  // 中等加粗
-                    'font-family': '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif',
+                    'font-weight': 700,
+                    'font-family': '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif',
+                    // 文字左对齐、预留左侧图标空间
                     'text-valign': 'center',
                     'text-halign': 'center',
+                    'text-justification': 'left',
                     'text-wrap': 'wrap',
                     'text-max-width': function(ele) {
                         const type = ele.data('type');
-                        if (type === 'target') return isComplexGraph ? '240px' : '280px';
-                        if (type === 'vulnerability') return isComplexGraph ? '220px' : '260px';
-                        return isComplexGraph ? '200px' : '240px';
+                        const w = (type === 'target') ? (isComplexGraph ? 300 : 360)
+                                : (type === 'vulnerability') ? (isComplexGraph ? 280 : 340)
+                                : (isComplexGraph ? 260 : 320);
+                        return (w - 80) + 'px';
                     },
                     'text-overflow-wrap': 'anywhere',
-                    'text-margin-y': 4,
-                    'padding': '12px 16px',  // 合理的内边距
-                    'line-height': 1.5,
-                    'text-outline-width': 0
+                    'text-margin-x': 28,
+                    'text-margin-y': 0,
+                    'padding': '12px',
+                    'line-height': 1.4,
+                    'text-outline-width': 0,
+                    // 柔和阴影（overlay 模拟）
+                    'overlay-color': '#0f172a',
+                    'overlay-opacity': 0,
+                    'overlay-padding': 0,
+                    'transition-property': 'overlay-opacity, border-width, border-color',
+                    'transition-duration': '160ms'
                 }
             },
             {
-                // 目标节点：蓝色主题
+                // 目标节点：边框略粗
                 selector: 'node[type = "target"]',
                 style: {
-                    'background-color': '#E3F2FD',
-                    'color': '#1565C0',
-                    'border-width': 3,
-                    'border-color': '#2196F3',
-                    'border-style': 'solid'
+                    'border-width': 2
                 }
             },
             {
-                // 行动节点：根据状态显示不同颜色
-                selector: 'node[type = "action"]',
-                style: {
-                    'background-color': function(ele) {
-                        const metadata = ele.data('metadata') || {};
-                        const findings = metadata.findings || [];
-                        const status = metadata.status || '';
-                        const hasFindings = Array.isArray(findings) && findings.length > 0;
-                        const isFailedInsight = status === 'failed_insight';
-                        
-                        if (hasFindings && !isFailedInsight) {
-                            return '#E8F5E9';  // 浅绿色背景
-                        } else {
-                            return '#F5F5F5';  // 浅灰色背景
-                        }
-                    },
-                    'color': '#424242',
-                    'border-width': 2,
-                    'border-color': function(ele) {
-                        const metadata = ele.data('metadata') || {};
-                        const findings = metadata.findings || [];
-                        const status = metadata.status || '';
-                        const hasFindings = Array.isArray(findings) && findings.length > 0;
-                        const isFailedInsight = status === 'failed_insight';
-                        
-                        if (hasFindings && !isFailedInsight) {
-                            return '#4CAF50';  // 绿色边框
-                        } else {
-                            return '#9E9E9E';  // 灰色边框
-                        }
-                    },
-                    'border-style': 'solid'
-                }
-            },
-            {
-                // 漏洞节点：根据风险等级显示颜色
+                // 漏洞节点：边框略粗
                 selector: 'node[type = "vulnerability"]',
                 style: {
-                    'background-color': function(ele) {
-                        const riskScore = ele.data('riskScore') || 0;
-                        if (riskScore >= 80) return '#FFEBEE';
-                        if (riskScore >= 60) return '#FFF3E0';
-                        if (riskScore >= 40) return '#FFFDE7';
-                        return '#E8F5E9';
-                    },
-                    'color': function(ele) {
-                        const riskScore = ele.data('riskScore') || 0;
-                        if (riskScore >= 80) return '#C62828';
-                        if (riskScore >= 60) return '#E65100';
-                        if (riskScore >= 40) return '#F57C00';
-                        return '#2E7D32';
-                    },
-                    'border-width': 3,
-                    'border-color': function(ele) {
-                        const riskScore = ele.data('riskScore') || 0;
-                        if (riskScore >= 80) return '#F44336';
-                        if (riskScore >= 60) return '#FF9800';
-                        if (riskScore >= 40) return '#FFC107';
-                        return '#4CAF50';
-                    },
-                    'border-style': 'solid'
+                    'border-width': 2
                 }
             },
             {
                 selector: 'edge',
                 style: {
-                    // 参考图二：简洁清晰的连接线
                     'width': function(ele) {
                         const type = ele.data('type');
-                        if (type === 'discovers') return 2.5;  // 发现漏洞的边稍粗
-                        if (type === 'enables') return 2.5;  // 使能关系稍粗
-                        return 2;  // 普通边
+                        if (type === 'discovers') return 2.6;
+                        if (type === 'enables') return 2.8;
+                        return 2;
                     },
                     'line-color': function(ele) {
                         const type = ele.data('type');
-                        if (type === 'discovers') return '#42A5F5';  // 蓝色
-                        if (type === 'targets') return '#42A5F5';  // 蓝色
-                        if (type === 'enables') return '#EF5350';  // 红色
-                        if (type === 'leads_to') return '#90A4AE';  // 灰蓝色
-                        return '#B0BEC5';
+                        if (type === 'discovers' || type === 'targets') return '#4F46E5';
+                        if (type === 'enables') return '#E11D48';
+                        if (type === 'leads_to') return '#64748B';
+                        return '#cbd5e1';
                     },
                     'target-arrow-color': function(ele) {
                         const type = ele.data('type');
-                        if (type === 'discovers') return '#42A5F5';
-                        if (type === 'targets') return '#42A5F5';
-                        if (type === 'enables') return '#EF5350';
-                        if (type === 'leads_to') return '#90A4AE';
-                        return '#B0BEC5';
+                        if (type === 'discovers' || type === 'targets') return '#4F46E5';
+                        if (type === 'enables') return '#E11D48';
+                        if (type === 'leads_to') return '#64748B';
+                        return '#cbd5e1';
                     },
-                    'target-arrow-shape': 'triangle',
-                    'arrow-scale': 1.2,  // 适中的箭头大小
-                    'curve-style': 'straight',
-                    'opacity': 0.7,  // 适中的不透明度
+                    'target-arrow-shape': 'triangle-backcurve',
+                    'arrow-scale': 1.35,
+                    'curve-style': 'bezier',
+                    'control-point-step-size': 60,
+                    'opacity': 0.88,
                     'line-style': function(ele) {
                         const type = ele.data('type');
                         if (type === 'targets') return 'dashed';
@@ -3584,26 +3921,31 @@ function renderAttackChain(chainData) {
                     },
                     'line-dash-pattern': function(ele) {
                         const type = ele.data('type');
-                        if (type === 'targets') return [8, 4];
+                        if (type === 'targets') return [10, 5];
                         return [];
-                    }
+                    },
+                    'transition-property': 'opacity, width, line-color',
+                    'transition-duration': '160ms'
                 }
             },
             {
                 selector: 'node:selected',
                 style: {
-                    'border-width': 5,
-                    'border-color': '#0066ff',
+                    'border-width': 3.5,
+                    'border-color': '#4F46E5',
                     'z-index': 999,
                     'opacity': 1,
-                    'overlay-opacity': 0.1,
-                    'overlay-color': '#0066ff'
+                    'overlay-opacity': 0.06,
+                    'overlay-color': '#4F46E5',
+                    'overlay-padding': 8
                 }
             }
         ],
         userPanningEnabled: true,
         userZoomingEnabled: true,
-        boxSelectionEnabled: true
+        boxSelectionEnabled: true,
+        minZoom: 0.2,
+        maxZoom: 3
     });
     
     // 使用ELK布局（高质量DAG布局，减少边交叉）
@@ -3628,38 +3970,47 @@ function renderAttackChain(chainData) {
     if (elkInstance) {
         try {
             
-            // 构建ELK图结构
+            // === 布局参数（始终使用 DOWN 纵向布局）===
+            const isSmallGraph = chainData.nodes.length <= 8 && validEdges.length <= 12;
+            // 同层节点间距（横向分散）
+            const nodeGap = isComplexGraph ? 45 : isSmallGraph ? 80 : 60;
+            // 层间距（纵向：给连线足够发挥空间，同时避免图太高）
+            const layerGap = isComplexGraph ? 70 : isSmallGraph ? 130 : 95;
+
+            // 构建 ELK 图结构 - 节点尺寸与 Cytoscape 样式保持一致
             const elkGraph = {
                 id: 'root',
                 layoutOptions: {
                     'elk.algorithm': 'layered',
                     'elk.direction': 'DOWN',
-                    'elk.spacing.nodeNode': String(isComplexGraph ? 100 : 120),  // 合理的节点间距
-                    'elk.spacing.edgeNode': '50',  // 合理的边到节点间距
-                    'elk.spacing.edgeEdge': '25',  // 合理的边间距
-                    'elk.layered.spacing.nodeNodeBetweenLayers': String(isComplexGraph ? 150 : 180),  // 合理的层级间距
-                    'elk.layered.nodePlacement.strategy': 'SIMPLE',  // 使用简单策略，让布局更分散
-                    'elk.layered.crossingMinimization.strategy': 'INTERACTIVE',  // 交互式交叉最小化
-                    'elk.layered.thoroughness': '10',  // 最高优化程度
-                    'elk.layered.spacing.edgeNodeBetweenLayers': '50',
+                    'elk.padding': '[top=30,left=50,bottom=30,right=50]',
+                    'elk.spacing.nodeNode': String(nodeGap),
+                    'elk.spacing.edgeNode': '20',
+                    'elk.spacing.edgeEdge': '12',
+                    'elk.spacing.componentComponent': '50',
+                    'elk.layered.spacing.nodeNodeBetweenLayers': String(layerGap),
+                    'elk.layered.spacing.edgeNodeBetweenLayers': '20',
+                    'elk.layered.spacing.edgeEdgeBetweenLayers': '12',
                     'elk.layered.nodePlacement.strategy': 'BRANDES_KOEPF',
+                    'elk.layered.nodePlacement.bk.fixedAlignment': 'BALANCED',
+                    'elk.layered.nodePlacement.bk.edgeStraightening': 'IMPROVE_STRAIGHTNESS',
                     'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
-                    'elk.layered.crossingMinimization.forceNodeModelOrder': 'true',
+                    'elk.layered.crossingMinimization.semiInteractive': 'false',
+                    'elk.layered.thoroughness': String(isComplexGraph ? 10 : 15),
                     'elk.layered.cycleBreaking.strategy': 'GREEDY',
-                    'elk.layered.thoroughness': '7',
-                    'elk.padding': '[top=60,left=100,bottom=60,right=100]',  // 更大的左右边距，让图更分散
-                    'elk.spacing.componentComponent': String(isComplexGraph ? 100 : 120)  // 组件间距
+                    'elk.layered.compaction.connectedComponents': 'true',
+                    'elk.layered.compaction.postCompaction.strategy': 'LEFT_RIGHT_CONSTRAINT_LOCKING',
+                    'elk.layered.unnecessaryBendpoints': 'true',
+                    'elk.layered.mergeEdges': 'false'
                 },
                 children: chainData.nodes.map(node => {
                     const type = node.type || '';
                     return {
                         id: node.id,
-                        width: type === 'target' ? (isComplexGraph ? 280 : 320) : 
-                               type === 'vulnerability' ? (isComplexGraph ? 260 : 300) : 
-                               (isComplexGraph ? 240 : 280),
-                        height: type === 'target' ? (isComplexGraph ? 100 : 120) : 
-                                type === 'vulnerability' ? (isComplexGraph ? 90 : 110) : 
-                                (isComplexGraph ? 80 : 100)
+                        width: type === 'target' ? (isComplexGraph ? 300 : 360) :
+                               type === 'vulnerability' ? (isComplexGraph ? 280 : 340) :
+                               (isComplexGraph ? 260 : 320),
+                        height: isComplexGraph ? 84 : 100
                     };
                 }),
                 edges: validEdges.map(edge => ({
@@ -3724,77 +4075,54 @@ function renderAttackChain(chainData) {
         layout.run();
     }
     
-    // 居中攻击链的函数
+    // 居中攻击链的函数：始终让所有节点完整可见
     function centerAttackChain() {
         try {
             if (!attackChainCytoscape) {
                 return;
             }
-            
             const container = attackChainCytoscape.container();
-            if (!container) {
-                return;
-            }
-            
+            if (!container) return;
             const containerWidth = container.offsetWidth;
             const containerHeight = container.offsetHeight;
-            
             if (containerWidth === 0 || containerHeight === 0) {
-                // 如果容器尺寸为0，延迟重试
                 setTimeout(centerAttackChain, 100);
                 return;
             }
-            
-            // 居中显示图，同时保持合理的缩放
-            const padding = 80;  // 边距
+
+            // 使用较大 padding 让节点不贴边，视觉上更舒适
+            // 核心原则：完全依赖 fit 的结果来保证全局可见，不强制最小缩放
+            const padding = 60;
             attackChainCytoscape.fit(undefined, padding);
-            
-            // 等待fit完成后再调整
+
+            // 只在极端情况下微调：小图（2-3 节点）fit 后缩放过大时适当降低
             setTimeout(() => {
-                const extent = attackChainCytoscape.extent();
-                if (!extent || typeof extent.x1 === 'undefined' || typeof extent.x2 === 'undefined' || 
-                    typeof extent.y1 === 'undefined' || typeof extent.y2 === 'undefined') {
-                    return;
-                }
-                
-                const graphWidth = extent.x2 - extent.x1;
-                const graphHeight = extent.y2 - extent.y1;
+                if (!attackChainCytoscape) return;
                 const currentZoom = attackChainCytoscape.zoom();
-                
-                // 如果图太小，适当放大
-                const availableWidth = containerWidth - padding * 2;
-                const availableHeight = containerHeight - padding * 2;
-                const widthScale = graphWidth > 0 ? availableWidth / (graphWidth * currentZoom) : 1;
-                const heightScale = graphHeight > 0 ? availableHeight / (graphHeight * currentZoom) : 1;
-                const scale = Math.min(widthScale, heightScale);
-                
-                // 只在合理范围内调整缩放（0.8-1.3倍）
-                if (scale > 1 && scale < 1.3) {
-                    attackChainCytoscape.zoom(currentZoom * scale);
-                } else if (scale < 0.8) {
-                    attackChainCytoscape.zoom(currentZoom * 0.8);
+                // 上限：避免节点占满屏幕看起来过大
+                const MAX_INITIAL_ZOOM = 1.25;
+                // 下限：避免极小图看不清（极小图通常节点很少）
+                const MIN_READABLE_ZOOM = 0.25;
+
+                let targetZoom = currentZoom;
+                if (currentZoom > MAX_INITIAL_ZOOM) {
+                    targetZoom = MAX_INITIAL_ZOOM;
+                } else if (currentZoom < MIN_READABLE_ZOOM) {
+                    // 如果 fit 后缩放低于 0.25，说明图超大；保持当前结果，让用户可拖动查看
+                    targetZoom = MIN_READABLE_ZOOM;
                 }
-                
-                // 确保图居中
-                const graphCenterX = (extent.x1 + extent.x2) / 2;
-                const graphCenterY = (extent.y1 + extent.y2) / 2;
-                const zoom = attackChainCytoscape.zoom();
-                const pan = attackChainCytoscape.pan();
-                
-                const graphCenterViewX = graphCenterX * zoom + pan.x;
-                const graphCenterViewY = graphCenterY * zoom + pan.y;
-                
-                const desiredViewX = containerWidth / 2;
-                const desiredViewY = containerHeight / 2;
-                
-                const deltaX = desiredViewX - graphCenterViewX;
-                const deltaY = desiredViewY - graphCenterViewY;
-                
-                attackChainCytoscape.pan({
-                    x: pan.x + deltaX,
-                    y: pan.y + deltaY
-                });
-            }, 100);
+
+                if (Math.abs(targetZoom - currentZoom) > 0.01) {
+                    const extent = attackChainCytoscape.extent();
+                    const cx = (extent.x1 + extent.x2) / 2;
+                    const cy = (extent.y1 + extent.y2) / 2;
+                    attackChainCytoscape.zoom({
+                        level: targetZoom,
+                        position: { x: cx, y: cy }
+                    });
+                }
+                attackChainCytoscape.center();
+            }, 60);
         } catch (error) {
             console.warn('居中图表时出错:', error);
         }
@@ -3805,26 +4133,47 @@ function renderAttackChain(chainData) {
         const node = evt.target;
         showNodeDetails(node.data());
     });
-    
-    // 添加悬停效果（使用事件监听器替代CSS选择器）
+
+    // 点击空白处关闭详情
+    attackChainCytoscape.on('tap', function(evt) {
+        if (evt.target === attackChainCytoscape) {
+            attackChainCytoscape.elements().unselect();
+        }
+    });
+
+    // 添加悬停效果：增强边框 + 柔光叠加 + 淡化不相关连线
     attackChainCytoscape.on('mouseover', 'node', function(evt) {
         const node = evt.target;
-        node.style('border-width', 5);
-        node.style('z-index', 998);
-        node.style('overlay-opacity', 0.05);
-        node.style('overlay-color', '#333333');
+        const accent = node.data('accentColor') || '#4F46E5';
+        node.style({
+            'border-width': 3,
+            'border-color': accent,
+            'border-opacity': 1,
+            'overlay-color': accent,
+            'overlay-opacity': 0.08,
+            'overlay-padding': 10,
+            'z-index': 998
+        });
+        const connected = node.connectedEdges();
+        attackChainCytoscape.edges().not(connected).style('opacity', 0.2);
+        connected.style({ 'opacity': 1, 'width': 3.5 });
     });
-    
+
     attackChainCytoscape.on('mouseout', 'node', function(evt) {
         const node = evt.target;
         const type = node.data('type');
-        // 恢复默认边框宽度
-        const defaultBorderWidth = type === 'target' ? 5 : 4;
-        node.style('border-width', defaultBorderWidth);
-        node.style('z-index', 'auto');
-        node.style('overlay-opacity', 0);
+        const defaultBorderWidth = (type === 'target' || type === 'vulnerability') ? 2 : 1.5;
+        node.style({
+            'border-width': defaultBorderWidth,
+            'border-color': node.data('accentColor') || '#94a3b8',
+            'border-opacity': 0.5,
+            'overlay-opacity': 0,
+            'overlay-padding': 0,
+            'z-index': 0
+        });
+        attackChainCytoscape.edges().style({ 'opacity': 0.88, 'width': '' });
     });
-    
+
     // 保存原始数据用于过滤
     window.attackChainOriginalData = chainData;
 }
@@ -4041,11 +4390,14 @@ function showNodeDetails(nodeData) {
     if (!detailsPanel || !detailsContent) {
         return;
     }
-    
+
+    // 给 sidebar 标记详情激活态，CSS 会隐藏图例让详情独占空间
+    const sidebar = document.querySelector('.attack-chain-sidebar');
+    if (sidebar) sidebar.classList.add('details-active');
+
     // 使用 requestAnimationFrame 优化显示动画
     requestAnimationFrame(() => {
         detailsPanel.style.display = 'flex';
-        // 在下一帧设置透明度，确保显示动画流畅
         requestAnimationFrame(() => {
             detailsPanel.style.opacity = '1';
         });
@@ -4157,36 +4509,16 @@ function showNodeDetails(nodeData) {
         `;
     }
     
-    // 先重置滚动位置，避免内容更新时的滚动计算
+    // 详情占满 sidebar 后，内容区滚动由自身处理，重置到顶部
     if (detailsContent) {
         detailsContent.scrollTop = 0;
     }
-    
-    // 使用 requestAnimationFrame 优化 DOM 更新和滚动
+
     requestAnimationFrame(() => {
-        // 更新内容
         detailsContent.innerHTML = html;
-        
-        // 在下一帧执行滚动，避免与 DOM 更新冲突
         requestAnimationFrame(() => {
-            // 重置详情内容区域的滚动位置
             if (detailsContent) {
                 detailsContent.scrollTop = 0;
-            }
-            
-            // 重置侧边栏的滚动位置，确保详情区域可见
-            const sidebar = document.querySelector('.attack-chain-sidebar-content');
-            if (sidebar) {
-                // 找到详情面板的位置
-                const detailsPanel = document.getElementById('attack-chain-details');
-                if (detailsPanel && detailsPanel.offsetParent !== null) {
-                    // 使用 getBoundingClientRect 获取位置，性能更好
-                    const detailsRect = detailsPanel.getBoundingClientRect();
-                    const sidebarRect = sidebar.getBoundingClientRect();
-                    const scrollTop = sidebar.scrollTop;
-                    const relativeTop = detailsRect.top - sidebarRect.top + scrollTop;
-                    sidebar.scrollTop = relativeTop - 20; // 留一点边距
-                }
             }
         });
     });
@@ -4245,19 +4577,20 @@ document.addEventListener('languagechange', function () {
 // 关闭节点详情
 function closeNodeDetails() {
     const detailsPanel = document.getElementById('attack-chain-details');
+    const sidebar = document.querySelector('.attack-chain-sidebar');
+
     if (detailsPanel) {
-        // 添加淡出动画
         detailsPanel.style.opacity = '0';
-        detailsPanel.style.maxHeight = detailsPanel.scrollHeight + 'px';
-        
         setTimeout(() => {
             detailsPanel.style.display = 'none';
-            detailsPanel.style.maxHeight = '';
             detailsPanel.style.opacity = '';
-        }, 300);
+            // 移除详情激活态，图例恢复显示
+            if (sidebar) sidebar.classList.remove('details-active');
+        }, 220);
+    } else if (sidebar) {
+        sidebar.classList.remove('details-active');
     }
-    
-    // 取消选中节点
+
     if (attackChainCytoscape) {
         attackChainCytoscape.elements().unselect();
     }
@@ -4404,375 +4737,811 @@ async function regenerateAttackChain() {
     }
 }
 
-// 导出攻击链
+// ==================== 攻击链导出（精美版） ====================
+
+// XML/HTML 转义
+function _acEscapeXml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+// 按字符宽度做软换行（支持中英文混排），返回字符串数组
+function _acWrapLabel(label, maxChars, maxLines) {
+    if (!label) return [''];
+    const text = String(label).replace(/\s+/g, ' ').trim();
+    if (!text) return [''];
+    // 以"字符宽度"估算：中文算2，其他算1
+    const width = (ch) => (/[\u4e00-\u9fa5\uff00-\uffef]/.test(ch) ? 2 : 1);
+    const maxW = maxChars * 1.8; // 以单位宽度衡量
+
+    const lines = [];
+    let buf = '';
+    let bufW = 0;
+    let lastSpaceIdx = -1;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        const w = width(ch);
+        if (ch === ' ') lastSpaceIdx = buf.length;
+        if (bufW + w > maxW) {
+            // 在空格处换行（英文更自然）
+            let cut = buf;
+            let rest = '';
+            if (lastSpaceIdx > 0 && lastSpaceIdx >= buf.length - 10) {
+                cut = buf.substring(0, lastSpaceIdx);
+                rest = buf.substring(lastSpaceIdx + 1);
+            }
+            lines.push(cut);
+            if (lines.length >= maxLines) {
+                // 在最后加省略号
+                const last = lines[lines.length - 1];
+                lines[lines.length - 1] = _acTruncateToWidth(last, maxW - 2) + '…';
+                return lines;
+            }
+            buf = rest + ch;
+            bufW = 0;
+            for (let j = 0; j < buf.length; j++) bufW += width(buf[j]);
+            lastSpaceIdx = -1;
+        } else {
+            buf += ch;
+            bufW += w;
+        }
+    }
+    if (buf) lines.push(buf);
+    if (lines.length > maxLines) {
+        const kept = lines.slice(0, maxLines);
+        kept[kept.length - 1] = _acTruncateToWidth(kept[kept.length - 1], maxW - 2) + '…';
+        return kept;
+    }
+    return lines;
+}
+
+function _acTruncateToWidth(str, maxW) {
+    const width = (ch) => (/[\u4e00-\u9fa5\uff00-\uffef]/.test(ch) ? 2 : 1);
+    let w = 0;
+    let out = '';
+    for (let i = 0; i < str.length; i++) {
+        w += width(str[i]);
+        if (w > maxW) break;
+        out += str[i];
+    }
+    return out;
+}
+
+// 计算颜色对应的深色主色（辅助 accent 深色）
+function _acDarken(hex, amount) {
+    try {
+        const h = hex.replace('#', '');
+        const r = parseInt(h.substring(0, 2), 16);
+        const g = parseInt(h.substring(2, 4), 16);
+        const b = parseInt(h.substring(4, 6), 16);
+        const f = (c) => Math.max(0, Math.min(255, Math.round(c * (1 - amount))));
+        return '#' + [f(r), f(g), f(b)].map(x => x.toString(16).padStart(2, '0')).join('');
+    } catch (e) {
+        return hex;
+    }
+}
+
+// 从当前 Cytoscape 实例收集导出所需的节点/边信息
+function _acCollectExportData() {
+    if (!attackChainCytoscape) return null;
+    const nodes = [];
+    attackChainCytoscape.nodes().forEach(n => {
+        // 过滤隐藏节点
+        if (n.style('display') === 'none') return;
+        const pos = n.position();
+        // 读取 Cytoscape 中实际渲染的节点尺寸，保证导出与看板一致
+        let w = n.outerWidth ? n.outerWidth() : n.width();
+        let h = n.outerHeight ? n.outerHeight() : n.height();
+        // 兜底
+        if (!w || !isFinite(w) || w < 40) w = 280;
+        if (!h || !isFinite(h) || h < 30) h = 96;
+        nodes.push({
+            id: n.id(),
+            x: pos.x,
+            y: pos.y,
+            w: w,
+            h: h,
+            type: n.data('type') || '',
+            typeLabel: n.data('typeLabel') || '',
+            typeBadge: n.data('typeBadge') || '•',
+            typeColor: n.data('typeColor') || '#334155',
+            accentColor: n.data('accentColor') || '#94a3b8',
+            bgGradientStart: n.data('bgGradientStart') || '#FFFFFF',
+            bgGradientEnd: n.data('bgGradientEnd') || '#F8FAFC',
+            riskScore: n.data('riskScore') || 0,
+            label: n.data('originalLabel') || n.data('label') || n.id(),
+            metadata: n.data('metadata') || {}
+        });
+    });
+
+    const edges = [];
+    attackChainCytoscape.edges().forEach(e => {
+        if (e.style('display') === 'none') return;
+        const info = getEdgeNodes(e);
+        if (!info.valid) return;
+        const s = info.source.position();
+        const t = info.target.position();
+        edges.push({
+            id: e.id(),
+            source: info.source.id(),
+            target: info.target.id(),
+            sx: s.x, sy: s.y,
+            tx: t.x, ty: t.y,
+            type: e.data('type') || 'leads_to'
+        });
+    });
+
+    return { nodes, edges };
+}
+
+// 节点类型图标（SVG path）—— 真正的矢量图标
+function _acGetNodeIconPath(type) {
+    // 24×24 视图下的 path（会被缩放到 iconSize）
+    if (type === 'target') {
+        // 靶子（同心圆 + 十字准星）
+        return 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm0-14c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6-2.69-6-6-6zm0 10c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4z';
+    }
+    if (type === 'action') {
+        // 闪电（行动）
+        return 'M7 2v11h3v9l7-12h-4l4-8z';
+    }
+    if (type === 'vulnerability') {
+        // 盾牌警告
+        return 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-1 6h2v6h-2V7zm0 8h2v2h-2v-2z';
+    }
+    // 默认点
+    return 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z';
+}
+
+// 获取节点风险等级标签（漏洞节点用）
+function _acGetRiskLabel(score) {
+    if (score >= 80) return '严重';
+    if (score >= 60) return '高';
+    if (score >= 40) return '中';
+    if (score > 0) return '低';
+    return '';
+}
+
+// 生成精美 SVG 字符串（高端商业报告风格）
+function _acBuildSvgString() {
+    const data = _acCollectExportData();
+    if (!data || data.nodes.length === 0) throw new Error('没有可导出的数据');
+
+    const { nodes, edges } = data;
+
+    // --- 关键：重新统一节点尺寸为大卡片设计（SVG 中使用自己的规格） ---
+    // SVG 导出时采用更大的卡片，让信息层次清晰
+    nodes.forEach(n => {
+        // 根据当前在 Cytoscape 中的位置，重新分配 SVG 版本的宽高
+        // 统一使用大卡片以便展示完整信息
+        n.w = 380;
+        n.h = 140;
+    });
+
+    // 计算图的包围盒
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    nodes.forEach(n => {
+        minX = Math.min(minX, n.x - n.w / 2);
+        minY = Math.min(minY, n.y - n.h / 2);
+        maxX = Math.max(maxX, n.x + n.w / 2);
+        maxY = Math.max(maxY, n.y + n.h / 2);
+    });
+
+    // ==================== 版面布局参数 ====================
+    const GRAPH_PAD = 100;                   // 图区域内部留白
+    const HEADER_H = 128;                    // 顶部标题栏（加大）
+    const FOOTER_H = 56;                     // 底部信息栏
+    const LEGEND_W = 320;                    // 右侧图例面板
+    const OUTER_PAD = 32;                    // 最外层留白
+
+    const rawGraphW = (maxX - minX) + GRAPH_PAD * 2;
+    const rawGraphH = (maxY - minY) + GRAPH_PAD * 2;
+
+    const minGraphW = 900;
+    const minGraphH = 620;
+    const graphW = Math.max(rawGraphW, minGraphW);
+    const graphH = Math.max(rawGraphH, minGraphH);
+
+    const contentW = graphW + LEGEND_W + 36;
+    const contentH = graphH + HEADER_H + FOOTER_H + 24;
+
+    const totalW = contentW + OUTER_PAD * 2;
+    const totalH = contentH + OUTER_PAD * 2;
+
+    // 图区域在卡片坐标系的位置
+    const graphAreaX = OUTER_PAD + 20;
+    const graphAreaY = OUTER_PAD + HEADER_H;
+    const graphAreaW = graphW - 4;
+    const graphAreaH = contentH - HEADER_H - FOOTER_H;
+
+    // 节点坐标映射
+    const graphCenterOffsetX = (graphAreaW - rawGraphW) / 2;
+    const graphCenterOffsetY = (graphAreaH - rawGraphH) / 2;
+    const graphOriginX = graphAreaX + GRAPH_PAD + graphCenterOffsetX - minX;
+    const graphOriginY = graphAreaY + GRAPH_PAD + graphCenterOffsetY - minY;
+
+    // 图例区坐标
+    const legendX = graphAreaX + graphW + 16;
+
+    // 统计信息
+    const nodeCount = nodes.length;
+    const edgeCount = edges.length;
+    const vulnNodes = nodes.filter(n => n.type === 'vulnerability');
+    const actionNodes = nodes.filter(n => n.type === 'action');
+    const targetNodes = nodes.filter(n => n.type === 'target');
+    const criticalCount = vulnNodes.filter(n => n.riskScore >= 80).length;
+    const highCount = vulnNodes.filter(n => n.riskScore >= 60 && n.riskScore < 80).length;
+    const medCount = vulnNodes.filter(n => n.riskScore >= 40 && n.riskScore < 60).length;
+    const lowCount = vulnNodes.filter(n => n.riskScore > 0 && n.riskScore < 40).length;
+
+    const timestamp = new Date();
+    const ts = timestamp.getFullYear() + '-' +
+        String(timestamp.getMonth() + 1).padStart(2, '0') + '-' +
+        String(timestamp.getDate()).padStart(2, '0') + ' ' +
+        String(timestamp.getHours()).padStart(2, '0') + ':' +
+        String(timestamp.getMinutes()).padStart(2, '0');
+
+    // 类型主题色（高级感配色）
+    const typeTheme = {
+        'target': { primary: '#4F46E5', light: '#EEF2FF', dark: '#3730A3', text: '#312E81', label: '目标' },
+        'action-success': { primary: '#10B981', light: '#ECFDF5', dark: '#047857', text: '#064E3B', label: '行动' },
+        'action-neutral': { primary: '#64748B', light: '#F8FAFC', dark: '#475569', text: '#334155', label: '行动' },
+        'vuln-critical': { primary: '#E11D48', light: '#FFF1F2', dark: '#BE123C', text: '#881337', label: '漏洞' },
+        'vuln-high': { primary: '#EA580C', light: '#FFF7ED', dark: '#C2410C', text: '#7C2D12', label: '漏洞' },
+        'vuln-med': { primary: '#CA8A04', light: '#FEFCE8', dark: '#A16207', text: '#713F12', label: '漏洞' },
+        'vuln-low': { primary: '#0D9488', light: '#F0FDFA', dark: '#0F766E', text: '#134E4A', label: '漏洞' }
+    };
+
+    function themeFor(n) {
+        if (n.type === 'target') return typeTheme['target'];
+        if (n.type === 'action') {
+            const m = n.metadata || {};
+            const findings = m.findings || [];
+            const hasFindings = Array.isArray(findings) && findings.length > 0;
+            const isFailed = m.status === 'failed_insight';
+            return (hasFindings && !isFailed) ? typeTheme['action-success'] : typeTheme['action-neutral'];
+        }
+        if (n.type === 'vulnerability') {
+            const s = n.riskScore || 0;
+            if (s >= 80) return typeTheme['vuln-critical'];
+            if (s >= 60) return typeTheme['vuln-high'];
+            if (s >= 40) return typeTheme['vuln-med'];
+            return typeTheme['vuln-low'];
+        }
+        return typeTheme['action-neutral'];
+    }
+
+    // 边的起止主题
+    const nodesMap = new Map(nodes.map(n => [n.id, n]));
+
+    // ==================== 开始组装 SVG ====================
+    const parts = [];
+    parts.push(`<?xml version="1.0" encoding="UTF-8"?>`);
+    parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${totalW}" height="${totalH}" viewBox="0 0 ${totalW} ${totalH}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', Roboto, Helvetica, Arial, sans-serif">`);
+
+    // ==================== defs ====================
+    parts.push(`<defs>`);
+
+    // 根背景渐变：极淡暖灰
+    parts.push(`<linearGradient id="ac-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#FAFBFC"/>
+        <stop offset="100%" stop-color="#F1F5F9"/>
+    </linearGradient>`);
+
+    // 角落光晕
+    parts.push(`<radialGradient id="ac-glow-1" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="#6366F1" stop-opacity="0.12"/>
+        <stop offset="100%" stop-color="#6366F1" stop-opacity="0"/>
+    </radialGradient>`);
+    parts.push(`<radialGradient id="ac-glow-2" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="#EC4899" stop-opacity="0.08"/>
+        <stop offset="100%" stop-color="#EC4899" stop-opacity="0"/>
+    </radialGradient>`);
+    parts.push(`<radialGradient id="ac-glow-3" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="#06B6D4" stop-opacity="0.08"/>
+        <stop offset="100%" stop-color="#06B6D4" stop-opacity="0"/>
+    </radialGradient>`);
+
+    // 品牌渐变（标题用）
+    parts.push(`<linearGradient id="ac-brand" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" stop-color="#4F46E5"/>
+        <stop offset="50%" stop-color="#7C3AED"/>
+        <stop offset="100%" stop-color="#EC4899"/>
+    </linearGradient>`);
+
+    // 网格点阵（非常淡）
+    parts.push(`<pattern id="ac-dot" x="0" y="0" width="24" height="24" patternUnits="userSpaceOnUse">
+        <circle cx="12" cy="12" r="1" fill="#0F172A" fill-opacity="0.06"/>
+    </pattern>`);
+
+    // 节点卡片阴影（多层阴影，更有层次）
+    parts.push(`<filter id="ac-shadow-card" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#0F172A" flood-opacity="0.06"/>
+        <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#0F172A" flood-opacity="0.08"/>
+    </filter>`);
+
+    // 图标徽章阴影
+    parts.push(`<filter id="ac-shadow-icon" x="-30%" y="-30%" width="160%" height="160%">
+        <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0F172A" flood-opacity="0.15"/>
+    </filter>`);
+
+    // 风险徽章阴影
+    parts.push(`<filter id="ac-shadow-badge" x="-30%" y="-30%" width="160%" height="160%">
+        <feDropShadow dx="0" dy="1.5" stdDeviation="2.5" flood-color="#0F172A" flood-opacity="0.18"/>
+    </filter>`);
+
+    // 为每个节点定义图标渐变（大图标用）
+    Object.keys(typeTheme).forEach(key => {
+        const t = typeTheme[key];
+        parts.push(`<linearGradient id="ac-icon-grad-${key}" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="${t.primary}"/>
+            <stop offset="100%" stop-color="${t.dark}"/>
+        </linearGradient>`);
+    });
+
+    // 边使用渐变（源 -> 目标）
+    edges.forEach((e, idx) => {
+        const sNode = nodesMap.get(e.source);
+        const tNode = nodesMap.get(e.target);
+        if (!sNode || !tNode) return;
+        const sTheme = themeFor(sNode);
+        const tTheme = themeFor(tNode);
+        parts.push(`<linearGradient id="ac-edge-grad-${idx}" gradientUnits="userSpaceOnUse" x1="${e.sx}" y1="${e.sy}" x2="${e.tx}" y2="${e.ty}">
+            <stop offset="0%" stop-color="${sTheme.primary}" stop-opacity="0.7"/>
+            <stop offset="100%" stop-color="${tTheme.primary}" stop-opacity="0.9"/>
+        </linearGradient>`);
+    });
+
+    // 为每种主题色定义箭头标记
+    Object.keys(typeTheme).forEach(key => {
+        const t = typeTheme[key];
+        parts.push(`<marker id="ac-arrow-${key}" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="8" markerHeight="8" orient="auto-start-reverse" markerUnits="strokeWidth">
+            <path d="M 0 0 L 12 6 L 0 12 L 3 6 Z" fill="${t.primary}"/>
+        </marker>`);
+    });
+
+    parts.push(`</defs>`);
+
+    // ==================== 背景 ====================
+    parts.push(`<rect x="0" y="0" width="${totalW}" height="${totalH}" fill="url(#ac-bg)"/>`);
+    // 角落光晕
+    parts.push(`<ellipse cx="${totalW * 0.1}" cy="${totalH * 0.15}" rx="${totalW * 0.4}" ry="${totalH * 0.4}" fill="url(#ac-glow-1)"/>`);
+    parts.push(`<ellipse cx="${totalW * 0.9}" cy="${totalH * 0.85}" rx="${totalW * 0.35}" ry="${totalH * 0.35}" fill="url(#ac-glow-2)"/>`);
+    parts.push(`<ellipse cx="${totalW * 0.5}" cy="${totalH * 0.1}" rx="${totalW * 0.3}" ry="${totalH * 0.3}" fill="url(#ac-glow-3)"/>`);
+
+    // ==================== 主卡片 ====================
+    parts.push(`<rect x="${OUTER_PAD}" y="${OUTER_PAD}" width="${contentW}" height="${contentH}" rx="24" ry="24" fill="#FFFFFF" stroke="rgba(15,23,42,0.06)" stroke-width="1" filter="url(#ac-shadow-card)"/>`);
+
+    // ==================== 顶部标题栏 ====================
+    const tX = OUTER_PAD + 40;
+    const tY = OUTER_PAD + 28;
+
+    // 左侧 Logo 色块（大，渐变，有设计感）
+    parts.push(`<g filter="url(#ac-shadow-icon)">`);
+    parts.push(`<rect x="${tX - 4}" y="${tY}" width="48" height="48" rx="12" fill="url(#ac-brand)"/>`);
+    // Logo 图标（六边形 + 闪电）
+    parts.push(`<g transform="translate(${tX - 4 + 12}, ${tY + 12}) scale(0.9)">
+        <path d="M12 2L3 7v10l9 5 9-5V7z" fill="none" stroke="#FFFFFF" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M10 7l-2 5h3l-1 4 4-5h-3l1-4z" fill="#FFFFFF"/>
+    </g>`);
+    parts.push(`</g>`);
+
+    // 主标题（超大、粗体）
+    parts.push(`<text x="${tX + 56}" y="${tY + 26}" font-size="26" font-weight="800" fill="#0F172A" letter-spacing="-0.6px">攻击链可视化报告</text>`);
+
+    // 副标题（小字、次要色）
+    parts.push(`<text x="${tX + 56}" y="${tY + 50}" font-size="13" font-weight="500" fill="#64748B" letter-spacing="0.1px">Attack Chain Analysis · ${_acEscapeXml(ts)}</text>`);
+
+    // 右上角：关键统计胶囊（3 个）
+    const kpiY = OUTER_PAD + 28;
+    const kpiH = 48;
+    const kpiGap = 12;
+    const kpiW = 110;
+    const kpiItems = [
+        { label: '节点', value: nodeCount, color: '#4F46E5' },
+        { label: '连线', value: edgeCount, color: '#06B6D4' },
+        { label: '严重漏洞', value: criticalCount, color: criticalCount > 0 ? '#E11D48' : '#94A3B8' }
+    ];
+    let kpiXStart = OUTER_PAD + contentW - 40 - (kpiW * kpiItems.length + kpiGap * (kpiItems.length - 1));
+    kpiItems.forEach((kpi, i) => {
+        const kx = kpiXStart + i * (kpiW + kpiGap);
+        // 卡片背景
+        parts.push(`<rect x="${kx}" y="${kpiY}" width="${kpiW}" height="${kpiH}" rx="12" fill="#FFFFFF" stroke="${kpi.color}" stroke-opacity="0.15" stroke-width="1"/>`);
+        // 左侧细条
+        parts.push(`<rect x="${kx}" y="${kpiY + 10}" width="3" height="${kpiH - 20}" rx="1.5" fill="${kpi.color}"/>`);
+        // 数值（大字）
+        parts.push(`<text x="${kx + 16}" y="${kpiY + 26}" font-size="20" font-weight="800" fill="#0F172A" letter-spacing="-0.4px">${kpi.value}</text>`);
+        // 标签（小字）
+        parts.push(`<text x="${kx + 16}" y="${kpiY + 40}" font-size="10.5" font-weight="600" fill="#64748B" letter-spacing="0.4px">${_acEscapeXml(kpi.label)}</text>`);
+    });
+
+    // 标题分隔线（渐变淡化）
+    parts.push(`<line x1="${OUTER_PAD + 40}" y1="${OUTER_PAD + HEADER_H - 10}" x2="${OUTER_PAD + contentW - 40}" y2="${OUTER_PAD + HEADER_H - 10}" stroke="rgba(15,23,42,0.08)" stroke-width="1"/>`);
+
+    // ==================== 图区域 ====================
+    parts.push(`<rect x="${graphAreaX}" y="${graphAreaY}" width="${graphAreaW}" height="${graphAreaH}" rx="18" fill="#FCFCFD" stroke="rgba(15,23,42,0.05)" stroke-width="1"/>`);
+    parts.push(`<rect x="${graphAreaX}" y="${graphAreaY}" width="${graphAreaW}" height="${graphAreaH}" rx="18" fill="url(#ac-dot)" opacity="0.7"/>`);
+
+    // ==================== 开始绘制图形 ====================
+    parts.push(`<g transform="translate(${graphOriginX}, ${graphOriginY})">`);
+
+    // ---- 边（渐变、柔和曲线） ----
+    edges.forEach((e, idx) => {
+        const sNode = nodesMap.get(e.source);
+        const tNode = nodesMap.get(e.target);
+        if (!sNode || !tNode) return;
+        const tTheme = themeFor(tNode);
+
+        const dx = e.tx - e.sx;
+        const dy = e.ty - e.sy;
+        const mag = Math.sqrt(dx * dx + dy * dy) || 1;
+        const offset = Math.min(80, mag * 0.25);
+        const nx = -dy / mag;
+        const ny = dx / mag;
+        const cx = (e.sx + e.tx) / 2 + nx * offset;
+        const cy = (e.sy + e.ty) / 2 + ny * offset;
+        const shrink = 22;
+        const ex = e.tx - (dx / mag) * shrink;
+        const ey = e.ty - (dy / mag) * shrink;
+
+        const strokeWidth = (e.type === 'discovers' || e.type === 'enables') ? 2.4 : 2;
+        const strokeDash = e.type === 'targets' ? 'stroke-dasharray="10,5"' : '';
+        // 目标箭头 key（根据目标节点的主题）
+        const targetThemeKey = Object.keys(typeTheme).find(k => typeTheme[k] === tTheme) || 'action-neutral';
+
+        // 先画一个轻微的 halo（背景光晕）
+        parts.push(`<path d="M ${e.sx.toFixed(1)} ${e.sy.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}" fill="none" stroke="${tTheme.primary}" stroke-width="${strokeWidth + 4}" stroke-linecap="round" stroke-opacity="0.08" ${strokeDash}/>`);
+        // 主线
+        parts.push(`<path d="M ${e.sx.toFixed(1)} ${e.sy.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}" fill="none" stroke="url(#ac-edge-grad-${idx})" stroke-width="${strokeWidth}" stroke-linecap="round" ${strokeDash} marker-end="url(#ac-arrow-${targetThemeKey})"/>`);
+    });
+
+    // ---- 节点（大卡片设计） ----
+    nodes.forEach((n, i) => {
+        const theme = themeFor(n);
+        const themeKey = Object.keys(typeTheme).find(k => typeTheme[k] === theme) || 'action-neutral';
+
+        const x = n.x - n.w / 2;
+        const y = n.y - n.h / 2;
+        const r = 18;  // 圆角
+
+        // ========== 卡片主体 ==========
+        // 柔和阴影 + 纯白背景
+        parts.push(`<g filter="url(#ac-shadow-card)">`);
+        parts.push(`<rect x="${x}" y="${y}" width="${n.w}" height="${n.h}" rx="${r}" fill="#FFFFFF"/>`);
+        parts.push(`</g>`);
+        // 顶部主题色条（很淡的渐变）
+        parts.push(`<rect x="${x}" y="${y}" width="${n.w}" height="${n.h}" rx="${r}" fill="${theme.primary}" fill-opacity="0.02"/>`);
+        // 细边框
+        parts.push(`<rect x="${x}" y="${y}" width="${n.w}" height="${n.h}" rx="${r}" fill="none" stroke="${theme.primary}" stroke-opacity="0.18" stroke-width="1"/>`);
+        // 顶部彩色装饰条（小圆点序列或渐变条）
+        parts.push(`<rect x="${x + 20}" y="${y}" width="${n.w - 40}" height="3" rx="1.5" fill="${theme.primary}" fill-opacity="0.5"/>`);
+
+        const padX = 24;
+        const padY = 22;
+
+        // ========== 顶部：大图标 + 类型标签 + 右侧徽章 ==========
+        const iconSize = 44;
+        const iconX = x + padX;
+        const iconY = y + padY;
+
+        // 图标背景（渐变方形）
+        parts.push(`<g filter="url(#ac-shadow-icon)">`);
+        parts.push(`<rect x="${iconX}" y="${iconY}" width="${iconSize}" height="${iconSize}" rx="12" fill="url(#ac-icon-grad-${themeKey})"/>`);
+        parts.push(`</g>`);
+        // 图标 path（白色，缩放）
+        const iconPath = _acGetNodeIconPath(n.type);
+        const iconScale = (iconSize * 0.55) / 24;
+        const iconInnerOffset = (iconSize - 24 * iconScale) / 2;
+        parts.push(`<g transform="translate(${iconX + iconInnerOffset}, ${iconY + iconInnerOffset}) scale(${iconScale.toFixed(3)})">
+            <path d="${iconPath}" fill="#FFFFFF"/>
+        </g>`);
+
+        // 类型标签（在图标右侧）
+        const typeTextX = iconX + iconSize + 14;
+        // 类型英文（TYPE LABEL，淡色小字）
+        const typeEn = n.type === 'target' ? 'TARGET' : n.type === 'action' ? 'ACTION' : n.type === 'vulnerability' ? 'VULNERABILITY' : (n.type || '').toUpperCase();
+        parts.push(`<text x="${typeTextX}" y="${iconY + 14}" font-size="10" font-weight="700" fill="${theme.dark}" fill-opacity="0.75" letter-spacing="1.2px">${_acEscapeXml(typeEn)}</text>`);
+        // 类型中文（大字，主要色）
+        parts.push(`<text x="${typeTextX}" y="${iconY + 34}" font-size="16" font-weight="700" fill="${theme.text}" letter-spacing="-0.2px">${_acEscapeXml(theme.label)}</text>`);
+
+        // ========== 右上角徽章 ==========
+        const badgeY = iconY + 2;
+        const badgeH = 26;
+        if (n.type === 'vulnerability' && n.riskScore > 0) {
+            // 风险分数徽章（大号，渐变背景）
+            const riskLabel = _acGetRiskLabel(n.riskScore);
+            const badgeText = `${riskLabel} · ${n.riskScore}`;
+            const badgeW = 90;
+            const bx = x + n.w - badgeW - padX;
+            parts.push(`<g filter="url(#ac-shadow-badge)">`);
+            parts.push(`<rect x="${bx}" y="${badgeY}" width="${badgeW}" height="${badgeH}" rx="${badgeH / 2}" fill="url(#ac-icon-grad-${themeKey})"/>`);
+            parts.push(`<text x="${bx + badgeW / 2}" y="${badgeY + badgeH / 2 + 4.5}" text-anchor="middle" font-size="12" font-weight="700" fill="#FFFFFF" letter-spacing="0.2px">${_acEscapeXml(badgeText)}</text>`);
+            parts.push(`</g>`);
+        } else if (n.type === 'action') {
+            const m = n.metadata || {};
+            const findings = m.findings || [];
+            const hasFindings = Array.isArray(findings) && findings.length > 0;
+            const isFailed = m.status === 'failed_insight';
+            if (hasFindings || isFailed) {
+                const text = isFailed ? '有线索' : `发现 ${findings.length}`;
+                const badgeW = 70;
+                const bx = x + n.w - badgeW - padX;
+                parts.push(`<rect x="${bx}" y="${badgeY}" width="${badgeW}" height="${badgeH}" rx="${badgeH / 2}" fill="${theme.primary}" fill-opacity="0.12" stroke="${theme.primary}" stroke-opacity="0.4" stroke-width="1"/>`);
+                // 小圆点（状态指示）
+                parts.push(`<circle cx="${bx + 12}" cy="${badgeY + badgeH / 2}" r="3" fill="${theme.primary}"/>`);
+                parts.push(`<text x="${bx + 20}" y="${badgeY + badgeH / 2 + 4.5}" font-size="11.5" font-weight="700" fill="${theme.dark}">${_acEscapeXml(text)}</text>`);
+            }
+        } else if (n.type === 'target') {
+            // 目标节点显示"目标"标识
+            const badgeW = 60;
+            const bx = x + n.w - badgeW - padX;
+            parts.push(`<rect x="${bx}" y="${badgeY}" width="${badgeW}" height="${badgeH}" rx="${badgeH / 2}" fill="${theme.primary}" fill-opacity="0.12" stroke="${theme.primary}" stroke-opacity="0.4" stroke-width="1"/>`);
+            parts.push(`<text x="${bx + badgeW / 2}" y="${badgeY + badgeH / 2 + 4.5}" text-anchor="middle" font-size="11.5" font-weight="700" fill="${theme.dark}" letter-spacing="0.3px">主目标</text>`);
+        }
+
+        // ========== 主标题 ==========
+        const contentTopY = iconY + iconSize + 18;
+        const titleFontSize = 16;
+        const titleLineH = titleFontSize + 6;
+        const contentAvailW = n.w - padX * 2;
+        const charsPerLine = Math.max(10, Math.floor(contentAvailW / (titleFontSize * 0.58)));
+        const titleLines = _acWrapLabel(n.label, charsPerLine, 2);
+        titleLines.forEach((ln, idx) => {
+            parts.push(`<text x="${x + padX}" y="${contentTopY + idx * titleLineH}" font-size="${titleFontSize}" font-weight="700" fill="#0F172A" letter-spacing="-0.2px">${_acEscapeXml(ln)}</text>`);
+        });
+
+        // ========== 底部元信息栏 ==========
+        const metaY = y + n.h - 22;
+        // 分隔线
+        parts.push(`<line x1="${x + padX}" y1="${metaY - 10}" x2="${x + n.w - padX}" y2="${metaY - 10}" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>`);
+
+        // 生成元信息文本
+        const metaItems = [];
+        if (n.type === 'target') {
+            const tgt = (n.metadata && n.metadata.target) ? n.metadata.target : null;
+            if (tgt) metaItems.push({ icon: 'loc', text: _acTruncateToWidth(tgt, 26) });
+        } else if (n.type === 'action') {
+            const toolName = n.metadata && n.metadata.tool_name;
+            if (toolName) metaItems.push({ icon: 'tool', text: _acTruncateToWidth(toolName, 20) });
+            const intent = n.metadata && n.metadata.tool_intent;
+            if (intent) metaItems.push({ icon: 'aim', text: _acTruncateToWidth(intent, 22) });
+        } else if (n.type === 'vulnerability') {
+            const vt = n.metadata && n.metadata.vulnerability_type;
+            if (vt) metaItems.push({ icon: 'shield', text: _acTruncateToWidth(vt, 22) });
+            const sev = n.metadata && n.metadata.severity;
+            if (sev) metaItems.push({ icon: 'alert', text: _acTruncateToWidth(sev, 12) });
+        }
+        if (metaItems.length === 0) {
+            // 没有元信息时显示节点ID简短版
+            metaItems.push({ icon: 'hash', text: _acTruncateToWidth(n.id || '', 20) });
+        }
+
+        // 元信息图标 path（24x24）
+        const metaIconPaths = {
+            'loc': 'M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z',
+            'tool': 'M22.7 19l-9.1-9.1c.9-2.3.4-5-1.5-6.9-2-2-5-2.4-7.4-1.3L9 6 6 9 1.6 4.7C.4 7.1.9 10.1 2.9 12.1c1.9 1.9 4.6 2.4 6.9 1.5l9.1 9.1c.4.4 1 .4 1.4 0l2.3-2.3c.5-.4.5-1.1.1-1.4z',
+            'aim': 'M12 2L4 5v6c0 5.5 3.8 10.7 8 12 4.2-1.3 8-6.5 8-12V5l-8-3zm4 10H8V9h3V7l3 3-3 3v-1z',
+            'shield': 'M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.4-1.4 2.6 2.6 6.6-6.6L18 9l-8 8z',
+            'alert': 'M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z',
+            'hash': 'M20 9h-4.5l.9-4h-2l-.9 4H9l.9-4H8l-.9 4H3v2h3.7l-1 4H2v2h3.3l-.9 4h2l.9-4H12l-.9 4h2l.9-4H19v-2h-4.7l1-4H20V9zm-6.3 6H9l1-4h4.7l-1 4z'
+        };
+
+        let metaX = x + padX;
+        metaItems.forEach((mi, idx) => {
+            if (idx > 0) {
+                // 分隔符
+                parts.push(`<circle cx="${metaX + 6}" cy="${metaY}" r="1.2" fill="#CBD5E1"/>`);
+                metaX += 14;
+            }
+            // 图标
+            const path = metaIconPaths[mi.icon] || metaIconPaths.hash;
+            parts.push(`<g transform="translate(${metaX}, ${metaY - 7}) scale(${(13 / 24).toFixed(3)})">
+                <path d="${path}" fill="${theme.primary}" fill-opacity="0.8"/>
+            </g>`);
+            metaX += 18;
+            // 文本
+            parts.push(`<text x="${metaX}" y="${metaY + 3}" font-size="11.5" font-weight="500" fill="#64748B">${_acEscapeXml(mi.text)}</text>`);
+            metaX += mi.text.length * 6.5;  // 粗略估算
+        });
+    });
+
+    parts.push(`</g>`);
+
+    // ==================== 右侧图例 ====================
+    const lx = legendX;
+    const ly = graphAreaY;
+    const lw = LEGEND_W - 16;
+    const lh = graphAreaH;
+
+    // 图例主卡片
+    parts.push(`<rect x="${lx}" y="${ly}" width="${lw}" height="${lh}" rx="18" fill="#FFFFFF" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>`);
+    // 顶部彩色装饰
+    parts.push(`<rect x="${lx + 16}" y="${ly}" width="${lw - 32}" height="3" rx="1.5" fill="url(#ac-brand)"/>`);
+
+    let curY = ly + 26;
+
+    // --- 节点类型 ---
+    parts.push(`<text x="${lx + 24}" y="${curY}" font-size="10.5" font-weight="800" fill="#64748B" letter-spacing="1.5px">NODE TYPES · 节点类型</text>`);
+    curY += 22;
+    const typeSummary = [
+        { key: 'target', count: targetNodes.length, text: '目标' },
+        { key: 'action-success', count: actionNodes.filter(a => { const m = a.metadata || {}; return Array.isArray(m.findings) && m.findings.length > 0 && m.status !== 'failed_insight'; }).length, text: '行动（有发现）' },
+        { key: 'action-neutral', count: actionNodes.filter(a => { const m = a.metadata || {}; const f = Array.isArray(m.findings) ? m.findings : []; return f.length === 0 || m.status === 'failed_insight'; }).length, text: '行动（其他）' },
+        { key: 'vuln-critical', count: criticalCount, text: '严重漏洞' },
+        { key: 'vuln-high', count: highCount, text: '高风险漏洞' },
+        { key: 'vuln-med', count: medCount, text: '中风险漏洞' },
+        { key: 'vuln-low', count: lowCount, text: '低风险漏洞' }
+    ];
+    typeSummary.forEach(item => {
+        const t = typeTheme[item.key];
+        if (item.count === 0) return;  // 不显示零计数项
+        // 图标方块
+        parts.push(`<rect x="${lx + 24}" y="${curY - 10}" width="14" height="14" rx="4" fill="${t.primary}"/>`);
+        // 标签文本
+        parts.push(`<text x="${lx + 46}" y="${curY + 1}" font-size="12.5" font-weight="500" fill="#334155">${_acEscapeXml(item.text)}</text>`);
+        // 计数
+        parts.push(`<text x="${lx + lw - 24}" y="${curY + 1}" font-size="12.5" font-weight="700" fill="#0F172A" text-anchor="end">${item.count}</text>`);
+        curY += 22;
+    });
+    curY += 10;
+
+    // --- 连线含义 ---
+    parts.push(`<text x="${lx + 24}" y="${curY}" font-size="10.5" font-weight="800" fill="#64748B" letter-spacing="1.5px">CONNECTIONS · 连线含义</text>`);
+    curY += 22;
+    const lineItems = [
+        { label: '行动发现漏洞', color: '#4F46E5', dash: '' },
+        { label: '使能 / 促成关系', color: '#E11D48', dash: '' },
+        { label: '逻辑顺序', color: '#64748B', dash: '' },
+        { label: '目标定位', color: '#4F46E5', dash: '6,3' }
+    ];
+    lineItems.forEach(l => {
+        const dashAttr = l.dash ? `stroke-dasharray="${l.dash}"` : '';
+        parts.push(`<line x1="${lx + 24}" y1="${curY - 3}" x2="${lx + 62}" y2="${curY - 3}" stroke="${l.color}" stroke-width="2.4" stroke-linecap="round" ${dashAttr}/>`);
+        parts.push(`<polygon points="${lx + 62},${curY - 6} ${lx + 68},${curY - 3} ${lx + 62},${curY}" fill="${l.color}"/>`);
+        parts.push(`<text x="${lx + 78}" y="${curY + 1}" font-size="12.5" font-weight="500" fill="#334155">${_acEscapeXml(l.label)}</text>`);
+        curY += 24;
+    });
+    curY += 10;
+
+    // --- 风险等级条 ---
+    parts.push(`<text x="${lx + 24}" y="${curY}" font-size="10.5" font-weight="800" fill="#64748B" letter-spacing="1.5px">RISK LEVELS · 风险等级</text>`);
+    curY += 22;
+    const riskBar = [
+        { label: '严重', range: '80-100', color: '#E11D48' },
+        { label: '高', range: '60-79', color: '#EA580C' },
+        { label: '中', range: '40-59', color: '#CA8A04' },
+        { label: '低', range: '0-39', color: '#0D9488' }
+    ];
+    riskBar.forEach(r => {
+        // 风险等级胶囊
+        parts.push(`<rect x="${lx + 24}" y="${curY - 10}" width="46" height="18" rx="9" fill="${r.color}"/>`);
+        parts.push(`<text x="${lx + 47}" y="${curY + 2}" text-anchor="middle" font-size="10.5" font-weight="700" fill="#FFFFFF" letter-spacing="0.3px">${_acEscapeXml(r.label)}</text>`);
+        // 分数范围
+        parts.push(`<text x="${lx + 80}" y="${curY + 1}" font-size="12" font-weight="500" fill="#64748B">分数 ${_acEscapeXml(r.range)}</text>`);
+        curY += 26;
+    });
+
+    // ==================== 底部信息栏 ====================
+    const fY = OUTER_PAD + contentH - FOOTER_H;
+    // 分隔线
+    parts.push(`<line x1="${OUTER_PAD + 40}" y1="${fY + 16}" x2="${OUTER_PAD + contentW - 40}" y2="${fY + 16}" stroke="rgba(15,23,42,0.06)" stroke-width="1"/>`);
+    // 左侧品牌
+    parts.push(`<circle cx="${OUTER_PAD + 44}" cy="${fY + 34}" r="5" fill="url(#ac-brand)"/>`);
+    parts.push(`<text x="${OUTER_PAD + 56}" y="${fY + 38}" font-size="11.5" font-weight="600" fill="#64748B">CyberStrikeAI <tspan fill="#94A3B8" font-weight="500">· Attack Chain Visualization Report</tspan></text>`);
+    // 右侧时间戳
+    parts.push(`<text x="${OUTER_PAD + contentW - 40}" y="${fY + 38}" font-size="11.5" font-weight="500" fill="#94A3B8" text-anchor="end">${_acEscapeXml(ts)}</text>`);
+
+    parts.push(`</svg>`);
+    return parts.join('\n');
+}
+
+// 下载文本文件
+function _acDownloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 150);
+}
+
+// 基于 SVG 字符串生成高清 PNG
+function _acSvgToPng(svgString, scale) {
+    return new Promise((resolve, reject) => {
+        try {
+            // 读取 SVG 尺寸
+            const m = svgString.match(/<svg[^>]*width="(\d+(?:\.\d+)?)"[^>]*height="(\d+(?:\.\d+)?)"/i);
+            const w = m ? parseFloat(m[1]) : 1600;
+            const h = m ? parseFloat(m[2]) : 900;
+            const s = scale || Math.min(2.5, Math.max(1.5, 2000 / Math.max(w, h)));
+
+            const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.onload = function () {
+                try {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = Math.round(w * s);
+                    canvas.height = Math.round(h * s);
+                    const ctx = canvas.getContext('2d');
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.imageSmoothingQuality = 'high';
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    URL.revokeObjectURL(url);
+                    canvas.toBlob(pngBlob => {
+                        if (!pngBlob) reject(new Error('PNG 生成失败'));
+                        else resolve(pngBlob);
+                    }, 'image/png', 0.95);
+                } catch (err) {
+                    URL.revokeObjectURL(url);
+                    reject(err);
+                }
+            };
+            img.onerror = function (e) {
+                URL.revokeObjectURL(url);
+                reject(new Error('SVG 加载失败'));
+            };
+            img.src = url;
+        } catch (e) {
+            reject(e);
+        }
+    });
+}
+
+// 导出攻击链（美化版）
 function exportAttackChain(format) {
     if (!attackChainCytoscape) {
-        alert('请先加载攻击链');
+        alert(typeof window.t === 'function' ? window.t('chat.pleaseLoadAttackChainFirst', {}, '请先加载攻击链') : '请先加载攻击链');
         return;
     }
-    
-    // 确保图形已经渲染完成（使用小延迟）
+
+    // 延时确保渲染完成
     setTimeout(() => {
         try {
-            if (format === 'png') {
-                try {
-                    const pngPromise = attackChainCytoscape.png({
-                        output: 'blob',
-                        bg: 'white',
-                        full: true,
-                        scale: 1
-                    });
-                    
-                    // 处理 Promise
-                    if (pngPromise && typeof pngPromise.then === 'function') {
-                        pngPromise.then(blob => {
-                            if (!blob) {
-                                throw new Error('PNG导出返回空数据');
+            const svgString = _acBuildSvgString();
+            const convId = currentAttackChainConversationId || 'export';
+            const tsName = Date.now();
+
+            if (format === 'svg') {
+                const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+                _acDownloadBlob(blob, `attack-chain-${convId}-${tsName}.svg`);
+            } else if (format === 'png') {
+                _acSvgToPng(svgString, 2)
+                    .then(pngBlob => _acDownloadBlob(pngBlob, `attack-chain-${convId}-${tsName}.png`))
+                    .catch(err => {
+                        console.error('导出 PNG 失败，回退到 Cytoscape 原生导出:', err);
+                        // 回退方案：使用 Cytoscape 自带导出
+                        try {
+                            const p = attackChainCytoscape.png({ output: 'blob', bg: '#ffffff', full: true, scale: 2 });
+                            if (p && typeof p.then === 'function') {
+                                p.then(b => _acDownloadBlob(b, `attack-chain-${convId}-${tsName}.png`))
+                                    .catch(e => alert('导出 PNG 失败: ' + (e && e.message || e)));
+                            } else if (p) {
+                                _acDownloadBlob(p, `attack-chain-${convId}-${tsName}.png`);
+                            } else {
+                                alert('导出 PNG 失败');
                             }
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement('a');
-                            a.href = url;
-                            a.download = `attack-chain-${currentAttackChainConversationId || 'export'}-${Date.now()}.png`;
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
-                            setTimeout(() => URL.revokeObjectURL(url), 100);
-                        }).catch(err => {
-                            console.error('导出PNG失败:', err);
-                            alert('导出PNG失败: ' + (err.message || '未知错误'));
-                        });
-                    } else {
-                        // 如果不是 Promise，直接使用
-                        const url = URL.createObjectURL(pngPromise);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `attack-chain-${currentAttackChainConversationId || 'export'}-${Date.now()}.png`;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        setTimeout(() => URL.revokeObjectURL(url), 100);
-                    }
-                } catch (err) {
-                    console.error('PNG导出错误:', err);
-                    alert('导出PNG失败: ' + (err.message || '未知错误'));
-                }
-            } else if (format === 'svg') {
-                try {
-                    // Cytoscape.js 3.x 不直接支持 .svg() 方法
-                    // 使用替代方案：从 Cytoscape 数据手动构建 SVG
-                    const container = attackChainCytoscape.container();
-                    if (!container) {
-                        throw new Error('无法获取容器元素');
-                    }
-                    
-                    // 获取所有节点和边
-                    const nodes = attackChainCytoscape.nodes();
-                    const edges = attackChainCytoscape.edges();
-                    
-                    if (nodes.length === 0) {
-                        throw new Error('没有节点可导出');
-                    }
-                    
-                    // 计算所有节点的实际边界（包括节点大小）
-                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-                    nodes.forEach(node => {
-                        const pos = node.position();
-                        const nodeWidth = node.width();
-                        const nodeHeight = node.height();
-                        const size = Math.max(nodeWidth, nodeHeight) / 2;
-                        
-                        minX = Math.min(minX, pos.x - size);
-                        minY = Math.min(minY, pos.y - size);
-                        maxX = Math.max(maxX, pos.x + size);
-                        maxY = Math.max(maxY, pos.y + size);
-                    });
-                    
-                    // 也考虑边的范围
-                    edges.forEach(edge => {
-                        const { source, target, valid } = getEdgeNodes(edge);
-                        if (valid) {
-                            const sourcePos = source.position();
-                            const targetPos = target.position();
-                            minX = Math.min(minX, sourcePos.x, targetPos.x);
-                            minY = Math.min(minY, sourcePos.y, targetPos.y);
-                            maxX = Math.max(maxX, sourcePos.x, targetPos.x);
-                            maxY = Math.max(maxY, sourcePos.y, targetPos.y);
+                        } catch (e2) {
+                            alert('导出 PNG 失败: ' + (e2 && e2.message || e2));
                         }
                     });
-                    
-                    // 添加边距
-                    const padding = 50;
-                    minX -= padding;
-                    minY -= padding;
-                    maxX += padding;
-                    maxY += padding;
-                    
-                    const width = maxX - minX;
-                    const height = maxY - minY;
-                    
-                    // 创建 SVG 元素
-                    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-                    svg.setAttribute('width', width.toString());
-                    svg.setAttribute('height', height.toString());
-                    svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-                    svg.setAttribute('viewBox', `${minX} ${minY} ${width} ${height}`);
-                    
-                    // 添加白色背景矩形
-                    const bgRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-                    bgRect.setAttribute('x', minX.toString());
-                    bgRect.setAttribute('y', minY.toString());
-                    bgRect.setAttribute('width', width.toString());
-                    bgRect.setAttribute('height', height.toString());
-                    bgRect.setAttribute('fill', 'white');
-                    svg.appendChild(bgRect);
-                    
-                    // 创建 defs 用于箭头标记
-                    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-                    
-                    // 添加边的箭头标记（为不同类型的边创建不同的箭头）
-                    const edgeTypes = ['discovers', 'targets', 'enables', 'leads_to'];
-                    edgeTypes.forEach((type, index) => {
-                        let color = '#999';
-                        if (type === 'discovers') color = '#3498db';
-                        else if (type === 'targets') color = '#0066ff';
-                        else if (type === 'enables') color = '#e74c3c';
-                        else if (type === 'leads_to') color = '#666';
-                        
-                        const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-                        marker.setAttribute('id', `arrowhead-${type}`);
-                        marker.setAttribute('markerWidth', '10');
-                        marker.setAttribute('markerHeight', '10');
-                        marker.setAttribute('refX', '9');
-                        marker.setAttribute('refY', '3');
-                        marker.setAttribute('orient', 'auto');
-                        const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-                        polygon.setAttribute('points', '0 0, 10 3, 0 6');
-                        polygon.setAttribute('fill', color);
-                        marker.appendChild(polygon);
-                        defs.appendChild(marker);
-                    });
-                    svg.appendChild(defs);
-                    
-                    // 添加边（先绘制，这样节点会在上面）
-                    edges.forEach(edge => {
-                        const { source, target, valid } = getEdgeNodes(edge);
-                        if (!valid) {
-                            return; // 跳过无效的边
-                        }
-                        
-                        const sourcePos = source.position();
-                        const targetPos = target.position();
-                        const edgeData = edge.data();
-                        const edgeType = edgeData.type || 'leads_to';
-                        
-                        // 获取边的样式
-                        let lineColor = '#999';
-                        if (edgeType === 'discovers') lineColor = '#3498db';
-                        else if (edgeType === 'targets') lineColor = '#0066ff';
-                        else if (edgeType === 'enables') lineColor = '#e74c3c';
-                        else if (edgeType === 'leads_to') lineColor = '#666';
-                        
-                        // 创建路径（支持曲线）
-                        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                        // 简单的直线路径（可以改进为曲线）
-                        const midX = (sourcePos.x + targetPos.x) / 2;
-                        const midY = (sourcePos.y + targetPos.y) / 2;
-                        const dx = targetPos.x - sourcePos.x;
-                        const dy = targetPos.y - sourcePos.y;
-                        const offset = Math.min(30, Math.sqrt(dx * dx + dy * dy) * 0.3);
-                        
-                        // 使用二次贝塞尔曲线
-                        const controlX = midX + (dy > 0 ? -offset : offset);
-                        const controlY = midY + (dx > 0 ? offset : -offset);
-                        path.setAttribute('d', `M ${sourcePos.x} ${sourcePos.y} Q ${controlX} ${controlY} ${targetPos.x} ${targetPos.y}`);
-                        path.setAttribute('stroke', lineColor);
-                        path.setAttribute('stroke-width', '2');
-                        path.setAttribute('fill', 'none');
-                        path.setAttribute('marker-end', `url(#arrowhead-${edgeType})`);
-                        svg.appendChild(path);
-                    });
-                    
-                    // 添加节点
-                    nodes.forEach(node => {
-                        const pos = node.position();
-                        const nodeData = node.data();
-                        const riskScore = nodeData.riskScore || 0;
-                        const nodeWidth = node.width();
-                        const nodeHeight = node.height();
-                        const size = Math.max(nodeWidth, nodeHeight) / 2;
-                        
-                        // 确定节点颜色
-                        let bgColor = '#88cc00';
-                        let textColor = '#1a5a1a';
-                        let borderColor = '#5a8a5a';
-                        if (riskScore >= 80) {
-                            bgColor = '#ff4444';
-                            textColor = '#fff';
-                            borderColor = '#fff';
-                        } else if (riskScore >= 60) {
-                            bgColor = '#ff8800';
-                            textColor = '#fff';
-                            borderColor = '#fff';
-                        } else if (riskScore >= 40) {
-                            bgColor = '#ffbb00';
-                            textColor = '#333';
-                            borderColor = '#cc9900';
-                        }
-                        
-                        // 确定节点形状
-                        const nodeType = nodeData.type;
-                        let shapeElement;
-                        if (nodeType === 'vulnerability') {
-                            // 菱形
-                            shapeElement = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-                            const points = [
-                                `${pos.x},${pos.y - size}`,
-                                `${pos.x + size},${pos.y}`,
-                                `${pos.x},${pos.y + size}`,
-                                `${pos.x - size},${pos.y}`
-                            ].join(' ');
-                            shapeElement.setAttribute('points', points);
-                        } else if (nodeType === 'target') {
-                            // 星形（五角星）
-                            shapeElement = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-                            const points = [];
-                            for (let i = 0; i < 5; i++) {
-                                const angle = (i * 4 * Math.PI / 5) - Math.PI / 2;
-                                const x = pos.x + size * Math.cos(angle);
-                                const y = pos.y + size * Math.sin(angle);
-                                points.push(`${x},${y}`);
-                            }
-                            shapeElement.setAttribute('points', points.join(' '));
-                        } else {
-                            // 圆角矩形
-                            shapeElement = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-                            shapeElement.setAttribute('x', (pos.x - size).toString());
-                            shapeElement.setAttribute('y', (pos.y - size).toString());
-                            shapeElement.setAttribute('width', (size * 2).toString());
-                            shapeElement.setAttribute('height', (size * 2).toString());
-                            shapeElement.setAttribute('rx', '5');
-                            shapeElement.setAttribute('ry', '5');
-                        }
-                        
-                        shapeElement.setAttribute('fill', bgColor);
-                        shapeElement.setAttribute('stroke', borderColor);
-                        shapeElement.setAttribute('stroke-width', '2');
-                        svg.appendChild(shapeElement);
-                        
-                        // 添加文本标签（使用文本描边提高可读性）
-                        // 使用原始标签，不包含类型标签前缀
-                        const label = (nodeData.originalLabel || nodeData.label || nodeData.id || '').toString();
-                        const maxLength = 15;
-                        
-                        // 创建文本组，包含描边和填充
-                        const textGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-                        textGroup.setAttribute('text-anchor', 'middle');
-                        textGroup.setAttribute('dominant-baseline', 'middle');
-                        
-                        // 处理长文本（简单换行）
-                        let lines = [];
-                        if (label.length > maxLength) {
-                            const words = label.split(' ');
-                            let currentLine = '';
-                            words.forEach(word => {
-                                if ((currentLine + word).length <= maxLength) {
-                                    currentLine += (currentLine ? ' ' : '') + word;
-                                } else {
-                                    if (currentLine) lines.push(currentLine);
-                                    currentLine = word;
-                                }
-                            });
-                            if (currentLine) lines.push(currentLine);
-                            lines = lines.slice(0, 2); // 最多两行
-                        } else {
-                            lines = [label];
-                        }
-                        
-                        // 确定文本描边颜色（与原始渲染一致）
-                        let textOutlineColor = '#fff';
-                        let textOutlineWidth = 2;
-                        if (riskScore >= 80 || riskScore >= 60) {
-                            // 红色/橙色背景：白色文字，白色描边，深色轮廓
-                            textOutlineColor = '#333';
-                            textOutlineWidth = 1;
-                        } else if (riskScore >= 40) {
-                            // 黄色背景：深色文字，白色描边
-                            textOutlineColor = '#fff';
-                            textOutlineWidth = 2;
-                        } else {
-                            // 绿色背景：深绿色文字，白色描边
-                            textOutlineColor = '#fff';
-                            textOutlineWidth = 2;
-                        }
-                        
-                        // 为每行文本创建描边和填充
-                        lines.forEach((line, i) => {
-                            const textY = pos.y + (i - (lines.length - 1) / 2) * 16;
-                            
-                            // 描边文本（用于提高对比度，模拟text-outline效果）
-                            const strokeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-                            strokeText.setAttribute('x', pos.x.toString());
-                            strokeText.setAttribute('y', textY.toString());
-                            strokeText.setAttribute('fill', 'none');
-                            strokeText.setAttribute('stroke', textOutlineColor);
-                            strokeText.setAttribute('stroke-width', textOutlineWidth.toString());
-                            strokeText.setAttribute('stroke-linejoin', 'round');
-                            strokeText.setAttribute('stroke-linecap', 'round');
-                            strokeText.setAttribute('font-size', '14px');
-                            strokeText.setAttribute('font-weight', 'bold');
-                            strokeText.setAttribute('font-family', 'Arial, sans-serif');
-                            strokeText.setAttribute('text-anchor', 'middle');
-                            strokeText.setAttribute('dominant-baseline', 'middle');
-                            strokeText.textContent = line;
-                            textGroup.appendChild(strokeText);
-                            
-                            // 填充文本（实际可见的文本）
-                            const fillText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-                            fillText.setAttribute('x', pos.x.toString());
-                            fillText.setAttribute('y', textY.toString());
-                            fillText.setAttribute('fill', textColor);
-                            fillText.setAttribute('font-size', '14px');
-                            fillText.setAttribute('font-weight', 'bold');
-                            fillText.setAttribute('font-family', 'Arial, sans-serif');
-                            fillText.setAttribute('text-anchor', 'middle');
-                            fillText.setAttribute('dominant-baseline', 'middle');
-                            fillText.textContent = line;
-                            textGroup.appendChild(fillText);
-                        });
-                        
-                        svg.appendChild(textGroup);
-                    });
-                    
-                    // 将 SVG 转换为字符串
-                    const serializer = new XMLSerializer();
-                    let svgString = serializer.serializeToString(svg);
-                    
-                    // 确保有 XML 声明
-                    if (!svgString.startsWith('<?xml')) {
-                        svgString = '<?xml version="1.0" encoding="UTF-8"?>\n' + svgString;
-                    }
-                    
-                    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `attack-chain-${currentAttackChainConversationId || 'export'}-${Date.now()}.svg`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    setTimeout(() => URL.revokeObjectURL(url), 100);
-                } catch (err) {
-                    console.error('SVG导出错误:', err);
-                    alert('导出SVG失败: ' + (err.message || '未知错误'));
-                }
             } else {
                 alert('不支持的导出格式: ' + format);
             }
         } catch (error) {
             console.error('导出失败:', error);
-            alert('导出失败: ' + (error.message || '未知错误'));
+            alert('导出失败: ' + (error && error.message || '未知错误'));
         }
-    }, 100); // 小延迟确保图形已渲染
+    }, 80);
 }
 
 // ============================================
@@ -6029,6 +6798,9 @@ function formatConversationAsMarkdown(conversation, options = {}) {
     }
 
     messages.forEach((msg, index) => {
+        if (msg && msg.role === 'user' && isInterruptContinueInjectChatMessage(msg.content)) {
+            return;
+        }
         const role = getConversationRoleLabel(msg && msg.role);
         const timestamp = formatConversationDateForMarkdown(msg && msg.createdAt);
         const content = msg && typeof msg.content === 'string' ? msg.content : '';
@@ -6606,6 +7378,14 @@ document.addEventListener('click', function(event) {
     if (agentWrap && agentPanel && agentPanel.style.display === 'flex') {
         if (!agentWrap.contains(event.target)) {
             closeAgentModePanel();
+        }
+    }
+
+    const reasoningWrap = document.getElementById('chat-reasoning-wrapper');
+    if (reasoningWrap && reasoningWrap.style.display !== 'none' &&
+        !reasoningWrap.classList.contains('conversation-reasoning-collapsed')) {
+        if (!reasoningWrap.contains(event.target)) {
+            closeChatReasoningPanel();
         }
     }
 });

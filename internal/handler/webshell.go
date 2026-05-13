@@ -3,19 +3,301 @@ package handler
 import (
 	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cyberstrike-ai/internal/database"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 )
+
+// webshellSupportedEncodings 允许的 WebShell 响应编码取值（小写，含空串代表 auto）
+// 仅暴露目前最常见的几种，其他需求可后续扩展（如 Big5、Shift_JIS 等）。
+var webshellSupportedEncodings = map[string]struct{}{
+	"":        {}, // 未配置，按 auto 处理
+	"auto":    {},
+	"utf-8":   {},
+	"utf8":    {},
+	"gbk":     {},
+	"gb18030": {},
+}
+
+// normalizeWebshellEncoding 归一化编码标识：统一为小写，未知值回退为 auto，供持久化使用
+func normalizeWebshellEncoding(enc string) string {
+	enc = strings.ToLower(strings.TrimSpace(enc))
+	if _, ok := webshellSupportedEncodings[enc]; !ok {
+		return "auto"
+	}
+	if enc == "" {
+		return "auto"
+	}
+	if enc == "utf8" {
+		return "utf-8"
+	}
+	return enc
+}
+
+// decodeWebshellOutput 把 WebShell 返回的字节按指定编码转换为合法 UTF-8 字符串。
+// 约定：
+//   - "" / "auto"：若已是合法 UTF-8 原样返回，否则依次尝试 GB18030（GBK 超集）解码。
+//   - "utf-8" / "utf8"：原样返回，非法字节交由 JSON 层按 U+FFFD 处理（保持原有行为）。
+//   - "gbk" / "gb18030"：强制按对应编码解码；失败则回退原始字节。
+//
+// 该函数对空输入直接返回空串，避免不必要的转换。
+func decodeWebshellOutput(raw []byte, encoding string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	enc := normalizeWebshellEncoding(encoding)
+	switch enc {
+	case "utf-8":
+		return string(raw)
+	case "gbk":
+		if out, _, err := transform.Bytes(simplifiedchinese.GBK.NewDecoder(), raw); err == nil {
+			return string(out)
+		}
+		return string(raw)
+	case "gb18030":
+		if out, _, err := transform.Bytes(simplifiedchinese.GB18030.NewDecoder(), raw); err == nil {
+			return string(out)
+		}
+		return string(raw)
+	default: // auto
+		if utf8.Valid(raw) {
+			return string(raw)
+		}
+		// GB18030 是 GBK 的超集，覆盖范围最广，auto 模式统一用它兜底
+		if out, _, err := transform.Bytes(simplifiedchinese.GB18030.NewDecoder(), raw); err == nil {
+			return string(out)
+		}
+		return string(raw)
+	}
+}
+
+// webshellSupportedOS 允许的 WebShell 目标操作系统（小写，空串代表 auto）
+var webshellSupportedOS = map[string]struct{}{
+	"":        {},
+	"auto":    {},
+	"linux":   {},
+	"windows": {},
+}
+
+// normalizeWebshellOS 归一化 OS 标识，未知值回退为 auto，供持久化使用
+func normalizeWebshellOS(osTag string) string {
+	osTag = strings.ToLower(strings.TrimSpace(osTag))
+	if _, ok := webshellSupportedOS[osTag]; !ok {
+		return "auto"
+	}
+	if osTag == "" {
+		return "auto"
+	}
+	return osTag
+}
+
+// resolveWebshellOS 根据连接的 os 与 shellType 推断最终目标 OS（仅返回 "linux" 或 "windows"）。
+// 规则：
+//   - 显式 linux / windows：按用户选择。
+//   - auto 或未知：asp/aspx → windows，其他 → linux。保持历史行为，平滑向后兼容。
+func resolveWebshellOS(osTag, shellType string) string {
+	osTag = strings.ToLower(strings.TrimSpace(osTag))
+	switch osTag {
+	case "linux":
+		return "linux"
+	case "windows":
+		return "windows"
+	}
+	t := strings.ToLower(strings.TrimSpace(shellType))
+	if t == "asp" || t == "aspx" {
+		return "windows"
+	}
+	return "linux"
+}
+
+// quoteCmdPath 把路径按 Windows cmd.exe 规则转义。
+// 使用双引号包裹，内部双引号转义为 ""（cmd 接受的写法）。
+func quoteCmdPath(p string) string {
+	if p == "" {
+		return "\".\""
+	}
+	return "\"" + strings.ReplaceAll(p, "\"", "\"\"") + "\""
+}
+
+// quotePsSingle 把字符串按 PowerShell 单引号字符串规则转义（内部 ' → ''）。
+// 供 PowerShell 脚本参数使用，全脚本只用单引号，外层 cmd 再用双引号包裹即可安全传递。
+func quotePsSingle(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// quoteShellSinglePosix 把路径按 POSIX sh 单引号规则转义（内部 ' → '\''）
+func quoteShellSinglePosix(p string) string {
+	if p == "" {
+		return "."
+	}
+	return "'" + strings.ReplaceAll(p, "'", "'\\''") + "'"
+}
+
+// quoteWebshellPath 按目标 OS 选择转义方案：Linux 用 POSIX 单引号，Windows 用 cmd 双引号
+func quoteWebshellPath(path, osTag string) string {
+	if resolveWebshellOS(osTag, "") == "windows" {
+		return quoteCmdPath(path)
+	}
+	return quoteShellSinglePosix(path)
+}
+
+// buildWindowsPowerShellWrite 构造 Windows 端把 base64 内容一次性写入目标路径的 cmd 命令。
+// 外层走 cmd.exe 的 powershell 调用，PowerShell 脚本里只用单引号字符串，避免嵌套引号陷阱。
+func buildWindowsPowerShellWrite(path, b64 string) string {
+	script := "$b=[Convert]::FromBase64String(" + quotePsSingle(b64) + ");" +
+		"[IO.File]::WriteAllBytes(" + quotePsSingle(path) + ",$b)"
+	return "powershell -NoProfile -NonInteractive -Command \"" + script + "\""
+}
+
+// buildWindowsPowerShellAppend 构造 Windows 端把 base64 内容追加写入目标路径的 cmd 命令（用于分块上传）
+func buildWindowsPowerShellAppend(path, b64 string) string {
+	script := "$b=[Convert]::FromBase64String(" + quotePsSingle(b64) + ");" +
+		"$f=[IO.File]::Open(" + quotePsSingle(path) + ",[IO.FileMode]::Append,[IO.FileAccess]::Write,[IO.FileShare]::None);" +
+		"try{$f.Write($b,0,$b.Length)}finally{$f.Close()}"
+	return "powershell -NoProfile -NonInteractive -Command \"" + script + "\""
+}
+
+// fileCommandInput 封装 buildFileCommand 的输入，避免长参数列表
+type fileCommandInput struct {
+	Action     string
+	Path       string
+	TargetPath string
+	Content    string
+	ChunkIndex int
+	OS         string
+	ShellType  string
+}
+
+// buildFileCommand 根据目标 OS 与文件操作类型生成具体的远端命令字符串。
+// 同一份实现供 HTTP 入口（FileOp）与 MCP 入口（FileOpWithConnection）共用，避免双份维护。
+// 返回值第二位是用户可见的业务错误（如 "path is required"）。
+func (h *WebShellHandler) buildFileCommand(in fileCommandInput) (string, error) {
+	targetOS := resolveWebshellOS(in.OS, in.ShellType)
+	action := strings.ToLower(strings.TrimSpace(in.Action))
+	path := strings.TrimSpace(in.Path)
+
+	switch action {
+	case "list":
+		p := path
+		if p == "" {
+			p = "."
+		}
+		if targetOS == "windows" {
+			return "dir /a " + quoteCmdPath(p), nil
+		}
+		return "ls -la " + quoteShellSinglePosix(p), nil
+
+	case "read":
+		if path == "" {
+			return "", errFileOpPathRequired
+		}
+		if targetOS == "windows" {
+			return "type " + quoteCmdPath(path), nil
+		}
+		return "cat " + quoteShellSinglePosix(path), nil
+
+	case "delete":
+		if path == "" {
+			return "", errFileOpPathRequired
+		}
+		if targetOS == "windows" {
+			return "del /q /f " + quoteCmdPath(path), nil
+		}
+		return "rm -f " + quoteShellSinglePosix(path), nil
+
+	case "mkdir":
+		if path == "" {
+			return "", errFileOpPathRequired
+		}
+		if targetOS == "windows" {
+			// cmd 的 md 默认会自动创建中间目录（等价于 Linux 的 mkdir -p）
+			return "md " + quoteCmdPath(path), nil
+		}
+		return "mkdir -p " + quoteShellSinglePosix(path), nil
+
+	case "rename":
+		oldPath := path
+		newPath := strings.TrimSpace(in.TargetPath)
+		if oldPath == "" || newPath == "" {
+			return "", errFileOpRenameNeedsBothPaths
+		}
+		if targetOS == "windows" {
+			return "move /y " + quoteCmdPath(oldPath) + " " + quoteCmdPath(newPath), nil
+		}
+		return "mv -f " + quoteShellSinglePosix(oldPath) + " " + quoteShellSinglePosix(newPath), nil
+
+	case "write":
+		if path == "" {
+			return "", errFileOpPathRequired
+		}
+		// 统一策略：先把内容 base64 编码，再用目标平台对应方式解码写回，
+		// 这样既能写入任意二进制/含引号的文本，又避免各家 shell 的转义地狱。
+		b64 := base64.StdEncoding.EncodeToString([]byte(in.Content))
+		if targetOS == "windows" {
+			return buildWindowsPowerShellWrite(path, b64), nil
+		}
+		return "echo '" + b64 + "' | base64 -d > " + quoteShellSinglePosix(path), nil
+
+	case "upload":
+		if path == "" {
+			return "", errFileOpPathRequired
+		}
+		if len(in.Content) > 512*1024 {
+			return "", errFileOpUploadTooLarge
+		}
+		if targetOS == "windows" {
+			return buildWindowsPowerShellWrite(path, in.Content), nil
+		}
+		return "echo '" + in.Content + "' | base64 -d > " + quoteShellSinglePosix(path), nil
+
+	case "upload_chunk":
+		if path == "" {
+			return "", errFileOpPathRequired
+		}
+		if targetOS == "windows" {
+			if in.ChunkIndex == 0 {
+				return buildWindowsPowerShellWrite(path, in.Content), nil
+			}
+			return buildWindowsPowerShellAppend(path, in.Content), nil
+		}
+		redir := ">>"
+		if in.ChunkIndex == 0 {
+			redir = ">"
+		}
+		return "echo '" + in.Content + "' | base64 -d " + redir + " " + quoteShellSinglePosix(path), nil
+	}
+
+	return "", errFileOpUnsupportedAction(action)
+}
+
+// 业务错误常量，便于上层统一返回用户可见提示
+var (
+	errFileOpPathRequired         = simpleError("path is required")
+	errFileOpRenameNeedsBothPaths = simpleError("path and target_path are required for rename")
+	errFileOpUploadTooLarge       = simpleError("upload content too large (max 512KB base64)")
+)
+
+func errFileOpUnsupportedAction(action string) error {
+	return simpleError("unsupported action: " + action)
+}
+
+// simpleError 是不带堆栈的轻量错误类型，供 buildFileCommand 报可预期的参数校验错误
+type simpleError string
+
+func (e simpleError) Error() string { return string(e) }
 
 // WebShellHandler 代理执行 WebShell 命令（类似冰蝎/蚁剑），避免前端跨域并统一构建请求
 type WebShellHandler struct {
@@ -44,6 +326,8 @@ type CreateConnectionRequest struct {
 	Method   string `json:"method"`
 	CmdParam string `json:"cmd_param"`
 	Remark   string `json:"remark"`
+	Encoding string `json:"encoding"`
+	OS       string `json:"os"`
 }
 
 // UpdateConnectionRequest 更新连接请求
@@ -54,6 +338,8 @@ type UpdateConnectionRequest struct {
 	Method   string `json:"method"`
 	CmdParam string `json:"cmd_param"`
 	Remark   string `json:"remark"`
+	Encoding string `json:"encoding"`
+	OS       string `json:"os"`
 }
 
 // ListConnections 列出所有 WebShell 连接（GET /api/webshell/connections）
@@ -109,6 +395,8 @@ func (h *WebShellHandler) CreateConnection(c *gin.Context) {
 		Method:    method,
 		CmdParam:  strings.TrimSpace(req.CmdParam),
 		Remark:    strings.TrimSpace(req.Remark),
+		Encoding:  normalizeWebshellEncoding(req.Encoding),
+		OS:        normalizeWebshellOS(req.OS),
 		CreatedAt: time.Now(),
 	}
 	if err := h.db.CreateWebshellConnection(conn); err != nil {
@@ -159,6 +447,8 @@ func (h *WebShellHandler) UpdateConnection(c *gin.Context) {
 		Method:   method,
 		CmdParam: strings.TrimSpace(req.CmdParam),
 		Remark:   strings.TrimSpace(req.Remark),
+		Encoding: normalizeWebshellEncoding(req.Encoding),
+		OS:       normalizeWebshellOS(req.OS),
 	}
 	if err := h.db.UpdateWebshellConnection(conn); err != nil {
 		if err == sql.ErrNoRows {
@@ -331,6 +621,8 @@ type ExecRequest struct {
 	Type     string `json:"type"`      // php, asp, aspx, jsp, custom
 	Method   string `json:"method"`    // GET 或 POST，空则默认 POST
 	CmdParam string `json:"cmd_param"` // 命令参数名，如 cmd/xxx，空则默认 cmd
+	Encoding string `json:"encoding"`  // 响应编码：auto / utf-8 / gbk / gb18030，空则 auto
+	OS       string `json:"os"`        // 目标操作系统：auto / linux / windows，当前 exec 不用它，保留字段便于未来扩展
 	Command  string `json:"command" binding:"required"`
 }
 
@@ -344,23 +636,27 @@ type ExecResponse struct {
 
 // FileOpRequest 文件操作请求
 type FileOpRequest struct {
-	URL        string `json:"url" binding:"required"`
-	Password   string `json:"password"`
-	Type       string `json:"type"`
-	Method     string `json:"method"`                    // GET 或 POST，空则默认 POST
-	CmdParam   string `json:"cmd_param"`                 // 命令参数名，如 cmd/xxx，空则默认 cmd
-	Action     string `json:"action" binding:"required"` // list, read, delete, write, mkdir, rename, upload, upload_chunk
-	Path       string `json:"path"`
-	TargetPath string `json:"target_path"` // rename 时目标路径
-	Content    string `json:"content"`     // write/upload 时使用
-	ChunkIndex int    `json:"chunk_index"` // upload_chunk 时，0 表示首块
+	URL          string `json:"url" binding:"required"`
+	Password     string `json:"password"`
+	Type         string `json:"type"`
+	Method       string `json:"method"`                    // GET 或 POST，空则默认 POST
+	CmdParam     string `json:"cmd_param"`                 // 命令参数名，如 cmd/xxx，空则默认 cmd
+	Encoding     string `json:"encoding"`                  // 响应编码：auto / utf-8 / gbk / gb18030，空则 auto
+	OS           string `json:"os"`                        // 目标操作系统：auto / linux / windows，空则按 shellType 推断
+	ConnectionID string `json:"connection_id,omitempty"`   // 可选：连接 ID；服务端探活出 OS 后会回写到此连接
+	Action       string `json:"action" binding:"required"` // list, read, delete, write, mkdir, rename, upload, upload_chunk
+	Path         string `json:"path"`
+	TargetPath   string `json:"target_path"` // rename 时目标路径
+	Content      string `json:"content"`     // write/upload 时使用
+	ChunkIndex   int    `json:"chunk_index"` // upload_chunk 时，0 表示首块
 }
 
 // FileOpResponse 文件操作响应
 type FileOpResponse struct {
-	OK     bool   `json:"ok"`
-	Output string `json:"output"`
-	Error  string `json:"error,omitempty"`
+	OK         bool   `json:"ok"`
+	Output     string `json:"output"`
+	Error      string `json:"error,omitempty"`
+	DetectedOS string `json:"detected_os,omitempty"` // 仅在 auto 模式且探活成功时返回，前端应更新本地缓存
 }
 
 func (h *WebShellHandler) Exec(c *gin.Context) {
@@ -415,7 +711,7 @@ func (h *WebShellHandler) Exec(c *gin.Context) {
 	if readErr != nil {
 		h.logger.Warn("webshell exec read body", zap.Error(readErr))
 	}
-	output := string(out)
+	output := decodeWebshellOutput(out, req.Encoding)
 	httpCode := resp.StatusCode
 
 	c.JSON(http.StatusOK, ExecResponse{
@@ -474,83 +770,32 @@ func (h *WebShellHandler) FileOp(c *gin.Context) {
 		return
 	}
 
-	// 通过执行系统命令实现文件操作（与通用一句话兼容）
-	var command string
-	shellType := strings.ToLower(strings.TrimSpace(req.Type))
-	switch req.Action {
-	case "list":
-		path := strings.TrimSpace(req.Path)
-		if path == "" {
-			path = "."
+	// 若 OS 未显式配置，先发一次探活命令，识别出真实 OS 再构造文件操作命令。
+	// 这解决了 "Windows + PHP + OS=auto" 场景下旧 fallback 错发 `ls -la` 导致目录列不出来的问题。
+	osTag := req.OS
+	detectedOS := ""
+	if normalizeWebshellOS(osTag) == "auto" {
+		if probed := probeWebshellOSViaExec(h.newHTTPExecFn(req.URL, req.Password, req.Type, req.Method, req.CmdParam, req.Encoding)); probed != "" {
+			osTag = probed
+			detectedOS = probed
+			// 若前端带了 connection_id，顺带把探活结果持久化到该连接，后续刷新零成本
+			if cid := strings.TrimSpace(req.ConnectionID); cid != "" {
+				h.persistDetectedOS(cid, probed)
+			}
 		}
-		if shellType == "asp" || shellType == "aspx" {
-			command = "dir " + h.escapePath(path)
-		} else {
-			command = "ls -la " + h.escapePath(path)
-		}
-	case "read":
-		if shellType == "asp" || shellType == "aspx" {
-			command = "type " + h.escapePath(strings.TrimSpace(req.Path))
-		} else {
-			command = "cat " + h.escapePath(strings.TrimSpace(req.Path))
-		}
-	case "delete":
-		if shellType == "asp" || shellType == "aspx" {
-			command = "del " + h.escapePath(strings.TrimSpace(req.Path))
-		} else {
-			command = "rm -f " + h.escapePath(strings.TrimSpace(req.Path))
-		}
-	case "write":
-		path := h.escapePath(strings.TrimSpace(req.Path))
-		command = "echo " + h.escapeForEcho(req.Content) + " > " + path
-	case "mkdir":
-		path := strings.TrimSpace(req.Path)
-		if path == "" {
-			c.JSON(http.StatusBadRequest, FileOpResponse{OK: false, Error: "path is required for mkdir"})
-			return
-		}
-		if shellType == "asp" || shellType == "aspx" {
-			command = "md " + h.escapePath(path)
-		} else {
-			command = "mkdir -p " + h.escapePath(path)
-		}
-	case "rename":
-		oldPath := strings.TrimSpace(req.Path)
-		newPath := strings.TrimSpace(req.TargetPath)
-		if oldPath == "" || newPath == "" {
-			c.JSON(http.StatusBadRequest, FileOpResponse{OK: false, Error: "path and target_path are required for rename"})
-			return
-		}
-		if shellType == "asp" || shellType == "aspx" {
-			command = "move /y " + h.escapePath(oldPath) + " " + h.escapePath(newPath)
-		} else {
-			command = "mv " + h.escapePath(oldPath) + " " + h.escapePath(newPath)
-		}
-	case "upload":
-		path := strings.TrimSpace(req.Path)
-		if path == "" {
-			c.JSON(http.StatusBadRequest, FileOpResponse{OK: false, Error: "path is required for upload"})
-			return
-		}
-		if len(req.Content) > 512*1024 {
-			c.JSON(http.StatusBadRequest, FileOpResponse{OK: false, Error: "upload content too large (max 512KB base64)"})
-			return
-		}
-		// base64 仅含 A-Za-z0-9+/=，用单引号包裹安全
-		command = "echo " + "'" + req.Content + "'" + " | base64 -d > " + h.escapePath(path)
-	case "upload_chunk":
-		path := strings.TrimSpace(req.Path)
-		if path == "" {
-			c.JSON(http.StatusBadRequest, FileOpResponse{OK: false, Error: "path is required for upload_chunk"})
-			return
-		}
-		redir := ">>"
-		if req.ChunkIndex == 0 {
-			redir = ">"
-		}
-		command = "echo " + "'" + req.Content + "'" + " | base64 -d " + redir + " " + h.escapePath(path)
-	default:
-		c.JSON(http.StatusBadRequest, FileOpResponse{OK: false, Error: "unsupported action: " + req.Action})
+	}
+
+	command, cmdErr := h.buildFileCommand(fileCommandInput{
+		Action:     req.Action,
+		Path:       req.Path,
+		TargetPath: req.TargetPath,
+		Content:    req.Content,
+		ChunkIndex: req.ChunkIndex,
+		OS:         osTag,
+		ShellType:  req.Type,
+	})
+	if cmdErr != nil {
+		c.JSON(http.StatusBadRequest, FileOpResponse{OK: false, Error: cmdErr.Error()})
 		return
 	}
 
@@ -585,25 +830,13 @@ func (h *WebShellHandler) FileOp(c *gin.Context) {
 	if readErr != nil {
 		h.logger.Warn("webshell fileop read body", zap.Error(readErr))
 	}
-	output := string(out)
+	output := decodeWebshellOutput(out, req.Encoding)
 
 	c.JSON(http.StatusOK, FileOpResponse{
-		OK:     resp.StatusCode == http.StatusOK,
-		Output: output,
+		OK:         resp.StatusCode == http.StatusOK,
+		Output:     output,
+		DetectedOS: detectedOS,
 	})
-}
-
-func (h *WebShellHandler) escapePath(p string) string {
-	if p == "" {
-		return "."
-	}
-	// 简单转义空格与敏感字符，避免命令注入
-	return "'" + strings.ReplaceAll(p, "'", "'\\''") + "'"
-}
-
-func (h *WebShellHandler) escapeForEcho(s string) string {
-	// 仅用于 write：base64 写入更安全，这里简单用单引号包裹
-	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
 // ExecWithConnection 在指定 WebShell 连接上执行命令（供 MCP/Agent 等非 HTTP 调用）
@@ -643,7 +876,7 @@ func (h *WebShellHandler) ExecWithConnection(conn *database.WebShellConnection, 
 	if readErr != nil {
 		h.logger.Warn("webshell ExecWithConnection read body", zap.Error(readErr))
 	}
-	return string(out), resp.StatusCode == http.StatusOK, ""
+	return decodeWebshellOutput(out, conn.Encoding), resp.StatusCode == http.StatusOK, ""
 }
 
 // FileOpWithConnection 在指定 WebShell 连接上执行文件操作（供 MCP/Agent 调用），支持 list / read / write
@@ -652,39 +885,37 @@ func (h *WebShellHandler) FileOpWithConnection(conn *database.WebShellConnection
 		return "", false, "connection is nil"
 	}
 	action = strings.ToLower(strings.TrimSpace(action))
-	shellType := strings.ToLower(strings.TrimSpace(conn.Type))
-	if shellType == "" {
-		shellType = "php"
-	}
-	var command string
+	// MCP 入口仅开放 list / read / write 三种动作，与工具文档的承诺保持一致
 	switch action {
-	case "list":
-		if path == "" {
-			path = "."
-		}
-		if shellType == "asp" || shellType == "aspx" {
-			command = "dir " + h.escapePath(strings.TrimSpace(path))
-		} else {
-			command = "ls -la " + h.escapePath(strings.TrimSpace(path))
-		}
-	case "read":
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return "", false, "path is required for read"
-		}
-		if shellType == "asp" || shellType == "aspx" {
-			command = "type " + h.escapePath(path)
-		} else {
-			command = "cat " + h.escapePath(path)
-		}
-	case "write":
-		path = strings.TrimSpace(path)
-		if path == "" {
-			return "", false, "path is required for write"
-		}
-		command = "echo " + h.escapeForEcho(content) + " > " + h.escapePath(path)
+	case "list", "read", "write":
+		// 支持的动作
 	default:
 		return "", false, "unsupported action: " + action + " (supported: list, read, write)"
+	}
+
+	// 若连接的 OS 为 auto，先探活并持久化，避免 AI/MCP 每次都对 Windows 发 `ls -la`
+	osTag := conn.OS
+	if normalizeWebshellOS(osTag) == "auto" {
+		if probed := probeWebshellOSViaExec(func(cmd string) (string, bool) {
+			out, exOk, _ := h.ExecWithConnection(conn, cmd)
+			return out, exOk
+		}); probed != "" {
+			osTag = probed
+			conn.OS = probed // 本次请求内使用探活结果
+			h.persistDetectedOS(conn.ID, probed)
+		}
+	}
+
+	command, cmdErr := h.buildFileCommand(fileCommandInput{
+		Action:     action,
+		Path:       path,
+		TargetPath: targetPath,
+		Content:    content,
+		OS:         osTag,
+		ShellType:  conn.Type,
+	})
+	if cmdErr != nil {
+		return "", false, cmdErr.Error()
 	}
 	useGET := strings.ToUpper(strings.TrimSpace(conn.Method)) == "GET"
 	cmdParam := strings.TrimSpace(conn.CmdParam)
@@ -714,5 +945,5 @@ func (h *WebShellHandler) FileOpWithConnection(conn *database.WebShellConnection
 	if readErr != nil {
 		h.logger.Warn("webshell FileOpWithConnection read body", zap.Error(readErr))
 	}
-	return string(out), resp.StatusCode == http.StatusOK, ""
+	return decodeWebshellOutput(out, conn.Encoding), resp.StatusCode == http.StatusOK, ""
 }

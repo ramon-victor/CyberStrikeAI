@@ -306,12 +306,13 @@ async function bootstrapApp() {
 
 // 通用工具函数
 function getStatusText(status) {
+    const s = (status && String(status).toLowerCase()) || '';
     if (typeof window.t !== 'function') {
-        const fallback = { pending: '等待中', running: '执行中', completed: '已完成', failed: '失败' };
-        return fallback[status] || status;
+        const fallback = { pending: '等待中', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已终止' };
+        return fallback[s] || status;
     }
-    const keyMap = { pending: 'mcpDetailModal.statusPending', running: 'mcpDetailModal.statusRunning', completed: 'mcpDetailModal.statusCompleted', failed: 'mcpDetailModal.statusFailed' };
-    const key = keyMap[status];
+    const keyMap = { pending: 'mcpDetailModal.statusPending', running: 'mcpDetailModal.statusRunning', completed: 'mcpDetailModal.statusCompleted', failed: 'mcpDetailModal.statusFailed', cancelled: 'mcpDetailModal.statusCancelled' };
+    const key = keyMap[s];
     return key ? window.t(key) : status;
 }
 
@@ -341,22 +342,27 @@ function formatMarkdown(text) {
         ALLOWED_ATTR: ['href', 'title', 'alt', 'src', 'class'],
         ALLOW_DATA_ATTR: false,
     };
-    
+
+    const raw = text == null ? '' : String(text);
+    const src = typeof window.normalizeAssistantMarkdownSource === 'function'
+        ? window.normalizeAssistantMarkdownSource(raw)
+        : raw;
+
     if (typeof DOMPurify !== 'undefined') {
-        if (typeof marked !== 'undefined' && !/<[a-z][\s\S]*>/i.test(text)) {
+        if (typeof marked !== 'undefined' && !/<[a-z][\s\S]*>/i.test(src)) {
             try {
                 marked.setOptions({
                     breaks: true,
                     gfm: true,
                 });
-                let parsedContent = marked.parse(text);
+                const parsedContent = marked.parse(src, { async: false });
                 return DOMPurify.sanitize(parsedContent, sanitizeConfig);
             } catch (e) {
                 console.error('Markdown 解析失败:', e);
-                return DOMPurify.sanitize(text, sanitizeConfig);
+                return DOMPurify.sanitize(src, sanitizeConfig);
             }
         } else {
-            return DOMPurify.sanitize(text, sanitizeConfig);
+            return DOMPurify.sanitize(src, sanitizeConfig);
         }
     } else if (typeof marked !== 'undefined') {
         try {
@@ -364,13 +370,13 @@ function formatMarkdown(text) {
                 breaks: true,
                 gfm: true,
             });
-            return marked.parse(text);
+            return marked.parse(src, { async: false });
         } catch (e) {
             console.error('Markdown 解析失败:', e);
-            return escapeHtml(text).replace(/\n/g, '<br>');
+            return escapeHtml(src).replace(/\n/g, '<br>');
         }
     } else {
-        return escapeHtml(text).replace(/\n/g, '<br>');
+        return escapeHtml(src).replace(/\n/g, '<br>');
     }
 }
 

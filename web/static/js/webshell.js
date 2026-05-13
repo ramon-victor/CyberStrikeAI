@@ -39,6 +39,100 @@ let webshellStreamingTypingId = 0;
 let webshellProbeStatusById = {};
 let webshellBatchProbeRunning = false;
 
+/** 允许的响应编码，与后端 normalizeWebshellEncoding 对齐 */
+const WEBSHELL_ALLOWED_ENCODINGS = ['auto', 'utf-8', 'gbk', 'gb18030'];
+
+/** 归一化连接的 encoding 字段，返回 'auto' | 'utf-8' | 'gbk' | 'gb18030'（空/未知 → auto） */
+function normalizeWebshellEncoding(v) {
+    var s = (v == null ? '' : String(v)).trim().toLowerCase();
+    if (s === 'utf8') s = 'utf-8';
+    if (!s) return 'auto';
+    return WEBSHELL_ALLOWED_ENCODINGS.indexOf(s) >= 0 ? s : 'auto';
+}
+
+/** 从连接对象取编码，便于透传到 /api/webshell/exec 与 /api/webshell/file */
+function webshellConnEncoding(conn) {
+    return normalizeWebshellEncoding(conn && conn.encoding);
+}
+
+/** 允许的目标 OS，与后端 normalizeWebshellOS 对齐 */
+const WEBSHELL_ALLOWED_OS = ['auto', 'linux', 'windows'];
+
+/** 归一化连接的 os 字段，返回 'auto' | 'linux' | 'windows'（空/未知 → auto） */
+function normalizeWebshellOS(v) {
+    var s = (v == null ? '' : String(v)).trim().toLowerCase();
+    if (!s) return 'auto';
+    return WEBSHELL_ALLOWED_OS.indexOf(s) >= 0 ? s : 'auto';
+}
+
+/** 从连接对象取目标 OS，便于透传到 /api/webshell/exec 与 /api/webshell/file */
+function webshellConnOS(conn) {
+    return normalizeWebshellOS(conn && conn.os);
+}
+
+/**
+ * 组装 /api/webshell/file 的公共请求体。
+ * 所有文件管理调用点都应走此函数，避免遗漏字段（如 connection_id）。
+ * @param {Object} conn 连接对象
+ * @param {Object} extra 额外字段（action / path / content / target_path / chunk_index ...）
+ * @returns {string} JSON 字符串
+ */
+function webshellFileRequestBody(conn, extra) {
+    const base = {
+        url: conn.url,
+        password: conn.password || '',
+        type: conn.type || 'php',
+        method: (conn.method || 'post').toLowerCase(),
+        cmd_param: conn.cmdParam || '',
+        encoding: webshellConnEncoding(conn),
+        os: webshellConnOS(conn),
+        connection_id: conn.id || ''
+    };
+    const merged = Object.assign(base, extra || {});
+    return JSON.stringify(merged);
+}
+
+/**
+ * 当服务端探活命中目标系统（仅 auto 连接首次列目录时出现）时，
+ * 把结果同步到本地 webshellConnections 缓存 + 持久化到数据库。
+ * 后续刷新不再探活，AI 也能直接看到正确的 OS 上下文。
+ */
+function applyWebshellDetectedOS(conn, data) {
+    if (!conn || !data || !data.detected_os) return;
+    const detected = normalizeWebshellOS(data.detected_os);
+    if (detected !== 'linux' && detected !== 'windows') return;
+    if (webshellConnOS(conn) !== 'auto') return; // 用户已显式配置，尊重之
+    conn.os = detected;
+    if (Array.isArray(webshellConnections)) {
+        for (var i = 0; i < webshellConnections.length; i++) {
+            if (webshellConnections[i] && webshellConnections[i].id === conn.id) {
+                webshellConnections[i].os = detected;
+                break;
+            }
+        }
+    }
+    if (typeof renderWebshellList === 'function') {
+        try { renderWebshellList(); } catch (e) {}
+    }
+    // 服务端已经回写了 DB；但极少数情况下调用方未带 connection_id，这里再兜底 PUT 一次
+    if (conn.id && typeof apiFetch === 'function') {
+        apiFetch('/api/webshell/connections/' + encodeURIComponent(conn.id), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                url: conn.url,
+                password: conn.password || '',
+                type: conn.type || 'php',
+                method: conn.method || 'post',
+                cmd_param: conn.cmdParam || '',
+                remark: conn.remark || '',
+                encoding: conn.encoding || 'auto',
+                os: detected
+            })
+        }).catch(function () {});
+    }
+}
+
 /** 与主对话页一致：Eino 模式走 /api/multi-agent/stream，body 带 orchestration */
 function resolveWebshellAiStreamRequest() {
     if (typeof apiFetch === 'undefined') {
@@ -335,6 +429,17 @@ function wsT(key) {
         'webshell.addConnection': '添加连接',
         'webshell.cmdParam': '命令参数名',
         'webshell.cmdParamPlaceholder': '不填默认为 cmd，如填 xxx 则请求为 xxx=命令',
+        'webshell.encoding': '响应编码',
+        'webshell.encodingAuto': '自动检测',
+        'webshell.encodingUtf8': 'UTF-8',
+        'webshell.encodingGbk': 'GBK（中文 Windows）',
+        'webshell.encodingGb18030': 'GB18030',
+        'webshell.encodingHint': '中文 Windows 目标若出现乱码，请切换为 GBK 或 GB18030',
+        'webshell.os': '目标系统',
+        'webshell.osAuto': '自动（按 Shell 类型推断）',
+        'webshell.osLinux': 'Linux / Unix',
+        'webshell.osWindows': 'Windows',
+        'webshell.osHint': '决定文件管理/上传使用 Linux 还是 Windows 命令；PHP/JSP 跑在 Windows 上请选 Windows',
         'webshell.connections': '连接列表',
         'webshell.noConnections': '暂无连接，请点击「添加连接」',
         'webshell.selectOrAdd': '请从左侧选择连接，或添加新的 WebShell 连接',
@@ -661,9 +766,20 @@ function renderWebshellList() {
         } else if (probe && probe.state === 'fail') {
             probeHtml = '<span class="webshell-probe-badge fail" title="' + escapeHtml(probe.message || '') + '">' + (wsT('webshell.probeOffline') || '离线') + '</span>';
         }
+        var encNorm = normalizeWebshellEncoding(conn.encoding);
+        var encHtml = '';
+        if (encNorm && encNorm !== 'auto') {
+            encHtml = '<span class="webshell-probe-badge" title="' + escapeHtml(wsT('webshell.encoding') || '响应编码') + '">' + escapeHtml(encNorm.toUpperCase()) + '</span>';
+        }
+        var osNorm = normalizeWebshellOS(conn.os);
+        var osHtml = '';
+        if (osNorm && osNorm !== 'auto') {
+            var osLabel = osNorm === 'windows' ? 'WIN' : 'LINUX';
+            osHtml = '<span class="webshell-probe-badge" title="' + escapeHtml(wsT('webshell.os') || '目标系统') + '">' + osLabel + '</span>';
+        }
         return (
             '<div class="webshell-item' + active + '" data-id="' + safeId + '">' +
-            '<div class="webshell-item-remark-row"><div class="webshell-item-remark" title="' + urlTitle + '">' + remark + '</div>' + probeHtml + '</div>' +
+            '<div class="webshell-item-remark-row"><div class="webshell-item-remark" title="' + urlTitle + '">' + remark + '</div>' + probeHtml + osHtml + encHtml + '</div>' +
             '<div class="webshell-item-url" title="' + urlTitle + '">' + url + '</div>' +
             '<div class="webshell-item-actions">' +
             '<details class="webshell-conn-actions"><summary class="btn-ghost btn-sm webshell-conn-actions-btn" title="' + actionsLabel + '">' + actionsLabel + '</summary>' +
@@ -709,6 +825,8 @@ function probeWebshellConnection(conn) {
             type: conn.type || 'php',
             method: ((conn.method || 'post').toLowerCase() === 'get') ? 'get' : 'post',
             cmd_param: conn.cmdParam || '',
+            encoding: webshellConnEncoding(conn),
+            os: webshellConnOS(conn),
             command: 'echo 1'
         })
     })
@@ -1540,6 +1658,8 @@ function buildWebshellTimelineItemFromDetail(detail) {
         title = ap + ((typeof window.t === 'function') ? window.t('chat.iterationRound', { n: data.iteration || 1 }) : ('第 ' + (data.iteration || 1) + ' 轮迭代'));
     } else if (eventType === 'thinking') {
         title = ap + '🤔 ' + ((typeof window.t === 'function') ? window.t('chat.aiThinking') : 'AI 思考');
+    } else if (eventType === 'reasoning_chain') {
+        title = ap + '🔗 ' + ((typeof window.t === 'function') ? window.t('chat.reasoningChain') : '推理过程');
     } else if (eventType === 'tool_calls_detected') {
         title = ap + '🔧 ' + ((typeof window.t === 'function') ? window.t('chat.toolCallsDetected', { count: data.count || 0 }) : ('检测到 ' + (data.count || 0) + ' 个工具调用'));
     } else if (eventType === 'tool_call') {
@@ -2729,6 +2849,12 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
         if (info && info.orchestration) {
             body.orchestration = info.orchestration;
         }
+        if (typeof window.buildReasoningRequestPayload === 'function') {
+            var rp = window.buildReasoningRequestPayload();
+            if (rp) {
+                body.reasoning = rp;
+            }
+        }
         return apiFetch(info.path, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -2780,7 +2906,10 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                     } else if (_et === 'response_delta') {
                         var deltaText = (_em != null && _em !== '') ? String(_em) : '';
                         if (deltaText) {
-                            streamingTarget += deltaText;
+                            var normR = (typeof window.normalizeStreamingDeltaJs === 'function')
+                                ? window.normalizeStreamingDeltaJs(streamingTarget, deltaText)
+                                : [streamingTarget + deltaText, deltaText];
+                            streamingTarget = normR[0];
                             webshellStreamingTypingId += 1;
                             streamingTypingId = webshellStreamingTypingId;
                             runWebshellAiStreamingTyping(assistantDiv, streamingTarget, streamingTypingId, messagesContainer);
@@ -2832,23 +2961,33 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                         appendTimelineItem('iteration', '🔍 ' + iterTitle, iterMessage, _ed);
                         if (!streamingTarget) assistantDiv.textContent = '…';
 
-                    // ─── Thinking (non-stream + stream) ───
-                    } else if (_et === 'thinking_stream_start' && _ed.streamId) {
-                        var thinkSLabel = wsTOr('chat.aiThinking', 'AI 思考');
+                    // ─── Thinking / reasoning_chain（推理过程，reasoning_content） ───
+                    } else if ((_et === 'thinking_stream_start' || _et === 'reasoning_chain_stream_start') && _ed.streamId) {
+                        var isRcStart = _et === 'reasoning_chain_stream_start';
+                        if (wsThinkingStreams.has(_ed.streamId)) {
+                            var tsExist = wsThinkingStreams.get(_ed.streamId);
+                            tsExist.buf = '';
+                            if (tsExist.body) tsExist.body.textContent = '';
+                        } else {
+                        var thinkSLabel = wsTOr(isRcStart ? 'chat.reasoningChain' : 'chat.aiThinking', isRcStart ? '推理过程' : 'AI 思考');
+                        var thinkEmoji = isRcStart ? '🔗' : '🤔';
                         var thinkSItem = document.createElement('div');
-                        thinkSItem.className = 'webshell-ai-timeline-item webshell-ai-timeline-thinking';
-                        thinkSItem.innerHTML = '<span class="webshell-ai-timeline-title">' + escapeHtml(webshellAgentPx(_ed) + '🤔 ' + thinkSLabel) + '</span>';
+                        thinkSItem.className = 'webshell-ai-timeline-item webshell-ai-timeline-' + (isRcStart ? 'reasoning_chain' : 'thinking');
+                        thinkSItem.innerHTML = '<span class="webshell-ai-timeline-title">' + escapeHtml(webshellAgentPx(_ed) + thinkEmoji + ' ' + thinkSLabel) + '</span>';
                         var thinkSPre = document.createElement('div');
                         thinkSPre.className = 'webshell-ai-timeline-msg webshell-thinking-stream-body';
                         thinkSItem.appendChild(thinkSPre);
                         timelineContainer.appendChild(thinkSItem);
                         timelineContainer.classList.add('has-items');
                         wsThinkingStreams.set(_ed.streamId, { el: thinkSItem, body: thinkSPre, buf: '' });
+                        }
                         if (!streamingTarget) assistantDiv.textContent = '…';
-                    } else if (_et === 'thinking_stream_delta' && _ed.streamId) {
+                    } else if ((_et === 'thinking_stream_delta' || _et === 'reasoning_chain_stream_delta') && _ed.streamId) {
                         var tsD = wsThinkingStreams.get(_ed.streamId);
                         if (tsD) {
-                            tsD.buf += (_em || '');
+                            var normT = (typeof window.normalizeStreamingDeltaJs === 'function')
+                                ? window.normalizeStreamingDeltaJs(tsD.buf, _em || '') : [tsD.buf + (_em || ''), _em || ''];
+                            tsD.buf = normT[0];
                             if (typeof formatMarkdown === 'function') {
                                 tsD.body.innerHTML = formatMarkdown(tsD.buf);
                             } else {
@@ -2856,7 +2995,7 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                             }
                         }
                         if (!streamingTarget) assistantDiv.textContent = '…';
-                    } else if (_et === 'thinking_stream_end' && _ed.streamId) {
+                    } else if ((_et === 'thinking_stream_end' || _et === 'reasoning_chain_stream_end') && _ed.streamId) {
                         var tsE = wsThinkingStreams.get(_ed.streamId);
                         if (tsE) {
                             var fullThink = (_em != null && _em !== '') ? String(_em) : tsE.buf;
@@ -2867,13 +3006,15 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                             }
                             wsThinkingStreams.delete(_ed.streamId);
                         }
-                    } else if (_et === 'thinking' && _em) {
+                    } else if ((_et === 'thinking' || _et === 'reasoning_chain') && _em) {
                         // 如果有 streamId 且已存在流式条目，跳过避免重复
                         if (_ed.streamId && wsThinkingStreams.has(_ed.streamId)) {
-                            // 已由 thinking_stream_* 处理
+                            // 已由 *_stream_* 处理
                         } else {
-                            var thinkLabel = wsTOr('chat.aiThinking', 'AI 思考');
-                            appendTimelineItem('thinking', webshellAgentPx(_ed) + '🤔 ' + thinkLabel, _em, _ed);
+                            var isRc = _et === 'reasoning_chain';
+                            var thinkLabel = wsTOr(isRc ? 'chat.reasoningChain' : 'chat.aiThinking', isRc ? '推理过程' : 'AI 思考');
+                            var thinkEm = isRc ? '🔗' : '🤔';
+                            appendTimelineItem(isRc ? 'reasoning_chain' : 'thinking', webshellAgentPx(_ed) + thinkEm + ' ' + thinkLabel, _em, _ed);
                         }
                         if (!streamingTarget) assistantDiv.textContent = '…';
 
@@ -2958,6 +3099,12 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
 
                     // ─── Eino sub-agent reply streaming ───
                     } else if (_et === 'eino_agent_reply_stream_start' && _ed.streamId) {
+                        if (einoSubReplyStreams.has(_ed.streamId)) {
+                            var stExist = einoSubReplyStreams.get(_ed.streamId);
+                            stExist.buf = '';
+                            var preExist = stExist.el && stExist.el.querySelector('.webshell-eino-reply-stream-body');
+                            if (preExist) preExist.textContent = '';
+                        } else {
                         var repTS = wsTOr('chat.einoAgentReplyTitle', '子代理回复');
                         var runTS = wsTOr('timeline.running', '执行中...');
                         var itemS = document.createElement('div');
@@ -2966,11 +3113,14 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                         timelineContainer.appendChild(itemS);
                         timelineContainer.classList.add('has-items');
                         einoSubReplyStreams.set(_ed.streamId, { el: itemS, buf: '' });
+                        }
                         if (!streamingTarget) assistantDiv.textContent = '…';
                     } else if (_et === 'eino_agent_reply_stream_delta' && _ed.streamId) {
                         var stD = einoSubReplyStreams.get(_ed.streamId);
                         if (stD) {
-                            stD.buf += (_em || '');
+                            var normS = (typeof window.normalizeStreamingDeltaJs === 'function')
+                                ? window.normalizeStreamingDeltaJs(stD.buf, _em || '') : [stD.buf + (_em || ''), _em || ''];
+                            stD.buf = normS[0];
                             var preD = stD.el.querySelector('.webshell-eino-reply-stream-body');
                             if (!preD) {
                                 preD = document.createElement('pre');
@@ -3365,6 +3515,8 @@ function execWebshellCommand(conn, command) {
                 type: conn.type || 'php',
                 method: (conn.method || 'post').toLowerCase(),
                 cmd_param: conn.cmdParam || '',
+                encoding: webshellConnEncoding(conn),
+                os: webshellConnOS(conn),
                 command: command
             })
         }).then(function (r) { return r.json(); })
@@ -3391,17 +3543,10 @@ function webshellFileListDir(conn, path) {
     apiFetch('/api/webshell/file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            url: conn.url,
-            password: conn.password || '',
-            type: conn.type || 'php',
-            method: (conn.method || 'post').toLowerCase(),
-            cmd_param: conn.cmdParam || '',
-            action: 'list',
-            path: path
-        })
+        body: webshellFileRequestBody(conn, { action: 'list', path: path })
     }).then(function (r) { return r.json(); })
         .then(function (data) {
+            applyWebshellDetectedOS(conn, data);
             if (!data.ok && data.error) {
                 listEl.innerHTML = '<div class="webshell-file-error">' + escapeHtml(data.error) + '</div><pre class="webshell-file-raw">' + escapeHtml(data.output || '') + '</pre>';
                 return;
@@ -3497,16 +3642,9 @@ function fetchWebshellDirectoryItems(conn, path) {
     return apiFetch('/api/webshell/file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            url: conn.url,
-            password: conn.password || '',
-            type: conn.type || 'php',
-            method: (conn.method || 'post').toLowerCase(),
-            cmd_param: conn.cmdParam || '',
-            action: 'list',
-            path: path
-        })
+        body: webshellFileRequestBody(conn, { action: 'list', path: path })
     }).then(function (r) { return r.json(); }).then(function (data) {
+        applyWebshellDetectedOS(conn, data);
         if (!data || data.error || !data.ok) return [];
         return parseWebshellListItems(data.output || '');
     }).catch(function () {
@@ -3801,7 +3939,7 @@ function webshellFileMkdir(conn, pathInput) {
     var name = prompt(wsT('webshell.newDir') || '新建目录', 'newdir');
     if (name == null || !name.trim()) return;
     var path = base === '.' ? name.trim() : base + '/' + name.trim();
-    apiFetch('/api/webshell/file', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: conn.url, password: conn.password || '', type: conn.type || 'php', method: (conn.method || 'post').toLowerCase(), cmd_param: conn.cmdParam || '', action: 'mkdir', path: path }) })
+    apiFetch('/api/webshell/file', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: webshellFileRequestBody(conn, { action: 'mkdir', path: path }) })
         .then(function (r) { return r.json(); })
         .then(function () { webshellFileListDir(conn, base); })
         .catch(function () { webshellFileListDir(conn, base); });
@@ -3848,7 +3986,7 @@ function webshellFileUpload(conn, pathInput) {
                     webshellFileListDir(conn, base);
                     return;
                 }
-                apiFetch('/api/webshell/file', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: conn.url, password: conn.password || '', type: conn.type || 'php', method: (conn.method || 'post').toLowerCase(), cmd_param: conn.cmdParam || '', action: 'upload_chunk', path: path, content: base64Chunks[idx], chunk_index: idx }) })
+                apiFetch('/api/webshell/file', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: webshellFileRequestBody(conn, { action: 'upload_chunk', path: path, content: base64Chunks[idx], chunk_index: idx }) })
                     .then(function (r) { return r.json(); })
                     .then(function () { idx++; sendNext(); })
                     .catch(function () { idx++; sendNext(); });
@@ -3867,7 +4005,7 @@ function webshellFileRename(conn, oldPath, oldName, listEl) {
     var parts = oldPath.split('/');
     var dir = parts.length > 1 ? parts.slice(0, -1).join('/') + '/' : '';
     var newPath = dir + newName.trim();
-    apiFetch('/api/webshell/file', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: conn.url, password: conn.password || '', type: conn.type || 'php', method: (conn.method || 'post').toLowerCase(), cmd_param: conn.cmdParam || '', action: 'rename', path: oldPath, target_path: newPath }) })
+    apiFetch('/api/webshell/file', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: webshellFileRequestBody(conn, { action: 'rename', path: oldPath, target_path: newPath }) })
         .then(function (r) { return r.json(); })
         .then(function () { webshellFileListDir(conn, document.getElementById('webshell-file-path').value.trim() || '.'); })
         .catch(function () { webshellFileListDir(conn, document.getElementById('webshell-file-path').value.trim() || '.'); });
@@ -3906,7 +4044,7 @@ function webshellFileDownload(conn, path) {
     apiFetch('/api/webshell/file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: conn.url, password: conn.password || '', type: conn.type || 'php', method: (conn.method || 'post').toLowerCase(), cmd_param: conn.cmdParam || '', action: 'read', path: path })
+        body: webshellFileRequestBody(conn, { action: 'read', path: path })
     }).then(function (r) { return r.json(); })
         .then(function (data) {
             var content = (data && data.output) != null ? data.output : (data.error || '');
@@ -3927,7 +4065,7 @@ function webshellFileRead(conn, path, listEl, browsePath) {
     apiFetch('/api/webshell/file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: conn.url, password: conn.password || '', type: conn.type || 'php', method: (conn.method || 'post').toLowerCase(), cmd_param: conn.cmdParam || '', action: 'read', path: path })
+        body: webshellFileRequestBody(conn, { action: 'read', path: path })
     }).then(function (r) { return r.json(); })
         .then(function (data) {
             const out = (data && data.output) ? data.output : (data.error || '');
@@ -3956,7 +4094,7 @@ function webshellFileEdit(conn, path, listEl) {
     apiFetch('/api/webshell/file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: conn.url, password: conn.password || '', type: conn.type || 'php', method: (conn.method || 'post').toLowerCase(), cmd_param: conn.cmdParam || '', action: 'read', path: path })
+        body: webshellFileRequestBody(conn, { action: 'read', path: path })
     }).then(function (r) { return r.json(); })
         .then(function (data) {
             const content = (data && data.output) ? data.output : (data.error || '');
@@ -3992,7 +4130,7 @@ function webshellFileWrite(conn, path, content, onDone, listEl) {
     apiFetch('/api/webshell/file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: conn.url, password: conn.password || '', type: conn.type || 'php', method: (conn.method || 'post').toLowerCase(), cmd_param: conn.cmdParam || '', action: 'write', path: path, content: content })
+        body: webshellFileRequestBody(conn, { action: 'write', path: path, content: content })
     }).then(function (r) { return r.json(); })
         .then(function (data) {
             if (data && !data.ok && data.error && listEl) {
@@ -4011,7 +4149,7 @@ function webshellFileDelete(conn, path, onDone) {
     apiFetch('/api/webshell/file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: conn.url, password: conn.password || '', type: conn.type || 'php', method: (conn.method || 'post').toLowerCase(), cmd_param: conn.cmdParam || '', action: 'delete', path: path })
+        body: webshellFileRequestBody(conn, { action: 'delete', path: path })
     }).then(function (r) { return r.json(); })
         .then(function () { if (onDone) onDone(); })
         .catch(function () { if (onDone) onDone(); });
@@ -4063,6 +4201,10 @@ function showAddWebshellModal() {
     document.getElementById('webshell-type').value = 'php';
     document.getElementById('webshell-method').value = 'post';
     document.getElementById('webshell-cmd-param').value = '';
+    var osSelEl = document.getElementById('webshell-os');
+    if (osSelEl) osSelEl.value = 'auto';
+    var encSelEl = document.getElementById('webshell-encoding');
+    if (encSelEl) encSelEl.value = 'auto';
     document.getElementById('webshell-remark').value = '';
     var titleEl = document.getElementById('webshell-modal-title');
     if (titleEl) titleEl.textContent = wsT('webshell.addConnection');
@@ -4081,6 +4223,10 @@ function showEditWebshellModal(connId) {
     document.getElementById('webshell-type').value = conn.type || 'php';
     document.getElementById('webshell-method').value = (conn.method || 'post').toLowerCase();
     document.getElementById('webshell-cmd-param').value = conn.cmdParam || '';
+    var osEditEl = document.getElementById('webshell-os');
+    if (osEditEl) osEditEl.value = normalizeWebshellOS(conn.os);
+    var encEditEl = document.getElementById('webshell-encoding');
+    if (encEditEl) encEditEl.value = normalizeWebshellEncoding(conn.encoding);
     document.getElementById('webshell-remark').value = conn.remark || '';
     var titleEl = document.getElementById('webshell-modal-title');
     if (titleEl) titleEl.textContent = wsT('webshell.editConnectionTitle');
@@ -4308,6 +4454,8 @@ function testWebshellConnection() {
     var method = ((document.getElementById('webshell-method') || {}).value || 'post').toLowerCase();
     var cmdParam = (document.getElementById('webshell-cmd-param') || {}).value;
     if (cmdParam && typeof cmdParam.trim === 'function') cmdParam = cmdParam.trim(); else cmdParam = '';
+    var osTag = normalizeWebshellOS((document.getElementById('webshell-os') || {}).value);
+    var encoding = normalizeWebshellEncoding((document.getElementById('webshell-encoding') || {}).value);
     var btn = document.getElementById('webshell-test-btn');
     if (btn) { btn.disabled = true; btn.textContent = (typeof wsT === 'function' ? wsT('common.refresh') : '刷新') + '...'; }
     if (typeof apiFetch === 'undefined') {
@@ -4315,6 +4463,7 @@ function testWebshellConnection() {
         alert(wsT('webshell.testFailed') || '连通性测试失败');
         return;
     }
+    // 连通性使用 Windows/Linux 都识别的最小内建命令作为探测（echo 1 在 cmd 和 sh 下行为等价）
     apiFetch('/api/webshell/exec', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4324,6 +4473,8 @@ function testWebshellConnection() {
             type: type,
             method: method === 'get' ? 'get' : 'post',
             cmd_param: cmdParam || '',
+            encoding: encoding,
+            os: osTag,
             command: 'echo 1'
         })
     })
@@ -4369,12 +4520,14 @@ function saveWebshellConnection() {
     var method = ((document.getElementById('webshell-method') || {}).value || 'post').toLowerCase();
     var cmdParam = (document.getElementById('webshell-cmd-param') || {}).value;
     if (cmdParam && typeof cmdParam.trim === 'function') cmdParam = cmdParam.trim(); else cmdParam = '';
+    var osTag = normalizeWebshellOS((document.getElementById('webshell-os') || {}).value);
+    var encoding = normalizeWebshellEncoding((document.getElementById('webshell-encoding') || {}).value);
     var remark = (document.getElementById('webshell-remark') || {}).value;
     if (remark && typeof remark.trim === 'function') remark = remark.trim(); else remark = '';
 
     var editIdEl = document.getElementById('webshell-edit-id');
     var editId = editIdEl ? editIdEl.value.trim() : '';
-    var body = { url: url, password: password, type: type, method: method === 'get' ? 'get' : 'post', cmd_param: cmdParam, remark: remark || url };
+    var body = { url: url, password: password, type: type, method: method === 'get' ? 'get' : 'post', cmd_param: cmdParam, encoding: encoding, os: osTag, remark: remark || url };
     if (typeof apiFetch === 'undefined') return;
 
     var reqUrl = editId ? ('/api/webshell/connections/' + encodeURIComponent(editId)) : '/api/webshell/connections';

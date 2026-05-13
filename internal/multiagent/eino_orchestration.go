@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"cyberstrike-ai/internal/agent"
 	"cyberstrike-ai/internal/config"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
@@ -25,7 +26,12 @@ type PlanExecuteRootArgs struct {
 	LoopMaxIter          int
 	// AppCfg / Logger 非空时为 Executor 挂载与 Deep/Supervisor 一致的 Eino summarization 中间件。
 	AppCfg *config.Config
+	MwCfg  *config.MultiAgentEinoMiddlewareConfig
+	// ConversationID is used for transcript/isolation paths in middleware.
+	ConversationID string
 	Logger *zap.Logger
+	// ModelName is used for model input token estimation logs.
+	ModelName string
 	// ExecPreMiddlewares 是由 prependEinoMiddlewares 构建的前置中间件（patchtoolcalls, reduction, toolsearch, plantask），
 	// 与 Deep/Supervisor 主代理的 mainOrchestratorPre 一致。
 	ExecPreMiddlewares []adk.ChatModelAgentMiddleware
@@ -33,6 +39,10 @@ type PlanExecuteRootArgs struct {
 	SkillMiddleware adk.ChatModelAgentMiddleware
 	// FilesystemMiddleware 是 Eino filesystem 中间件，当 eino_skills.filesystem_tools 启用时提供本机文件读写与 Shell 能力（可选）。
 	FilesystemMiddleware adk.ChatModelAgentMiddleware
+	// PlannerReplannerRewriteHandlers applies BeforeModelRewriteState pipeline for planner/replanner input.
+	PlannerReplannerRewriteHandlers []adk.ChatModelAgentMiddleware
+	// ModelFacingTrace 可选：由 Executor Handlers 链末尾写入，供 last_react 与 summarization 后上下文对齐。
+	ModelFacingTrace *modelFacingTraceHolder
 }
 
 // NewPlanExecuteRoot 返回 plan → execute → replan 预置编排根节点（与 Deep / Supervisor 并列）。
@@ -50,7 +60,7 @@ func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.Resuma
 	plannerCfg := &planexecute.PlannerConfig{
 		ToolCallingChatModel: tcm,
 	}
-	if fn := planExecutePlannerGenInput(a.OrchInstruction); fn != nil {
+	if fn := planExecutePlannerGenInput(a.OrchInstruction, a.AppCfg, a.MwCfg, a.Logger, a.ModelName, a.ConversationID, a.PlannerReplannerRewriteHandlers); fn != nil {
 		plannerCfg.GenInputFn = fn
 	}
 	planner, err := planexecute.NewPlanner(ctx, plannerCfg)
@@ -59,7 +69,7 @@ func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.Resuma
 	}
 	replanner, err := planexecute.NewReplanner(ctx, &planexecute.ReplannerConfig{
 		ChatModel:  tcm,
-		GenInputFn: planExecuteReplannerGenInput(a.OrchInstruction),
+		GenInputFn: planExecuteReplannerGenInput(a.OrchInstruction, a.AppCfg, a.MwCfg, a.Logger, a.ModelName, a.ConversationID, a.PlannerReplannerRewriteHandlers),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("plan_execute replanner: %w", err)
@@ -81,17 +91,28 @@ func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.Resuma
 	}
 	// 4. summarization（最后，与 Deep/Supervisor 一致）
 	if a.AppCfg != nil {
-		sumMw, sumErr := newEinoSummarizationMiddleware(ctx, a.ExecModel, a.AppCfg, a.Logger)
+		sumMw, sumErr := newEinoSummarizationMiddleware(ctx, a.ExecModel, a.AppCfg, a.MwCfg, a.ConversationID, a.Logger)
 		if sumErr != nil {
 			return nil, fmt.Errorf("plan_execute executor summarization: %w", sumErr)
 		}
 		execHandlers = append(execHandlers, sumMw)
 	}
+	// 5. 孤儿 tool 消息兜底：必须挂在所有改写历史中间件（summarization/reduction/skill）之后、
+	//    telemetry 之前，保证送入 ChatModel 的消息序列 tool_call ↔ tool_result 配对完整。
+	execHandlers = append(execHandlers, newOrphanToolPrunerMiddleware(a.Logger, "plan_execute_executor"))
+	if teleMw := newEinoModelInputTelemetryMiddleware(a.Logger, a.ModelName, a.ConversationID, "plan_execute_executor"); teleMw != nil {
+		execHandlers = append(execHandlers, teleMw)
+	}
+	if a.ModelFacingTrace != nil {
+		if capMw := newModelFacingTraceMiddleware(a.ModelFacingTrace); capMw != nil {
+			execHandlers = append(execHandlers, capMw)
+		}
+	}
 	executor, err := newPlanExecuteExecutor(ctx, &planexecute.ExecutorConfig{
 		Model:         a.ExecModel,
 		ToolsConfig:   a.ToolsCfg,
 		MaxIterations: a.ExecMaxIter,
-		GenInputFn:    planExecuteExecutorGenInput(a.OrchInstruction),
+		GenInputFn:    planExecuteExecutorGenInput(a.OrchInstruction, a.AppCfg, a.MwCfg, a.Logger, a.ModelName, a.ConversationID),
 	}, execHandlers)
 	if err != nil {
 		return nil, fmt.Errorf("plan_execute executor: %w", err)
@@ -110,20 +131,42 @@ func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.Resuma
 
 // planExecutePlannerGenInput 将 orchestrator instruction 作为 SystemMessage 注入 planner 输入。
 // 返回 nil 时 Eino 使用内置默认 planner prompt。
-func planExecutePlannerGenInput(orchInstruction string) planexecute.GenPlannerModelInputFn {
+func planExecutePlannerGenInput(
+	orchInstruction string,
+	appCfg *config.Config,
+	mwCfg *config.MultiAgentEinoMiddlewareConfig,
+	logger *zap.Logger,
+	modelName string,
+	conversationID string,
+	rewriteHandlers []adk.ChatModelAgentMiddleware,
+) planexecute.GenPlannerModelInputFn {
 	oi := strings.TrimSpace(orchInstruction)
-	if oi == "" {
+	if oi == "" && appCfg == nil {
 		return nil
 	}
 	return func(ctx context.Context, userInput []adk.Message) ([]adk.Message, error) {
+		userInput = capPlanExecuteUserInputMessages(userInput, appCfg, mwCfg)
 		msgs := make([]adk.Message, 0, 1+len(userInput))
-		msgs = append(msgs, schema.SystemMessage(oi))
+		if oi != "" {
+			msgs = append(msgs, schema.SystemMessage(oi))
+		}
 		msgs = append(msgs, userInput...)
+		if rewritten, rerr := applyBeforeModelRewriteHandlers(ctx, msgs, rewriteHandlers); rerr == nil && len(rewritten) > 0 {
+			msgs = rewritten
+		}
+		logPlanExecuteModelInputEstimate(logger, modelName, conversationID, "plan_execute_planner", msgs)
 		return msgs, nil
 	}
 }
 
-func planExecuteExecutorGenInput(orchInstruction string) planexecute.GenModelInputFn {
+func planExecuteExecutorGenInput(
+	orchInstruction string,
+	appCfg *config.Config,
+	mwCfg *config.MultiAgentEinoMiddlewareConfig,
+	logger *zap.Logger,
+	modelName string,
+	conversationID string,
+) planexecute.GenModelInputFn {
 	oi := strings.TrimSpace(orchInstruction)
 	return func(ctx context.Context, in *planexecute.ExecutionContext) ([]adk.Message, error) {
 		planContent, err := in.Plan.MarshalJSON()
@@ -131,9 +174,9 @@ func planExecuteExecutorGenInput(orchInstruction string) planexecute.GenModelInp
 			return nil, err
 		}
 		userMsgs, err := planexecute.ExecutorPrompt.Format(ctx, map[string]any{
-			"input":          planExecuteFormatInput(in.UserInput),
+			"input":          planExecuteFormatInput(capPlanExecuteUserInputMessages(in.UserInput, appCfg, mwCfg)),
 			"plan":           string(planContent),
-			"executed_steps": planExecuteFormatExecutedSteps(in.ExecutedSteps),
+			"executed_steps": planExecuteFormatExecutedSteps(in.ExecutedSteps, appCfg, mwCfg),
 			"step":           in.Plan.FirstStep(),
 		})
 		if err != nil {
@@ -142,6 +185,7 @@ func planExecuteExecutorGenInput(orchInstruction string) planexecute.GenModelInp
 		if oi != "" {
 			userMsgs = append([]adk.Message{schema.SystemMessage(oi)}, userMsgs...)
 		}
+		logPlanExecuteModelInputEstimate(logger, modelName, conversationID, "plan_execute_executor_gen_input", userMsgs)
 		return userMsgs, nil
 	}
 }
@@ -155,18 +199,22 @@ func planExecuteFormatInput(input []adk.Message) string {
 	return sb.String()
 }
 
-func planExecuteFormatExecutedSteps(results []planexecute.ExecutedStep) string {
-	capped := capPlanExecuteExecutedSteps(results)
-	var sb strings.Builder
-	for _, result := range capped {
-		sb.WriteString(fmt.Sprintf("Step: %s\nResult: %s\n\n", result.Step, result.Result))
-	}
-	return sb.String()
+func planExecuteFormatExecutedSteps(results []planexecute.ExecutedStep, appCfg *config.Config, mwCfg *config.MultiAgentEinoMiddlewareConfig) string {
+	capped := capPlanExecuteExecutedStepsWithConfig(results, mwCfg)
+	return renderPlanExecuteStepsByBudget(capped, appCfg, mwCfg)
 }
 
 // planExecuteReplannerGenInput 与 Eino 默认 Replanner 输入一致，但 executed_steps 经 cap 后再写入 prompt，
 // 且在 orchInstruction 非空时 prepend SystemMessage 使 replanner 也能接收全局指令。
-func planExecuteReplannerGenInput(orchInstruction string) planexecute.GenModelInputFn {
+func planExecuteReplannerGenInput(
+	orchInstruction string,
+	appCfg *config.Config,
+	mwCfg *config.MultiAgentEinoMiddlewareConfig,
+	logger *zap.Logger,
+	modelName string,
+	conversationID string,
+	rewriteHandlers []adk.ChatModelAgentMiddleware,
+) planexecute.GenModelInputFn {
 	oi := strings.TrimSpace(orchInstruction)
 	return func(ctx context.Context, in *planexecute.ExecutionContext) ([]adk.Message, error) {
 		planContent, err := in.Plan.MarshalJSON()
@@ -175,8 +223,8 @@ func planExecuteReplannerGenInput(orchInstruction string) planexecute.GenModelIn
 		}
 		msgs, err := planexecute.ReplannerPrompt.Format(ctx, map[string]any{
 			"plan":           string(planContent),
-			"input":          planExecuteFormatInput(in.UserInput),
-			"executed_steps": planExecuteFormatExecutedSteps(in.ExecutedSteps),
+			"input":          planExecuteFormatInput(capPlanExecuteUserInputMessages(in.UserInput, appCfg, mwCfg)),
+			"executed_steps": planExecuteFormatExecutedSteps(in.ExecutedSteps, appCfg, mwCfg),
 			"plan_tool":      planexecute.PlanToolInfo.Name,
 			"respond_tool":   planexecute.RespondToolInfo.Name,
 		})
@@ -186,8 +234,118 @@ func planExecuteReplannerGenInput(orchInstruction string) planexecute.GenModelIn
 		if oi != "" {
 			msgs = append([]adk.Message{schema.SystemMessage(oi)}, msgs...)
 		}
+		if rewritten, rerr := applyBeforeModelRewriteHandlers(ctx, msgs, rewriteHandlers); rerr == nil && len(rewritten) > 0 {
+			msgs = rewritten
+		}
+		logPlanExecuteModelInputEstimate(logger, modelName, conversationID, "plan_execute_replanner", msgs)
 		return msgs, nil
 	}
+}
+
+func capPlanExecuteUserInputMessages(input []adk.Message, appCfg *config.Config, mwCfg *config.MultiAgentEinoMiddlewareConfig) []adk.Message {
+	if len(input) == 0 {
+		return input
+	}
+	maxTotal := 120000
+	modelName := "gpt-4o"
+	if appCfg != nil {
+		if appCfg.OpenAI.MaxTotalTokens > 0 {
+			maxTotal = appCfg.OpenAI.MaxTotalTokens
+		}
+		if m := strings.TrimSpace(appCfg.OpenAI.Model); m != "" {
+			modelName = m
+		}
+	}
+	// Reserve most tokens for planner/replanner prompt and tool schema.
+	ratio := 0.35
+	if mwCfg != nil {
+		ratio = mwCfg.PlanExecuteUserInputBudgetRatioEffective()
+	}
+	budget := int(float64(maxTotal) * ratio)
+	if budget < 4096 {
+		budget = 4096
+	}
+	tc := agent.NewTikTokenCounter()
+	out := make([]adk.Message, 0, len(input))
+	used := 0
+	for i := len(input) - 1; i >= 0; i-- {
+		msg := input[i]
+		if msg == nil {
+			continue
+		}
+		n, err := tc.Count(modelName, string(msg.Role)+"\n"+msg.Content)
+		if err != nil {
+			n = (len(msg.Content) + 3) / 4
+		}
+		if n <= 0 {
+			n = 1
+		}
+		if used+n > budget {
+			break
+		}
+		used += n
+		out = append(out, msg)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	if len(out) == 0 {
+		// Keep the latest user message at least.
+		return []adk.Message{input[len(input)-1]}
+	}
+	return out
+}
+
+func renderPlanExecuteStepsByBudget(steps []planexecute.ExecutedStep, appCfg *config.Config, mwCfg *config.MultiAgentEinoMiddlewareConfig) string {
+	if len(steps) == 0 {
+		return ""
+	}
+	maxTotal := 120000
+	modelName := "gpt-4o"
+	if appCfg != nil {
+		if appCfg.OpenAI.MaxTotalTokens > 0 {
+			maxTotal = appCfg.OpenAI.MaxTotalTokens
+		}
+		if m := strings.TrimSpace(appCfg.OpenAI.Model); m != "" {
+			modelName = m
+		}
+	}
+	ratio := 0.2
+	if mwCfg != nil {
+		ratio = mwCfg.PlanExecuteExecutedStepsBudgetRatioEffective()
+	}
+	budget := int(float64(maxTotal) * ratio)
+	if budget < 3072 {
+		budget = 3072
+	}
+	tc := agent.NewTikTokenCounter()
+	var kept []string
+	used := 0
+	skipped := 0
+	for i := len(steps) - 1; i >= 0; i-- {
+		block := fmt.Sprintf("Step: %s\nResult: %s\n\n", steps[i].Step, steps[i].Result)
+		n, err := tc.Count(modelName, block)
+		if err != nil {
+			n = (len(block) + 3) / 4
+		}
+		if n <= 0 {
+			n = 1
+		}
+		if used+n > budget {
+			skipped = i + 1
+			break
+		}
+		used += n
+		kept = append(kept, block)
+	}
+	var sb strings.Builder
+	if skipped > 0 {
+		sb.WriteString(fmt.Sprintf("Earlier executed steps omitted due to context budget: %d steps.\n\n", skipped))
+	}
+	for i := len(kept) - 1; i >= 0; i-- {
+		sb.WriteString(kept[i])
+	}
+	return sb.String()
 }
 
 // planExecuteStreamsMainAssistant 将规划/执行/重规划各阶段助手流式输出映射到主对话区。

@@ -28,6 +28,7 @@ type Config struct {
 	Auth        AuthConfig            `yaml:"auth"`
 	ExternalMCP ExternalMCPConfig     `yaml:"external_mcp,omitempty"`
 	Knowledge   KnowledgeConfig       `yaml:"knowledge,omitempty"`
+	C2          C2Config              `yaml:"c2,omitempty" json:"c2,omitempty"` // 内置 C2 总开关；未配置时默认启用
 	Robots      RobotsConfig          `yaml:"robots,omitempty" json:"robots,omitempty"`         // 企业微信/钉钉/飞书等机器人配置
 	RolesDir    string                `yaml:"roles_dir,omitempty" json:"roles_dir,omitempty"`   // 角色配置文件目录（新方式）
 	Roles       map[string]RoleConfig `yaml:"roles,omitempty" json:"roles,omitempty"`           // 向后兼容：支持在主配置文件中定义角色
@@ -62,6 +63,126 @@ type MultiAgentConfig struct {
 	EinoSkills MultiAgentEinoSkillsConfig `yaml:"eino_skills,omitempty" json:"eino_skills,omitempty"`
 	// EinoMiddleware wires optional ADK middleware (patchtoolcalls, toolsearch, plantask, reduction) and Deep extras.
 	EinoMiddleware MultiAgentEinoMiddlewareConfig `yaml:"eino_middleware,omitempty" json:"eino_middleware,omitempty"`
+	// EinoCallbacks attaches CloudWeGo eino callbacks.InitCallbacks on ADK Runner context (structured logs + optional SSE trace).
+	EinoCallbacks MultiAgentEinoCallbacksConfig `yaml:"eino_callbacks,omitempty" json:"eino_callbacks,omitempty"`
+}
+
+// MultiAgentEinoCallbacksConfig enables Eino unified callbacks on each ADK agent run (deep / plan_execute / supervisor / eino_single).
+// Modes: log_only (zap + optional OTel; no SSE to browser), sse (adds client SSE eino_trace_* when sse_trace_to_client), full (sse rules + stream callback copies closed).
+type MultiAgentEinoCallbacksConfig struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Mode    string `yaml:"mode,omitempty" json:"mode,omitempty"` // log_only | sse | full; empty with enabled=true defaults to log_only
+	// SseTraceToClient when true emits eino_trace_* SSE for UI (use only for admin/debug; nil/false recommended in production).
+	SseTraceToClient *bool `yaml:"sse_trace_to_client,omitempty" json:"sse_trace_to_client,omitempty"`
+	// Otel configures OpenTelemetry trace export (independent of mode; exporter none disables export even if enabled).
+	Otel MultiAgentEinoCallbacksOtelConfig `yaml:"otel,omitempty" json:"otel,omitempty"`
+	// MaxInputSummaryRunes / MaxOutputSummaryRunes cap text placed in SSE payloads and debug logs (not full payloads).
+	MaxInputSummaryRunes  int `yaml:"max_input_summary_runes,omitempty" json:"max_input_summary_runes,omitempty"`
+	MaxOutputSummaryRunes int `yaml:"max_output_summary_runes,omitempty" json:"max_output_summary_runes,omitempty"`
+	// ZapVerbose when true logs input/output summaries at zap.Debug on start/end; false uses Info with short fields only.
+	ZapVerbose bool `yaml:"zap_verbose,omitempty" json:"zap_verbose,omitempty"`
+}
+
+// MultiAgentEinoCallbacksOtelConfig OpenTelemetry for Eino callback spans (W3C trace in collector / stdout).
+type MultiAgentEinoCallbacksOtelConfig struct {
+	Enabled     bool    `yaml:"enabled" json:"enabled"`
+	ServiceName string  `yaml:"service_name,omitempty" json:"service_name,omitempty"`
+	Exporter    string  `yaml:"exporter,omitempty" json:"exporter,omitempty"`         // none | stdout | otlphttp
+	OTLPEndpoint string `yaml:"otlp_endpoint,omitempty" json:"otlp_endpoint,omitempty"` // host:port, e.g. localhost:4318 (path /v1/traces)
+	SampleRatio float64 `yaml:"sample_ratio,omitempty" json:"sample_ratio,omitempty"`   // 0–1, default 1.0
+}
+
+// EinoCallbacksModeEffective returns off | log_only | sse | full.
+func (c MultiAgentEinoCallbacksConfig) EinoCallbacksModeEffective() string {
+	if !c.Enabled {
+		return "off"
+	}
+	m := strings.TrimSpace(strings.ToLower(c.Mode))
+	switch m {
+	case "log_only":
+		return "log_only"
+	case "sse":
+		return "sse"
+	case "full":
+		return "full"
+	case "":
+		return "log_only"
+	default:
+		return "log_only"
+	}
+}
+
+// SseTraceToClientEffective is false unless explicitly set true (best practice: do not expose framework traces to end users by default).
+func (c MultiAgentEinoCallbacksConfig) SseTraceToClientEffective() bool {
+	if c.SseTraceToClient == nil {
+		return false
+	}
+	return *c.SseTraceToClient
+}
+
+// ShouldEmitEinoTraceSSE is true when client-visible trace events should be sent over progress/SSE.
+func (c MultiAgentEinoCallbacksConfig) ShouldEmitEinoTraceSSE(mode string) bool {
+	if !c.SseTraceToClientEffective() {
+		return false
+	}
+	return mode == "sse" || mode == "full"
+}
+
+// OtelExporterEffective returns none | stdout | otlphttp.
+func (c MultiAgentEinoCallbacksOtelConfig) OtelExporterEffective() string {
+	e := strings.TrimSpace(strings.ToLower(c.Exporter))
+	switch e {
+	case "none", "stdout", "otlphttp":
+		return e
+	case "":
+		if c.Enabled {
+			return "stdout"
+		}
+		return "none"
+	default:
+		return "none"
+	}
+}
+
+// OtelTracingActive is true when spans should be started (enabled + non-none exporter).
+func (c MultiAgentEinoCallbacksConfig) OtelTracingActive() bool {
+	if !c.Otel.Enabled {
+		return false
+	}
+	return c.Otel.OtelExporterEffective() != "none"
+}
+
+func (c MultiAgentEinoCallbacksOtelConfig) ServiceNameEffective() string {
+	s := strings.TrimSpace(c.ServiceName)
+	if s != "" {
+		return s
+	}
+	return "cyberstrike-ai"
+}
+
+func (c MultiAgentEinoCallbacksOtelConfig) SampleRatioEffective() float64 {
+	r := c.SampleRatio
+	if r <= 0 {
+		return 1.0
+	}
+	if r > 1 {
+		return 1.0
+	}
+	return r
+}
+
+func (c MultiAgentEinoCallbacksConfig) EinoCallbacksMaxInputSummaryRunes() int {
+	if c.MaxInputSummaryRunes > 0 {
+		return c.MaxInputSummaryRunes
+	}
+	return 400
+}
+
+func (c MultiAgentEinoCallbacksConfig) EinoCallbacksMaxOutputSummaryRunes() int {
+	if c.MaxOutputSummaryRunes > 0 {
+		return c.MaxOutputSummaryRunes
+	}
+	return 400
 }
 
 // MultiAgentEinoMiddlewareConfig optional Eino ADK middleware and Deep / supervisor tuning.
@@ -72,6 +193,8 @@ type MultiAgentEinoMiddlewareConfig struct {
 	ToolSearchEnable        bool `yaml:"tool_search_enable,omitempty" json:"tool_search_enable,omitempty"`
 	ToolSearchMinTools      int  `yaml:"tool_search_min_tools,omitempty" json:"tool_search_min_tools,omitempty"`           // default 20; applies when len(tools) >= this
 	ToolSearchAlwaysVisible int  `yaml:"tool_search_always_visible,omitempty" json:"tool_search_always_visible,omitempty"` // default 12; first N tools stay always visible
+	// ToolSearchAlwaysVisibleTools keeps specified tool names always visible (never hidden by tool_search).
+	ToolSearchAlwaysVisibleTools []string `yaml:"tool_search_always_visible_tools,omitempty" json:"tool_search_always_visible_tools,omitempty"`
 	// Plantask adds TaskCreate/Get/Update/List (file-backed under skills dir); requires eino_skills + local backend.
 	PlantaskEnable bool `yaml:"plantask_enable,omitempty" json:"plantask_enable,omitempty"`
 	// PlantaskRelDir relative to skills_dir for per-conversation task boards (default .eino/plantask).
@@ -79,8 +202,25 @@ type MultiAgentEinoMiddlewareConfig struct {
 	// Reduction truncates/offloads large tool outputs (requires eino local backend for Write).
 	ReductionEnable       bool     `yaml:"reduction_enable,omitempty" json:"reduction_enable,omitempty"`
 	ReductionRootDir      string   `yaml:"reduction_root_dir,omitempty" json:"reduction_root_dir,omitempty"` // default: os temp + conversation id
+	ReductionMaxLengthForTrunc int `yaml:"reduction_max_length_for_trunc,omitempty" json:"reduction_max_length_for_trunc,omitempty"` // default 12000
+	ReductionMaxTokensForClear int `yaml:"reduction_max_tokens_for_clear,omitempty" json:"reduction_max_tokens_for_clear,omitempty"` // default 50000
 	ReductionClearExclude []string `yaml:"reduction_clear_exclude,omitempty" json:"reduction_clear_exclude,omitempty"`
 	ReductionSubAgents    bool     `yaml:"reduction_sub_agents,omitempty" json:"reduction_sub_agents,omitempty"` // also attach to sub-agents
+	// SummarizationTriggerRatio controls summarization trigger threshold as max_total_tokens * ratio (default 0.8).
+	SummarizationTriggerRatio float64 `yaml:"summarization_trigger_ratio,omitempty" json:"summarization_trigger_ratio,omitempty"`
+	// SummarizationEmitInternalEvents controls middleware internal event emission (default true).
+	SummarizationEmitInternalEvents *bool `yaml:"summarization_emit_internal_events,omitempty" json:"summarization_emit_internal_events,omitempty"`
+	// HistoryInputBudgetRatio 已不影响 Eino：从 last_react 轨迹转 ADK 消息时**不再**按 token 比例裁剪（完整注入）。
+	// 字段仍保留，便于旧版 config 不报错；新部署可省略。
+	HistoryInputBudgetRatio float64 `yaml:"history_input_budget_ratio,omitempty" json:"history_input_budget_ratio,omitempty"`
+	// PlanExecuteUserInputBudgetRatio caps planner/replanner/executor userInput prompt budget ratio (default 0.35).
+	PlanExecuteUserInputBudgetRatio float64 `yaml:"plan_execute_user_input_budget_ratio,omitempty" json:"plan_execute_user_input_budget_ratio,omitempty"`
+	// PlanExecuteExecutedStepsBudgetRatio caps executed_steps prompt budget ratio (default 0.2).
+	PlanExecuteExecutedStepsBudgetRatio float64 `yaml:"plan_execute_executed_steps_budget_ratio,omitempty" json:"plan_execute_executed_steps_budget_ratio,omitempty"`
+	// PlanExecuteMaxStepResultRunes caps each executed step result length for prompt view (default 4000).
+	PlanExecuteMaxStepResultRunes int `yaml:"plan_execute_max_step_result_runes,omitempty" json:"plan_execute_max_step_result_runes,omitempty"`
+	// PlanExecuteKeepLastSteps keeps only the tail steps in prompt view (default 8).
+	PlanExecuteKeepLastSteps int `yaml:"plan_execute_keep_last_steps,omitempty" json:"plan_execute_keep_last_steps,omitempty"`
 	// CheckpointDir when non-empty enables adk.Runner CheckPointStore (file-backed) for interrupt/resume persistence.
 	CheckpointDir string `yaml:"checkpoint_dir,omitempty" json:"checkpoint_dir,omitempty"`
 	// DeepOutputKey passed to deep.Config OutputKey (session final text); empty = off.
@@ -89,6 +229,97 @@ type MultiAgentEinoMiddlewareConfig struct {
 	DeepModelRetryMaxRetries int `yaml:"deep_model_retry_max_retries,omitempty" json:"deep_model_retry_max_retries,omitempty"`
 	// TaskToolDescriptionPrefix when non-empty sets deep.Config TaskToolDescriptionGenerator (sub-agent names appended).
 	TaskToolDescriptionPrefix string `yaml:"task_tool_description_prefix,omitempty" json:"task_tool_description_prefix,omitempty"`
+}
+
+func (c MultiAgentEinoMiddlewareConfig) SummarizationTriggerRatioEffective() float64 {
+	v := c.SummarizationTriggerRatio
+	if v <= 0 {
+		return 0.8
+	}
+	if v < 0.5 {
+		return 0.5
+	}
+	if v > 0.95 {
+		return 0.95
+	}
+	return v
+}
+
+func (c MultiAgentEinoMiddlewareConfig) SummarizationEmitInternalEventsEffective() bool {
+	if c.SummarizationEmitInternalEvents != nil {
+		return *c.SummarizationEmitInternalEvents
+	}
+	return true
+}
+
+func (c MultiAgentEinoMiddlewareConfig) HistoryInputBudgetRatioEffective() float64 {
+	v := c.HistoryInputBudgetRatio
+	if v <= 0 {
+		return 0.35
+	}
+	if v < 0.15 {
+		return 0.15
+	}
+	if v > 0.6 {
+		return 0.6
+	}
+	return v
+}
+
+func (c MultiAgentEinoMiddlewareConfig) PlanExecuteUserInputBudgetRatioEffective() float64 {
+	v := c.PlanExecuteUserInputBudgetRatio
+	if v <= 0 {
+		return 0.35
+	}
+	if v < 0.1 {
+		return 0.1
+	}
+	if v > 0.6 {
+		return 0.6
+	}
+	return v
+}
+
+func (c MultiAgentEinoMiddlewareConfig) PlanExecuteExecutedStepsBudgetRatioEffective() float64 {
+	v := c.PlanExecuteExecutedStepsBudgetRatio
+	if v <= 0 {
+		return 0.2
+	}
+	if v < 0.08 {
+		return 0.08
+	}
+	if v > 0.5 {
+		return 0.5
+	}
+	return v
+}
+
+func (c MultiAgentEinoMiddlewareConfig) PlanExecuteMaxStepResultRunesEffective() int {
+	if c.PlanExecuteMaxStepResultRunes > 0 {
+		return c.PlanExecuteMaxStepResultRunes
+	}
+	return 4000
+}
+
+func (c MultiAgentEinoMiddlewareConfig) PlanExecuteKeepLastStepsEffective() int {
+	if c.PlanExecuteKeepLastSteps > 0 {
+		return c.PlanExecuteKeepLastSteps
+	}
+	return 8
+}
+
+func (c MultiAgentEinoMiddlewareConfig) ReductionMaxLengthForTruncEffective() int {
+	if c.ReductionMaxLengthForTrunc > 0 {
+		return c.ReductionMaxLengthForTrunc
+	}
+	return 12000
+}
+
+func (c MultiAgentEinoMiddlewareConfig) ReductionMaxTokensForClearEffective() int {
+	if c.ReductionMaxTokensForClear > 0 {
+		return c.ReductionMaxTokensForClear
+	}
+	return 50000
 }
 
 // MultiAgentEinoSkillsConfig toggles Eino official skill progressive disclosure and host filesystem tools.
@@ -137,6 +368,8 @@ type MultiAgentPublic struct {
 	SubAgentCount                int    `json:"sub_agent_count"`
 	Orchestration                string `json:"orchestration,omitempty"`
 	PlanExecuteLoopMaxIterations int    `json:"plan_execute_loop_max_iterations"`
+	ToolSearchAlwaysVisibleTools []string `json:"tool_search_always_visible_tools,omitempty"`
+	ToolSearchAlwaysVisibleEffectiveTools []string `json:"tool_search_always_visible_effective_tools,omitempty"`
 }
 
 // NormalizeMultiAgentOrchestration 返回 deep、plan_execute 或 supervisor。
@@ -158,13 +391,28 @@ type MultiAgentAPIUpdate struct {
 	RobotUseMultiAgent           bool `json:"robot_use_multi_agent"`
 	BatchUseMultiAgent           bool `json:"batch_use_multi_agent"`
 	PlanExecuteLoopMaxIterations *int `json:"plan_execute_loop_max_iterations,omitempty"`
+	ToolSearchAlwaysVisibleTools []string `json:"tool_search_always_visible_tools,omitempty"`
 }
 
 // RobotsConfig 机器人配置（企业微信、钉钉、飞书等）
 type RobotsConfig struct {
+	Session  RobotSessionConfig  `yaml:"session,omitempty" json:"session,omitempty"`   // 机器人会话隔离策略
 	Wecom    RobotWecomConfig    `yaml:"wecom,omitempty" json:"wecom,omitempty"`       // 企业微信
 	Dingtalk RobotDingtalkConfig `yaml:"dingtalk,omitempty" json:"dingtalk,omitempty"` // 钉钉
 	Lark     RobotLarkConfig     `yaml:"lark,omitempty" json:"lark,omitempty"`         // 飞书
+}
+
+// RobotSessionConfig 机器人会话隔离策略
+type RobotSessionConfig struct {
+	StrictUserIdentity *bool `yaml:"strict_user_identity,omitempty" json:"strict_user_identity,omitempty"` // true 时只允许真实用户标识，不允许会话/群 ID 兜底
+}
+
+// StrictUserIdentityEnabled 返回是否启用严格用户身份模式；未配置时默认 true。
+func (c RobotSessionConfig) StrictUserIdentityEnabled() bool {
+	if c.StrictUserIdentity == nil {
+		return true
+	}
+	return *c.StrictUserIdentity
 }
 
 // RobotWecomConfig 企业微信机器人配置
@@ -179,17 +427,19 @@ type RobotWecomConfig struct {
 
 // RobotDingtalkConfig 钉钉机器人配置
 type RobotDingtalkConfig struct {
-	Enabled      bool   `yaml:"enabled" json:"enabled"`
-	ClientID     string `yaml:"client_id" json:"client_id"`         // 应用 Key (AppKey)
-	ClientSecret string `yaml:"client_secret" json:"client_secret"` // 应用 Secret
+	Enabled                    bool   `yaml:"enabled" json:"enabled"`
+	ClientID                   string `yaml:"client_id" json:"client_id"`                                       // 应用 Key (AppKey)
+	ClientSecret               string `yaml:"client_secret" json:"client_secret"`                               // 应用 Secret
+	AllowConversationIDFallback bool   `yaml:"allow_conversation_id_fallback" json:"allow_conversation_id_fallback"` // sender_id 缺失时是否允许回退到会话 ID
 }
 
 // RobotLarkConfig 飞书机器人配置
 type RobotLarkConfig struct {
-	Enabled     bool   `yaml:"enabled" json:"enabled"`
-	AppID       string `yaml:"app_id" json:"app_id"`             // 应用 App ID
-	AppSecret   string `yaml:"app_secret" json:"app_secret"`     // 应用 App Secret
-	VerifyToken string `yaml:"verify_token" json:"verify_token"` // 事件订阅 Verification Token（可选）
+	Enabled                 bool   `yaml:"enabled" json:"enabled"`
+	AppID                   string `yaml:"app_id" json:"app_id"`                                 // 应用 App ID
+	AppSecret               string `yaml:"app_secret" json:"app_secret"`                         // 应用 App Secret
+	VerifyToken             string `yaml:"verify_token" json:"verify_token"`                     // 事件订阅 Verification Token（可选）
+	AllowChatIDFallback     bool   `yaml:"allow_chat_id_fallback" json:"allow_chat_id_fallback"` // 用户 ID 缺失时是否允许回退到 chat_id
 }
 
 type ServerConfig struct {
@@ -216,6 +466,48 @@ type OpenAIConfig struct {
 	BaseURL        string `yaml:"base_url" json:"base_url"`
 	Model          string `yaml:"model" json:"model"`
 	MaxTotalTokens int    `yaml:"max_total_tokens,omitempty" json:"max_total_tokens,omitempty"`
+	// Reasoning 控制 Eino ChatModel 的 thinking / reasoning_effort / output_config 等（仅 Eino 路径生效；原生 ReAct 忽略）。
+	Reasoning OpenAIReasoningConfig `yaml:"reasoning,omitempty" json:"reasoning,omitempty"`
+}
+
+// OpenAIReasoningConfig 全局默认与网关 profile（对话页可通过 ChatRequest.reasoning 覆盖，受 AllowClientReasoning 约束）。
+type OpenAIReasoningConfig struct {
+	// Mode: auto（默认）| on | off | default（与 auto 相同）。off 时不向模型附加推理扩展字段。
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	// Effort: low | medium | high | max；空表示不单独指定强度（各 profile 行为见 internal/reasoning）。
+	Effort string `yaml:"effort,omitempty" json:"effort,omitempty"`
+	// AllowClientReasoning 为 false 时忽略请求体 reasoning；nil 或未设置等同于 true。
+	AllowClientReasoning *bool `yaml:"allow_client_reasoning,omitempty" json:"allow_client_reasoning,omitempty"`
+	// Profile: auto | deepseek_compat | openai_compat | output_config_effort
+	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
+	// ExtraRequestFields 合并进 Chat Completions 根 JSON（管理员用；与自动字段同名时后者覆盖）。
+	ExtraRequestFields map[string]interface{} `yaml:"extra_request_fields,omitempty" json:"extra_request_fields,omitempty"`
+}
+
+// ModeEffective returns auto when empty or default.
+func (c OpenAIReasoningConfig) ModeEffective() string {
+	m := strings.ToLower(strings.TrimSpace(c.Mode))
+	if m == "" || m == "default" {
+		return "auto"
+	}
+	return m
+}
+
+// ProfileEffective returns auto when empty.
+func (c OpenAIReasoningConfig) ProfileEffective() string {
+	p := strings.ToLower(strings.TrimSpace(c.Profile))
+	if p == "" {
+		return "auto"
+	}
+	return p
+}
+
+// AllowClientReasoningEffective true when client may send ChatRequest.reasoning.
+func (c OpenAIReasoningConfig) AllowClientReasoningEffective() bool {
+	if c.AllowClientReasoning == nil {
+		return true
+	}
+	return *c.AllowClientReasoning
 }
 
 type FofaConfig struct {
@@ -352,7 +644,6 @@ func Load(path string) (*Config, error) {
 	if cfg.Auth.SessionDurationHours <= 0 {
 		cfg.Auth.SessionDurationHours = 12
 	}
-
 	if strings.TrimSpace(cfg.Auth.Password) == "" {
 		password, err := generateStrongPassword(24)
 		if err != nil {
@@ -821,6 +1112,7 @@ func LoadRoleFromFile(path string) (*RoleConfig, error) {
 }
 
 func Default() *Config {
+	strictRobotIdentity := true
 	return &Config{
 		Server: ServerConfig{
 			Host: "0.0.0.0",
@@ -855,6 +1147,11 @@ func Default() *Config {
 		Auth: AuthConfig{
 			SessionDurationHours: 12,
 		},
+		Robots: RobotsConfig{
+			Session: RobotSessionConfig{
+				StrictUserIdentity: &strictRobotIdentity,
+			},
+		},
 		Knowledge: KnowledgeConfig{
 			Enabled:  true,
 			BasePath: "knowledge_base",
@@ -883,6 +1180,35 @@ func Default() *Config {
 			},
 		},
 	}
+}
+
+// C2Config 内置 C2 模块开关（与知识库 enabled 语义一致：关闭后不初始化监听器、不注册 C2 MCP 工具）。
+type C2Config struct {
+	// Enabled 为 nil 表示未写配置，按 true 处理（兼容旧 config.yaml）
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+// EnabledEffective 返回是否启用 C2；未显式配置时默认启用。
+func (c C2Config) EnabledEffective() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// C2Public 返回给前端的 C2 状态（仅标量）。
+type C2Public struct {
+	Enabled bool `json:"enabled"`
+}
+
+// Public 将内部配置转为 API 响应。
+func (c C2Config) Public() C2Public {
+	return C2Public{Enabled: c.EnabledEffective()}
+}
+
+// C2APIUpdate 设置页/API 更新 C2 开关。
+type C2APIUpdate struct {
+	Enabled bool `json:"enabled"`
 }
 
 // KnowledgeConfig 知识库配置

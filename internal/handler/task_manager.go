@@ -3,8 +3,11 @@ package handler
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
+
+	"cyberstrike-ai/internal/multiagent"
 )
 
 // ErrTaskCancelled 用户取消任务的错误
@@ -12,6 +15,13 @@ var ErrTaskCancelled = errors.New("agent task cancelled by user")
 
 // ErrTaskAlreadyRunning 会话已有任务正在执行
 var ErrTaskAlreadyRunning = errors.New("agent task already running for conversation")
+
+// shouldPersistEinoAgentTraceAfterRunError：Eino 相关 Run 非成功返回时，是否仍写入 last_react_* 供下轮 loadHistoryFromAgentTrace。
+// 当前策略：无论正常结束、异常结束或用户主动停止，都尽量保留最后可用轨迹，
+// 以便在同一会话继续时可基于原始上下文续跑，而不是回退到仅消息文本历史。
+func shouldPersistEinoAgentTraceAfterRunError(baseCtx context.Context) bool {
+	return true
+}
 
 // AgentTask 描述正在运行的Agent任务
 type AgentTask struct {
@@ -21,7 +31,101 @@ type AgentTask struct {
 	Status         string    `json:"status"`
 	CancellingAt   time.Time `json:"-"` // 进入 cancelling 状态的时间，用于清理长时间卡住的任务
 
+	// ActiveMCPExecutionID 当前正在执行的 MCP 工具 executionId（仅内存，供「中断并继续」= 仅掐当前工具）
+	ActiveMCPExecutionID string `json:"-"`
+
+	// InterruptContinueNote 无 MCP 时「中断并继续」由用户在弹窗中填写的补充说明（Cancel 前写入，续跑轮次读取后清空）
+	InterruptContinueNote string `json:"-"`
+
 	cancel func(error)
+}
+
+// RegisterRunningTool 实现 mcp.ToolRunRegistry：工具开始时登记本会话当前 executionId。
+func (m *AgentTaskManager) RegisterRunningTool(conversationID, executionID string) {
+	conversationID = strings.TrimSpace(conversationID)
+	executionID = strings.TrimSpace(executionID)
+	if conversationID == "" || executionID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t, ok := m.tasks[conversationID]; ok && t != nil {
+		t.ActiveMCPExecutionID = executionID
+	}
+}
+
+// UnregisterRunningTool 工具结束时清除登记（仅当 id 仍匹配时清除，避免并发串单）。
+func (m *AgentTaskManager) UnregisterRunningTool(conversationID, executionID string) {
+	conversationID = strings.TrimSpace(conversationID)
+	executionID = strings.TrimSpace(executionID)
+	if conversationID == "" || executionID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t, ok := m.tasks[conversationID]; ok && t != nil {
+		if t.ActiveMCPExecutionID == executionID {
+			t.ActiveMCPExecutionID = ""
+		}
+	}
+}
+
+// SetInterruptContinueNote 在发起 ErrInterruptContinue 取消前写入用户补充说明（仅内存）。
+func (m *AgentTaskManager) SetInterruptContinueNote(conversationID, note string) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t, ok := m.tasks[conversationID]; ok && t != nil {
+		t.InterruptContinueNote = note
+	}
+}
+
+// TakeInterruptContinueNote 读取并清空补充说明（续跑开始时调用一次）。
+func (m *AgentTaskManager) TakeInterruptContinueNote(conversationID string) string {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t, ok := m.tasks[conversationID]; ok && t != nil {
+		n := t.InterruptContinueNote
+		t.InterruptContinueNote = ""
+		return n
+	}
+	return ""
+}
+
+// BindTaskCancel 在同一运行任务内替换与 context 绑定的 cancel 函数（用于中断后继续时换新 baseCtx）。
+func (m *AgentTaskManager) BindTaskCancel(conversationID string, cancel context.CancelCauseFunc) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" || cancel == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t, ok := m.tasks[conversationID]; ok && t != nil {
+		t.cancel = func(err error) {
+			cancel(err)
+		}
+	}
+}
+
+// ActiveMCPExecutionID 返回当前会话进行中的工具 executionId，无则空串。
+func (m *AgentTaskManager) ActiveMCPExecutionID(conversationID string) string {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if t, ok := m.tasks[conversationID]; ok && t != nil {
+		return strings.TrimSpace(t.ActiveMCPExecutionID)
+	}
+	return ""
 }
 
 // CompletedTask 已完成的任务（用于历史记录）
@@ -155,8 +259,16 @@ func (m *AgentTaskManager) CancelTask(conversationID string, cause error) (bool,
 		return true, nil
 	}
 
-	task.Status = "cancelling"
-	task.CancellingAt = time.Now()
+	// ErrInterruptContinue：仅掐断当前推理步骤，随后由处理器续跑，不进入长时间「取消中」态。
+	if cause != nil && errors.Is(cause, multiagent.ErrInterruptContinue) {
+		task.Status = "running"
+	} else {
+		task.Status = "cancelling"
+		task.CancellingAt = time.Now()
+	}
+	if cause != nil && errors.Is(cause, ErrTaskCancelled) {
+		task.InterruptContinueNote = ""
+	}
 	cancel := task.cancel
 	m.mu.Unlock()
 

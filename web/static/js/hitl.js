@@ -7,6 +7,19 @@ function hitlModeNormalize(m) {
     return allowed.indexOf(v) >= 0 ? v : 'off';
 }
 
+function hitlT(key, fallback, params) {
+    const fullKey = 'hitl.' + key;
+    try {
+        if (typeof window.t === 'function') {
+            const translated = window.t(fullKey, params || {});
+            if (typeof translated === 'string' && translated && translated !== fullKey) {
+                return translated;
+            }
+        }
+    } catch (e) {}
+    return fallback;
+}
+
 function hitlEffectiveEnabled(cfg) {
     if (!cfg) return false;
     if (cfg.enabled === true) return true;
@@ -34,6 +47,18 @@ function hitlSensitiveToolsToArray(config) {
         return s.split(/[,\n\r]+/).map(function (x) { return x.trim(); }).filter(Boolean);
     }
     return [];
+}
+
+function normalizeHitlTimeoutSeconds(v, fallback) {
+    const n = Number(v);
+    if (Number.isFinite(n)) {
+        return n > 0 ? Math.floor(n) : 0;
+    }
+    const f = Number(fallback);
+    if (Number.isFinite(f)) {
+        return f > 0 ? Math.floor(f) : 0;
+    }
+    return 0;
 }
 
 function getCurrentConversationIdForHitl() {
@@ -84,6 +109,7 @@ async function saveHitlConversationConfig(conversationId, config) {
     const mode = hitlModeNormalize(config.mode || 'off');
     const enabled = typeof config.enabled === 'boolean' ? config.enabled : (mode !== 'off');
     const sensitiveTools = hitlSensitiveToolsToArray(config);
+    const timeoutSeconds = normalizeHitlTimeoutSeconds(config.timeoutSeconds, 0);
     const resp = await hitlApiFetch('/api/hitl/config', {
         method: 'PUT',
         credentials: 'same-origin',
@@ -93,7 +119,7 @@ async function saveHitlConversationConfig(conversationId, config) {
             enabled: enabled,
             mode: mode,
             sensitiveTools: sensitiveTools,
-            timeoutSeconds: config.timeoutSeconds || 300
+            timeoutSeconds: timeoutSeconds
         })
     });
     if (!resp.ok) {
@@ -126,7 +152,7 @@ async function syncHitlConfigFromServer(conversationId) {
                 enabled: true,
                 mode: localMode,
                 sensitiveTools: localToolsStr.split(/[,\n\r]+/).map(function (s) { return s.trim(); }).filter(Boolean),
-                timeoutSeconds: cfg.timeoutSeconds || 300
+                timeoutSeconds: normalizeHitlTimeoutSeconds(cfg.timeoutSeconds, 0)
             };
             saveHitlConversationConfig(conversationId, {
                 mode: localMode,
@@ -146,7 +172,7 @@ async function syncHitlConfigFromServer(conversationId) {
                     enabled: true,
                     mode: glMode,
                     sensitiveTools: glToolsStr.split(/[,\n\r]+/).map(function (s) { return s.trim(); }).filter(Boolean),
-                    timeoutSeconds: cfg.timeoutSeconds || 300
+                    timeoutSeconds: normalizeHitlTimeoutSeconds(cfg.timeoutSeconds, 0)
                 };
                 saveHitlConversationConfig(conversationId, {
                     mode: glMode,
@@ -265,7 +291,7 @@ async function followAgentRunAfterHitlDecision(conversationId) {
 async function refreshHitlPending() {
     const container = document.getElementById('hitl-pending-list');
     if (!container) return;
-    container.innerHTML = '<div class="loading-spinner">Loading...</div>';
+    container.innerHTML = '<div class="loading-spinner">' + escapeHtml(hitlT('loading', 'Loading...')) + '</div>';
     try {
         const resp = await hitlApiFetch('/api/hitl/pending', { credentials: 'same-origin' });
         if (!resp.ok) {
@@ -274,7 +300,7 @@ async function refreshHitlPending() {
         const data = await resp.json();
         const items = Array.isArray(data.items) ? data.items : [];
         if (!items.length) {
-            container.innerHTML = '<div class="empty-state">暂无待审批项</div>';
+            container.innerHTML = '<div class="empty-state">' + escapeHtml(hitlT('emptyState', 'No pending approvals')) + '</div>';
             return;
         }
         container.innerHTML = items.map(function (item) {
@@ -292,25 +318,25 @@ async function refreshHitlPending() {
                 '<span class="hitl-tool-badge">' + escapeHtml(item.toolName || '-') + '</span>' +
                 '<span class="hitl-mode-tag hitl-mode-tag--' + escapeHtml(mode) + '">' + escapeHtml(item.mode || '-') + '</span>' +
                 '</div>' +
-                '<button class="hitl-dismiss-btn" title="忽略" onclick="dismissHitlItem(' + qId + ')">&times;</button>' +
+                '<button class="hitl-dismiss-btn" title="' + escapeHtml(hitlT('dismiss', 'Dismiss')) + '" onclick="dismissHitlItem(' + qId + ')">&times;</button>' +
                 '</div>' +
-                '<div class="hitl-pending-meta">会话：' + escapeHtml(item.conversationId || '-') + '</div>' +
+                '<div class="hitl-pending-meta">' + escapeHtml(hitlT('conversationLabel', 'Conversation:')) + ' ' + escapeHtml(item.conversationId || '-') + '</div>' +
                 '<pre class="hitl-pending-payload">' + escapeHtml(preview) + '</pre>' +
                 (allowEdit
-                    ? ('<div class="hitl-input-help">审查编辑模式：可填写 JSON 对象覆盖参数。示例：{"command":"ls -la"}</div>' +
+                    ? ('<div class="hitl-input-help">' + escapeHtml(hitlT('reviewEditHelp', 'Review & edit mode: provide a JSON object to override tool arguments. Example: {"command":"ls -la"}')) + '</div>' +
                        '<textarea id="hitl-edit-' + escId + '" class="hitl-edit-args" placeholder=\'{"command":"ls -la"}\'></textarea>')
-                    : '<div class="hitl-input-help">审批模式：仅通过/拒绝，不支持改参。</div>') +
-                '<div class="hitl-input-help">备注（可选）：建议写审批依据。</div>' +
-                '<input id="hitl-comment-' + escId + '" class="hitl-config-input hitl-inline-comment" type="text" placeholder="例如：允许只读命令">' +
+                    : '<div class="hitl-input-help">' + escapeHtml(hitlT('approvalHelp', 'Approval mode: only approve/reject, argument editing is disabled.')) + '</div>') +
+                '<div class="hitl-input-help">' + escapeHtml(hitlT('commentHelp', 'Comment (optional): briefly note the approval reason.')) + '</div>' +
+                '<input id="hitl-comment-' + escId + '" class="hitl-config-input hitl-inline-comment" type="text" placeholder="' + escapeHtml(hitlT('commentPlaceholder', 'e.g. allow read-only command')) + '">' +
                 '<div class="hitl-pending-actions">' +
-                '<button class="btn-secondary" onclick="submitHitlDecision(' + qId + ',&quot;reject&quot;,' + qConv + ')">拒绝</button>' +
-                '<button class="btn-primary" onclick="submitHitlDecision(' + qId + ',&quot;approve&quot;,' + qConv + ')">通过</button>' +
+                '<button class="btn-secondary" onclick="submitHitlDecision(' + qId + ',&quot;reject&quot;,' + qConv + ')">' + escapeHtml(hitlT('reject', 'Reject')) + '</button>' +
+                '<button class="btn-primary" onclick="submitHitlDecision(' + qId + ',&quot;approve&quot;,' + qConv + ')">' + escapeHtml(hitlT('approve', 'Approve')) + '</button>' +
                 '</div>' +
                 '</div>'
             );
         }).join('');
     } catch (e) {
-        container.innerHTML = '<div class="empty-state">加载失败</div>';
+        container.innerHTML = '<div class="empty-state">' + escapeHtml(hitlT('loadFailed', 'Failed to load')) + '</div>';
     }
 }
 
@@ -323,7 +349,7 @@ async function submitHitlDecision(interruptId, decision, conversationIdOpt) {
         try {
             editedArguments = JSON.parse(editBox.value.trim());
         } catch (e) {
-            alert('JSON 参数格式错误');
+            alert(hitlT('invalidJson', 'Invalid JSON arguments'));
             return;
         }
     }
@@ -344,7 +370,7 @@ async function submitHitlDecisionWithPayload(interruptId, decision, comment, edi
             await dismissHitlItem(interruptId, true);
             return true;
         }
-        alert('提交失败：' + errText);
+        alert(hitlT('submitFailedPrefix', 'Submit failed:') + ' ' + errText);
         return false;
     }
     refreshHitlPending();

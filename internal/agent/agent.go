@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"cyberstrike-ai/internal/c2"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/mcp/builtin"
@@ -72,6 +73,11 @@ func agentConversationIDFromContext(ctx context.Context) string {
 	}
 	v, _ := ctx.Value(agentConversationIDKey{}).(string)
 	return v
+}
+
+// ConversationIDFromContext 返回当前 Agent 请求上下文中注入的对话 ID（如 C2 MCP 入队与人机协同门控使用）。
+func ConversationIDFromContext(ctx context.Context) string {
+	return agentConversationIDFromContext(ctx)
 }
 
 // ToolCallInterceptor allows caller to gate or rewrite tool arguments just before execution.
@@ -187,6 +193,10 @@ type ChatMessage struct {
 	Content    string     `json:"content,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+	// ToolName 仅 tool 角色：从 Eino/轨迹 JSON 的 name 或 tool_name 恢复，供续跑构造 ToolMessage。
+	ToolName string `json:"tool_name,omitempty"`
+	// ReasoningContent 对应 OpenAI/DeepSeek 的 reasoning_content；思考模式 + 工具调用后续跑须回传（见 DeepSeek 文档）。
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // MarshalJSON 自定义JSON序列化，将tool_calls中的arguments转换为JSON字符串
@@ -200,10 +210,16 @@ func (cm ChatMessage) MarshalJSON() ([]byte, error) {
 	if cm.Content != "" {
 		aux["content"] = cm.Content
 	}
+	if cm.ReasoningContent != "" {
+		aux["reasoning_content"] = cm.ReasoningContent
+	}
 
 	// 添加tool_call_id（如果存在）
 	if cm.ToolCallID != "" {
 		aux["tool_call_id"] = cm.ToolCallID
+	}
+	if cm.ToolName != "" {
+		aux["tool_name"] = cm.ToolName
 	}
 
 	// 转换tool_calls，将arguments转换为JSON字符串
@@ -432,6 +448,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 				Content:    msg.Content,
 				ToolCalls:  msg.ToolCalls,
 				ToolCallID: msg.ToolCallID,
+				ToolName:   msg.ToolName,
 			})
 			addedCount++
 			contentPreview := msg.Content
@@ -651,8 +668,8 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 
 		// 检查是否有工具调用
 		if len(choice.Message.ToolCalls) > 0 {
-			// 思考内容：如果本轮启用了思考流式增量（thinking_stream_*），前端会去重；
-			// 同时也需要在该“思考阶段结束”时补一条可落库的 thinking（用于刷新后持久化展示）。
+			// ReAct 助手正文流式增量（thinking_stream_*）在 UI 上归为「思考」；若与 streamId 重复则前端会去重。
+			// 该条 thinking 用于刷新后持久化展示（与流式聚合一致）。
 			if choice.Message.Content != "" {
 				sendProgress("thinking", choice.Message.Content, map[string]interface{}{
 					"iteration": i + 1,
@@ -1485,6 +1502,8 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 			}
 		}()
 	}
+	// C2 危险任务 HITL 异步等待：须绑定整条 Agent 运行期 ctx，而非单次工具子 ctx（return 时会被 cancel）
+	toolCtx = c2.WithHITLRunContext(toolCtx, ctx)
 
 	// 检查是否是外部MCP工具（通过工具名称映射）
 	a.mu.RLock()
@@ -1506,7 +1525,9 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 	// 如果调用失败（如工具不存在、超时），返回友好的错误信息而不是抛出异常
 	if err != nil {
 		detail := err.Error()
-		if errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) {
+			detail = "工具调用已被手动终止（MCP 监控页）。智能体将携带此结果继续后续步骤，整条任务不会因此被停止。"
+		} else if errors.Is(err, context.DeadlineExceeded) {
 			min := 10
 			if a.agentConfig != nil && a.agentConfig.ToolTimeoutMinutes > 0 {
 				min = a.agentConfig.ToolTimeoutMinutes
@@ -1895,7 +1916,33 @@ func (a *Agent) ExecuteMCPToolForConversation(ctx context.Context, conversationI
 		a.currentConversationID = prev
 		a.mu.Unlock()
 	}()
+	ctx = withAgentConversationID(ctx, conversationID)
 	return a.executeToolViaMCP(ctx, toolName, args)
+}
+
+// RecordLocalToolExecution 将非 CallTool 路径完成的工具调用写入 MCP 监控库（与 CallTool 落库一致），返回 executionId。
+// 用于 Eino filesystem execute 等场景，使助手气泡「渗透测试详情」与常规 MCP 一致可点进监控。
+func (a *Agent) RecordLocalToolExecution(toolName string, args map[string]interface{}, resultText string, invokeErr error) string {
+	if a == nil || a.mcpServer == nil {
+		return ""
+	}
+	return a.mcpServer.RecordCompletedToolInvocation(toolName, args, resultText, invokeErr)
+}
+
+// CancelMCPToolExecutionWithNote 取消一次进行中的 MCP 工具（先内部后外部），与监控页「终止工具」一致；note 非空时合并进返回给模型的文本。
+func (a *Agent) CancelMCPToolExecutionWithNote(executionID, note string) bool {
+	executionID = strings.TrimSpace(executionID)
+	note = strings.TrimSpace(note)
+	if executionID == "" {
+		return false
+	}
+	if a.mcpServer != nil && a.mcpServer.CancelToolExecutionWithNote(executionID, note) {
+		return true
+	}
+	if a.externalMCPMgr != nil && a.externalMCPMgr.CancelToolExecutionWithNote(executionID, note) {
+		return true
+	}
+	return false
 }
 
 // extractQuotedToolName 尝试从错误信息中提取被引用的工具名称

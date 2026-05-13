@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,6 +41,13 @@ type Server struct {
 	logger                *zap.Logger
 	maxExecutionsInMemory int // 内存中最大执行记录数
 	sseClients            map[string]*sseClient
+	runningCancels        map[string]context.CancelFunc
+	runningCancelsMu      sync.Mutex
+	abortUserNotes        map[string]string // 监控页终止时附带的用户说明，与 executionID 对应
+	// httpToolTimeoutMinutes 同步 agent.tool_timeout_minutes，用于 POST /api/mcp 的 tools/call（不经 Agent 包装的路径）。
+	// nil 表示未配置，沿用默认 30 分钟；指向 0 表示不限制；>0 为分钟数。
+	httpToolTimeoutMinutes *int
+	httpToolTimeoutMu      sync.RWMutex
 }
 
 type sseClient struct {
@@ -49,6 +57,13 @@ type sseClient struct {
 
 // ToolHandler 工具处理函数
 type ToolHandler func(ctx context.Context, args map[string]interface{}) (*ToolResult, error)
+
+func executionStatusAndMessage(err error) (status string, errMsg string) {
+	if errors.Is(err, context.Canceled) {
+		return "cancelled", "已手动终止（MCP 监控）"
+	}
+	return "failed", err.Error()
+}
 
 // NewServer 创建新的MCP服务器
 func NewServer(logger *zap.Logger) *Server {
@@ -68,6 +83,8 @@ func NewServerWithStorage(logger *zap.Logger, storage MonitorStorage) *Server {
 		logger:                logger,
 		maxExecutionsInMemory: 1000, // 默认最多在内存中保留1000条执行记录
 		sseClients:            make(map[string]*sseClient),
+		runningCancels:        make(map[string]context.CancelFunc),
+		abortUserNotes:        make(map[string]string),
 	}
 
 	// 初始化默认提示词和资源
@@ -75,6 +92,39 @@ func NewServerWithStorage(logger *zap.Logger, storage MonitorStorage) *Server {
 	s.initDefaultResources()
 
 	return s
+}
+
+// ConfigureHTTPToolCallTimeoutFromAgentMinutes 将 agent.tool_timeout_minutes 同步到经 HTTP POST /api/mcp 触发的 tools/call。
+// minutes<=0 表示不设置硬性截止时间（与配置「0 不限制」一致）；minutes>0 为该次调用的最长等待时间。
+// 未调用前对 tools/call 使用默认 30 分钟（与历史硬编码一致）。
+func (s *Server) ConfigureHTTPToolCallTimeoutFromAgentMinutes(minutes int) {
+	if s == nil {
+		return
+	}
+	v := minutes
+	if v < 0 {
+		v = 0
+	}
+	s.httpToolTimeoutMu.Lock()
+	defer s.httpToolTimeoutMu.Unlock()
+	s.httpToolTimeoutMinutes = &v
+}
+
+func (s *Server) effectiveHTTPToolCallDeadline() (context.Context, context.CancelFunc) {
+	const defaultDur = 30 * time.Minute
+	if s == nil {
+		return context.WithTimeout(context.Background(), defaultDur)
+	}
+	s.httpToolTimeoutMu.RLock()
+	mPtr := s.httpToolTimeoutMinutes
+	s.httpToolTimeoutMu.RUnlock()
+	if mPtr == nil {
+		return context.WithTimeout(context.Background(), defaultDur)
+	}
+	if *mPtr <= 0 {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithTimeout(context.Background(), time.Duration(*mPtr)*time.Minute)
 }
 
 // RegisterTool 注册工具
@@ -444,15 +494,22 @@ func (s *Server) handleCallTool(msg *Message) *Message {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
+	baseCtx, timeoutCancel := s.effectiveHTTPToolCallDeadline()
+	defer timeoutCancel()
+	execCtx, runCancel := context.WithCancel(baseCtx)
+	s.registerRunningCancel(executionID, runCancel)
+	defer func() {
+		runCancel()
+		s.unregisterRunningCancel(executionID)
+	}()
 
 	s.logger.Info("开始执行工具",
 		zap.String("toolName", req.Name),
 		zap.Any("arguments", req.Arguments),
 	)
 
-	result, err := handler(ctx, req.Arguments)
+	result, err := handler(execCtx, req.Arguments)
+	cancelledWithUserNote := s.applyAbortUserNoteToCancelledToolResult(executionID, &result, &err)
 	now := time.Now()
 	var failed bool
 	var finalResult *ToolResult
@@ -462,18 +519,26 @@ func (s *Server) handleCallTool(msg *Message) *Message {
 	execution.Duration = now.Sub(execution.StartTime)
 
 	if err != nil {
-		execution.Status = "failed"
-		execution.Error = err.Error()
+		st, msg := executionStatusAndMessage(err)
+		execution.Status = st
+		execution.Error = msg
 		failed = true
 	} else if result != nil && result.IsError {
-		execution.Status = "failed"
-		if len(result.Content) > 0 {
-			execution.Error = result.Content[0].Text
+		if cancelledWithUserNote {
+			execution.Status = "cancelled"
+			execution.Error = ""
+			execution.Result = result
+			failed = true
 		} else {
-			execution.Error = "工具执行返回错误结果"
+			execution.Status = "failed"
+			if len(result.Content) > 0 {
+				execution.Error = result.Content[0].Text
+			} else {
+				execution.Error = "工具执行返回错误结果"
+			}
+			execution.Result = result
+			failed = true
 		}
-		execution.Result = result
-		failed = true
 	} else {
 		execution.Status = "completed"
 		if result == nil {
@@ -510,9 +575,13 @@ func (s *Server) handleCallTool(msg *Message) *Message {
 			zap.Error(err),
 		)
 
+		errText := fmt.Sprintf("工具执行失败: %v", err)
+		if errors.Is(err, context.Canceled) {
+			errText = "工具执行已手动终止（MCP 监控）。后续编排步骤可继续。"
+		}
 		errorResult, _ := json.Marshal(CallToolResponse{
 			Content: []Content{
-				{Type: "text", Text: fmt.Sprintf("工具执行失败: %v", err)},
+				{Type: "text", Text: errText},
 			},
 			IsError: true,
 		})
@@ -769,7 +838,17 @@ func (s *Server) CallTool(ctx context.Context, toolName string, args map[string]
 		}
 	}
 
-	result, err := handler(ctx, args)
+	execCtx, runCancel := context.WithCancel(ctx)
+	s.registerRunningCancel(executionID, runCancel)
+	notifyToolRunBegin(ctx, executionID)
+	defer func() {
+		notifyToolRunEnd(ctx, executionID)
+		runCancel()
+		s.unregisterRunningCancel(executionID)
+	}()
+
+	result, err := handler(execCtx, args)
+	cancelledWithUserNote := s.applyAbortUserNoteToCancelledToolResult(executionID, &result, &err)
 
 	s.mu.Lock()
 	now := time.Now()
@@ -779,19 +858,28 @@ func (s *Server) CallTool(ctx context.Context, toolName string, args map[string]
 	var finalResult *ToolResult
 
 	if err != nil {
-		execution.Status = "failed"
-		execution.Error = err.Error()
+		st, msg := executionStatusAndMessage(err)
+		execution.Status = st
+		execution.Error = msg
 		failed = true
 	} else if result != nil && result.IsError {
-		execution.Status = "failed"
-		if len(result.Content) > 0 {
-			execution.Error = result.Content[0].Text
+		if cancelledWithUserNote {
+			execution.Status = "cancelled"
+			execution.Error = ""
+			execution.Result = result
+			failed = true
+			finalResult = result
 		} else {
-			execution.Error = "工具执行返回错误结果"
+			execution.Status = "failed"
+			if len(result.Content) > 0 {
+				execution.Error = result.Content[0].Text
+			} else {
+				execution.Error = "工具执行返回错误结果"
+			}
+			execution.Result = result
+			failed = true
+			finalResult = result
 		}
-		execution.Result = result
-		failed = true
-		finalResult = result
 	} else {
 		execution.Status = "completed"
 		if result == nil {
@@ -832,6 +920,49 @@ func (s *Server) CallTool(ctx context.Context, toolName string, args map[string]
 	return finalResult, executionID, nil
 }
 
+// RecordCompletedToolInvocation 将已在其它路径完成的工具调用写入监控存储（格式与 CallTool 结束后一致），
+// 用于 Eino ADK filesystem execute 等未经过 CallTool 的场景；返回 executionId 供助手消息 mcpExecutionIds 关联。
+func (s *Server) RecordCompletedToolInvocation(toolName string, args map[string]interface{}, resultText string, invokeErr error) string {
+	if s == nil {
+		return ""
+	}
+	if args == nil {
+		args = map[string]interface{}{}
+	}
+	executionID := uuid.New().String()
+	now := time.Now()
+	failed := invokeErr != nil
+	exec := &ToolExecution{
+		ID:        executionID,
+		ToolName:  toolName,
+		Arguments: args,
+		StartTime: now,
+		EndTime:   &now,
+		Duration:  0,
+	}
+	if failed {
+		exec.Status = "failed"
+		exec.Error = invokeErr.Error()
+		if strings.TrimSpace(resultText) != "" {
+			exec.Result = &ToolResult{Content: []Content{{Type: "text", Text: resultText}}}
+		}
+	} else {
+		exec.Status = "completed"
+		text := resultText
+		if strings.TrimSpace(text) == "" {
+			text = "（无输出）"
+		}
+		exec.Result = &ToolResult{Content: []Content{{Type: "text", Text: text}}}
+	}
+	if s.storage != nil {
+		if err := s.storage.SaveToolExecution(exec); err != nil {
+			s.logger.Warn("RecordCompletedToolInvocation 保存失败", zap.Error(err))
+		}
+	}
+	s.updateStats(toolName, failed)
+	return executionID
+}
+
 // cleanupOldExecutions 清理旧的执行记录，防止内存无限增长
 func (s *Server) cleanupOldExecutions() {
 	if len(s.executions) <= s.maxExecutionsInMemory {
@@ -867,6 +998,88 @@ func (s *Server) cleanupOldExecutions() {
 		zap.Int("after", len(s.executions)),
 		zap.Int("deleted", toDelete),
 	)
+}
+
+func (s *Server) registerRunningCancel(id string, cancel context.CancelFunc) {
+	s.runningCancelsMu.Lock()
+	s.runningCancels[id] = cancel
+	s.runningCancelsMu.Unlock()
+}
+
+func (s *Server) unregisterRunningCancel(id string) {
+	s.runningCancelsMu.Lock()
+	delete(s.runningCancels, id)
+	s.runningCancelsMu.Unlock()
+}
+
+func (s *Server) readAbortUserNote(id string) string {
+	s.runningCancelsMu.Lock()
+	defer s.runningCancelsMu.Unlock()
+	if s.abortUserNotes == nil {
+		return ""
+	}
+	return s.abortUserNotes[id]
+}
+
+func (s *Server) takeAbortUserNote(id string) string {
+	s.runningCancelsMu.Lock()
+	defer s.runningCancelsMu.Unlock()
+	if s.abortUserNotes == nil {
+		return ""
+	}
+	n := s.abortUserNotes[id]
+	delete(s.abortUserNotes, id)
+	return n
+}
+
+// applyAbortUserNoteToCancelledToolResult 监控页「终止并填写说明」时合并「工具已输出 + 用户说明」交给模型。
+// exec 等工具会把失败写在 *ToolResult 里并返回 err==nil，若仅在 err!=nil 时合并会漏掉说明，甚至误 clear 掉 note。
+func (s *Server) applyAbortUserNoteToCancelledToolResult(executionID string, result **ToolResult, err *error) (cancelledWithUserNote bool) {
+	note := strings.TrimSpace(s.readAbortUserNote(executionID))
+	if note == "" {
+		return false
+	}
+	hasErr := err != nil && *err != nil
+	hasRes := result != nil && *result != nil
+	if !hasErr && !hasRes {
+		return false
+	}
+	_ = s.takeAbortUserNote(executionID)
+	partial := ""
+	if hasRes {
+		partial = ToolResultPlainText(*result)
+	}
+	if partial == "" && hasErr {
+		partial = (*err).Error()
+	}
+	merged := MergePartialToolOutputAndAbortNote(partial, note)
+	*err = nil
+	*result = &ToolResult{Content: []Content{{Type: "text", Text: merged}}, IsError: true}
+	return true
+}
+
+// CancelToolExecutionWithNote 取消内部工具；note 非空时与工具已返回文本合并后交给上层模型。
+func (s *Server) CancelToolExecutionWithNote(id string, note string) bool {
+	s.runningCancelsMu.Lock()
+	cancel, ok := s.runningCancels[id]
+	if !ok || cancel == nil {
+		s.runningCancelsMu.Unlock()
+		return false
+	}
+	if strings.TrimSpace(note) != "" {
+		if s.abortUserNotes == nil {
+			s.abortUserNotes = make(map[string]string)
+		}
+		s.abortUserNotes[id] = strings.TrimSpace(note)
+	}
+	s.runningCancelsMu.Unlock()
+	cancel()
+	return true
+}
+
+// CancelToolExecution 取消正在执行的内部工具调用（无用户说明）。
+func (s *Server) CancelToolExecution(id string) bool {
+	return s.CancelToolExecutionWithNote(id, "")
 }
 
 // initDefaultPrompts 初始化默认提示词模板

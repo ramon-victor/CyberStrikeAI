@@ -37,6 +37,16 @@ const (
 	ToolBatchTaskAdd             = "batch_task_add_task"
 	ToolBatchTaskUpdate          = "batch_task_update_task"
 	ToolBatchTaskRemove          = "batch_task_remove_task"
+
+	// C2 工具集（合并同类项，8 个统一工具）
+	ToolC2Listener   = "c2_listener"    // 监听器管理（create/start/stop/list/get/update/delete）
+	ToolC2Session    = "c2_session"     // 会话管理（list/get/set_sleep/kill/delete）
+	ToolC2Task       = "c2_task"        // 任务下发（统一 task_type 参数）
+	ToolC2TaskManage = "c2_task_manage" // 任务管理（get_result/wait/list/cancel）
+	ToolC2Payload    = "c2_payload"     // Payload 生成（oneliner/build）
+	ToolC2Event      = "c2_event"       // 事件查询
+	ToolC2Profile    = "c2_profile"     // Malleable Profile 管理（list/get/create/update/delete）
+	ToolC2File       = "c2_file"        // 文件管理（list/get_result）
 )
 
 // IsBuiltinTool 检查工具名称是否是内置工具
@@ -66,7 +76,16 @@ func IsBuiltinTool(toolName string) bool {
 		ToolBatchTaskScheduleEnabled,
 		ToolBatchTaskAdd,
 		ToolBatchTaskUpdate,
-		ToolBatchTaskRemove:
+		ToolBatchTaskRemove,
+		// C2 工具
+		ToolC2Listener,
+		ToolC2Session,
+		ToolC2Task,
+		ToolC2TaskManage,
+		ToolC2Payload,
+		ToolC2Event,
+		ToolC2Profile,
+		ToolC2File:
 		return true
 	default:
 		return false
@@ -101,5 +120,14 @@ func GetAllBuiltinTools() []string {
 		ToolBatchTaskAdd,
 		ToolBatchTaskUpdate,
 		ToolBatchTaskRemove,
+		// C2 工具
+		ToolC2Listener,
+		ToolC2Session,
+		ToolC2Task,
+		ToolC2TaskManage,
+		ToolC2Payload,
+		ToolC2Event,
+		ToolC2Profile,
+		ToolC2File,
 	}
 }

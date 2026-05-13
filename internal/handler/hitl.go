@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS hitl_conversation_configs (
     enabled INTEGER NOT NULL DEFAULT 0,
     mode TEXT NOT NULL DEFAULT 'off',
     sensitive_tools TEXT NOT NULL DEFAULT '[]',
-    timeout_seconds INTEGER NOT NULL DEFAULT 300,
+    timeout_seconds INTEGER NOT NULL DEFAULT 0,
     updated_at DATETIME NOT NULL
 );`)
 	if err != nil {
@@ -133,7 +133,8 @@ func (m *HITLManager) ActivateConversation(conversationID string, req *HITLReque
 			tools[n] = struct{}{}
 		}
 	}
-	timeout := 5 * time.Minute
+	// timeout <= 0 means wait forever (no timeout).
+	timeout := time.Duration(0)
 	if req.TimeoutSeconds > 0 {
 		timeout = time.Duration(req.TimeoutSeconds) * time.Second
 	}
@@ -232,6 +233,15 @@ func (m *HITLManager) shouldInterrupt(conversationID, toolName string) (hitlRunt
 	return cfg, !inWhitelist
 }
 
+// NeedsToolApproval 与 Agent 工具层 shouldInterrupt 语义一致：仅当该会话已开启人机协同且工具不在免审批白名单时为 true。
+func (m *HITLManager) NeedsToolApproval(conversationID, toolName string) bool {
+	if m == nil {
+		return false
+	}
+	_, need := m.shouldInterrupt(conversationID, toolName)
+	return need
+}
+
 func (m *HITLManager) CreatePendingInterrupt(conversationID, assistantMessageID, mode, toolName, toolCallID, payload string) (*pendingInterrupt, error) {
 	now := time.Now()
 	id := "hitl_" + strings.ReplaceAll(uuid.New().String(), "-", "")
@@ -275,8 +285,8 @@ func (m *HITLManager) ensureConversationHITLModePersisted(conversationID, interr
 	}
 	cfg.Enabled = true
 	cfg.Mode = nm
-	if cfg.TimeoutSeconds <= 0 {
-		cfg.TimeoutSeconds = 300
+	if cfg.TimeoutSeconds < 0 {
+		cfg.TimeoutSeconds = 0
 	}
 	return m.SaveConversationConfig(conversationID, cfg)
 }
@@ -341,7 +351,7 @@ func (m *HITLManager) SaveConversationConfig(conversationID string, req *HITLReq
 		return errors.New("conversationId is required")
 	}
 	if req == nil {
-		req = &HITLRequest{Enabled: false, Mode: "off", TimeoutSeconds: 300}
+		req = &HITLRequest{Enabled: false, Mode: "off", TimeoutSeconds: 0}
 	}
 	mode := normalizeHitlMode(req.Mode)
 	if !req.Enabled {
@@ -349,8 +359,8 @@ func (m *HITLManager) SaveConversationConfig(conversationID string, req *HITLReq
 	}
 	tools, _ := json.Marshal(req.SensitiveTools)
 	timeout := req.TimeoutSeconds
-	if timeout <= 0 {
-		timeout = 300
+	if timeout < 0 {
+		timeout = 0
 	}
 	_, err := m.db.Exec(`INSERT INTO hitl_conversation_configs
 		(conversation_id, enabled, mode, sensitive_tools, timeout_seconds, updated_at)
@@ -368,10 +378,13 @@ func (m *HITLManager) LoadConversationConfig(conversationID string) (*HITLReques
 	err := m.db.QueryRow(`SELECT enabled, mode, sensitive_tools, timeout_seconds FROM hitl_conversation_configs WHERE conversation_id = ?`, conversationID).
 		Scan(&enabledInt, &mode, &toolsJSON, &timeout)
 	if errors.Is(err, sql.ErrNoRows) {
-		return &HITLRequest{Enabled: false, Mode: "off", SensitiveTools: []string{}, TimeoutSeconds: 300}, nil
+		return &HITLRequest{Enabled: false, Mode: "off", SensitiveTools: []string{}, TimeoutSeconds: 0}, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if timeout < 0 {
+		timeout = 0
 	}
 	tools := make([]string, 0)
 	_ = json.Unmarshal([]byte(toolsJSON), &tools)
@@ -389,6 +402,12 @@ func (m *HITLManager) waitDecision(ctx context.Context, p *pendingInterrupt, tim
 		delete(m.pending, p.InterruptID)
 		m.mu.Unlock()
 	}()
+	var timeoutCh <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
 	select {
 	case d := <-p.decideCh:
 		// 只有 review_edit 模式允许改参；其他模式一律忽略 edited arguments
@@ -398,7 +417,7 @@ func (m *HITLManager) waitDecision(ctx context.Context, p *pendingInterrupt, tim
 		_, _ = m.db.Exec(`UPDATE hitl_interrupts SET status='decided', decision=?, decision_comment=?, decided_at=? WHERE id=?`,
 			d.Decision, d.Comment, time.Now(), p.InterruptID)
 		return d, nil
-	case <-time.After(timeout):
+	case <-timeoutCh:
 		_, _ = m.db.Exec(`UPDATE hitl_interrupts SET status='timeout', decision='approve', decision_comment='timeout auto approve', decided_at=? WHERE id=?`,
 			time.Now(), p.InterruptID)
 		return hitlDecision{Decision: "approve", Comment: "timeout auto approve"}, nil
@@ -718,8 +737,8 @@ func (h *AgentHandler) GetHITLConversationConfig(c *gin.Context) {
 			cfg2 := *cfg
 			cfg2.Enabled = true
 			cfg2.Mode = normalizeHitlMode(pendMode)
-			if cfg2.TimeoutSeconds <= 0 {
-				cfg2.TimeoutSeconds = 300
+			if cfg2.TimeoutSeconds < 0 {
+				cfg2.TimeoutSeconds = 0
 			}
 			cfg = &cfg2
 		}

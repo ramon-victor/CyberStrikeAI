@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -245,6 +248,37 @@ func (h *MonitorHandler) GetExecution(c *gin.Context) {
 	c.JSON(http.StatusNotFound, gin.H{"error": "执行记录未找到"})
 }
 
+// CancelExecution 手动取消进行中的 MCP 工具调用（仅取消该次 tools/call 的上下文，不停止整条 Agent / 迭代任务）
+// 请求体可选 JSON：{ "note": "用户说明" }，将与工具已返回输出合并交给模型（含「用户终止说明」标题块，与命令行原文区分）。
+func (h *MonitorHandler) CancelExecution(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "执行记录ID不能为空"})
+		return
+	}
+	note := ""
+	dec := json.NewDecoder(c.Request.Body)
+	var body struct {
+		Note string `json:"note"`
+	}
+	if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体须为 JSON，例如 {\"note\":\"说明\"}，可为空对象"})
+		return
+	}
+	note = strings.TrimSpace(body.Note)
+	if h.mcpServer.CancelToolExecutionWithNote(id, note) {
+		h.logger.Info("已请求取消 MCP 工具执行", zap.String("executionId", id), zap.String("source", "internal"), zap.Bool("hasNote", note != ""))
+		c.JSON(http.StatusOK, gin.H{"message": "已发送终止信号", "executionId": id})
+		return
+	}
+	if h.externalMCPMgr != nil && h.externalMCPMgr.CancelToolExecutionWithNote(id, note) {
+		h.logger.Info("已请求取消 MCP 工具执行", zap.String("executionId", id), zap.String("source", "external"), zap.Bool("hasNote", note != ""))
+		c.JSON(http.StatusOK, gin.H{"message": "已发送终止信号", "executionId": id})
+		return
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": "未找到进行中的工具执行，或该任务已结束"})
+}
+
 // BatchGetToolNames 批量获取工具执行的工具名称（消除前端 N+1 请求）
 func (h *MonitorHandler) BatchGetToolNames(c *gin.Context) {
 	var req struct {
@@ -317,7 +351,7 @@ func (h *MonitorHandler) DeleteExecution(c *gin.Context) {
 		totalCalls := 1
 		successCalls := 0
 		failedCalls := 0
-		if exec.Status == "failed" {
+		if exec.Status == "failed" || exec.Status == "cancelled" {
 			failedCalls = 1
 		} else if exec.Status == "completed" {
 			successCalls = 1
@@ -381,7 +415,7 @@ func (h *MonitorHandler) DeleteExecutions(c *gin.Context) {
 
 			stats := toolStats[exec.ToolName]
 			stats.totalCalls++
-			if exec.Status == "failed" {
+			if exec.Status == "failed" || exec.Status == "cancelled" {
 				stats.failedCalls++
 			} else if exec.Status == "completed" {
 				stats.successCalls++

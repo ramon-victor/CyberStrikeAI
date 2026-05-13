@@ -461,6 +461,14 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"type":        "string",
 							"description": "对话ID",
 						},
+						"reason": map[string]interface{}{
+							"type":        "string",
+							"description": "可选。与 MCP 监控页「终止并说明」一致：非空时合并进当前工具返回给模型的文本（含 USER INTERRUPT NOTE 块）",
+						},
+						"continueAfter": map[string]interface{}{
+							"type":        "boolean",
+							"description": "为 true 时仅终止当前进行中的 MCP 工具调用（不取消整轮任务）；须已有工具在执行，否则 400",
+						},
 					},
 				},
 				"AgentTask": map[string]interface{}{
@@ -3311,6 +3319,55 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						},
 						"404": map[string]interface{}{
 							"description": "执行记录不存在",
+						},
+						"401": map[string]interface{}{
+							"description": "未授权",
+						},
+					},
+				},
+			},
+			"/api/monitor/execution/{id}/cancel": map[string]interface{}{
+				"post": map[string]interface{}{
+					"tags":        []string{"监控"},
+					"summary":     "取消进行中的工具执行",
+					"description": "对当前进程内正在执行的 MCP 工具调用发送 context 取消信号；上层对话/多步任务可继续。若执行已结束或未在本进程内运行则返回 404。",
+					"operationId": "cancelExecution",
+					"parameters": []map[string]interface{}{
+						{
+							"name":        "id",
+							"in":          "path",
+							"required":    true,
+							"description": "执行ID",
+							"schema": map[string]interface{}{
+								"type": "string",
+							},
+						},
+					},
+					"requestBody": map[string]interface{}{
+						"required": false,
+						"content": map[string]interface{}{
+							"application/json": map[string]interface{}{
+								"schema": map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"note": map[string]interface{}{
+											"type":        "string",
+											"description": "可选。非空时与工具已返回输出合并交给大模型，并带有「用户终止说明」标题块以便与命令行原文区分",
+										},
+									},
+								},
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "已发送终止信号",
+						},
+						"400": map[string]interface{}{
+							"description": "请求体不是合法 JSON",
+						},
+						"404": map[string]interface{}{
+							"description": "未找到进行中的工具执行",
 						},
 						"401": map[string]interface{}{
 							"description": "未授权",

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/compose"
@@ -105,6 +107,39 @@ func TestSoftRecoveryToolCallMiddleware_PassesThrough(t *testing.T) {
 	}
 	if out.Result != "success" {
 		t.Fatalf("expected 'success', got %q", out.Result)
+	}
+}
+
+func TestSoftRecoveryStreamableToolCallMiddleware_LocalStreamFuncJSONError(t *testing.T) {
+	mw := softRecoveryStreamableToolCallMiddleware()
+	next := func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+		return nil, errors.New(`[LocalStreamFunc] failed to unmarshal arguments in json, toolName=execute, err="Syntax error no sources available, the input json is empty`)
+	}
+	wrapped := mw(next)
+	out, err := wrapped(context.Background(), &compose.ToolInput{
+		Name:      "execute",
+		Arguments: "",
+	})
+	if err != nil {
+		t.Fatalf("expected nil error (soft recovery), got: %v", err)
+	}
+	if out == nil || out.Result == nil {
+		t.Fatal("expected stream result")
+	}
+	var sb strings.Builder
+	for {
+		chunk, rerr := out.Result.Recv()
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			t.Fatalf("recv: %v", rerr)
+		}
+		sb.WriteString(chunk)
+	}
+	text := sb.String()
+	if !containsAll(text, "[Tool Error]", "execute", "JSON") {
+		t.Fatalf("recovery message missing expected content: %s", text)
 	}
 }
 

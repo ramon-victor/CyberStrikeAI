@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/agent"
+	"cyberstrike-ai/internal/c2"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/einoobserve"
 	"cyberstrike-ai/internal/handler"
 	"cyberstrike-ai/internal/knowledge"
 	"cyberstrike-ai/internal/logger"
@@ -51,6 +53,10 @@ type App struct {
 	robotMu            sync.Mutex                // 保护钉钉/飞书长连接的 cancel
 	dingCancel         context.CancelFunc        // 钉钉 Stream 取消函数，用于配置变更时重启
 	larkCancel         context.CancelFunc        // 飞书长连接取消函数，用于配置变更时重启
+	c2Manager          *c2.Manager               // C2 管理器（未启用 C2 时为 nil）
+	c2Watchdog         *c2.SessionWatchdog       // C2 会话看门狗
+	c2WatchdogCancel   context.CancelFunc        // 看门狗取消函数
+	c2Handler          *handler.C2Handler        // C2 REST（与 Manager 生命周期同步）
 }
 
 // New 创建新应用
@@ -85,6 +91,7 @@ func New(cfg *config.Config, log *logger.Logger) (*App, error) {
 
 	// 创建MCP服务器（带数据库持久化）
 	mcpServer := mcp.NewServerWithStorage(log.Logger, db)
+	mcpServer.ConfigureHTTPToolCallTimeoutFromAgentMinutes(cfg.Agent.ToolTimeoutMinutes)
 
 	// 创建安全工具执行器
 	executor := security.NewExecutor(&cfg.Security, mcpServer, log.Logger)
@@ -318,6 +325,7 @@ func New(cfg *config.Config, log *logger.Logger) (*App, error) {
 	}
 	monitorHandler := handler.NewMonitorHandler(mcpServer, executor, db, log.Logger)
 	monitorHandler.SetExternalMCPManager(externalMCPMgr) // 设置外部MCP管理器，以便获取外部MCP执行记录
+	notificationHandler := handler.NewNotificationHandler(db, agentHandler, log.Logger)
 	groupHandler := handler.NewGroupHandler(db, log.Logger)
 	authHandler := handler.NewAuthHandler(authManager, cfg, configPath, log.Logger)
 	attackChainHandler := handler.NewAttackChainHandler(db, &cfg.OpenAI, log.Logger)
@@ -336,6 +344,15 @@ func New(cfg *config.Config, log *logger.Logger) (*App, error) {
 	if db != nil {
 		skillsHandler.SetDB(db) // 设置数据库连接以便获取调用统计
 	}
+
+	// ============================================================================
+	// 初始化 C2 模块（可按配置关闭，节省本机部署资源）
+	// ============================================================================
+	c2Manager, c2Watchdog, watchdogCancel := setupC2Runtime(cfg, db, agentHandler, log.Logger)
+	if c2Manager != nil {
+		registerC2Tools(mcpServer, c2Manager, log.Logger, cfg.Server.Port)
+	}
+	c2Handler := handler.NewC2Handler(c2Manager, log.Logger)
 
 	// 创建OpenAPI处理器
 	conversationHandler := handler.NewConversationHandler(db, log.Logger)
@@ -360,6 +377,10 @@ func New(cfg *config.Config, log *logger.Logger) (*App, error) {
 		knowledgeHandler:   knowledgeHandler,
 		agentHandler:       agentHandler,
 		robotHandler:       robotHandler,
+		c2Manager:          c2Manager,
+		c2Watchdog:         c2Watchdog,
+		c2WatchdogCancel:   watchdogCancel,
+		c2Handler:          c2Handler,
 	}
 	// 飞书/钉钉长连接（无需公网），启用时在后台启动；后续前端应用配置时会通过 RestartRobotConnections 重启
 	app.startRobotConnections()
@@ -428,12 +449,21 @@ func New(cfg *config.Config, log *logger.Logger) (*App, error) {
 	// 设置机器人连接重启器，前端应用配置后无需重启服务即可使钉钉/飞书新配置生效
 	configHandler.SetRobotRestarter(app)
 
+	configHandler.SetC2Runtime(app)
+	configHandler.SetC2ToolRegistrar(func() error {
+		if app.config.C2.EnabledEffective() && app.c2Manager != nil {
+			registerC2Tools(mcpServer, app.c2Manager, log.Logger, app.config.Server.Port)
+		}
+		return nil
+	})
+
 	// 设置路由（使用 App 实例以便动态获取 handler）
 	setupRoutes(
 		router,
 		authHandler,
 		agentHandler,
 		monitorHandler,
+		notificationHandler,
 		conversationHandler,
 		robotHandler,
 		groupHandler,
@@ -449,6 +479,7 @@ func New(cfg *config.Config, log *logger.Logger) (*App, error) {
 		markdownAgentsHandler,
 		fofaHandler,
 		terminalHandler,
+		app.c2Handler,
 		mcpServer,
 		authManager,
 		openAPIHandler,
@@ -528,6 +559,10 @@ func (a *App) RunWithContext(ctx context.Context) error {
 
 // Shutdown 关闭应用
 func (a *App) Shutdown() {
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = einoobserve.ShutdownOtel(shutdownCtx)
+	shutdownCancel()
+
 	// 停止钉钉/飞书长连接
 	a.robotMu.Lock()
 	if a.dingCancel != nil {
@@ -539,6 +574,8 @@ func (a *App) Shutdown() {
 		a.larkCancel = nil
 	}
 	a.robotMu.Unlock()
+
+	a.shutdownC2()
 
 	// 停止所有外部MCP客户端
 	if a.externalMCPMgr != nil {
@@ -568,12 +605,12 @@ func (a *App) startRobotConnections() {
 	if cfg.Robots.Lark.Enabled && cfg.Robots.Lark.AppID != "" && cfg.Robots.Lark.AppSecret != "" {
 		ctx, cancel := context.WithCancel(context.Background())
 		a.larkCancel = cancel
-		go robot.StartLark(ctx, cfg.Robots.Lark, a.robotHandler, a.logger.Logger)
+		go robot.StartLark(ctx, cfg.Robots, a.robotHandler, a.logger.Logger)
 	}
 	if cfg.Robots.Dingtalk.Enabled && cfg.Robots.Dingtalk.ClientID != "" && cfg.Robots.Dingtalk.ClientSecret != "" {
 		ctx, cancel := context.WithCancel(context.Background())
 		a.dingCancel = cancel
-		go robot.StartDing(ctx, cfg.Robots.Dingtalk, a.robotHandler, a.logger.Logger)
+		go robot.StartDing(ctx, cfg.Robots, a.robotHandler, a.logger.Logger)
 	}
 }
 
@@ -600,6 +637,7 @@ func setupRoutes(
 	authHandler *handler.AuthHandler,
 	agentHandler *handler.AgentHandler,
 	monitorHandler *handler.MonitorHandler,
+	notificationHandler *handler.NotificationHandler,
 	conversationHandler *handler.ConversationHandler,
 	robotHandler *handler.RobotHandler,
 	groupHandler *handler.GroupHandler,
@@ -615,6 +653,7 @@ func setupRoutes(
 	markdownAgentsHandler *handler.MarkdownAgentsHandler,
 	fofaHandler *handler.FofaHandler,
 	terminalHandler *handler.TerminalHandler,
+	c2Handler *handler.C2Handler,
 	mcpServer *mcp.Server,
 	authManager *security.AuthManager,
 	openAPIHandler *handler.OpenAPIHandler,
@@ -724,10 +763,13 @@ func setupRoutes(
 		// 监控
 		protected.GET("/monitor", monitorHandler.Monitor)
 		protected.GET("/monitor/execution/:id", monitorHandler.GetExecution)
+		protected.POST("/monitor/execution/:id/cancel", monitorHandler.CancelExecution)
 		protected.POST("/monitor/executions/names", monitorHandler.BatchGetToolNames)
 		protected.DELETE("/monitor/execution/:id", monitorHandler.DeleteExecution)
 		protected.DELETE("/monitor/executions", monitorHandler.DeleteExecutions)
 		protected.GET("/monitor/stats", monitorHandler.GetStats)
+		protected.GET("/notifications/summary", notificationHandler.GetSummary)
+		protected.POST("/notifications/read", notificationHandler.MarkRead)
 
 		// 配置管理
 		protected.GET("/config", configHandler.GetConfig)
@@ -921,6 +963,52 @@ func setupRoutes(
 		protected.DELETE("/webshell/connections/:id", webshellHandler.DeleteConnection)
 		protected.POST("/webshell/exec", webshellHandler.Exec)
 		protected.POST("/webshell/file", webshellHandler.FileOp)
+
+		// C2 管理（未启用时返回 503，避免 Handler 空指针）
+		c2Routes := protected.Group("/c2")
+		c2Routes.Use(func(c *gin.Context) {
+			if app.c2Manager == nil {
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+					"error":   "c2_disabled",
+					"message": "C2 功能已在系统设置中关闭",
+					"enabled": false,
+				})
+				return
+			}
+			c.Next()
+		})
+		c2Routes.GET("/listeners", c2Handler.ListListeners)
+		c2Routes.POST("/listeners", c2Handler.CreateListener)
+		c2Routes.GET("/listeners/:id", c2Handler.GetListener)
+		c2Routes.PUT("/listeners/:id", c2Handler.UpdateListener)
+		c2Routes.DELETE("/listeners/:id", c2Handler.DeleteListener)
+		c2Routes.POST("/listeners/:id/start", c2Handler.StartListener)
+		c2Routes.POST("/listeners/:id/stop", c2Handler.StopListener)
+		c2Routes.GET("/sessions", c2Handler.ListSessions)
+		c2Routes.GET("/sessions/:id", c2Handler.GetSession)
+		c2Routes.DELETE("/sessions/:id", c2Handler.DeleteSession)
+		c2Routes.PUT("/sessions/:id/sleep", c2Handler.SetSessionSleep)
+		c2Routes.GET("/tasks", c2Handler.ListTasks)
+		c2Routes.DELETE("/tasks", c2Handler.DeleteTasks)
+		c2Routes.GET("/tasks/:id", c2Handler.GetTask)
+		c2Routes.POST("/tasks", c2Handler.CreateTask)
+		c2Routes.POST("/tasks/:id/cancel", c2Handler.CancelTask)
+		c2Routes.GET("/tasks/:id/wait", c2Handler.WaitTask)
+		c2Routes.POST("/sessions/:id/tasks", c2Handler.CreateTask)
+		c2Routes.POST("/payloads/oneliner", c2Handler.PayloadOneliner)
+		c2Routes.POST("/payloads/build", c2Handler.PayloadBuild)
+		c2Routes.GET("/payloads/:id/download", c2Handler.PayloadDownload)
+		c2Routes.GET("/events", c2Handler.ListEvents)
+		c2Routes.DELETE("/events", c2Handler.DeleteEvents)
+		c2Routes.GET("/events/stream", c2Handler.EventStream)
+		c2Routes.POST("/files/upload", c2Handler.UploadFileForImplant)
+		c2Routes.GET("/files", c2Handler.ListFiles)
+		c2Routes.GET("/tasks/:id/result-file", c2Handler.DownloadResultFile)
+		c2Routes.GET("/profiles", c2Handler.ListProfiles)
+		c2Routes.GET("/profiles/:id", c2Handler.GetProfile)
+		c2Routes.POST("/profiles", c2Handler.CreateProfile)
+		c2Routes.PUT("/profiles/:id", c2Handler.UpdateProfile)
+		c2Routes.DELETE("/profiles/:id", c2Handler.DeleteProfile)
 
 		// 对话附件（chat_uploads）管理
 		protected.GET("/chat-uploads", chatUploadsHandler.List)

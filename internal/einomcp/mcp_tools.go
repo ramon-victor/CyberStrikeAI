@@ -23,12 +23,16 @@ type ExecutionRecorder func(executionID string)
 const ToolErrorPrefix = "__CYBERSTRIKE_AI_TOOL_ERROR__\n"
 
 // ToolsFromDefinitions 将单 Agent 使用的 OpenAI 风格工具定义转为 Eino InvokableTool，执行时走 Agent 的 MCP 路径。
+// invokeNotify 可选：与 runEinoADKAgentLoop 共享，在 InvokableRun 返回时触发 UI 与 pending 清理（与 ADK Tool 事件去重）。
+// einoAgentName 为该套工具所属 ChatModelAgent 的 Name（主代理或子代理 id），用于 SSE 上的 einoAgent 字段。
 func ToolsFromDefinitions(
 	ag *agent.Agent,
 	holder *ConversationHolder,
 	defs []agent.Tool,
 	rec ExecutionRecorder,
 	toolOutputChunk func(toolName, toolCallID, chunk string),
+	invokeNotify *ToolInvokeNotifyHolder,
+	einoAgentName string,
 ) ([]tool.BaseTool, error) {
 	out := make([]tool.BaseTool, 0, len(defs))
 	for _, d := range defs {
@@ -40,12 +44,14 @@ func ToolsFromDefinitions(
 			return nil, fmt.Errorf("tool %q: %w", d.Function.Name, err)
 		}
 		out = append(out, &mcpBridgeTool{
-			info:   info,
-			name:   d.Function.Name,
-			agent:  ag,
-			holder: holder,
-			record: rec,
-			chunk:  toolOutputChunk,
+			info:           info,
+			name:           d.Function.Name,
+			agent:          ag,
+			holder:         holder,
+			record:         rec,
+			chunk:          toolOutputChunk,
+			invokeNotify:   invokeNotify,
+			einoAgentName:  strings.TrimSpace(einoAgentName),
 		})
 	}
 	return out, nil
@@ -77,12 +83,14 @@ func toolInfoFromDefinition(d agent.Tool) (*schema.ToolInfo, error) {
 }
 
 type mcpBridgeTool struct {
-	info   *schema.ToolInfo
-	name   string
-	agent  *agent.Agent
-	holder *ConversationHolder
-	record ExecutionRecorder
-	chunk  func(toolName, toolCallID, chunk string)
+	info          *schema.ToolInfo
+	name          string
+	agent         *agent.Agent
+	holder        *ConversationHolder
+	record        ExecutionRecorder
+	chunk         func(toolName, toolCallID, chunk string)
+	invokeNotify  *ToolInvokeNotifyHolder
+	einoAgentName string
 }
 
 func (m *mcpBridgeTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
@@ -90,8 +98,27 @@ func (m *mcpBridgeTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	return m.info, nil
 }
 
-func (m *mcpBridgeTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (m *mcpBridgeTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (out string, err error) {
 	_ = opts
+	toolCallID := compose.GetToolCallID(ctx)
+	defer func() {
+		if m.invokeNotify == nil {
+			return
+		}
+		tid := strings.TrimSpace(toolCallID)
+		if tid == "" {
+			return
+		}
+		success := err == nil && !strings.HasPrefix(out, ToolErrorPrefix)
+		body := out
+		if err != nil {
+			success = false
+		} else if strings.HasPrefix(out, ToolErrorPrefix) {
+			success = false
+			body = strings.TrimPrefix(out, ToolErrorPrefix)
+		}
+		m.invokeNotify.Fire(tid, m.name, m.einoAgentName, success, body, err)
+	}()
 	return runMCPToolInvocation(ctx, m.agent, m.holder, m.name, argumentsInJSON, m.record, m.chunk)
 }
 

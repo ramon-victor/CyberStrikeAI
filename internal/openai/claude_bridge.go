@@ -9,6 +9,9 @@ package openai
 //   Stream:   Claude SSE (event: content_block_delta / message_delta) → OpenAI SSE 格式
 //   Auth:     Bearer → x-api-key
 //   Tools:    OpenAI tools[] → Claude tools[] (input_schema)
+//
+// Extended thinking: 顶层 `thinking` 从 OpenAI 请求体透传；响应中 `thinking` block 映射为
+// `reasoning_content`（可读前缀 + 内部 JSON 尾缀以保留 signature，供多轮工具续跑；UI 用 openai.DisplayReasoningContent 剥离）。
 
 import (
 	"bufio"
@@ -38,6 +41,7 @@ type claudeRequest struct {
 	Messages  []claudeMessage `json:"messages"`
 	Tools     []claudeTool    `json:"tools,omitempty"`
 	Stream    bool            `json:"stream,omitempty"`
+	Thinking  json.RawMessage `json:"thinking,omitempty"`
 }
 
 type claudeMessage struct {
@@ -75,6 +79,10 @@ type claudeContentBlock struct {
 
 	// text block
 	Text string `json:"text,omitempty"`
+
+	// thinking block (extended thinking)
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
 
 	// tool_use block (assistant 返回)
 	ID    string          `json:"id,omitempty"`
@@ -176,7 +184,13 @@ func convertOpenAIToClaude(payload interface{}) (*claudeRequest, error) {
 
 		// tool_calls (assistant 消息中包含工具调用)
 		if role == "assistant" {
+			rc, _ := mm["reasoning_content"].(string)
+			_, thinkingReplay := parseClaudeReasoningAssistantBlocks(rc)
+
 			var blocks []claudeContentBlock
+			for _, tb := range thinkingReplay {
+				blocks = append(blocks, tb)
+			}
 			if content != "" {
 				blocks = append(blocks, claudeContentBlock{Type: "text", Text: content})
 			}
@@ -290,6 +304,13 @@ func convertOpenAIToClaude(payload interface{}) (*claudeRequest, error) {
 		}
 	}
 
+	// Extended thinking (Anthropic top-level); merged from Eino ExtraFields / admin extras.
+	if th, ok := oai["thinking"]; ok && th != nil {
+		if raw, err := json.Marshal(th); err == nil && len(raw) > 0 && string(raw) != "null" {
+			req.Thinking = json.RawMessage(raw)
+		}
+	}
+
 	return req, nil
 }
 
@@ -318,9 +339,12 @@ func claudeToOpenAIResponseJSON(claudeBody []byte) ([]byte, error) {
 
 	var textContent string
 	var toolCalls []interface{}
+	var thinkingBlocks []claudeContentBlock
 
 	for _, block := range cr.Content {
 		switch block.Type {
+		case "thinking":
+			thinkingBlocks = append(thinkingBlocks, block)
 		case "text":
 			textContent += block.Text
 		case "tool_use":
@@ -343,6 +367,18 @@ func claudeToOpenAIResponseJSON(claudeBody []byte) ([]byte, error) {
 	}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
+	}
+	if len(thinkingBlocks) > 0 {
+		var parts []string
+		for _, tb := range thinkingBlocks {
+			if strings.TrimSpace(tb.Thinking) != "" {
+				parts = append(parts, tb.Thinking)
+			}
+		}
+		rc := appendClaudeReasoningRoundTrip(strings.Join(parts, "\n\n"), thinkingBlocks)
+		if rc != "" {
+			message["reasoning_content"] = rc
+		}
 	}
 
 	choice := map[string]interface{}{
@@ -499,6 +535,7 @@ func (c *Client) claudeChatCompletionStream(ctx context.Context, payload interfa
 
 	reader := bufio.NewReader(resp.Body)
 	var full strings.Builder
+	fullText := ""
 
 	for {
 		line, readErr := reader.ReadString('\n')
@@ -531,9 +568,14 @@ func (c *Client) claudeChatCompletionStream(ctx context.Context, payload interfa
 			if deltaType == "text_delta" {
 				text, _ := delta["text"].(string)
 				if text != "" {
-					full.WriteString(text)
+					var textOut string
+					fullText, textOut = normalizeStreamingDelta(fullText, text)
+					if textOut == "" {
+						continue
+					}
+					full.WriteString(textOut)
 					if onDelta != nil {
-						if err := onDelta(text); err != nil {
+						if err := onDelta(textOut); err != nil {
 							return full.String(), err
 						}
 					}
@@ -603,6 +645,7 @@ func (c *Client) claudeChatCompletionStreamWithToolCalls(
 
 	reader := bufio.NewReader(resp.Body)
 	var full strings.Builder
+	fullText := ""
 	finishReason := ""
 
 	// 追踪当前正在构建的 content blocks
@@ -665,9 +708,14 @@ func (c *Client) claudeChatCompletionStreamWithToolCalls(
 			if deltaType == "text_delta" {
 				text, _ := delta["text"].(string)
 				if text != "" {
-					full.WriteString(text)
+					var textOut string
+					fullText, textOut = normalizeStreamingDelta(fullText, text)
+					if textOut == "" {
+						continue
+					}
+					full.WriteString(textOut)
 					if onContentDelta != nil {
-						if err := onContentDelta(text); err != nil {
+						if err := onContentDelta(textOut); err != nil {
 							return full.String(), nil, finishReason, err
 						}
 					}
@@ -752,14 +800,18 @@ func isClaudeProvider(cfg *config.OpenAIConfig) bool {
 // Eino HTTP Client Bridge
 // ============================================================
 
-// NewEinoHTTPClient 为 einoopenai.ChatModelConfig 返回一个支持 Claude 自动桥接的 http.Client。
-// 当 cfg.Provider 为 claude 时，会拦截 /chat/completions 请求，透明转换为 Anthropic Messages API。
+// NewEinoHTTPClient 为 einoopenai.ChatModelConfig 返回一个 http.Client，包含两层 transport 包装：
+//  1. 当 cfg.Provider 为 claude 时，最内层套 claudeRoundTripper，把 OpenAI /chat/completions 透明
+//     桥接为 Anthropic /v1/messages（并把 Claude SSE 翻译回 OpenAI SSE 格式）。
+//  2. 最外层无条件套 einoSSESanitizingRoundTripper，吞掉中转站发的 SSE 心跳/注释/控制行
+//     (": keepalive" / "event: ping" / "retry: 3000" 等)，避免 Eino 用的 meguminnnnnnnnn/go-openai
+//     SDK 在累计超过 300 个非 "data:" 行后抛 "stream has sent too many empty messages"。
+//
+// 两层都对调用方完全透明：普通 JSON 响应原样透传，仅当响应 Content-Type 为 text/event-stream 时
+// sanitizer 才会接管 body；data: payload (含 [DONE]、{"error":...}) 一字节不改。
 func NewEinoHTTPClient(cfg *config.OpenAIConfig, base *http.Client) *http.Client {
 	if base == nil {
 		base = http.DefaultClient
-	}
-	if !isClaudeProvider(cfg) {
-		return base
 	}
 
 	cloned := *base
@@ -767,10 +819,14 @@ func NewEinoHTTPClient(cfg *config.OpenAIConfig, base *http.Client) *http.Client
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-	cloned.Transport = &claudeRoundTripper{
-		base:   transport,
-		config: cfg,
+	if isClaudeProvider(cfg) {
+		transport = &claudeRoundTripper{
+			base:   transport,
+			config: cfg,
+		}
 	}
+	transport = &einoSSESanitizingRoundTripper{base: transport}
+	cloned.Transport = transport
 	return &cloned
 }
 
@@ -881,7 +937,15 @@ func (rt *claudeRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 
 		reader := bufio.NewReader(resp.Body)
 		blockToToolIndex := make(map[int]int)
+		blockIndexToType := make(map[int]string)
 		nextToolIndex := 0
+
+		type thinkingAcc struct {
+			text strings.Builder
+			sig  strings.Builder
+		}
+		thinkingByIndex := make(map[int]*thinkingAcc)
+		var finishedThinking []claudeContentBlock
 
 		for {
 			line, readErr := reader.ReadString('\n')
@@ -927,6 +991,11 @@ func (rt *claudeRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 				blockIdx := int(blockIdxFlt)
 				cb, _ := event["content_block"].(map[string]interface{})
 				bt, _ := cb["type"].(string)
+				blockIndexToType[blockIdx] = bt
+
+				if bt == "thinking" {
+					thinkingByIndex[blockIdx] = &thinkingAcc{}
+				}
 
 				if bt == "tool_use" {
 					id, _ := cb["id"].(string)
@@ -966,7 +1035,35 @@ func (rt *claudeRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 				delta, _ := event["delta"].(map[string]interface{})
 				dt, _ := delta["type"].(string)
 
-				if dt == "text_delta" {
+				if dt == "thinking_delta" {
+					tPart, _ := delta["thinking"].(string)
+					if tPart != "" {
+						if acc := thinkingByIndex[blockIdx]; acc != nil {
+							acc.text.WriteString(tPart)
+						}
+						oaiChunk := map[string]interface{}{
+							"choices": []map[string]interface{}{
+								{
+									"delta": map[string]interface{}{
+										"reasoning_content": tPart,
+									},
+								},
+							},
+						}
+						b, _ := json.Marshal(oaiChunk)
+						if !writeLine("data: " + string(b) + "\n\n") {
+							pw.Close()
+							return
+						}
+					}
+				} else if dt == "signature_delta" {
+					sigPart, _ := delta["signature"].(string)
+					if sigPart != "" {
+						if acc := thinkingByIndex[blockIdx]; acc != nil {
+							acc.sig.WriteString(sigPart)
+						}
+					}
+				} else if dt == "text_delta" {
 					text, _ := delta["text"].(string)
 					oaiChunk := map[string]interface{}{
 						"choices": []map[string]interface{}{
@@ -1011,6 +1108,21 @@ func (rt *claudeRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 					}
 				}
 
+			case "content_block_stop":
+				blockIdxFlt, _ := event["index"].(float64)
+				blockIdx := int(blockIdxFlt)
+				bt := blockIndexToType[blockIdx]
+				if bt == "thinking" {
+					if acc := thinkingByIndex[blockIdx]; acc != nil {
+						finishedThinking = append(finishedThinking, claudeContentBlock{
+							Type:      "thinking",
+							Thinking:  acc.text.String(),
+							Signature: acc.sig.String(),
+						})
+						delete(thinkingByIndex, blockIdx)
+					}
+				}
+
 			case "message_delta":
 				d, _ := event["delta"].(map[string]interface{})
 				if sr, ok := d["stop_reason"].(string); ok {
@@ -1031,6 +1143,25 @@ func (rt *claudeRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 				}
 
 			case "message_stop":
+				if len(finishedThinking) > 0 {
+					suffix := appendClaudeReasoningRoundTrip("", finishedThinking)
+					if strings.TrimSpace(suffix) != "" {
+						oaiChunk := map[string]interface{}{
+							"choices": []map[string]interface{}{
+								{
+									"delta": map[string]interface{}{
+										"reasoning_content": suffix,
+									},
+								},
+							},
+						}
+						b, _ := json.Marshal(oaiChunk)
+						if !writeLine("data: " + string(b) + "\n\n") {
+							pw.Close()
+							return
+						}
+					}
+				}
 				writeLine("data: [DONE]\n\n")
 				pw.Close()
 				return

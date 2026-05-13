@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 // softRecoveryToolCallMiddleware returns an InvokableToolMiddleware that catches
@@ -16,8 +17,9 @@ import (
 // returned to the LLM. This allows the model to self-correct within the same
 // iteration rather than crashing the entire graph and requiring a full replay.
 //
-// Without this middleware, a JSON parse failure in any tool's InvokableRun propagates
-// as a hard error through the Eino ToolsNode → [NodeRunError] → ev.Err, which
+// Without Invokable (+ Streamable where applicable) registration, a JSON parse failure
+// in InvokableRun / StreamableRun propagates as a hard error through the Eino ToolsNode
+// → [NodeRunError] → ev.Err, which
 // either triggers the full-replay retry loop (expensive) or terminates the run
 // entirely once retries are exhausted. With it, the LLM simply sees an error message
 // in the tool result and can adjust its next tool call accordingly.
@@ -36,6 +38,44 @@ func softRecoveryToolCallMiddleware() compose.InvokableToolMiddleware {
 			msg := buildSoftRecoveryMessage(input.Name, input.Arguments, err)
 			return &compose.ToolOutput{Result: msg}, nil
 		}
+	}
+}
+
+// softRecoveryStreamableToolCallMiddleware mirrors softRecoveryToolCallMiddleware for
+// tools that implement StreamableTool only (e.g. Eino ADK filesystem execute).
+// Eino applies Invokable vs Streamable middleware to disjoint code paths in ToolsNode;
+// registering only Invokable leaves streaming tools uncovered — empty/malformed JSON
+// then fails inside [LocalStreamFunc] before the inner endpoint runs.
+func softRecoveryStreamableToolCallMiddleware() compose.StreamableToolMiddleware {
+	return func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+		return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+			out, err := next(ctx, input)
+			if err == nil {
+				return out, nil
+			}
+			if !isSoftRecoverableToolError(err) {
+				return out, err
+			}
+			toolName := ""
+			args := ""
+			if input != nil {
+				toolName = input.Name
+				args = input.Arguments
+			}
+			msg := buildSoftRecoveryMessage(toolName, args, err)
+			return &compose.StreamToolOutput{
+				Result: schema.StreamReaderFromArray([]string{msg}),
+			}, nil
+		}
+	}
+}
+
+// softRecoveryToolMiddleware returns a ToolMiddleware with both Invokable and Streamable
+// soft recovery (same semantics as hitlToolCallMiddleware bundling).
+func softRecoveryToolMiddleware() compose.ToolMiddleware {
+	return compose.ToolMiddleware{
+		Invokable:  softRecoveryToolCallMiddleware(),
+		Streamable: softRecoveryStreamableToolCallMiddleware(),
 	}
 }
 

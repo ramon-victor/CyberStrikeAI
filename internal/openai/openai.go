@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cyberstrike-ai/internal/config"
 
@@ -31,6 +32,32 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("openai api error: status=%d body=%s", e.StatusCode, e.Body)
+}
+
+// normalizeStreamingDelta 将可能是“累计片段/重发片段”的内容归一化为“纯增量”。
+// 部分兼容网关会返回累计 content；若直接 append 会出现重复文本。
+//
+// 注意：
+//   - 不做「任意后缀与前缀重叠」合并；流式可能在重复字符边界分片（"194"+"43"→"19443"）。
+//   - HasPrefix 仅在 incoming 严格长于 current 时视为累计全文，否则会把分片产生的第二个相同
+//     单字/单码点（叠字、44、22 等）误判为「整段重复」而吞字。
+//   - incoming==current 仅当 current 长度 >1 个码点时才视为整包重发；单码点重复必须走拼接。
+//   - 不再使用「current 以 incoming 结尾则丢弃」：否则 "1943"+"43" 会误吞增量（19443 显示成 1943）。
+//     若网关重复发送尾部片段，应重复送完整累计串，由 HasPrefix 分支去重。
+func normalizeStreamingDelta(current, incoming string) (next, delta string) {
+	if incoming == "" {
+		return current, ""
+	}
+	if current == "" {
+		return incoming, incoming
+	}
+	if strings.HasPrefix(incoming, current) && len(incoming) > len(current) {
+		return incoming, incoming[len(current):]
+	}
+	if incoming == current && utf8.RuneCountInString(current) > 1 {
+		return current, ""
+	}
+	return current + incoming, incoming
 }
 
 // NewClient 创建一个新的OpenAI客户端。
@@ -219,6 +246,7 @@ func (c *Client) ChatCompletionStream(ctx context.Context, payload interface{}, 
 
 	reader := bufio.NewReader(resp.Body)
 	var full strings.Builder
+	fullText := ""
 
 	// 典型 SSE 结构：
 	// data: {...}\n\n
@@ -263,9 +291,14 @@ func (c *Client) ChatCompletionStream(ctx context.Context, payload interface{}, 
 			continue
 		}
 
-		full.WriteString(delta)
+		var deltaOut string
+		fullText, deltaOut = normalizeStreamingDelta(fullText, delta)
+		if deltaOut == "" {
+			continue
+		}
+		full.WriteString(deltaOut)
 		if onDelta != nil {
-			if err := onDelta(delta); err != nil {
+			if err := onDelta(deltaOut); err != nil {
 				return full.String(), err
 			}
 		}
@@ -380,6 +413,7 @@ func (c *Client) ChatCompletionStreamWithToolCalls(
 
 	reader := bufio.NewReader(resp.Body)
 	var full strings.Builder
+	fullText := ""
 	finishReason := ""
 
 	for {
@@ -426,10 +460,14 @@ func (c *Client) ChatCompletionStreamWithToolCalls(
 			content = delta.Text
 		}
 		if content != "" {
-			full.WriteString(content)
-			if onContentDelta != nil {
-				if err := onContentDelta(content); err != nil {
-					return full.String(), nil, finishReason, err
+			var contentOut string
+			fullText, contentOut = normalizeStreamingDelta(fullText, content)
+			if contentOut != "" {
+				full.WriteString(contentOut)
+				if onContentDelta != nil {
+					if err := onContentDelta(contentOut); err != nil {
+						return full.String(), nil, finishReason, err
+					}
 				}
 			}
 		}

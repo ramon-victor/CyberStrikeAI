@@ -1,4 +1,6 @@
 const progressTaskState = new Map();
+/** @type {{ progressId: string, conversationId: string } | null} */
+let userInterruptModalPending = null;
 let activeTaskInterval = null;
 const ACTIVE_TASK_REFRESH_INTERVAL = 10000; // 10秒检查一次
 const TASK_FINAL_STATUSES = new Set(['failed', 'timeout', 'cancelled', 'completed']);
@@ -142,6 +144,11 @@ function einoMainStreamPlanningTitle(responseData) {
         const label = typeof window.t === 'function' ? window.t(key) : '输出';
         return prefix + '📝 ' + label;
     }
+    // eino_single / deep / supervisor：主通道是模型流式输出，不是「规划」；模型偶发复述工具 stdout 时，旧文案易被误认为工具结果标题。
+    if (orch != null && String(orch).trim() !== '' && orch !== 'plan_execute') {
+        const streamLabel = typeof window.t === 'function' ? window.t('chat.assistantStreamPhase') : '助手输出';
+        return prefix + '📝 ' + streamLabel;
+    }
     const plan = typeof window.t === 'function' ? window.t('chat.planning') : '规划中';
     return prefix + '📝 ' + plan;
 }
@@ -266,12 +273,164 @@ function escapeHtmlLocal(text) {
     return div.innerHTML;
 }
 
+/** fenced 块占位（BMP 私用区，正文几乎不会出现） */
+const _MD_FENCE_PRE = '\n\uE000CSAI_FENCE_';
+const _MD_FENCE_SUF = '_\uE000\n';
+
+function _maskFencedCodeBlocksForMdPreprocess(md) {
+    const blocks = [];
+    const masked = String(md).replace(/```[\s\S]*?```/g, (m) => {
+        const i = blocks.length;
+        blocks.push(m);
+        return _MD_FENCE_PRE + i + _MD_FENCE_SUF;
+    });
+    return { masked, blocks };
+}
+
+function _unmaskFencedCodeBlocksAfterMdPreprocess(s, blocks) {
+    let out = s;
+    for (let i = 0; i < blocks.length; i++) {
+        out = out.split(_MD_FENCE_PRE + i + _MD_FENCE_SUF).join(blocks[i]);
+    }
+    return out;
+}
+
+/**
+ * 模型/网关偶发把「思考」混进正文，用伪 XML 包裹（如 &lt;redacted_thinking&gt;…&lt;/redacted_thinking&gt;）。
+ * 与 Markdown 列表混排时，结束标签常被吞进 &lt;li&gt;，其后 **、` 等行内语法全部无法解析；成对块整段移除。
+ * @param {string} segment
+ * @returns {string}
+ */
+function _stripXmlReasoningWrappersForMarkdown(segment) {
+    let t = String(segment);
+    const tags = ['redacted_thinking', 'redacted_reasoning'];
+    for (let i = 0; i < tags.length; i++) {
+        const name = tags[i];
+        const re = new RegExp('<\\s*' + name + '\\b[^>]*>[\\s\\S]*?<\\s*/\\s*' + name + '\\s*>', 'gi');
+        t = t.replace(re, '\n\n');
+    }
+    return t.replace(/\n{3,}/g, '\n\n');
+}
+
+/**
+ * 解除 LLM 常用的块级 HTML 外壳（`<div>`、`<p>`、`<section>`、`<article>`、`<main>`）。
+ * 整段包在块级标签里时，CommonMark 不会在块内再解析 Markdown，导致 **、` 原样显示。
+ */
+function _unwrapHtmlBlockWrappersForMarkdown(segment) {
+    let s = segment;
+    let prev;
+    for (let i = 0; i < 30 && s !== prev; i++) {
+        prev = s;
+        s = s.replace(/<div(?:\s[^>]*)?>([\s\S]*?)<\/div>/gi, (_, inner) => String(inner).trim() + '\n\n');
+        s = s.replace(/<p(?:\s[^>]*)?>([\s\S]*?)<\/p>/gi, (_, inner) => String(inner).trim() + '\n\n');
+        s = s.replace(/<section(?:\s[^>]*)?>([\s\S]*?)<\/section>/gi, (_, inner) => String(inner).trim() + '\n\n');
+        s = s.replace(/<article(?:\s[^>]*)?>([\s\S]*?)<\/article>/gi, (_, inner) => String(inner).trim() + '\n\n');
+        s = s.replace(/<main(?:\s[^>]*)?>([\s\S]*?)<\/main>/gi, (_, inner) => String(inner).trim() + '\n\n');
+        s = s.replace(/\n{3,}/g, '\n\n');
+    }
+    return s;
+}
+
+/**
+ * 将 HTML 列表 / 粘连的 `<li>` 还原为 Markdown 列表行，并去掉外层 `<ul>`，便于 marked 解析行内 **、` `
+ * @param {string} segment
+ * @returns {string}
+ */
+function _flattenOrphanHtmlLiInMarkdown(segment) {
+    let s = segment;
+    s = s.replace(/<li(?:\s[^>]*)?>([\s\S]*?)<\/li>/gi, (_, inner) => {
+        const body = String(inner).trim().replace(/\s*\n\s*/g, ' ');
+        return '- ' + body + '\n';
+    });
+    s = s.replace(/<\/?ul(?:\s[^>]*)?>/gi, '\n');
+    s = s.replace(/<\/?ol(?:\s[^>]*)?>/gi, '\n');
+    s = s.replace(/([0-9A-Za-z_\u4e00-\u9fff])\s*<li(?:\s[^>]*)?>\s*/g, (_, ch) => ch + '\n- ');
+    return s.replace(/\n{3,}/g, '\n\n');
+}
+
+/** 行首 Unicode 项目符号 → Markdown 列表 `- `（模型常用 • 而非 `-`） */
+function _normalizeUnicodeBulletMarkersToMdDash(segment) {
+    return segment
+        .replace(/^\s*\u2022\s+/gm, '- ')
+        .replace(/^\s*\u00b7\s+/gm, '- ');
+}
+
+/**
+ * 解析前归一化助手 Markdown：去掉零宽字符，NFKC 将全角 * ` _ 等转为 ASCII，
+ * 避免 marked 无法识别强调/行内代码而原样显示 **、反引号；
+ * 并移除 &lt;redacted_thinking&gt; 等伪 XML 思考块、修正块级 HTML（`<div>`/`<p>`/…、`<ul>`/`<li>`）与 Unicode 项目符号 `•`，避免块级 HTML 吞掉 inline 解析。
+ * @param {string|null|undefined} text
+ * @returns {string}
+ */
+function normalizeAssistantMarkdownSource(text) {
+    if (text == null) return '';
+    let s = String(text);
+    s = s.replace(/[\u200B-\u200D\u200E\u200F\uFEFF\u2060]/g, '');
+    try {
+        s = s.normalize('NFKC');
+    } catch (e) {
+        /* ignore */
+    }
+    s = _stripXmlReasoningWrappersForMarkdown(s);
+    const fb = _maskFencedCodeBlocksForMdPreprocess(s);
+    s = _unwrapHtmlBlockWrappersForMarkdown(fb.masked);
+    s = _flattenOrphanHtmlLiInMarkdown(s);
+    s = _normalizeUnicodeBulletMarkersToMdDash(s);
+    s = _unmaskFencedCodeBlocksAfterMdPreprocess(s, fb.blocks);
+    return s;
+}
+if (typeof window !== 'undefined') {
+    window.normalizeAssistantMarkdownSource = normalizeAssistantMarkdownSource;
+}
+
+/**
+ * 与 internal/openai.normalizeStreamingDelta 一致：兼容网关/模型返回「累计全文」或整包重发，
+ * 避免前端 buffer += chunk 与后端已归一化的增量叠加导致逐段重复（如「响应中显示了响应中显示了」）。
+ * @returns {[string, string]} [nextBuffer, effectiveDelta]
+ */
+function normalizeStreamingDeltaJs(current, incoming) {
+    const cur = current == null ? '' : String(current);
+    const inc = incoming == null ? '' : String(incoming);
+    if (inc === '') {
+        return [cur, ''];
+    }
+    if (cur === '') {
+        return [inc, inc];
+    }
+    if (inc.startsWith(cur) && inc.length > cur.length) {
+        return [inc, inc.slice(cur.length)];
+    }
+    const runeCount = Array.from(cur).length;
+    if (inc === cur && runeCount > 1) {
+        return [cur, ''];
+    }
+    return [cur + inc, inc];
+}
+if (typeof window !== 'undefined') {
+    window.normalizeStreamingDeltaJs = normalizeStreamingDeltaJs;
+}
+
+/** 流式 delta：纯文本，避免每条全量 marked + DOMPurify */
+function setTimelineItemContentStreamPlain(contentEl, text) {
+    if (!contentEl) return;
+    contentEl.classList.add('timeline-stream-plain');
+    contentEl.textContent = text == null ? '' : String(text);
+}
+
+/** 流结束或非流式：富文本（已消毒的 HTML 字符串） */
+function setTimelineItemContentStreamRich(contentEl, html) {
+    if (!contentEl) return;
+    contentEl.classList.remove('timeline-stream-plain');
+    contentEl.innerHTML = html;
+}
+
 function formatAssistantMarkdownContent(text) {
     const raw = text == null ? '' : String(text);
+    const src = normalizeAssistantMarkdownSource(raw);
     if (typeof marked !== 'undefined') {
         try {
             marked.setOptions({ breaks: true, gfm: true });
-            const parsed = marked.parse(raw);
+            const parsed = marked.parse(src, { async: false });
             if (typeof DOMPurify !== 'undefined') {
                 return DOMPurify.sanitize(parsed, assistantMarkdownSanitizeConfig);
             }
@@ -349,6 +508,23 @@ function isChatMessagesPinnedToBottom() {
     return scrollHeight - clientHeight - scrollTop <= CHAT_SCROLL_PIN_THRESHOLD_PX;
 }
 
+/** 顶栏「停止任务」与进度条按钮对齐时，用会话 ID 反查当前页的 progress 块 ID（无则弹窗内仍可按会话取消） */
+function findProgressIdByConversationId(conversationId) {
+    if (!conversationId) {
+        return null;
+    }
+    let fallback = null;
+    for (const [pid, st] of progressTaskState) {
+        if (st && st.conversationId === conversationId) {
+            fallback = pid;
+            if (document.getElementById(pid)) {
+                return pid;
+            }
+        }
+    }
+    return fallback;
+}
+
 function registerProgressTask(progressId, conversationId = null) {
     const state = progressTaskState.get(progressId) || {};
     state.conversationId = conversationId !== undefined && conversationId !== null
@@ -403,6 +579,140 @@ async function requestCancel(conversationId) {
         throw new Error(result.error || (typeof window.t === 'function' ? window.t('tasks.cancelFailed') : '取消失败'));
     }
     return result;
+}
+
+/** 与 MCP 监控一致：仅终止当前进行中的工具调用，工具返回后本轮推理继续（可选 reason 合并进工具结果） */
+async function requestCancelWithContinue(conversationId, reason) {
+    const response = await apiFetch('/api/agent-loop/cancel', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            conversationId,
+            reason: reason || '',
+            continueAfter: true,
+        }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(result.error || (typeof window.t === 'function' ? window.t('tasks.cancelFailed') : '取消失败'));
+    }
+    return result;
+}
+
+function openUserInterruptModal(progressId, conversationId) {
+    userInterruptModalPending = {
+        progressId: progressId != null && progressId !== '' ? progressId : null,
+        conversationId,
+    };
+    const ta = document.getElementById('user-interrupt-reason');
+    if (ta) {
+        ta.value = '';
+    }
+    const m = document.getElementById('user-interrupt-modal');
+    if (m) {
+        m.style.display = 'block';
+    }
+}
+
+function closeUserInterruptModal() {
+    userInterruptModalPending = null;
+    const m = document.getElementById('user-interrupt-modal');
+    if (m) {
+        m.style.display = 'none';
+    }
+}
+
+async function submitUserInterruptContinue() {
+    if (!userInterruptModalPending) {
+        return;
+    }
+    const reason = (document.getElementById('user-interrupt-reason') && document.getElementById('user-interrupt-reason').value || '').trim();
+    const { progressId, conversationId } = userInterruptModalPending;
+    closeUserInterruptModal();
+    const stopBtn = progressId ? document.getElementById(`${progressId}-stop-btn`) : null;
+    try {
+        if (stopBtn) {
+            stopBtn.disabled = true;
+            stopBtn.textContent = typeof window.t === 'function' ? window.t('tasks.interruptSubmitting') : '提交中...';
+        }
+        await requestCancelWithContinue(conversationId, reason);
+        loadActiveTasks();
+    } catch (error) {
+        console.error('中断并继续失败:', error);
+        alert((typeof window.t === 'function' ? window.t('tasks.cancelTaskFailed') : '操作失败') + ': ' + error.message);
+    } finally {
+        if (stopBtn) {
+            stopBtn.disabled = false;
+            stopBtn.textContent = typeof window.t === 'function' ? window.t('tasks.stopTask') : '停止任务';
+        }
+    }
+}
+
+async function submitUserInterruptHardCancel() {
+    if (!userInterruptModalPending) {
+        return;
+    }
+    const { progressId, conversationId } = userInterruptModalPending;
+    closeUserInterruptModal();
+    if (progressId) {
+        await performHardCancelProgressTask(progressId);
+        return;
+    }
+    if (!conversationId) {
+        return;
+    }
+    try {
+        await requestCancel(conversationId);
+        loadActiveTasks();
+    } catch (error) {
+        console.error('取消任务失败:', error);
+        alert((typeof window.t === 'function' ? window.t('tasks.cancelTaskFailed') : '取消任务失败') + ': ' + error.message);
+    }
+}
+
+/** 彻底停止任务（原「停止任务」行为） */
+async function performHardCancelProgressTask(progressId) {
+    const state = progressTaskState.get(progressId);
+    const stopBtn = document.getElementById(`${progressId}-stop-btn`);
+
+    if (!state || !state.conversationId) {
+        if (stopBtn) {
+            stopBtn.disabled = true;
+            setTimeout(() => {
+                stopBtn.disabled = false;
+            }, 1500);
+        }
+        alert(typeof window.t === 'function' ? window.t('tasks.taskInfoNotSynced') : '任务信息尚未同步，请稍后再试。');
+        return;
+    }
+
+    if (state.cancelling) {
+        return;
+    }
+
+    markProgressCancelling(progressId);
+    if (stopBtn) {
+        stopBtn.disabled = true;
+        stopBtn.textContent = typeof window.t === 'function' ? window.t('tasks.cancelling') : '取消中...';
+    }
+
+    try {
+        await requestCancel(state.conversationId);
+        loadActiveTasks();
+    } catch (error) {
+        console.error('取消任务失败:', error);
+        alert((typeof window.t === 'function' ? window.t('tasks.cancelTaskFailed') : '取消任务失败') + ': ' + error.message);
+        if (stopBtn) {
+            stopBtn.disabled = false;
+            stopBtn.textContent = typeof window.t === 'function' ? window.t('tasks.stopTask') : '停止任务';
+        }
+        const currentState = progressTaskState.get(progressId);
+        if (currentState) {
+            currentState.cancelling = false;
+        }
+    }
 }
 
 function addProgressMessage() {
@@ -585,19 +895,33 @@ function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecut
         mcpSection.appendChild(buttonsContainer);
     }
 
-    const hasExecBtns = buttonsContainer.querySelector('.mcp-detail-btn:not(.process-detail-btn)');
-    if (mcpIds.length > 0 && !hasExecBtns) {
-        mcpIds.forEach((execId, index) => {
+    let maxExecIndex = 0;
+    const existingExecBtns = buttonsContainer.querySelectorAll('.mcp-detail-btn:not(.process-detail-btn)');
+    existingExecBtns.forEach(function (btn) {
+        const n = parseInt(btn.dataset.execIndex, 10);
+        if (!isNaN(n) && n > maxExecIndex) maxExecIndex = n;
+    });
+    const seenExec = new Set();
+    existingExecBtns.forEach(function (btn) {
+        if (btn.dataset.execId) seenExec.add(String(btn.dataset.execId).trim());
+    });
+    let appendedAny = false;
+    if (mcpIds.length > 0) {
+        mcpIds.forEach(function (execId) {
+            const id = execId != null ? String(execId).trim() : '';
+            if (!id || seenExec.has(id)) return;
+            seenExec.add(id);
+            maxExecIndex += 1;
+            appendedAny = true;
             const detailBtn = document.createElement('button');
             detailBtn.className = 'mcp-detail-btn';
-            detailBtn.dataset.execId = execId;
-            detailBtn.dataset.execIndex = String(index + 1);
-            detailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.callNumber', { n: index + 1 }) : '调用 #' + (index + 1)) + '</span>';
-            detailBtn.onclick = () => showMCPDetail(execId);
+            detailBtn.dataset.execId = id;
+            detailBtn.dataset.execIndex = String(maxExecIndex);
+            detailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.callNumber', { n: maxExecIndex }) : '调用 #' + maxExecIndex) + '</span>';
+            detailBtn.onclick = function () { showMCPDetail(id); };
             buttonsContainer.appendChild(detailBtn);
         });
-        // 使用批量 API 一次性获取所有工具名称（消除 N 次单独请求）
-        if (typeof batchUpdateButtonToolNames === 'function') {
+        if (appendedAny && typeof batchUpdateButtonToolNames === 'function') {
             batchUpdateButtonToolNames(buttonsContainer, mcpIds);
         }
     }
@@ -732,7 +1056,7 @@ function toggleProcessDetails(progressId, assistantMessageId) {
     }
 }
 
-// 停止当前进度对应的任务
+// 停止当前进度：弹出「中断并说明 / 彻底停止」
 async function cancelProgressTask(progressId) {
     const state = progressTaskState.get(progressId);
     const stopBtn = document.getElementById(`${progressId}-stop-btn`);
@@ -752,27 +1076,7 @@ async function cancelProgressTask(progressId) {
         return;
     }
 
-    markProgressCancelling(progressId);
-    if (stopBtn) {
-        stopBtn.disabled = true;
-        stopBtn.textContent = typeof window.t === 'function' ? window.t('tasks.cancelling') : '取消中...';
-    }
-
-    try {
-        await requestCancel(state.conversationId);
-        loadActiveTasks();
-    } catch (error) {
-        console.error('取消任务失败:', error);
-        alert((typeof window.t === 'function' ? window.t('tasks.cancelTaskFailed') : '取消任务失败') + ': ' + error.message);
-        if (stopBtn) {
-            stopBtn.disabled = false;
-            stopBtn.textContent = typeof window.t === 'function' ? window.t('tasks.stopTask') : '停止任务';
-        }
-        const currentState = progressTaskState.get(progressId);
-        if (currentState) {
-            currentState.cancelling = false;
-        }
-    }
+    openUserInterruptModal(progressId, state.conversationId);
 }
 
 // 将进度消息转换为可折叠的详情组件
@@ -900,6 +1204,24 @@ function resolveStreamTimeline(progressId) {
     return timeline;
 }
 
+/** 去重合并 MCP execution id（顺序：先 prev 后 next），用于多段 Run / 多次 SSE 同一任务。 */
+function mergeMcpExecutionIDLists(prev, next) {
+    const seen = new Set();
+    const out = [];
+    const add = function (arr) {
+        if (!Array.isArray(arr)) return;
+        for (let i = 0; i < arr.length; i++) {
+            const s = arr[i] != null ? String(arr[i]).trim() : '';
+            if (!s || seen.has(s)) continue;
+            seen.add(s);
+            out.push(s);
+        }
+    };
+    add(prev);
+    add(next);
+    return out;
+}
+
 // 处理流式事件
 function handleStreamEvent(event, progressElement, progressId, 
                           getAssistantId, setAssistantId, getMcpIds, setMcpIds) {
@@ -1011,21 +1333,65 @@ function handleStreamEvent(event, progressElement, progressId,
             });
             break;
         }
+
+        case 'eino_trace_run':
+        case 'eino_trace_start':
+        case 'eino_trace_end':
+        case 'eino_trace_error': {
+            const d = event.data || {};
+            const comp = d.component != null ? String(d.component) : '';
+            const name = d.name != null ? String(d.name) : '';
+            let glyph = '◆';
+            if (event.type === 'eino_trace_run') glyph = '●';
+            else if (event.type === 'eino_trace_start') glyph = '▶';
+            else if (event.type === 'eino_trace_end') glyph = '■';
+            else if (event.type === 'eino_trace_error') glyph = '✖';
+            const title = '[Eino] ' + glyph + ' ' + (comp || 'component') + (name ? '/' + name : '');
+            const parts = [];
+            if (d.runId) parts.push('run=' + String(d.runId));
+            if (d.spanId) parts.push('span=' + String(d.spanId));
+            if (d.parentSpanId) parts.push('parent=' + String(d.parentSpanId));
+            if (d.inputSummary) parts.push(String(d.inputSummary));
+            if (d.outputSummary) parts.push(String(d.outputSummary));
+            if (d.error) parts.push(String(d.error));
+            if (event.message && String(event.message).trim()) parts.push(String(event.message));
+            const body = parts.join(' · ');
+            addTimelineItem(timeline, 'progress', { title, message: body, data: d });
+            break;
+        }
             
-        case 'thinking_stream_start': {
+        case 'thinking_stream_start':
+        case 'reasoning_chain_stream_start': {
             const d = event.data || {};
             const streamId = d.streamId || null;
             if (!streamId) break;
+
+            const timelineType = event.type === 'reasoning_chain_stream_start' ? 'reasoning_chain' : 'thinking';
 
             let state = thinkingStreamStateByProgressId.get(progressId);
             if (!state) {
                 state = new Map();
                 thinkingStreamStateByProgressId.set(progressId, state);
             }
-            // 若已存在，重置 buffer
-            const thinkBase = typeof window.t === 'function' ? window.t('chat.aiThinking') : 'AI思考';
-            const title = timelineAgentBracketPrefix(d) + '🤔 ' + thinkBase;
-            const itemId = addTimelineItem(timeline, 'thinking', {
+            // 同一 streamId 重复 start：复用已有条目，避免孤儿卡片 + 新条目重复收 delta
+            if (state.has(streamId)) {
+                const ex = state.get(streamId);
+                ex.buffer = '';
+                const existingItem = document.getElementById(ex.itemId);
+                if (existingItem) {
+                    const contentEl = existingItem.querySelector('.timeline-item-content');
+                    if (contentEl) {
+                        setTimelineItemContentStreamPlain(contentEl, '');
+                    }
+                }
+                break;
+            }
+            const labelBase = typeof window.t === 'function'
+                ? window.t(timelineType === 'reasoning_chain' ? 'chat.reasoningChain' : 'chat.aiThinking')
+                : (timelineType === 'reasoning_chain' ? '推理过程' : 'AI思考');
+            const emoji = timelineType === 'reasoning_chain' ? '🔗' : '🤔';
+            const title = timelineAgentBracketPrefix(d) + emoji + ' ' + labelBase;
+            const itemId = addTimelineItem(timeline, timelineType, {
                 title: title,
                 message: ' ',
                 data: d
@@ -1034,7 +1400,8 @@ function handleStreamEvent(event, progressElement, progressId,
             break;
         }
 
-        case 'thinking_stream_delta': {
+        case 'thinking_stream_delta':
+        case 'reasoning_chain_stream_delta': {
             const d = event.data || {};
             const streamId = d.streamId || null;
             if (!streamId) break;
@@ -1044,24 +1411,23 @@ function handleStreamEvent(event, progressElement, progressId,
             const s = state.get(streamId);
 
             const delta = event.message || '';
-            s.buffer += delta;
+            const merged = normalizeStreamingDeltaJs(s.buffer, delta);
+            s.buffer = merged[0];
 
             const item = document.getElementById(s.itemId);
             if (item) {
                 const contentEl = item.querySelector('.timeline-item-content');
                 if (contentEl) {
-                    if (typeof formatMarkdown === 'function') {
-                        contentEl.innerHTML = formatMarkdown(s.buffer);
-                    } else {
-                        contentEl.textContent = s.buffer;
-                    }
+                    setTimelineItemContentStreamPlain(contentEl, s.buffer);
                 }
             }
             break;
         }
 
         case 'thinking':
-            // 如果本 thinking 是由 thinking_stream_* 聚合出来的（带 streamId），避免重复创建 timeline item
+        case 'reasoning_chain': {
+            const timelineType = event.type === 'reasoning_chain' ? 'reasoning_chain' : 'thinking';
+            // 若已由 *_stream_* 聚合（带 streamId），避免重复创建 timeline item
             if (event.data && event.data.streamId) {
                 const streamId = event.data.streamId;
                 const state = thinkingStreamStateByProgressId.get(progressId);
@@ -1072,11 +1438,10 @@ function handleStreamEvent(event, progressElement, progressId,
                     if (item) {
                         const contentEl = item.querySelector('.timeline-item-content');
                         if (contentEl) {
-                            // contentEl.innerHTML 用于兼容 Markdown 展示
                             if (typeof formatMarkdown === 'function') {
-                                contentEl.innerHTML = formatMarkdown(s.buffer);
+                                setTimelineItemContentStreamRich(contentEl, formatMarkdown(s.buffer));
                             } else {
-                                contentEl.textContent = s.buffer;
+                                setTimelineItemContentStreamPlain(contentEl, s.buffer);
                             }
                         }
                     }
@@ -1084,12 +1449,17 @@ function handleStreamEvent(event, progressElement, progressId,
                 }
             }
 
-            addTimelineItem(timeline, 'thinking', {
-                title: timelineAgentBracketPrefix(event.data) + '🤔 ' + (typeof window.t === 'function' ? window.t('chat.aiThinking') : 'AI思考'),
+            const labelBase = typeof window.t === 'function'
+                ? window.t(timelineType === 'reasoning_chain' ? 'chat.reasoningChain' : 'chat.aiThinking')
+                : (timelineType === 'reasoning_chain' ? '推理过程' : 'AI思考');
+            const emoji = timelineType === 'reasoning_chain' ? '🔗' : '🤔';
+            addTimelineItem(timeline, timelineType, {
+                title: timelineAgentBracketPrefix(event.data) + emoji + ' ' + labelBase,
                 message: event.message,
                 data: event.data
             });
             break;
+        }
             
         case 'tool_calls_detected':
             addTimelineItem(timeline, 'tool_calls_detected', {
@@ -1132,6 +1502,19 @@ function handleStreamEvent(event, progressElement, progressId,
                 data: event.data
             });
             break;
+
+        case 'user_interrupt_continue': {
+            const d = event.data || {};
+            const titleBase = typeof window.t === 'function'
+                ? window.t('chat.userInterruptContinueTitle')
+                : '⏸️ 用户中断并继续';
+            addTimelineItem(timeline, 'user_interrupt_continue', {
+                title: titleBase,
+                message: event.message || '',
+                data: d
+            });
+            break;
+        }
 
         case 'eino_stream_error': {
             const d = event.data || {};
@@ -1318,6 +1701,18 @@ function handleStreamEvent(event, progressElement, progressId,
                 stateMap = new Map();
                 einoAgentReplyStreamStateByProgressId.set(progressId, stateMap);
             }
+            if (stateMap.has(streamId)) {
+                const ex = stateMap.get(streamId);
+                ex.buffer = '';
+                const existingItem = document.getElementById(ex.itemId);
+                if (existingItem) {
+                    let contentEl = existingItem.querySelector('.timeline-item-content');
+                    if (contentEl) {
+                        setTimelineItemContentStreamPlain(contentEl, '');
+                    }
+                }
+                break;
+            }
             const streamingLabel = typeof window.t === 'function' ? window.t('timeline.running') : '执行中...';
             const replyTitleBase = typeof window.t === 'function' ? window.t('chat.einoAgentReplyTitle') : '子代理回复';
             const itemId = addTimelineItem(timeline, 'eino_agent_reply', {
@@ -1339,7 +1734,8 @@ function handleStreamEvent(event, progressElement, progressId,
             const stateMap = einoAgentReplyStreamStateByProgressId.get(progressId);
             if (!stateMap || !stateMap.has(streamId)) break;
             const s = stateMap.get(streamId);
-            s.buffer += delta;
+            const merged = normalizeStreamingDeltaJs(s.buffer, delta);
+            s.buffer = merged[0];
             const item = document.getElementById(s.itemId);
             if (item) {
                 let contentEl = item.querySelector('.timeline-item-content');
@@ -1352,11 +1748,7 @@ function handleStreamEvent(event, progressElement, progressId,
                     }
                 }
                 if (contentEl) {
-                    if (typeof formatMarkdown === 'function') {
-                        contentEl.innerHTML = formatMarkdown(s.buffer);
-                    } else {
-                        contentEl.textContent = s.buffer;
-                    }
+                    setTimelineItemContentStreamPlain(contentEl, s.buffer);
                 }
             }
             break;
@@ -1384,9 +1776,9 @@ function handleStreamEvent(event, progressElement, progressId,
                         item.appendChild(contentEl);
                     }
                     if (typeof formatMarkdown === 'function') {
-                        contentEl.innerHTML = formatMarkdown(full);
+                        setTimelineItemContentStreamRich(contentEl, formatMarkdown(full));
                     } else {
-                        contentEl.textContent = full;
+                        setTimelineItemContentStreamPlain(contentEl, full);
                     }
                     if (d.einoAgent != null && String(d.einoAgent).trim() !== '') {
                         item.dataset.einoAgent = String(d.einoAgent).trim();
@@ -1476,7 +1868,7 @@ function handleStreamEvent(event, progressElement, progressId,
 
             const responseData = event.data || {};
             const mcpIds = responseData.mcpExecutionIds || [];
-            setMcpIds(mcpIds);
+            setMcpIds(mergeMcpExecutionIDLists(typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], mcpIds));
 
             if (responseData.conversationId) {
                 // 如果用户已经开始了新对话（currentConversationId 为 null），且这个事件来自旧对话，则忽略
@@ -1498,7 +1890,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const itemId = addTimelineItem(timeline, 'thinking', {
                 title: title,
                 message: ' ',
-                data: responseData
+                data: Object.assign({}, responseData, { responseStreamPlaceholder: true })
             });
             responseStreamStateByProgressId.set(progressId, { itemId: itemId, buffer: '', streamMeta: responseData });
             break;
@@ -1527,7 +1919,8 @@ function handleStreamEvent(event, progressElement, progressId,
             }
 
             const deltaContent = event.message || '';
-            state.buffer += deltaContent;
+            const mergedResp = normalizeStreamingDeltaJs(state.buffer, deltaContent);
+            state.buffer = mergedResp[0];
 
             // 更新时间线条目内容
             if (state.itemId) {
@@ -1537,11 +1930,7 @@ function handleStreamEvent(event, progressElement, progressId,
                     if (contentEl) {
                         const meta = state.streamMeta || responseData;
                         const body = formatTimelineStreamBody(state.buffer, meta);
-                        if (typeof formatMarkdown === 'function') {
-                            contentEl.innerHTML = formatMarkdown(body);
-                        } else {
-                            contentEl.textContent = body;
-                        }
+                        setTimelineItemContentStreamPlain(contentEl, body);
                     }
                 }
             }
@@ -1555,7 +1944,7 @@ function handleStreamEvent(event, progressElement, progressId,
 
             // 先更新 mcp ids
             const responseData = event.data || {};
-            const mcpIds = responseData.mcpExecutionIds || [];
+            const mcpIds = mergeMcpExecutionIDLists(typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], responseData.mcpExecutionIds || []);
             setMcpIds(mcpIds);
 
             // 更新对话ID
@@ -2079,7 +2468,7 @@ async function attachRunningTaskEventStream(conversationId) {
                     if (line.indexOf('data: ') === 0) {
                         try {
                             const eventData = JSON.parse(line.slice(6));
-                            handleStreamEvent(eventData, null, progressId, getAssistantIdFn, setAssistantIdFn, function () { return mcpIds; }, function (ids) { mcpIds = ids; });
+                            handleStreamEvent(eventData, null, progressId, getAssistantIdFn, setAssistantIdFn, function () { return mcpIds; }, function (ids) { mcpIds = mergeMcpExecutionIDLists(mcpIds, ids || []); });
                         } catch (e) {
                             console.error('task-events parse', e);
                         }
@@ -2198,6 +2587,9 @@ function addTimelineItem(timeline, type, options) {
     if (options.data && options.data.orchestration != null && String(options.data.orchestration).trim() !== '') {
         item.dataset.orchestration = String(options.data.orchestration).trim();
     }
+    if (options.data && options.data.responseStreamPlaceholder === true) {
+        item.dataset.responseStreamPlaceholder = '1';
+    }
 
     // 使用传入的createdAt时间，如果没有则使用当前时间（向后兼容）
     let eventTime;
@@ -2234,7 +2626,7 @@ function addTimelineItem(timeline, type, options) {
     `;
     
     // 根据类型添加详细内容
-    if ((type === 'thinking' || type === 'planning') && options.message) {
+    if ((type === 'thinking' || type === 'reasoning_chain' || type === 'planning') && options.message) {
         const streamBody = typeof formatTimelineStreamBody === 'function'
             ? formatTimelineStreamBody(options.message, options.data)
             : options.message;
@@ -2289,6 +2681,13 @@ function addTimelineItem(timeline, type, options) {
                 ${escapeHtml(options.message || taskCancelledLabel)}
             </div>
         `;
+    } else if (type === 'progress' && options.message) {
+        content += `<div class="timeline-item-content timeline-eino-trace"><pre class="tool-result">${escapeHtml(options.message)}</pre></div>`;
+    } else if (type === 'user_interrupt_continue' && options.message) {
+        const streamBody = typeof formatTimelineStreamBody === 'function'
+            ? formatTimelineStreamBody(options.message, options.data)
+            : options.message;
+        content += `<div class="timeline-item-content">${formatMarkdown(streamBody)}</div>`;
     }
 
     item.innerHTML = content;
@@ -2348,9 +2747,28 @@ function renderActiveTasks(tasks) {
     bar.style.display = 'flex';
     bar.innerHTML = '';
 
+    function openActiveTaskConversation(conversationId) {
+        if (!conversationId) return;
+        if (typeof switchPage === 'function') {
+            switchPage('chat');
+        }
+        if (typeof window.loadConversation === 'function') {
+            setTimeout(function () {
+                window.loadConversation(conversationId);
+            }, 120);
+            return;
+        }
+        window.location.hash = 'chat?conversation=' + encodeURIComponent(conversationId);
+    }
+
     normalizedTasks.forEach(task => {
         const item = document.createElement('div');
-        item.className = 'active-task-item';
+        item.className = 'active-task-item active-task-item-clickable';
+        if (task && task.conversationId) {
+            item.title = (typeof window.t === 'function' ? window.t('tasks.viewConversation') : '查看会话');
+            item.setAttribute('role', 'button');
+            item.onclick = () => openActiveTaskConversation(task.conversationId);
+        }
 
         const startedTime = task.startedAt ? new Date(task.startedAt) : null;
         const taskTimeLocale = getCurrentTimeLocale();
@@ -2388,7 +2806,10 @@ function renderActiveTasks(tasks) {
         if (!isFinalStatus) {
             const cancelBtn = item.querySelector('.active-task-cancel');
             if (cancelBtn) {
-                cancelBtn.onclick = () => cancelActiveTask(task.conversationId, cancelBtn);
+                cancelBtn.onclick = (evt) => {
+                    evt.stopPropagation();
+                    cancelActiveTask(task.conversationId);
+                };
                 if (task.status === 'cancelling') {
                     cancelBtn.disabled = true;
                     cancelBtn.textContent = typeof window.t === 'function' ? window.t('tasks.cancelling') : '取消中...';
@@ -2400,21 +2821,12 @@ function renderActiveTasks(tasks) {
     });
 }
 
-async function cancelActiveTask(conversationId, button) {
-    if (!conversationId) return;
-    const originalText = button.textContent;
-    button.disabled = true;
-    button.textContent = typeof window.t === 'function' ? window.t('tasks.cancelling') : '取消中...';
-
-    try {
-        await requestCancel(conversationId);
-        loadActiveTasks();
-    } catch (error) {
-        console.error('取消任务失败:', error);
-        alert((typeof window.t === 'function' ? window.t('tasks.cancelTaskFailed') : '取消任务失败') + ': ' + error.message);
-        button.disabled = false;
-        button.textContent = originalText;
+function cancelActiveTask(conversationId) {
+    if (!conversationId) {
+        return;
     }
+    const progressId = findProgressIdByConversationId(conversationId);
+    openUserInterruptModal(progressId, conversationId);
 }
 
 let monitorPanelFetchSeq = 0;
@@ -2747,7 +3159,8 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
     const viewDetailLabel = typeof window.t === 'function' ? window.t('mcpMonitor.viewDetail') : '查看详情';
     const deleteLabel = typeof window.t === 'function' ? window.t('mcpMonitor.delete') : '删除';
     const deleteExecTitle = typeof window.t === 'function' ? window.t('mcpMonitor.deleteExecTitle') : '删除此执行记录';
-    const statusKeyMap = { pending: 'statusPending', running: 'statusRunning', completed: 'statusCompleted', failed: 'statusFailed' };
+    const terminateLabel = typeof window.t === 'function' ? window.t('mcpMonitor.terminateExecution') : '终止';
+    const statusKeyMap = { pending: 'statusPending', running: 'statusRunning', completed: 'statusCompleted', failed: 'statusFailed', cancelled: 'statusCancelled' };
     const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : undefined;
     const rows = executions
         .map(exec => {
@@ -2758,7 +3171,11 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
             const startTime = exec.startTime ? (new Date(exec.startTime).toLocaleString ? new Date(exec.startTime).toLocaleString(locale || 'en-US') : String(exec.startTime)) : unknownLabel;
             const duration = formatExecutionDuration(exec.startTime, exec.endTime);
             const toolName = escapeHtml(exec.toolName || unknownToolLabel);
-            const executionId = escapeHtml(exec.id || '');
+            const rawExecId = exec.id || '';
+            const executionId = escapeHtml(rawExecId);
+            const terminateBtn = status === 'running'
+                ? `<button type="button" class="btn-secondary btn-monitor-abort" onclick="cancelMCPToolExecution('${rawExecId.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')">${escapeHtml(terminateLabel)}</button>`
+                : '';
             return `
                 <tr>
                     <td>
@@ -2771,6 +3188,7 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
                     <td>
                         <div class="monitor-execution-actions">
                             <button class="btn-secondary" onclick="showMCPDetail('${executionId}')">${escapeHtml(viewDetailLabel)}</button>
+                            ${terminateBtn}
                             <button class="btn-secondary btn-delete" onclick="deleteExecution('${executionId}')" title="${escapeHtml(deleteExecTitle)}">${escapeHtml(deleteLabel)}</button>
                         </div>
                     </td>
@@ -3132,7 +3550,12 @@ function refreshProgressAndTimelineI18n() {
                 titleSpan.textContent = ap + _t('chat.iterationRound', { n: n });
             }
         } else if (type === 'thinking') {
-            if (item.dataset.orchestration === 'plan_execute' && item.dataset.einoAgent && typeof einoMainStreamPlanningTitle === 'function') {
+            if (item.dataset.responseStreamPlaceholder === '1' && typeof einoMainStreamPlanningTitle === 'function') {
+                titleSpan.textContent = einoMainStreamPlanningTitle({
+                    orchestration: item.dataset.orchestration || '',
+                    einoAgent: item.dataset.einoAgent || ''
+                });
+            } else if (item.dataset.orchestration === 'plan_execute' && item.dataset.einoAgent && typeof einoMainStreamPlanningTitle === 'function') {
                 titleSpan.textContent = einoMainStreamPlanningTitle({
                     orchestration: 'plan_execute',
                     einoAgent: item.dataset.einoAgent
@@ -3140,11 +3563,13 @@ function refreshProgressAndTimelineI18n() {
             } else {
                 titleSpan.textContent = ap + '\uD83E\uDD14 ' + _t('chat.aiThinking');
             }
+        } else if (type === 'reasoning_chain') {
+            titleSpan.textContent = ap + '\uD83D\uDD17 ' + _t('chat.reasoningChain');
         } else if (type === 'planning') {
-            if (item.dataset.orchestration === 'plan_execute' && item.dataset.einoAgent && typeof einoMainStreamPlanningTitle === 'function') {
+            if (item.dataset.orchestration && typeof einoMainStreamPlanningTitle === 'function') {
                 titleSpan.textContent = einoMainStreamPlanningTitle({
-                    orchestration: 'plan_execute',
-                    einoAgent: item.dataset.einoAgent
+                    orchestration: item.dataset.orchestration,
+                    einoAgent: item.dataset.einoAgent || ''
                 });
             } else {
                 titleSpan.textContent = ap + '\uD83D\uDCDD ' + _t('chat.planning');
@@ -3166,6 +3591,8 @@ function refreshProgressAndTimelineI18n() {
             titleSpan.textContent = ap + '\uD83D\uDCAC ' + _t('chat.einoAgentReplyTitle');
         } else if (type === 'cancelled') {
             titleSpan.textContent = '\u26D4 ' + _t('chat.taskCancelled');
+        } else if (type === 'user_interrupt_continue') {
+            titleSpan.textContent = _t('chat.userInterruptContinueTitle');
         } else if (type === 'progress' && item.dataset.progressMessage !== undefined) {
             titleSpan.textContent = typeof window.translateProgressMessage === 'function' ? window.translateProgressMessage(item.dataset.progressMessage) : item.dataset.progressMessage;
         }

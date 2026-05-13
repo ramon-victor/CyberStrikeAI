@@ -7,6 +7,7 @@
     <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="shortcut icon" type="image/png" href="/static/favicon.ico">
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@4.19.0/css/xterm.css">
 </head>
 <body>
@@ -61,6 +62,24 @@
                             <div id="lang-dropdown" class="lang-dropdown" style="display: none;">
                                 <div class="lang-option" data-lang="zh-CN" onclick="onLanguageSelect('zh-CN')">中文</div>
                                 <div class="lang-option" data-lang="en-US" onclick="onLanguageSelect('en-US')">English</div>
+                            </div>
+                        </div>
+                        <div class="notification-menu-container">
+                            <button class="notification-btn" id="notification-bell-btn" onclick="toggleNotificationDropdown()" data-i18n="notifications.title" data-i18n-attr="title" data-i18n-skip-text="true" title="事件通知">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <path d="M13.73 21a2 2 0 0 1-3.46 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                                <span class="notification-badge" id="notification-badge" style="display: none;">0</span>
+                            </button>
+                            <div id="notification-dropdown" class="notification-dropdown" style="display: none;">
+                                <div class="notification-dropdown-header">
+                                    <span id="notification-dropdown-title" data-i18n="notifications.title">事件通知</span>
+                                    <button class="notification-mark-read-btn" id="notification-mark-all-read-btn" type="button" onclick="markAllNotificationsSeen()" data-i18n="notifications.markAllRead">标记已读</button>
+                                </div>
+                                <div id="notification-list" class="notification-list">
+                                    <div class="notification-empty" data-i18n="notifications.empty">暂无新事件</div>
+                                </div>
                             </div>
                         </div>
                         <div class="user-menu-container">
@@ -151,6 +170,14 @@
                             <span data-i18n="nav.vulnerabilities">漏洞管理</span>
                         </div>
                     </div>
+                    <div class="nav-item" data-page="chat-files">
+                        <div class="nav-item-content" data-title="文件管理" onclick="switchPage('chat-files')" data-i18n="nav.chatFiles" data-i18n-attr="data-title" data-i18n-skip-text="true">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                            </svg>
+                            <span data-i18n="nav.chatFiles">文件管理</span>
+                        </div>
+                    </div>
                     <div class="nav-item" data-page="webshell">
                         <div class="nav-item-content" data-title="WebShell管理" onclick="switchPage('webshell')" data-i18n="nav.webshell" data-i18n-attr="data-title" data-i18n-skip-text="true">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -160,12 +187,26 @@
                             <span data-i18n="nav.webshell">WebShell管理</span>
                         </div>
                     </div>
-                    <div class="nav-item" data-page="chat-files">
-                        <div class="nav-item-content" data-title="文件管理" onclick="switchPage('chat-files')" data-i18n="nav.chatFiles" data-i18n-attr="data-title" data-i18n-skip-text="true">
+                    <!-- C2 侧栏入口（带子菜单） -->
+                    <div class="nav-item nav-item-has-submenu" data-page="c2" id="nav-c2">
+                        <div class="nav-item-content" data-title="C2" onclick="window.toggleSubmenu('c2')" data-i18n="nav.c2" data-i18n-attr="data-title" data-i18n-skip-text="true">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                                <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                                <path d="M2 17l10 5 10-5"></path>
+                                <path d="M2 12l10 5 10-5"></path>
                             </svg>
-                            <span data-i18n="nav.chatFiles">文件管理</span>
+                            <span data-i18n="nav.c2">C2</span>
+                            <svg class="submenu-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </div>
+                        <div class="nav-submenu" id="submenu-c2">
+                            <div class="nav-submenu-item" data-page="c2-listeners" onclick="switchPage('c2-listeners')" data-i18n="nav.c2Listeners">监听器</div>
+                            <div class="nav-submenu-item" data-page="c2-sessions" onclick="switchPage('c2-sessions')" data-i18n="nav.c2Sessions">会话</div>
+                            <div class="nav-submenu-item" data-page="c2-tasks" onclick="switchPage('c2-tasks')" data-i18n="nav.c2Tasks">任务</div>
+                            <div class="nav-submenu-item" data-page="c2-payloads" onclick="switchPage('c2-payloads')" data-i18n="nav.c2Payloads">Payload</div>
+                            <div class="nav-submenu-item" data-page="c2-events" onclick="switchPage('c2-events')" data-i18n="nav.c2Events">事件</div>
+                            <div class="nav-submenu-item" data-page="c2-profiles" onclick="switchPage('c2-profiles')" data-i18n="nav.c2Profiles">流量伪装</div>
                         </div>
                     </div>
                     <div class="nav-item nav-item-has-submenu" data-page="mcp">
@@ -287,41 +328,262 @@
                         <div class="page-header">
                             <h2 data-i18n="dashboard.title">仪表盘</h2>
                             <div class="page-header-actions">
+                                <span class="dashboard-last-updated" id="dashboard-last-updated" aria-live="polite">
+                                    <svg class="dashboard-last-updated-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                    <span data-i18n="dashboard.lastUpdated">上次更新</span>
+                                    <span class="dashboard-last-updated-time" id="dashboard-last-updated-time">-</span>
+                                    <span class="dashboard-last-updated-stale" id="dashboard-last-updated-stale" hidden data-i18n="dashboard.dataStale" data-i18n-attr="title" title="数据可能已过期">
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                                    </span>
+                                </span>
                                 <button class="btn-secondary" onclick="refreshDashboard()" data-i18n="dashboard.refreshData" data-i18n-attr="title" title="刷新数据"><span data-i18n="common.refresh">刷新</span></button>
                             </div>
                         </div>
                         <div class="dashboard-content">
-                            <!-- 第一行：核心 KPI（仪表盘最佳实践：关键指标置顶） -->
+                            <!-- 关键提醒条（仅当存在严重风险时渲染，默认 hidden）；右侧 × 可在 session 内忽略 -->
+                            <div class="dashboard-alert-banner" id="dashboard-alert-banner" hidden>
+                                <span class="dashboard-alert-icon" aria-hidden="true">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                                </span>
+                                <div class="dashboard-alert-content">
+                                    <div class="dashboard-alert-title" id="dashboard-alert-title" data-i18n="dashboard.alertTitle">需要关注</div>
+                                    <div class="dashboard-alert-desc" id="dashboard-alert-desc"></div>
+                                </div>
+                                <div class="dashboard-alert-actions" id="dashboard-alert-actions"></div>
+                                <button type="button" class="dashboard-alert-close" id="dashboard-alert-close" data-i18n="dashboard.alertDismiss" data-i18n-attr="title" data-i18n-skip-text="true" title="忽略此提醒（仅本次会话）" aria-label="dismiss">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                </button>
+                            </div>
+                            <!-- 第一行：核心 KPI（关键指标置顶 + 副标徽章承载次级信息） -->
                             <div class="dashboard-kpi-row" id="dashboard-cards">
-                                <div class="dashboard-kpi-card" role="button" tabindex="0" onclick="switchPage('tasks')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('tasks'); }" data-i18n="dashboard.clickToViewTasks" data-i18n-attr="title" title="点击查看任务管理"> <div class="dashboard-kpi-value" id="dashboard-running-tasks">-</div><div class="dashboard-kpi-label" data-i18n="dashboard.runningTasks">运行中任务</div></div>
-                                <div class="dashboard-kpi-card" role="button" tabindex="0" onclick="switchPage('vulnerabilities')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('vulnerabilities'); }" data-i18n="dashboard.clickToViewVuln" data-i18n-attr="title" title="点击查看漏洞管理"><div class="dashboard-kpi-value" id="dashboard-vuln-total">-</div><div class="dashboard-kpi-label" data-i18n="dashboard.vulnTotal">漏洞总数</div></div>
-                                <div class="dashboard-kpi-card" role="button" tabindex="0" onclick="switchPage('mcp-monitor')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('mcp-monitor'); }" data-i18n="dashboard.clickToViewMCP" data-i18n-attr="title" title="点击查看 MCP 监控"><div class="dashboard-kpi-value" id="dashboard-kpi-tools-calls">-</div><div class="dashboard-kpi-label" data-i18n="dashboard.toolCalls">工具调用次数</div></div>
-                                <div class="dashboard-kpi-card" role="button" tabindex="0" onclick="switchPage('mcp-monitor')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('mcp-monitor'); }" data-i18n="dashboard.clickToViewMCP" data-i18n-attr="title" title="点击查看 MCP 监控"><div class="dashboard-kpi-value" id="dashboard-kpi-success-rate">-</div><div class="dashboard-kpi-label" data-i18n="dashboard.successRate">工具执行成功率</div></div>
+                                <div class="dashboard-kpi-card" role="button" tabindex="0" onclick="switchPage('tasks')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('tasks'); }" data-i18n="dashboard.clickToViewTasks" data-i18n-attr="title" title="点击查看任务管理">
+                                    <div class="dashboard-kpi-head">
+                                        <div class="dashboard-kpi-label" data-i18n="dashboard.runningTasks">运行中任务</div>
+                                        <span class="dashboard-kpi-icon dashboard-kpi-icon-tasks" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/></svg></span>
+                                    </div>
+                                    <div class="dashboard-kpi-value" id="dashboard-running-tasks">-</div>
+                                    <div class="dashboard-kpi-sub" id="dashboard-kpi-tasks-sub">
+                                        <span class="dashboard-kpi-sub-text" id="dashboard-kpi-tasks-sub-text">-</span>
+                                    </div>
+                                </div>
+                                <div class="dashboard-kpi-card" role="button" tabindex="0" onclick="switchPage('vulnerabilities')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('vulnerabilities'); }" data-i18n="dashboard.clickToViewVuln" data-i18n-attr="title" title="点击查看漏洞管理">
+                                    <div class="dashboard-kpi-head">
+                                        <div class="dashboard-kpi-label" data-i18n="dashboard.vulnTotal">漏洞总数</div>
+                                        <span class="dashboard-kpi-icon dashboard-kpi-icon-vuln" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
+                                    </div>
+                                    <div class="dashboard-kpi-value" id="dashboard-vuln-total">-</div>
+                                    <div class="dashboard-kpi-sub" id="dashboard-kpi-vuln-sub">
+                                        <span class="dashboard-kpi-sub-badge dashboard-kpi-sub-badge-critical" id="dashboard-kpi-vuln-critical-badge" hidden>
+                                            <span class="dashboard-kpi-sub-badge-dot"></span>
+                                            <span data-i18n="dashboard.severityCritical">严重</span>
+                                            <span id="dashboard-kpi-vuln-critical-count">0</span>
+                                        </span>
+                                        <span class="dashboard-kpi-sub-text" id="dashboard-kpi-vuln-sub-text" data-i18n="dashboard.allClear">暂无新增风险</span>
+                                    </div>
+                                </div>
+                                <div class="dashboard-kpi-card" role="button" tabindex="0" onclick="switchPage('mcp-monitor')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('mcp-monitor'); }" data-i18n="dashboard.clickToViewMCP" data-i18n-attr="title" title="点击查看 MCP 监控">
+                                    <div class="dashboard-kpi-head">
+                                        <div class="dashboard-kpi-label" data-i18n="dashboard.toolCalls">工具调用次数</div>
+                                        <span class="dashboard-kpi-icon dashboard-kpi-icon-calls" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
+                                    </div>
+                                    <div class="dashboard-kpi-value" id="dashboard-kpi-tools-calls">-</div>
+                                    <div class="dashboard-kpi-sub">
+                                        <span class="dashboard-kpi-sub-text" id="dashboard-kpi-tools-sub-text">-</span>
+                                    </div>
+                                </div>
+                                <div class="dashboard-kpi-card" role="button" tabindex="0" onclick="switchPage('mcp-monitor')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('mcp-monitor'); }" data-i18n="dashboard.clickToViewMCP" data-i18n-attr="title" title="点击查看 MCP 监控">
+                                    <div class="dashboard-kpi-head">
+                                        <div class="dashboard-kpi-label" data-i18n="dashboard.successRate">工具执行成功率</div>
+                                        <span class="dashboard-kpi-icon dashboard-kpi-icon-rate" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span>
+                                    </div>
+                                    <div class="dashboard-kpi-value" id="dashboard-kpi-success-rate">-</div>
+                                    <div class="dashboard-kpi-sub">
+                                        <span class="dashboard-kpi-sub-text" id="dashboard-kpi-rate-sub-text" data-i18n="dashboard.healthyStatus">运行平稳</span>
+                                    </div>
+                                </div>
                             </div>
                             <!-- 两列主内容区 -->
                             <div class="dashboard-grid">
                                 <div class="dashboard-main">
                                     <section class="dashboard-section dashboard-section-chart">
-                                        <h3 class="dashboard-section-title" data-i18n="dashboard.severityDistribution">漏洞严重程度分布</h3>
-                                        <div class="dashboard-chart-wrap">
-                                            <div class="dashboard-stacked-bar" id="dashboard-stacked-bar">
-                                                <span class="dashboard-bar-seg seg-critical" id="dashboard-bar-critical" style="width: 0%"></span>
-                                                <span class="dashboard-bar-seg seg-high" id="dashboard-bar-high" style="width: 0%"></span>
-                                                <span class="dashboard-bar-seg seg-medium" id="dashboard-bar-medium" style="width: 0%"></span>
-                                                <span class="dashboard-bar-seg seg-low" id="dashboard-bar-low" style="width: 0%"></span>
-                                                <span class="dashboard-bar-seg seg-info" id="dashboard-bar-info" style="width: 0%"></span>
+                                        <div class="dashboard-section-header">
+                                            <h3 class="dashboard-section-title" data-i18n="dashboard.severityDistribution">漏洞严重程度分布</h3>
+                                            <a class="dashboard-section-link" onclick="switchPage('vulnerabilities')" data-i18n="dashboard.viewAll">查看全部 →</a>
+                                        </div>
+                                        <div class="dashboard-severity-wrap">
+                                            <!-- 风险概览卡：填充 donut 左侧留白；提供「结论性」洞察（风险等级/加权分/待处理计数/最新时间），
+                                                 与右侧 legend 的「明细」形成互补，避免和下方「最近漏洞」列表重复 -->
+                                            <aside class="dashboard-severity-insights" aria-label="风险概览">
+                                                <div class="dashboard-severity-insight-risk" data-level="safe">
+                                                    <div class="dashboard-severity-insight-head">
+                                                        <span class="dashboard-severity-insight-label" data-i18n="dashboard.riskLevel">风险等级</span>
+                                                        <span class="dashboard-severity-insight-risk-badge" id="dashboard-severity-risk-level" data-i18n="dashboard.riskSafe">安全</span>
+                                                    </div>
+                                                    <div class="dashboard-severity-insight-score-track" aria-hidden="true">
+                                                        <div class="dashboard-severity-insight-score-fill" id="dashboard-severity-risk-fill" style="width: 0%"></div>
+                                                    </div>
+                                                    <div class="dashboard-severity-insight-score-meta">
+                                                        <span class="dashboard-severity-insight-score-label" data-i18n="dashboard.riskScore">加权风险分</span>
+                                                        <span class="dashboard-severity-insight-score-value" id="dashboard-severity-risk-score">0</span>
+                                                    </div>
+                                                </div>
+                                                <div class="dashboard-severity-insight-urgent-group">
+                                                    <span class="dashboard-severity-insight-label" data-i18n="dashboard.statusOpen">待处理</span>
+                                                    <div class="dashboard-severity-insight-urgent">
+                                                        <div class="dashboard-severity-insight-urgent-item u-critical" role="button" tabindex="0" onclick="switchPage('vulnerabilities')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('vulnerabilities'); }" title="查看待处理严重漏洞">
+                                                            <span class="dashboard-severity-insight-urgent-value" id="dashboard-severity-urgent-critical">0</span>
+                                                            <span class="dashboard-severity-insight-urgent-label" data-i18n="dashboard.severityCritical">严重</span>
+                                                        </div>
+                                                        <div class="dashboard-severity-insight-urgent-item u-high" role="button" tabindex="0" onclick="switchPage('vulnerabilities')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('vulnerabilities'); }" title="查看待处理高危漏洞">
+                                                            <span class="dashboard-severity-insight-urgent-value" id="dashboard-severity-urgent-high">0</span>
+                                                            <span class="dashboard-severity-insight-urgent-label" data-i18n="dashboard.severityHigh">高危</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="dashboard-severity-insight-latest">
+                                                    <span class="dashboard-severity-insight-label" data-i18n="dashboard.latestFound">最近发现</span>
+                                                    <span class="dashboard-severity-insight-time" id="dashboard-severity-latest-time" data-i18n="dashboard.noneYet">暂无</span>
+                                                </div>
+                                            </aside>
+                                            <div class="dashboard-severity-chart">
+                                                <svg class="dashboard-severity-donut" id="dashboard-severity-donut" viewBox="0 0 480 260" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+                                                    <g id="dashboard-severity-donut-track"></g>
+                                                    <g id="dashboard-severity-donut-segments"></g>
+                                                    <g id="dashboard-severity-donut-labels"></g>
+                                                </svg>
+                                                <div class="dashboard-severity-center">
+                                                    <div class="dashboard-severity-center-value" id="dashboard-severity-total">0</div>
+                                                    <div class="dashboard-severity-center-label" data-i18n="dashboard.totalVulns">总漏洞数</div>
+                                                </div>
                                             </div>
-                                            <div class="dashboard-legend" id="dashboard-vuln-bars">
-                                                <div class="dashboard-legend-item"><span class="dashboard-legend-dot critical"></span><span class="dashboard-legend-label" data-i18n="dashboard.severityCritical">严重</span><span class="dashboard-legend-value" id="dashboard-severity-critical">0</span></div>
-                                                <div class="dashboard-legend-item"><span class="dashboard-legend-dot high"></span><span class="dashboard-legend-label" data-i18n="dashboard.severityHigh">高危</span><span class="dashboard-legend-value" id="dashboard-severity-high">0</span></div>
-                                                <div class="dashboard-legend-item"><span class="dashboard-legend-dot medium"></span><span class="dashboard-legend-label" data-i18n="dashboard.severityMedium">中危</span><span class="dashboard-legend-value" id="dashboard-severity-medium">0</span></div>
-                                                <div class="dashboard-legend-item"><span class="dashboard-legend-dot low"></span><span class="dashboard-legend-label" data-i18n="dashboard.severityLow">低危</span><span class="dashboard-legend-value" id="dashboard-severity-low">0</span></div>
-                                                <div class="dashboard-legend-item"><span class="dashboard-legend-dot info"></span><span class="dashboard-legend-label" data-i18n="dashboard.severityInfo">信息</span><span class="dashboard-legend-value" id="dashboard-severity-info">0</span></div>
+                                            <div class="dashboard-severity-legend" id="dashboard-vuln-bars">
+                                                <div class="dashboard-severity-legend-item">
+                                                    <span class="dashboard-severity-legend-dot critical"></span>
+                                                    <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityCritical">严重</span>
+                                                    <span class="dashboard-severity-legend-value" id="dashboard-severity-critical">0</span>
+                                                    <span class="dashboard-severity-legend-pct" id="dashboard-severity-critical-pct">0%</span>
+                                                </div>
+                                                <div class="dashboard-severity-legend-item">
+                                                    <span class="dashboard-severity-legend-dot high"></span>
+                                                    <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityHigh">高危</span>
+                                                    <span class="dashboard-severity-legend-value" id="dashboard-severity-high">0</span>
+                                                    <span class="dashboard-severity-legend-pct" id="dashboard-severity-high-pct">0%</span>
+                                                </div>
+                                                <div class="dashboard-severity-legend-item">
+                                                    <span class="dashboard-severity-legend-dot medium"></span>
+                                                    <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityMedium">中危</span>
+                                                    <span class="dashboard-severity-legend-value" id="dashboard-severity-medium">0</span>
+                                                    <span class="dashboard-severity-legend-pct" id="dashboard-severity-medium-pct">0%</span>
+                                                </div>
+                                                <div class="dashboard-severity-legend-item">
+                                                    <span class="dashboard-severity-legend-dot low"></span>
+                                                    <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityLow">低危</span>
+                                                    <span class="dashboard-severity-legend-value" id="dashboard-severity-low">0</span>
+                                                    <span class="dashboard-severity-legend-pct" id="dashboard-severity-low-pct">0%</span>
+                                                </div>
+                                                <div class="dashboard-severity-legend-item">
+                                                    <span class="dashboard-severity-legend-dot info"></span>
+                                                    <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityInfo">信息</span>
+                                                    <span class="dashboard-severity-legend-value" id="dashboard-severity-info">0</span>
+                                                    <span class="dashboard-severity-legend-pct" id="dashboard-severity-info-pct">0%</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <!-- 处置状态 + 修复进度（利用 by_status 数据，避免下半部分留白） -->
+                                        <div class="dashboard-severity-status">
+                                            <div class="dashboard-severity-status-grid">
+                                                <div class="dashboard-severity-status-cell s-open" role="button" tabindex="0" onclick="switchPage('vulnerabilities')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('vulnerabilities'); }">
+                                                    <span class="dashboard-severity-status-icon" aria-hidden="true">
+                                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                                                    </span>
+                                                    <div class="dashboard-severity-status-text">
+                                                        <span class="dashboard-severity-status-value" id="dashboard-status-open">0</span>
+                                                        <span class="dashboard-severity-status-label" data-i18n="dashboard.statusOpen">待处理</span>
+                                                    </div>
+                                                </div>
+                                                <div class="dashboard-severity-status-cell s-confirmed" role="button" tabindex="0" onclick="switchPage('vulnerabilities')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('vulnerabilities'); }">
+                                                    <span class="dashboard-severity-status-icon" aria-hidden="true">
+                                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                                                    </span>
+                                                    <div class="dashboard-severity-status-text">
+                                                        <span class="dashboard-severity-status-value" id="dashboard-status-confirmed">0</span>
+                                                        <span class="dashboard-severity-status-label" data-i18n="dashboard.statusConfirmed">已确认</span>
+                                                    </div>
+                                                </div>
+                                                <div class="dashboard-severity-status-cell s-fixed" role="button" tabindex="0" onclick="switchPage('vulnerabilities')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('vulnerabilities'); }">
+                                                    <span class="dashboard-severity-status-icon" aria-hidden="true">
+                                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+                                                    </span>
+                                                    <div class="dashboard-severity-status-text">
+                                                        <span class="dashboard-severity-status-value" id="dashboard-status-fixed">0</span>
+                                                        <span class="dashboard-severity-status-label" data-i18n="dashboard.statusFixed">已修复</span>
+                                                    </div>
+                                                </div>
+                                                <div class="dashboard-severity-status-cell s-fp" role="button" tabindex="0" onclick="switchPage('vulnerabilities')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('vulnerabilities'); }">
+                                                    <span class="dashboard-severity-status-icon" aria-hidden="true">
+                                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                                                    </span>
+                                                    <div class="dashboard-severity-status-text">
+                                                        <span class="dashboard-severity-status-value" id="dashboard-status-fp">0</span>
+                                                        <span class="dashboard-severity-status-label" data-i18n="dashboard.statusFalsePositive">误报</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="dashboard-severity-progress">
+                                                <div class="dashboard-severity-progress-meta">
+                                                    <span class="dashboard-severity-progress-title" data-i18n="dashboard.fixRate">修复率</span>
+                                                    <span class="dashboard-severity-progress-value">
+                                                        <span id="dashboard-fix-rate">0%</span>
+                                                        <span class="dashboard-severity-progress-detail" id="dashboard-fix-detail">(0 / 0)</span>
+                                                    </span>
+                                                </div>
+                                                <div class="dashboard-severity-progress-track" aria-hidden="true">
+                                                    <div class="dashboard-severity-progress-fixed" id="dashboard-fix-progress-fixed" style="width: 0%"></div>
+                                                    <div class="dashboard-severity-progress-confirmed" id="dashboard-fix-progress-confirmed" style="width: 0%"></div>
+                                                </div>
+                                                <div class="dashboard-severity-progress-legend">
+                                                    <span class="dashboard-severity-progress-legend-item"><span class="dashboard-severity-progress-legend-dot legend-fixed"></span><span data-i18n="dashboard.statusFixed">已修复</span></span>
+                                                    <span class="dashboard-severity-progress-legend-item"><span class="dashboard-severity-progress-legend-dot legend-confirmed"></span><span data-i18n="dashboard.statusConfirmed">已确认</span></span>
+                                                    <span class="dashboard-severity-progress-legend-item"><span class="dashboard-severity-progress-legend-dot legend-open"></span><span data-i18n="dashboard.statusOpen">待处理</span></span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </section>
+                                    <section class="dashboard-section dashboard-section-recent-vulns">
+                                        <div class="dashboard-section-header">
+                                            <h3 class="dashboard-section-title" data-i18n="dashboard.recentVulns">最近漏洞</h3>
+                                            <a class="dashboard-section-link" onclick="switchPage('vulnerabilities')" data-i18n="dashboard.viewAll">查看全部 →</a>
+                                        </div>
+                                        <div class="dashboard-recent-vulns" id="dashboard-recent-vulns">
+                                            <div class="dashboard-recent-vulns-empty" id="dashboard-recent-vulns-empty" data-i18n="dashboard.noVulnYet">暂无最近漏洞</div>
+                                        </div>
+                                    </section>
+                                    <!-- C2 概览：介于「最近漏洞」与「批量任务队列」之间 -->
+                                    <section class="dashboard-section dashboard-section-c2" id="dashboard-section-c2" hidden>
+                                        <div class="dashboard-section-header">
+                                            <h3 class="dashboard-section-title" data-i18n="dashboard.c2OverviewTitle">C2 概览</h3>
+                                            <a class="dashboard-section-link" onclick="switchPage('c2')" data-i18n="dashboard.c2GoManage">进入 C2 →</a>
+                                        </div>
+                                        <div class="dashboard-c2-strip">
+                                            <div class="dashboard-c2-stat" role="button" tabindex="0" onclick="switchPage('c2-listeners')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('c2-listeners'); }" data-i18n="dashboard.c2ClickListeners" data-i18n-attr="title" title="查看监听器">
+                                                <span class="dashboard-c2-stat-value" id="dashboard-c2-listeners-running">-</span>
+                                                <span class="dashboard-c2-stat-label" data-i18n="dashboard.c2ListenersRunning">运行中监听器</span>
+                                            </div>
+                                            <div class="dashboard-c2-stat" role="button" tabindex="0" onclick="switchPage('c2-sessions')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('c2-sessions'); }" data-i18n="dashboard.c2ClickSessions" data-i18n-attr="title" title="查看会话">
+                                                <span class="dashboard-c2-stat-value" id="dashboard-c2-sessions-online">-</span>
+                                                <span class="dashboard-c2-stat-label" data-i18n="dashboard.c2SessionsOnline">在线会话</span>
+                                            </div>
+                                            <div class="dashboard-c2-stat" role="button" tabindex="0" onclick="switchPage('c2-tasks')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('c2-tasks'); }" data-i18n="dashboard.c2ClickTasks" data-i18n-attr="title" title="查看任务">
+                                                <span class="dashboard-c2-stat-value" id="dashboard-c2-tasks-pending">-</span>
+                                                <span class="dashboard-c2-stat-label" data-i18n="dashboard.c2TasksPending">待审 / 排队任务</span>
                                             </div>
                                         </div>
                                     </section>
                                     <section class="dashboard-section dashboard-section-overview">
-                                        <h3 class="dashboard-section-title" data-i18n="dashboard.runOverview">运行概览</h3>
+                                        <div class="dashboard-section-header">
+                                            <h3 class="dashboard-section-title" data-i18n="dashboard.batchQueues">批量任务队列</h3>
+                                            <a class="dashboard-section-link" onclick="switchPage('tasks')" data-i18n="dashboard.viewAll">查看全部 →</a>
+                                        </div>
                                         <div class="dashboard-overview-list">
                                             <div class="dashboard-overview-item dashboard-overview-item-batch" role="button" tabindex="0" onclick="switchPage('tasks')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('tasks'); }">
                                                 <span class="dashboard-overview-icon dashboard-overview-icon-batch" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
@@ -356,80 +618,100 @@
                                                     </div>
                                                 </div>
                                             </div>
-                                            <div class="dashboard-overview-item dashboard-overview-item-tools" role="button" tabindex="0" onclick="switchPage('mcp-monitor')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('mcp-monitor'); }">
-                                                <span class="dashboard-overview-icon dashboard-overview-icon-tools" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span>
-                                                <div class="dashboard-overview-content">
-                                                    <div class="dashboard-overview-header">
-                                                        <span class="dashboard-overview-label" data-i18n="dashboard.toolInvocations">工具调用</span>
-                                                        <span class="dashboard-overview-success-rate" id="dashboard-tools-success-rate">-</span>
-                                                    </div>
-                                                    <div class="dashboard-overview-value-group">
-                                                        <span class="dashboard-overview-value-large" id="dashboard-tools-calls">-</span>
-                                                        <span class="dashboard-overview-value-unit" data-i18n="dashboard.callsUnit">次调用</span>
-                                                        <span class="dashboard-overview-value-separator">·</span>
-                                                        <span class="dashboard-overview-value-normal" id="dashboard-tools-count">-</span>
-                                                        <span class="dashboard-overview-value-unit" data-i18n="dashboard.toolsUnit">个工具</span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="dashboard-overview-item dashboard-overview-item-knowledge" role="button" tabindex="0" onclick="switchPage('knowledge-management')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('knowledge-management'); }">
-                                                <span class="dashboard-overview-icon dashboard-overview-icon-knowledge" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></span>
-                                                <div class="dashboard-overview-content">
-                                                    <div class="dashboard-overview-header">
-                                                        <span class="dashboard-overview-label" data-i18n="dashboard.knowledgeLabel">知识</span>
-                                                        <span class="dashboard-overview-status" id="dashboard-knowledge-status">-</span>
-                                                    </div>
-                                                    <div class="dashboard-overview-value-group">
-                                                        <span class="dashboard-overview-value-large" id="dashboard-knowledge-items">-</span>
-                                                        <span class="dashboard-overview-value-unit" data-i18n="dashboard.knowledgeItems">项知识</span>
-                                                        <span class="dashboard-overview-value-separator">·</span>
-                                                        <span class="dashboard-overview-value-normal" id="dashboard-knowledge-categories">-</span>
-                                                        <span class="dashboard-overview-value-unit" data-i18n="dashboard.categoriesUnit">个分类</span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="dashboard-overview-item dashboard-overview-item-skills" role="button" tabindex="0" onclick="switchPage('skills-monitor')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('skills-monitor'); }">
-                                                <span class="dashboard-overview-icon dashboard-overview-icon-skills" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>
-                                                <div class="dashboard-overview-content">
-                                                    <div class="dashboard-overview-header">
-                                                        <span class="dashboard-overview-label" data-i18n="dashboard.skillsLabel">Skills</span>
-                                                        <span class="dashboard-overview-status" id="dashboard-skills-status">-</span>
-                                                    </div>
-                                                    <div class="dashboard-overview-value-group">
-                                                        <span class="dashboard-overview-value-large" id="dashboard-skills-calls">-</span>
-                                                        <span class="dashboard-overview-value-unit" data-i18n="dashboard.callsUnit">次调用</span>
-                                                        <span class="dashboard-overview-value-separator">·</span>
-                                                        <span class="dashboard-overview-value-normal" id="dashboard-skills-count">-</span>
-                                                        <span class="dashboard-overview-value-unit" data-i18n="dashboard.skillUnit">个 Skill</span>
-                                                    </div>
-                                                </div>
-                                            </div>
                                         </div>
                                     </section>
-                                    <section class="dashboard-section dashboard-section-quick dashboard-quick-inline">
-                                        <h3 class="dashboard-section-title" data-i18n="dashboard.quickLinks">快捷入口</h3>
-                                        <div class="dashboard-quick-links dashboard-quick-links-row">
-                                            <a class="dashboard-quick-link" onclick="switchPage('chat')"><span class="dashboard-quick-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg></span><span data-i18n="nav.chat">对话</span></a>
-                                            <a class="dashboard-quick-link" onclick="switchPage('tasks')"><span class="dashboard-quick-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg></span><span data-i18n="nav.tasks">任务管理</span></a>
-                                            <a class="dashboard-quick-link" onclick="switchPage('vulnerabilities')"><span class="dashboard-quick-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg></span><span data-i18n="nav.vulnerabilities">漏洞管理</span></a>
-                                            <a class="dashboard-quick-link" onclick="switchPage('mcp-management')"><span class="dashboard-quick-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg></span><span data-i18n="nav.mcpManagement">MCP 管理</span></a>
-                                            <a class="dashboard-quick-link" onclick="switchPage('knowledge-management')"><span class="dashboard-quick-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg></span><span data-i18n="nav.knowledgeManagement">知识管理</span></a>
-                                            <a class="dashboard-quick-link" onclick="switchPage('skills-management')"><span class="dashboard-quick-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path><polyline points="14 2 14 8 20 8"></polyline></svg></span><span data-i18n="nav.skillsManagement">Skills 管理</span></a>
-                                            <a class="dashboard-quick-link" onclick="switchPage('roles-management')"><span class="dashboard-quick-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg></span><span data-i18n="nav.rolesManagement">角色管理</span></a>
+                                    <!-- 推荐操作：基于当前数据状态智能生成（如「修复 4 个待处理严重漏洞」「审批 2 个 HITL」），
+                                         比纯静态导航更有意义；当没有任何推荐时整个 section 隐藏 -->
+                                    <section class="dashboard-section dashboard-section-recommend" id="dashboard-section-recommend" hidden>
+                                        <div class="dashboard-section-header">
+                                            <h3 class="dashboard-section-title" data-i18n="dashboard.recommendedActions">推荐操作</h3>
+                                            <span class="dashboard-section-hint" data-i18n="dashboard.recommendedActionsHint">基于当前状态自动生成</span>
                                         </div>
+                                        <div class="dashboard-recommend-list" id="dashboard-recommend-list"></div>
                                     </section>
                                 </div>
                                 <div class="dashboard-side">
                                     <section class="dashboard-section dashboard-section-tools">
-                                        <h3 class="dashboard-section-title" data-i18n="dashboard.toolsExecCount">工具执行次数</h3>
+                                        <div class="dashboard-section-header">
+                                            <h3 class="dashboard-section-title" data-i18n="dashboard.toolsExecCount">工具执行次数</h3>
+                                            <a class="dashboard-section-link" onclick="switchPage('mcp-monitor')" data-i18n="dashboard.viewAll">查看全部 →</a>
+                                        </div>
                                         <div class="dashboard-tools-chart-wrap">
                                             <div class="dashboard-tools-chart-placeholder" id="dashboard-tools-pie-placeholder" data-i18n="common.noData">暂无数据</div>
                                             <div class="dashboard-tools-bar-chart" id="dashboard-tools-bar-chart"></div>
                                         </div>
                                     </section>
+                                    <!-- 最近事件：拉 /api/notifications/summary 取最新 3 条；空时整个隐藏 -->
+                                    <section class="dashboard-section dashboard-section-events" id="dashboard-section-events" hidden>
+                                        <div class="dashboard-section-header">
+                                            <h3 class="dashboard-section-title" data-i18n="dashboard.recentEvents">最近事件</h3>
+                                            <a class="dashboard-section-link" onclick="if(typeof toggleNotificationDropdown==='function') toggleNotificationDropdown()" data-i18n="dashboard.viewAll">查看全部 →</a>
+                                        </div>
+                                        <div class="dashboard-events-list" id="dashboard-events-list"></div>
+                                    </section>
+                                    <section class="dashboard-section dashboard-section-resources">
+                                        <h3 class="dashboard-section-title" data-i18n="dashboard.capabilities">能力总览</h3>
+                                        <div class="dashboard-resource-list" id="dashboard-resource-list">
+                                            <a class="dashboard-resource-item" onclick="switchPage('mcp-management')" role="button" tabindex="0">
+                                                <span class="dashboard-resource-icon dashboard-resource-icon-mcp" aria-hidden="true">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                                                </span>
+                                                <span class="dashboard-resource-label" data-i18n="dashboard.mcpTools">MCP 工具</span>
+                                                <span class="dashboard-resource-value" id="dashboard-resource-tools">-</span>
+                                            </a>
+                                            <!-- External MCP 服务器健康度：N 运行 / N 异常；只有配置过 External MCP 才显示 -->
+                                            <a class="dashboard-resource-item" id="dashboard-resource-external-mcp-row" onclick="switchPage('mcp-management')" role="button" tabindex="0" hidden>
+                                                <span class="dashboard-resource-icon dashboard-resource-icon-external" aria-hidden="true">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                                                </span>
+                                                <span class="dashboard-resource-label" data-i18n="dashboard.externalMcpServers">External MCP</span>
+                                                <span class="dashboard-resource-value" id="dashboard-resource-external-mcp">
+                                                    <span id="dashboard-resource-external-mcp-text">-</span>
+                                                    <span class="dashboard-resource-health" id="dashboard-resource-external-mcp-health" hidden></span>
+                                                </span>
+                                            </a>
+                                            <a class="dashboard-resource-item" onclick="switchPage('skills-management')" role="button" tabindex="0">
+                                                <span class="dashboard-resource-icon dashboard-resource-icon-skills" aria-hidden="true">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+                                                </span>
+                                                <span class="dashboard-resource-label" data-i18n="dashboard.skillsLabel">Skills</span>
+                                                <span class="dashboard-resource-value" id="dashboard-resource-skills">-</span>
+                                            </a>
+                                            <a class="dashboard-resource-item" onclick="switchPage('knowledge-management')" role="button" tabindex="0">
+                                                <span class="dashboard-resource-icon dashboard-resource-icon-knowledge" aria-hidden="true">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                                                </span>
+                                                <span class="dashboard-resource-label" data-i18n="dashboard.knowledgeLabel">知识</span>
+                                                <span class="dashboard-resource-value" id="dashboard-resource-knowledge">-</span>
+                                            </a>
+                                            <a class="dashboard-resource-item" onclick="switchPage('roles-management')" role="button" tabindex="0">
+                                                <span class="dashboard-resource-icon dashboard-resource-icon-roles" aria-hidden="true">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                                                </span>
+                                                <span class="dashboard-resource-label" data-i18n="dashboard.rolesLabel">角色</span>
+                                                <span class="dashboard-resource-value" id="dashboard-resource-roles">-</span>
+                                            </a>
+                                            <a class="dashboard-resource-item" onclick="switchPage('agents-management')" role="button" tabindex="0">
+                                                <span class="dashboard-resource-icon dashboard-resource-icon-agents" aria-hidden="true">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+                                                </span>
+                                                <span class="dashboard-resource-label" data-i18n="dashboard.agentsLabel">Agents</span>
+                                                <span class="dashboard-resource-value" id="dashboard-resource-agents">-</span>
+                                            </a>
+                                            <!-- WebShell 连接：渗透落地后建立的 foothold，对安全运维场景非常关键 -->
+                                            <a class="dashboard-resource-item" onclick="switchPage('webshell')" role="button" tabindex="0">
+                                                <span class="dashboard-resource-icon dashboard-resource-icon-webshell" aria-hidden="true">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                                                </span>
+                                                <span class="dashboard-resource-label" data-i18n="dashboard.webshellLabel">WebShell</span>
+                                                <span class="dashboard-resource-value" id="dashboard-resource-webshell">-</span>
+                                            </a>
+                                        </div>
+                                    </section>
                                 </div>
                             </div>
-                            <div class="dashboard-cta-block">
+                            <!-- "开始你的安全之旅" CTA：默认显示；当用户已经有数据（任务/漏洞/调用）后，由 JS 隐藏避免冗余 -->
+                            <div class="dashboard-cta-block" id="dashboard-cta-block">
                                 <div class="dashboard-cta-content">
                                     <div class="dashboard-cta-icon" aria-hidden="true">
                                         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
@@ -510,11 +792,51 @@
                                     <div id="conversations-list" class="conversations-list"></div>
                                 </div>
                             </div>
+                            <div id="chat-reasoning-wrapper" class="chat-reasoning-wrapper conversation-reasoning-card conversation-reasoning-collapsed" style="display: none;">
+                                <button type="button" id="conversation-reasoning-toggle" class="conversation-reasoning-card-header" onclick="toggleConversationReasoningCard()" aria-expanded="false" aria-controls="conversation-reasoning-body" data-i18n="chat.reasoningCompactAria" data-i18n-attr="aria-label,title" data-i18n-skip-text="true" aria-label="模型推理选项" title="模型推理选项">
+                                    <div class="conversation-reasoning-heading">
+                                        <span class="conversation-reasoning-icon" aria-hidden="true">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                                <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.75"/>
+                                                <path d="M16 16l5 5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+                                            </svg>
+                                        </span>
+                                        <div class="conversation-reasoning-heading-text">
+                                            <span class="conversation-reasoning-title" data-i18n="chat.reasoningPanelTitle">模型推理</span>
+                                            <span id="chat-reasoning-summary" class="conversation-reasoning-summary"></span>
+                                        </div>
+                                    </div>
+                                </button>
+                                <div id="conversation-reasoning-body" class="conversation-reasoning-body" role="region">
+                                    <p class="chat-reasoning-panel-hint" data-i18n="chat.reasoningPanelHint">仅 Eino 请求生效，与系统设置中的默认值合并。</p>
+                                    <div class="chat-reasoning-fields">
+                                        <div class="chat-reasoning-field">
+                                            <label class="chat-reasoning-field-label" for="chat-reasoning-mode"><span data-i18n="chat.reasoningModeLabel">模式</span></label>
+                                            <select id="chat-reasoning-mode" class="chat-reasoning-select" onchange="persistChatReasoningPrefs()">
+                                                <option value="default" data-i18n="chat.reasoningModeDefault">跟随系统</option>
+                                                <option value="off" data-i18n="chat.reasoningModeOff">关闭</option>
+                                                <option value="on" data-i18n="chat.reasoningModeOn">开启</option>
+                                                <option value="auto" data-i18n="chat.reasoningModeAuto">自动</option>
+                                            </select>
+                                        </div>
+                                        <div class="chat-reasoning-field">
+                                            <label class="chat-reasoning-field-label" for="chat-reasoning-effort"><span data-i18n="chat.reasoningEffortLabel">推理强度</span></label>
+                                            <select id="chat-reasoning-effort" class="chat-reasoning-select" onchange="persistChatReasoningPrefs()">
+                                                <option value="" data-i18n="chat.reasoningEffortUnset">不指定</option>
+                                                <option value="low">low</option>
+                                                <option value="medium">medium</option>
+                                                <option value="high">high</option>
+                                                <option value="max">max</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                             <div class="hitl-sidebar-card hitl-sidebar-collapsed" id="hitl-sidebar-card">
                                 <div class="hitl-sidebar-card-header" onclick="toggleHitlSidebarCard()">
                                     <div class="hitl-sidebar-heading">
                                         <span class="hitl-sidebar-icon" aria-hidden="true">
-                                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                                 <path d="M12 2L4 5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5l-8-3z" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/>
                                                 <path d="M9.5 12.5l2 2 3-4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
                                             </svg>
@@ -612,6 +934,8 @@
                             <div id="active-tasks-bar" class="active-tasks-bar"></div>
                             <div id="chat-messages" class="chat-messages"></div>
                             <div id="chat-input-container" class="chat-input-container">
+                                <div class="chat-input-primary-row">
+                                <div class="chat-input-leading">
                                 <div class="role-selector-wrapper">
                                     <button id="role-selector-btn" class="role-selector-btn" onclick="toggleRoleSelectionPanel()" data-i18n="chat.selectRole" data-i18n-attr="title" title="选择角色">
                                         <span id="role-selector-icon" class="role-selector-icon">🔵</span>
@@ -697,6 +1021,7 @@
                                     </div>
                                     <input type="hidden" id="agent-mode-select" value="react" autocomplete="off">
                                 </div>
+                                </div>
                                 <div class="chat-input-with-files">
                                     <div id="chat-file-list" class="chat-file-list" aria-label="已选文件列表"></div>
                                     <div id="chat-attachment-progress" class="chat-upload-progress-row" hidden role="status" aria-live="polite">
@@ -720,6 +1045,7 @@
                                         <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                                     </svg>
                                 </button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -771,6 +1097,7 @@
                                                 <option value="completed" data-i18n="mcpMonitor.statusCompleted">已完成</option>
                                                 <option value="running" data-i18n="mcpMonitor.statusRunning">执行中</option>
                                                 <option value="failed" data-i18n="mcpMonitor.statusFailed">失败</option>
+                                                <option value="cancelled" data-i18n="mcpMonitor.statusCancelled">已终止</option>
                                             </select>
                                         </label>
                                     </div>
@@ -1268,6 +1595,212 @@
                     </div>
                 </div>
 
+                <!-- C2 管理页面容器（各子页面通过 JS 动态渲染） -->
+                <div id="page-c2" class="page">
+                    <div class="page-header">
+                        <h2 data-i18n="c2.title">C2 管理</h2>
+                    </div>
+                    <div class="page-content" id="c2-content">
+                        <div class="c2-layout">
+                            <div id="c2-main" class="c2-main">
+                                <div class="c2-welcome">
+                                    <div class="c2-welcome-icon">
+                                        <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="url(#c2-grad)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                            <defs><linearGradient id="c2-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00d4ff"/><stop offset="100%" stop-color="#a855f7"/></linearGradient></defs>
+                                            <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                                            <path d="M2 17l10 5 10-5"></path>
+                                            <path d="M2 12l10 5 10-5"></path>
+                                        </svg>
+                                    </div>
+                                    <h3 data-i18n="c2.welcomeTitle">AI-Native C2 框架</h3>
+                                    <p data-i18n="c2.welcomeDesc">以 MCP 工具为一等公民，让 LLM 可以像调用 nmap 一样调用 C2 完成"上线 → 控制 → 任务 → 横向 → 清场"全流程</p>
+                                    <div class="c2-stats" id="c2-dashboard-stats">
+                                        <div class="c2-stat-item">
+                                            <span class="c2-stat-value" id="c2-stat-listeners">-</span>
+                                            <span class="c2-stat-label" data-i18n="c2.statListeners">运行中监听器</span>
+                                        </div>
+                                        <div class="c2-stat-item">
+                                            <span class="c2-stat-value" id="c2-stat-sessions">-</span>
+                                            <span class="c2-stat-label" data-i18n="c2.statSessions">在线会话</span>
+                                        </div>
+                                        <div class="c2-stat-item">
+                                            <span class="c2-stat-value" id="c2-stat-pending">-</span>
+                                            <span class="c2-stat-label" data-i18n="c2.statPending">待审任务</span>
+                                        </div>
+                                    </div>
+                                    <div class="c2-actions">
+                                        <button class="btn-primary" onclick="switchPage('c2-listeners')" data-i18n="c2.goListeners">管理监听器</button>
+                                        <button class="btn-secondary" onclick="switchPage('c2-sessions')" data-i18n="c2.goSessions">查看会话</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- C2 监听器管理页面 -->
+                <div id="page-c2-listeners" class="page">
+                    <div class="page-header">
+                        <h2 data-i18n="c2.listeners.title">监听器管理</h2>
+                        <div class="page-header-actions">
+                            <button class="btn-primary" onclick="C2.showCreateListenerModal()" data-i18n="c2.listeners.headerCreateBtn">+ 创建监听器</button>
+                        </div>
+                    </div>
+                    <div class="page-content">
+                        <div id="c2-listener-grid" class="c2-listener-grid"></div>
+                    </div>
+                </div>
+
+                <!-- C2 会话管理页面 -->
+                <div id="page-c2-sessions" class="page">
+                    <div class="page-header">
+                        <h2 data-i18n="c2.sessions.title">会话管理</h2>
+                        <div class="page-header-actions">
+                            <button class="btn-secondary" onclick="C2.loadSessions()"><span data-i18n="common.refresh">刷新</span></button>
+                        </div>
+                    </div>
+                    <div class="page-content" style="padding:0;">
+                        <div class="c2-session-layout">
+                            <div id="c2-session-list" class="c2-session-sidebar"></div>
+                            <div id="c2-session-main" class="c2-session-main"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- C2 任务管理页面 -->
+                <div id="page-c2-tasks" class="page">
+                    <div class="page-header">
+                        <h2 data-i18n="c2.tasks.title">任务管理</h2>
+                        <div class="page-header-actions">
+                            <button type="button" class="btn-danger" id="c2-tasks-batch-delete" disabled onclick="C2.deleteSelectedTasks()"><span data-i18n="c2.tasks.batchDelete">批量删除</span></button>
+                            <button type="button" class="btn-secondary" onclick="C2.loadTasks()"><span data-i18n="common.refresh">刷新</span></button>
+                        </div>
+                    </div>
+                    <div class="page-content c2-tasks-page-wrap">
+                        <div class="c2-tasks-toolbar">
+                            <label class="c2-tasks-select-all-label">
+                                <input type="checkbox" id="c2-tasks-select-all" onchange="C2.onTasksSelectAll(this.checked)">
+                                <span data-i18n="c2.tasks.selectAll">全选本页</span>
+                            </label>
+                        </div>
+                        <div id="c2-task-list" class="c2-task-list-container"></div>
+                        <div id="c2-tasks-pagination" class="pagination-container"></div>
+                    </div>
+                </div>
+
+                <!-- C2 Payload 生成页面 -->
+                <div id="page-c2-payloads" class="page">
+                    <div class="page-header">
+                        <h2 data-i18n="c2.payloads.title">Payload 生成</h2>
+                    </div>
+                    <div class="page-content">
+                        <div class="c2-payload-grid">
+                            <div class="c2-payload-card">
+                                <h3>
+                                    <span class="c2-payload-icon" style="background:rgba(59,130,246,0.08);color:#3b82f6;">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+                                    </span>
+                                    <span data-i18n="c2.payloads.oneliner">单行 Payload</span>
+                                </h3>
+                                <p class="c2-payload-desc" data-i18n="c2.payloads.onelinerDesc">快速生成可在目标机直接执行的反弹命令，支持 Bash / Python / PowerShell / Curl</p>
+                                <div class="c2-form-group">
+                                    <label data-i18n="c2.payloads.listener">监听器</label>
+                                    <select id="c2-payload-listener" class="form-control"></select>
+                                </div>
+                                <div class="c2-form-group">
+                                    <label data-i18n="c2.payloads.kind">类型</label>
+                                    <select id="c2-payload-kind" class="form-control"></select>
+                                </div>
+                                <div class="c2-form-group">
+                                    <label data-i18n="c2.payloads.hostOptional">回连地址 (可选)</label>
+                                    <input type="text" id="c2-payload-host" class="form-control" data-i18n="c2.payloads.placeholderListenerHost" data-i18n-attr="placeholder" placeholder="留空则使用监听器地址">
+                                </div>
+                                <button type="button" id="c2-generate-oneliner-btn" class="btn-primary" onclick="C2.generateOneliner()" style="width:100%;" data-i18n="c2.payloads.generateOnelinerBtn">生成 Oneliner</button>
+                                <pre id="c2-oneliner-output" class="c2-oneliner-output" style="display:none;" onclick="C2.copyOneliner()" data-i18n="c2.payloads.clickToCopyTitle" data-i18n-attr="title" data-i18n-skip-text="true" title="点击复制"></pre>
+                            </div>
+                            <div class="c2-payload-card">
+                                <h3>
+                                    <span class="c2-payload-icon" style="background:rgba(16,185,129,0.08);color:#10b981;">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+                                    </span>
+                                    <span data-i18n="c2.payloads.build">编译 Beacon 二进制</span>
+                                </h3>
+                                <p class="c2-payload-desc" data-i18n="c2.payloads.buildDesc">交叉编译支持多平台的完整 Beacon 可执行文件，支持 Linux / Windows / macOS</p>
+                                <div class="c2-form-group">
+                                    <label data-i18n="c2.payloads.listener">监听器</label>
+                                    <select id="c2-build-listener" class="form-control"></select>
+                                    <p id="c2-build-loopback-hint" class="form-hint" style="display:none;margin-top:8px;color:#b45309;"></p>
+                                </div>
+                                <div class="c2-form-group">
+                                    <label data-i18n="c2.payloads.hostOptional">回连地址（可选）</label>
+                                    <input type="text" id="c2-build-host" class="form-control" data-i18n="c2.payloads.placeholderListenerHost" data-i18n-attr="placeholder" placeholder="留空则使用监听器地址">
+                                </div>
+                                <div class="c2-form-row">
+                                    <div class="c2-form-group">
+                                        <label data-i18n="c2.payloads.os">目标系统</label>
+                                        <select id="c2-build-os" class="form-control">
+                                            <option value="linux" data-i18n="c2.payloads.linux">Linux</option>
+                                            <option value="windows" data-i18n="c2.payloads.windows">Windows</option>
+                                            <option value="darwin" data-i18n="c2.payloads.darwin">macOS</option>
+                                        </select>
+                                    </div>
+                                    <div class="c2-form-group">
+                                        <label data-i18n="c2.payloads.arch">目标架构</label>
+                                        <select id="c2-build-arch" class="form-control">
+                                            <option value="amd64" data-i18n="c2.payloads.amd64">AMD64</option>
+                                            <option value="arm64" data-i18n="c2.payloads.arm64">ARM64</option>
+                                            <option value="386" data-i18n="c2.payloads.386">386</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <button id="c2-build-btn" type="button" class="btn-primary" onclick="C2.buildBeacon()" style="width:100%;" data-i18n="c2.payloads.buildBeaconBtn">构建 Beacon</button>
+                                <div id="c2-build-result"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- C2 事件审计页面 -->
+                <div id="page-c2-events" class="page">
+                    <div class="page-header">
+                        <h2 data-i18n="c2.events.title">事件审计</h2>
+                        <div class="page-header-actions">
+                            <button type="button" class="btn-danger" id="c2-events-batch-delete" disabled onclick="C2.deleteSelectedEvents()"><span data-i18n="c2.events.batchDelete">批量删除</span></button>
+                            <button type="button" class="btn-secondary" onclick="C2.loadEvents()"><span data-i18n="common.refresh">刷新</span></button>
+                        </div>
+                    </div>
+                    <div class="page-content c2-events-page-wrap">
+                        <div class="c2-events-toolbar">
+                            <label class="c2-events-select-all-label">
+                                <input type="checkbox" id="c2-events-select-all" onchange="C2.onEventsSelectAll(this.checked)">
+                                <span data-i18n="c2.events.selectAll">全选本页</span>
+                            </label>
+                        </div>
+                        <div id="c2-event-list" class="c2-event-list"></div>
+                        <div id="c2-events-pagination" class="pagination-container"></div>
+                    </div>
+                </div>
+
+                <!-- C2 Profile 管理页面 -->
+                <div id="page-c2-profiles" class="page">
+                    <div class="page-header">
+                        <h2 data-i18n="c2.profiles.title">流量伪装</h2>
+                        <div class="page-header-actions">
+                            <button class="btn-primary" onclick="C2.showCreateProfileModal()" data-i18n="c2.profiles.createBtn">+ 创建 Profile</button>
+                        </div>
+                    </div>
+                    <div class="page-content">
+                        <div id="c2-profile-list" class="c2-profile-list"></div>
+                    </div>
+                </div>
+
+                <!-- C2 模态框 -->
+                <div id="c2-modal" class="c2-modal-overlay" style="display:none;" onclick="if(event.target===this)C2.closeModal()">
+                    <div class="c2-modal" onclick="event.stopPropagation()">
+                        <div id="c2-modal-content"></div>
+                    </div>
+                </div>
+
                 <!-- 角色管理页面 -->
                 <div id="page-roles-management" class="page">
                     <div class="page-header">
@@ -1449,6 +1982,9 @@
                                 <div class="settings-nav-item" data-section="knowledge" onclick="switchSettingsSection('knowledge')">
                                     <span data-i18n="settings.nav.knowledge">知识库</span>
                                 </div>
+                                <div class="settings-nav-item" data-section="c2" onclick="switchSettingsSection('c2')">
+                                    <span data-i18n="settings.nav.c2">C2</span>
+                                </div>
                                 <div class="settings-nav-item" data-section="robots" onclick="switchSettingsSection('robots')">
                                     <span data-i18n="settings.nav.robots">机器人设置</span>
                                 </div>
@@ -1496,6 +2032,38 @@
                                             <label for="openai-max-total-tokens"><span data-i18n="settingsBasic.maxTotalTokens">最大上下文 Token 数</span></label>
                                             <input type="number" id="openai-max-total-tokens" data-i18n="settingsBasic.maxTotalTokensPlaceholder" data-i18n-attr="placeholder" placeholder="120000" min="1000" step="1000" />
                                             <small style="color: var(--text-muted, #718096); font-size: 0.75rem;" data-i18n="settingsBasic.maxTotalTokensHint">内存压缩和攻击链构建共用此配置，默认 120000</small>
+                                        </div>
+                                        <div class="form-group">
+                                            <label data-i18n="settingsBasic.openaiReasoningTitle">模型推理（Eino）</label>
+                                            <small class="form-hint" data-i18n="settingsBasic.openaiReasoningHint">仅影响 Eino 单代理与多代理；对话页可覆盖（见下方「允许对话覆盖」）。</small>
+                                            <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; align-items: center;">
+                                                <label for="openai-reasoning-mode" style="font-size: 0.8125rem;" data-i18n="chat.reasoningModeLabel">模式</label>
+                                                <select id="openai-reasoning-mode" style="min-width: 120px; padding: 0.35rem 0.5rem; border-radius: 6px; border: 1px solid var(--border-color, #e2e8f0);">
+                                                    <option value="auto" data-i18n="chat.reasoningModeAuto">自动</option>
+                                                    <option value="on" data-i18n="chat.reasoningModeOn">开启</option>
+                                                    <option value="off" data-i18n="chat.reasoningModeOff">关闭</option>
+                                                </select>
+                                                <label for="openai-reasoning-effort" style="font-size: 0.8125rem;" data-i18n="chat.reasoningEffortLabel">强度</label>
+                                                <select id="openai-reasoning-effort" style="min-width: 100px; padding: 0.35rem 0.5rem; border-radius: 6px; border: 1px solid var(--border-color, #e2e8f0);">
+                                                    <option value="" data-i18n="chat.reasoningEffortUnset">不指定</option>
+                                                    <option value="low">low</option>
+                                                    <option value="medium">medium</option>
+                                                    <option value="high">high</option>
+                                                    <option value="max">max</option>
+                                                </select>
+                                                <label for="openai-reasoning-profile" style="font-size: 0.8125rem;" data-i18n="settingsBasic.openaiReasoningProfile">线路</label>
+                                                <select id="openai-reasoning-profile" style="min-width: 140px; padding: 0.35rem 0.5rem; border-radius: 6px; border: 1px solid var(--border-color, #e2e8f0);">
+                                                    <option value="auto">auto</option>
+                                                    <option value="deepseek_compat">deepseek_compat</option>
+                                                    <option value="openai_compat">openai_compat</option>
+                                                    <option value="output_config_effort">output_config_effort</option>
+                                                </select>
+                                            </div>
+                                            <label class="checkbox-label" style="margin-top: 8px;">
+                                                <input type="checkbox" id="openai-reasoning-allow-client" class="modern-checkbox" checked />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settingsBasic.openaiReasoningAllowClient">允许对话页覆盖推理选项</span>
+                                            </label>
                                         </div>
                                         <div style="display: flex; align-items: center; gap: 8px; margin-top: 2px;">
                                             <a href="javascript:void(0)" id="test-openai-btn" onclick="testOpenAIConnection()" style="font-size: 0.8125rem; color: var(--accent-color, #3182ce); text-decoration: none; cursor: pointer; user-select: none;" data-i18n="settingsBasic.testConnection">测试连接</a>
@@ -1734,6 +2302,29 @@
                                 </div>
                             </div>
 
+                            <!-- C2 总开关 -->
+                            <div id="settings-section-c2" class="settings-section-content">
+                                <div class="settings-section-header">
+                                    <h3 data-i18n="settings.c2.title">C2 设置</h3>
+                                </div>
+                                <div class="settings-subsection">
+                                    <h4 data-i18n="settings.c2.sectionTitle">内置 C2</h4>
+                                    <div class="settings-form">
+                                        <div class="form-group">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="c2-enabled" class="modern-checkbox" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settings.c2.enableLabel">启用内置 C2（监听器、会话、Payload、MCP 工具等）</span>
+                                            </label>
+                                            <small class="form-hint" data-i18n="settings.c2.enableHint">关闭后不再启动监听器、不注册 C2 相关 MCP 工具，侧栏 C2 入口将隐藏；仅本机使用对话与知识库时可关闭以节省资源。</small>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="settings-actions">
+                                    <button class="btn-primary" onclick="applySettings()" data-i18n="settings.apply.button">应用配置</button>
+                                </div>
+                            </div>
+
                             <!-- 机器人设置 -->
                             <div id="settings-section-robots" class="settings-section-content">
                                 <div class="settings-section-header">
@@ -1935,6 +2526,13 @@
                         </div>
                     </div>
                 </div>
+                <div class="detail-section detail-abort-section" id="detail-abort-section" style="display: none;">
+                    <div class="detail-section-header">
+                        <h3 data-i18n="mcpDetailModal.abortTitle">运行控制</h3>
+                    </div>
+                    <p class="detail-abort-hint" data-i18n="mcpDetailModal.abortHint">仅中断当前工具调用；对话与多步任务会继续。</p>
+                    <button type="button" class="btn-secondary btn-monitor-abort" id="detail-abort-btn" onclick="abortMCPToolExecutionFromDetail()">终止工具</button>
+                </div>
                 <div class="detail-section">
                     <div class="detail-section-header">
                         <h3 data-i18n="mcpDetailModal.requestParams">请求参数</h3>
@@ -1970,6 +2568,49 @@
                     <div class="detail-code-card">
                         <pre id="detail-error" class="code-block error"></pre>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 用户中断并说明（继续迭代） -->
+    <div id="user-interrupt-modal" class="modal">
+        <div class="modal-content" style="max-width: 520px;">
+            <div class="modal-header">
+                <h2 data-i18n="tasks.interruptModalTitle">中断当前步骤</h2>
+                <span class="modal-close" onclick="closeUserInterruptModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p class="detail-abort-hint" data-i18n="tasks.interruptModalHint">填写说明后将写入对话并由智能体继续迭代。</p>
+                <div class="form-group">
+                    <label for="user-interrupt-reason"><span data-i18n="tasks.interruptReasonLabel">中断说明</span></label>
+                    <textarea id="user-interrupt-reason" class="form-control" rows="4" data-i18n="tasks.interruptReasonPlaceholder" data-i18n-attr="placeholder" placeholder=""></textarea>
+                </div>
+                <div class="form-actions" style="display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end;">
+                    <button type="button" class="btn-secondary" onclick="closeUserInterruptModal()" data-i18n="tasks.interruptModalClose">关闭</button>
+                    <button type="button" class="btn-secondary btn-delete" onclick="submitUserInterruptHardCancel()" data-i18n="tasks.interruptHardStop">彻底停止</button>
+                    <button type="button" class="btn-primary" onclick="submitUserInterruptContinue()" data-i18n="tasks.interruptConfirmContinue">中断并继续</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MCP 工具终止：可填写给模型的说明 -->
+    <div id="mcp-tool-abort-modal" class="modal">
+        <div class="modal-content" style="max-width: 520px;">
+            <div class="modal-header">
+                <h2 data-i18n="mcpDetailModal.abortNoteModalTitle">终止工具并补充说明</h2>
+                <span class="modal-close" onclick="closeMcpToolAbortModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p class="detail-abort-hint" data-i18n="mcpDetailModal.abortNoteModalHint">可选说明。</p>
+                <div class="form-group">
+                    <label for="mcp-tool-abort-note"><span data-i18n="mcpDetailModal.abortNoteLabel">终止说明（可选）</span></label>
+                    <textarea id="mcp-tool-abort-note" class="form-control" rows="4" data-i18n="mcpDetailModal.abortNotePlaceholder" data-i18n-attr="placeholder" placeholder=""></textarea>
+                </div>
+                <div class="form-actions" style="display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end;">
+                    <button type="button" class="btn-secondary" onclick="closeMcpToolAbortModal()" data-i18n="mcpDetailModal.abortNoteClose">取消</button>
+                    <button type="button" class="btn-primary" onclick="submitMcpToolAbortModal()" data-i18n="mcpDetailModal.abortNoteSubmit">提交终止</button>
                 </div>
             </div>
         </div>
@@ -2034,7 +2675,7 @@
                 <h2 data-i18n="attackChainModal.title">攻击链可视化</h2>
                 <div class="modal-header-actions">
                     <button class="btn-primary attack-chain-action-btn" onclick="regenerateAttackChain()" data-i18n="attackChainModal.regenerateTitle" data-i18n-attr="title" data-i18n-skip-text="true" title="重新生成攻击链（包含最新对话内容）">
-                        🔄 <span data-i18n="attackChainModal.regenerate">重新生成</span>
+                        <span data-i18n="attackChainModal.regenerate">重新生成</span>
                     </button>
                     <button class="btn-secondary attack-chain-action-btn" onclick="exportAttackChain('png')" data-i18n="attackChainModal.exportPng" data-i18n-attr="title" title="导出为PNG">
                         📥 PNG
@@ -2043,7 +2684,7 @@
                         📥 SVG
                     </button>
                     <button class="btn-secondary attack-chain-action-btn" onclick="refreshAttackChain()" data-i18n="attackChainModal.refreshTitle" data-i18n-attr="title" title="刷新当前攻击链（不重新生成）">
-                        ↻ <span data-i18n="common.refresh">刷新</span>
+                        <span data-i18n="common.refresh">刷新</span>
                     </button>
                     <span class="modal-close" onclick="closeAttackChainModal()">&times;</span>
                 </div>
@@ -2722,6 +3363,25 @@
                     <input type="text" id="webshell-cmd-param" data-i18n="webshell.cmdParamPlaceholder" data-i18n-attr="placeholder" placeholder="不填默认为 cmd，如 xxx 则请求为 xxx=命令" />
                 </div>
                 <div class="form-group">
+                    <label for="webshell-os" data-i18n="webshell.os">目标系统</label>
+                    <select id="webshell-os">
+                        <option value="auto" data-i18n="webshell.osAuto">自动（按 Shell 类型推断）</option>
+                        <option value="linux" data-i18n="webshell.osLinux">Linux / Unix</option>
+                        <option value="windows" data-i18n="webshell.osWindows">Windows</option>
+                    </select>
+                    <small class="form-hint" data-i18n="webshell.osHint">决定文件管理/上传使用 Linux 还是 Windows 命令；PHP/JSP 跑在 Windows 上请选 Windows</small>
+                </div>
+                <div class="form-group">
+                    <label for="webshell-encoding" data-i18n="webshell.encoding">响应编码</label>
+                    <select id="webshell-encoding">
+                        <option value="auto" data-i18n="webshell.encodingAuto">自动检测</option>
+                        <option value="utf-8" data-i18n="webshell.encodingUtf8">UTF-8</option>
+                        <option value="gbk" data-i18n="webshell.encodingGbk">GBK（中文 Windows）</option>
+                        <option value="gb18030" data-i18n="webshell.encodingGb18030">GB18030</option>
+                    </select>
+                    <small class="form-hint" data-i18n="webshell.encodingHint">中文 Windows 目标若出现乱码，请切换为 GBK 或 GB18030</small>
+                </div>
+                <div class="form-group">
                     <label for="webshell-remark" data-i18n="webshell.remark">备注</label>
                     <input type="text" id="webshell-remark" data-i18n="webshell.remarkPlaceholder" data-i18n-attr="placeholder" placeholder="便于识别的备注名" />
                 </div>
@@ -2832,6 +3492,7 @@
     <script src="/static/js/i18n.js"></script>
     <script src="/static/js/builtin-tools.js"></script>
     <script src="/static/js/auth.js"></script>
+    <script src="/static/js/notifications.js"></script>
     <script src="/static/js/info-collect.js"></script>
     <script src="/static/js/router.js"></script>
     <script src="/static/js/agents.js"></script>
@@ -2850,6 +3511,7 @@
     <script src="/static/js/chat-files.js"></script>
     <script src="/static/js/tasks.js"></script>
     <script src="/static/js/roles.js"></script>
+    <script src="/static/js/c2.js"></script>
 </body>
 </html>
 

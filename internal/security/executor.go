@@ -153,6 +153,7 @@ func (e *Executor) ExecuteTool(ctx context.Context, toolName string, args map[st
 	// 执行命令
 	cmd := exec.CommandContext(ctx, toolConfig.Command, cmdArgs...)
 	applyDefaultTerminalEnv(cmd)
+	_ = prepareShellCmdSession(cmd)
 
 	e.logger.Info("执行安全工具",
 		zap.String("tool", toolName),
@@ -163,13 +164,14 @@ func (e *Executor) ExecuteTool(ctx context.Context, toolName string, args map[st
 	var err error
 	// 如果上层提供了 stdout/stderr 增量回调，则边执行边读取并回调。
 	if cb, ok := ctx.Value(ToolOutputCallbackCtxKey).(ToolOutputCallback); ok && cb != nil {
-		output, err = streamCommandOutput(cmd, cb)
+		output, err = streamCommandOutput(ctx, cmd, cb)
 		if err != nil && shouldRetryWithPTY(output) {
 			e.logger.Info("检测到工具需要 TTY，使用 PTY 重试",
 				zap.String("tool", toolName),
 			)
 			cmd2 := exec.CommandContext(ctx, toolConfig.Command, cmdArgs...)
 			applyDefaultTerminalEnv(cmd2)
+			_ = prepareShellCmdSession(cmd2)
 			output, err = runCommandWithPTY(ctx, cmd2, cb)
 		}
 	} else {
@@ -182,6 +184,7 @@ func (e *Executor) ExecuteTool(ctx context.Context, toolName string, args map[st
 			)
 			cmd2 := exec.CommandContext(ctx, toolConfig.Command, cmdArgs...)
 			applyDefaultTerminalEnv(cmd2)
+			_ = prepareShellCmdSession(cmd2)
 			output, err = runCommandWithPTY(ctx, cmd2, nil)
 		}
 	}
@@ -699,9 +702,9 @@ func (e *Executor) formatParamValue(param config.ParameterConfig, value interfac
 	}
 }
 
-// isBackgroundCommand 检测命令是否为完全后台命令（末尾有 & 符号，但不在引号内）
-// 注意：command1 & command2 这种情况不算完全后台，因为command2会在前台执行
-func (e *Executor) isBackgroundCommand(command string) bool {
+// IsBackgroundShellCommand 检测命令是否为完全后台命令（末尾有独立 &，且不在引号内）。
+// command1 & command2 不算完全后台（command2 仍在前台执行）。
+func IsBackgroundShellCommand(command string) bool {
 	// 移除首尾空格
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -827,7 +830,7 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 	}
 
 	// 检测是否为后台命令（包含 & 符号，但不在引号内）
-	isBackground := e.isBackgroundCommand(command)
+	isBackground := IsBackgroundShellCommand(command)
 
 	// 构建命令
 	var cmd *exec.Cmd
@@ -837,6 +840,8 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 	} else {
 		cmd = exec.CommandContext(ctx, shell, "-c", command)
 	}
+	applyDefaultTerminalEnv(cmd)
+	_ = prepareShellCmdSession(cmd)
 
 	// 执行命令
 	e.logger.Info("执行系统命令",
@@ -852,9 +857,10 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 		commandWithoutAmpersand := strings.TrimSuffix(strings.TrimSpace(command), "&")
 		commandWithoutAmpersand = strings.TrimSpace(commandWithoutAmpersand)
 
-		// 构建新命令：command & pid=$!; echo $pid
-		// 使用变量保存PID，确保能获取到正确的后台进程PID
-		pidCommand := fmt.Sprintf("%s & pid=$!; echo $pid", commandWithoutAmpersand)
+		// 构建新命令：将用户命令置于独立重定向的后台作业，再 echo $pid。
+		// 若子进程与 echo 共享同一 stdout 管道，且长时间不向 stdout 写入换行，
+		// bufio.ReadString('\n') 会永久阻塞（例如 beacon 持续写二进制/单行日志）。
+		pidCommand := fmt.Sprintf("%s </dev/null >/dev/null 2>&1 & pid=$!; echo $pid", commandWithoutAmpersand)
 
 		// 创建新命令来获取PID
 		var pidCmd *exec.Cmd
@@ -864,6 +870,8 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 		} else {
 			pidCmd = exec.CommandContext(ctx, shell, "-c", pidCommand)
 		}
+		applyDefaultTerminalEnv(pidCmd)
+		_ = prepareShellCmdSession(pidCmd)
 
 		// 获取stdout管道
 		stdout, err := pidCmd.StdoutPipe()
@@ -975,7 +983,7 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 	var err error
 	// 若上层提供工具输出增量回调，则边执行边流式读取。
 	if cb, ok := ctx.Value(ToolOutputCallbackCtxKey).(ToolOutputCallback); ok && cb != nil {
-		output, err = streamCommandOutput(cmd, cb)
+		output, err = streamCommandOutput(ctx, cmd, cb)
 		if err != nil && shouldRetryWithPTY(output) {
 			e.logger.Info("检测到系统命令需要 TTY，使用 PTY 重试")
 			cmd2 := exec.CommandContext(ctx, shell, "-c", command)
@@ -983,6 +991,7 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 				cmd2.Dir = workDir
 			}
 			applyDefaultTerminalEnv(cmd2)
+			_ = prepareShellCmdSession(cmd2)
 			output, err = runCommandWithPTY(ctx, cmd2, cb)
 		}
 	} else {
@@ -996,6 +1005,7 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 				cmd2.Dir = workDir
 			}
 			applyDefaultTerminalEnv(cmd2)
+			_ = prepareShellCmdSession(cmd2)
 			output, err = runCommandWithPTY(ctx, cmd2, nil)
 		}
 	}
@@ -1033,8 +1043,11 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 }
 
 // streamCommandOutput 以“边读边回调”的方式读取命令 stdout/stderr。
-// 保持输出内容完整拼接返回，并用 cb(chunk) 向上层持续推送。
-func streamCommandOutput(cmd *exec.Cmd, cb ToolOutputCallback) (string, error) {
+// 使用定长块读取，避免按行读取在无换行输出时永久阻塞；ctx 取消时终止进程树。
+func streamCommandOutput(ctx context.Context, cmd *exec.Cmd, cb ToolOutputCallback) (string, error) {
+	if err := prepareShellCmdSession(cmd); err != nil {
+		return "", err
+	}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", err
@@ -1050,18 +1063,27 @@ func streamCommandOutput(cmd *exec.Cmd, cb ToolOutputCallback) (string, error) {
 		return "", err
 	}
 
+	stopWatch := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			terminateCmdTree(cmd)
+		case <-stopWatch:
+		}
+	}()
+	defer close(stopWatch)
+
 	chunks := make(chan string, 64)
 	var wg sync.WaitGroup
 	readFn := func(r io.Reader) {
 		defer wg.Done()
-		br := bufio.NewReader(r)
+		buf := make([]byte, 8192)
 		for {
-			s, readErr := br.ReadString('\n')
-			if s != "" {
-				chunks <- s
+			n, readErr := r.Read(buf)
+			if n > 0 {
+				chunks <- string(buf[:n])
 			}
 			if readErr != nil {
-				// EOF 正常结束
 				return
 			}
 		}
@@ -1157,12 +1179,14 @@ func runCommandWithPTY(ctx context.Context, cmd *exec.Cmd, cb ToolOutputCallback
 	if runtime.GOOS == "windows" {
 		// PTY 方案为类 Unix；Windows 走原逻辑
 		if cb != nil {
-			return streamCommandOutput(cmd, cb)
+			return streamCommandOutput(ctx, cmd, cb)
 		}
+		_ = prepareShellCmdSession(cmd)
 		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
 
+	_ = prepareShellCmdSession(cmd)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return "", err
@@ -1175,9 +1199,7 @@ func runCommandWithPTY(ctx context.Context, cmd *exec.Cmd, cb ToolOutputCallback
 		select {
 		case <-ctx.Done():
 			_ = ptmx.Close() // 触发读退出
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
+			terminateCmdTree(cmd)
 		case <-done:
 		}
 	}()

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"cyberstrike-ai/internal/config"
+
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
 )
 
@@ -12,8 +14,11 @@ import (
 // 此处仅约束「写入模型 prompt 的视图」，不修改 Eino session 中的原始 ExecutedSteps。
 
 const (
-	planExecuteMaxStepResultRunes = 12000
-	planExecuteKeepLastSteps      = 16
+	defaultPlanExecuteMaxStepResultRunes = 4000
+	defaultPlanExecuteKeepLastSteps      = 8
+	// Backward-compatible aliases for tests and existing references.
+	planExecuteMaxStepResultRunes = defaultPlanExecuteMaxStepResultRunes
+	planExecuteKeepLastSteps      = defaultPlanExecuteKeepLastSteps
 )
 
 func truncateRunesWithSuffix(s string, maxRunes int, suffix string) string {
@@ -29,16 +34,26 @@ func truncateRunesWithSuffix(s string, maxRunes int, suffix string) string {
 
 // capPlanExecuteExecutedSteps 折叠较早步骤、截断单步过长结果，供 prompt 使用。
 func capPlanExecuteExecutedSteps(steps []planexecute.ExecutedStep) []planexecute.ExecutedStep {
+	return capPlanExecuteExecutedStepsWithConfig(steps, nil)
+}
+
+func capPlanExecuteExecutedStepsWithConfig(steps []planexecute.ExecutedStep, mwCfg *config.MultiAgentEinoMiddlewareConfig) []planexecute.ExecutedStep {
 	if len(steps) == 0 {
 		return steps
 	}
+	maxStepResultRunes := defaultPlanExecuteMaxStepResultRunes
+	keepLastSteps := defaultPlanExecuteKeepLastSteps
+	if mwCfg != nil {
+		maxStepResultRunes = mwCfg.PlanExecuteMaxStepResultRunesEffective()
+		keepLastSteps = mwCfg.PlanExecuteKeepLastStepsEffective()
+	}
 	out := make([]planexecute.ExecutedStep, 0, len(steps)+1)
 	start := 0
-	if len(steps) > planExecuteKeepLastSteps {
-		start = len(steps) - planExecuteKeepLastSteps
+	if len(steps) > keepLastSteps {
+		start = len(steps) - keepLastSteps
 		var b strings.Builder
 		b.WriteString(fmt.Sprintf("（上文已完成 %d 步；此处仅保留步骤标题以节省上下文，完整输出已省略。后续 %d 步仍保留正文。）\n",
-			start, planExecuteKeepLastSteps))
+			start, keepLastSteps))
 		for i := 0; i < start; i++ {
 			b.WriteString(fmt.Sprintf("- %s\n", steps[i].Step))
 		}
@@ -50,8 +65,8 @@ func capPlanExecuteExecutedSteps(steps []planexecute.ExecutedStep) []planexecute
 	suffix := "\n…[step result truncated]"
 	for i := start; i < len(steps); i++ {
 		e := steps[i]
-		if utf8.RuneCountInString(e.Result) > planExecuteMaxStepResultRunes {
-			e.Result = truncateRunesWithSuffix(e.Result, planExecuteMaxStepResultRunes, suffix)
+		if utf8.RuneCountInString(e.Result) > maxStepResultRunes {
+			e.Result = truncateRunesWithSuffix(e.Result, maxStepResultRunes, suffix)
 		}
 		out = append(out, e)
 	}

@@ -1,6 +1,28 @@
 // 角色管理相关功能
 function _t(key, opts) {
-    return typeof window.t === 'function' ? window.t(key, opts) : key;
+    if (typeof window.t === 'function') {
+        try {
+            var translated = window.t(key, opts);
+            if (typeof translated === 'string' && translated && translated !== key) {
+                return translated;
+            }
+        } catch (e) { /* ignore */ }
+    }
+    // i18n 未就绪或词条缺失时避免把 key 暴露给用户（与 zh-CN 默认一致）
+    if (key === 'roles.noDescription') return '暂无描述';
+    if (key === 'roles.noDescriptionShort') return '无描述';
+    if (key === 'roles.defaultRoleDescription') {
+        return '默认角色，不额外携带用户提示词，使用默认MCP';
+    }
+    return key;
+}
+
+/** 角色配置中的描述：trim，并把误存为 i18n key 的字面量视为空 */
+function rolePlainDescription(role) {
+    const raw = typeof role.description === 'string' ? role.description.trim() : '';
+    if (!raw) return '';
+    if (raw === 'roles.noDescription' || raw === 'roles.noDescriptionShort') return '';
+    return raw;
 }
 let currentRole = localStorage.getItem('currentRole') || '';
 let roles = [];
@@ -56,6 +78,11 @@ function sortRoles(rolesArray) {
 
 // 加载所有角色
 async function loadRoles() {
+    if (window.i18nReady && typeof window.i18nReady.then === 'function') {
+        try {
+            await window.i18nReady;
+        } catch (e) { /* ignore */ }
+    }
     try {
         const response = await apiFetch('/api/roles');
         if (!response.ok) {
@@ -189,8 +216,9 @@ function renderRoleSelectionSidebar() {
         const icon = getRoleIcon(role);
         
         // 处理默认角色的描述
-        let description = role.description || _t('roles.noDescription');
-        if (isDefaultRole && !role.description) {
+        const plainDesc = rolePlainDescription(role);
+        let description = plainDesc || _t('roles.noDescription');
+        if (isDefaultRole && !plainDesc) {
             description = _t('roles.defaultRoleDescription');
         }
         
@@ -227,6 +255,9 @@ function toggleRoleSelectionPanel() {
     if (isHidden) {
         if (typeof closeAgentModePanel === 'function') {
             closeAgentModePanel();
+        }
+        if (typeof closeChatReasoningPanel === 'function') {
+            closeChatReasoningPanel();
         }
         panel.style.display = 'flex'; // 使用flex布局
         // 添加打开状态的视觉反馈
@@ -316,6 +347,7 @@ function renderRolesList() {
     const sortedRoles = sortRoles(filteredRoles);
     
     rolesList.innerHTML = sortedRoles.map(role => {
+        const plainDesc = rolePlainDescription(role);
         // 获取角色图标，如果是Unicode转义格式则转换为emoji
         let roleIcon = role.icon || '👤';
         if (roleIcon && typeof roleIcon === 'string') {
@@ -369,7 +401,7 @@ function renderRolesList() {
                     ${role.enabled !== false ? _t('roles.enabled') : _t('roles.disabled')}
                 </span>
             </div>
-            <div class="role-card-description">${escapeHtml(role.description || _t('roles.noDescriptionShort'))}</div>
+            <div class="role-card-description">${escapeHtml(plainDesc || _t('roles.noDescriptionShort'))}</div>
             <div class="role-card-tools">
                 <span class="role-card-tools-label">${_t('roleModal.toolsLabel')}</span>
                 <span class="role-card-tools-value">${toolsDisplay}</span>
@@ -1575,9 +1607,10 @@ document.addEventListener('DOMContentLoaded', () => {
     updateRoleSelectorDisplay();
 });
 
-// 语言切换后刷新角色选择器显示（默认/自定义角色名）
+// 语言切换后刷新角色选择器与「选择角色」列表文案
 document.addEventListener('languagechange', () => {
     updateRoleSelectorDisplay();
+    renderRoleSelectionSidebar();
 });
 
 // 获取当前选中的角色（供chat.js使用）

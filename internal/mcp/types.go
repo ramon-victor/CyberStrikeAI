@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -192,7 +193,7 @@ type ToolExecution struct {
 	ID        string                 `json:"id"`
 	ToolName  string                 `json:"toolName"`
 	Arguments map[string]interface{} `json:"arguments"`
-	Status    string                 `json:"status"` // pending, running, completed, failed
+	Status    string                 `json:"status"` // pending, running, completed, failed, cancelled
 	Result    *ToolResult            `json:"result,omitempty"`
 	Error     string                 `json:"error,omitempty"`
 	StartTime time.Time              `json:"startTime"`
@@ -292,4 +293,37 @@ type SamplingResponse struct {
 type SamplingContent struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
+}
+
+// ToolResultPlainText 拼接工具结果中的文本（手动终止时作为「工具原始输出」）。
+func ToolResultPlainText(r *ToolResult) string {
+	if r == nil || len(r.Content) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range r.Content {
+		b.WriteString(c.Text)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// AbortNoteBannerForModel 标出后续文本来自「用户手动终止工具时在弹窗中填写」，避免与 stdout/stderr 混淆。
+const AbortNoteBannerForModel = "---\n" +
+	"【用户终止说明｜USER INTERRUPT NOTE】\n" +
+	"（以下由操作者填写，用于指示模型如何继续；不是工具原始输出。）\n" +
+	"（Written by the operator when stopping this tool; not raw tool output.）\n" +
+	"---"
+
+// MergePartialToolOutputAndAbortNote 格式：工具原始输出 + 醒目标题 + 用户终止说明（无说明则原样返回 partial）。
+func MergePartialToolOutputAndAbortNote(partial, userNote string) string {
+	partial = strings.TrimSpace(partial)
+	userNote = strings.TrimSpace(userNote)
+	if userNote == "" {
+		return partial
+	}
+	section := AbortNoteBannerForModel + "\n" + userNote
+	if partial == "" {
+		return section
+	}
+	return partial + "\n\n" + section
 }

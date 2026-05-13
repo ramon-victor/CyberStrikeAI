@@ -50,7 +50,7 @@ function initRouter() {
     if (hash) {
         const hashParts = hash.split('?');
         const pageId = hashParts[0];
-        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks'].includes(pageId)) {
+        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
                 scheduleChatConversationFromHash(500);
@@ -65,6 +65,9 @@ function initRouter() {
 
 // 切换页面
 function switchPage(pageId) {
+    if (typeof window.syncC2NavOnceFromServer === 'function') {
+        void window.syncC2NavOnceFromServer();
+    }
     // 隐藏所有页面
     document.querySelectorAll('.page').forEach(page => {
         page.classList.remove('active');
@@ -146,6 +149,17 @@ function updateNavState(pageId) {
         if (agentsItem) {
             agentsItem.classList.add('active');
             agentsItem.classList.add('expanded');
+        }
+        const submenuItem = document.querySelector(`.nav-submenu-item[data-page="${pageId}"]`);
+        if (submenuItem) {
+            submenuItem.classList.add('active');
+        }
+    } else if (pageId.startsWith('c2') || pageId === 'c2-listeners' || pageId === 'c2-sessions' || pageId === 'c2-tasks' || pageId === 'c2-payloads' || pageId === 'c2-events' || pageId === 'c2-profiles') {
+        // C2 子菜单项
+        const c2Item = document.querySelector('.nav-item[data-page="c2"]');
+        if (c2Item) {
+            c2Item.classList.add('active');
+            c2Item.classList.add('expanded');
         }
         const submenuItem = document.querySelector(`.nav-submenu-item[data-page="${pageId}"]`);
         if (submenuItem) {
@@ -301,25 +315,37 @@ async function initPage(pageId) {
             break;
         case 'mcp-management':
             // 初始化MCP管理
+            const startLoadMcpTools = () => {
+                // 加载工具列表（MCP工具配置已移到MCP管理页面）
+                // 使用异步加载，避免阻塞页面渲染
+                if (typeof loadToolsList === 'function') {
+                    // 确保工具分页设置已初始化
+                    if (typeof getToolsPageSize === 'function' && typeof toolsPagination !== 'undefined') {
+                        toolsPagination.pageSize = getToolsPageSize();
+                    }
+                    // 延迟加载，让页面先渲染
+                    setTimeout(() => {
+                        loadToolsList(1, '').catch(err => {
+                            console.error('加载工具列表失败:', err);
+                        });
+                    }, 100);
+                }
+            };
+            // 先拉取全局配置，确保 tool_search 常驻状态按后端生效集合展示
+            if (typeof loadConfig === 'function') {
+                loadConfig(false)
+                    .catch(err => {
+                        console.warn('加载配置失败（将继续加载工具列表）:', err);
+                    })
+                    .finally(startLoadMcpTools);
+            } else {
+                startLoadMcpTools();
+            }
             // 先加载外部MCP列表（快速），然后加载工具列表
             if (typeof loadExternalMCPs === 'function') {
                 loadExternalMCPs().catch(err => {
                     console.warn('加载外部MCP列表失败:', err);
                 });
-            }
-            // 加载工具列表（MCP工具配置已移到MCP管理页面）
-            // 使用异步加载，避免阻塞页面渲染
-            if (typeof loadToolsList === 'function') {
-                // 确保工具分页设置已初始化
-                if (typeof getToolsPageSize === 'function' && typeof toolsPagination !== 'undefined') {
-                    toolsPagination.pageSize = getToolsPageSize();
-                }
-                // 延迟加载，让页面先渲染
-                setTimeout(() => {
-                    loadToolsList(1, '').catch(err => {
-                        console.error('加载工具列表失败:', err);
-                    });
-                }, 100);
             }
             break;
         case 'vulnerabilities':
@@ -393,6 +419,18 @@ async function initPage(pageId) {
                 loadMarkdownAgents();
             }
             break;
+        case 'c2':
+        case 'c2-listeners':
+        case 'c2-sessions':
+        case 'c2-tasks':
+        case 'c2-payloads':
+        case 'c2-events':
+        case 'c2-profiles':
+            window.currentPageId = pageId;
+            if (window.C2 && typeof window.C2.init === 'function') {
+                window.C2.init();
+            }
+            break;
     }
     
     // 清理其他页面的定时器
@@ -413,7 +451,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const hashParts = hash.split('?');
         const pageId = hashParts[0];
         
-        if (pageId && ['chat', 'hitl', 'info-collect', 'tasks', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings'].includes(pageId)) {
+        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'tasks', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
                 scheduleChatConversationFromHash(200);

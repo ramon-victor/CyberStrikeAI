@@ -71,7 +71,7 @@ func planExecuteDefaultGenExecutorInput(ctx context.Context, in *planexecute.Exe
 	return planexecute.ExecutorPrompt.Format(ctx, map[string]any{
 		"input":          planExecuteFormatInput(in.UserInput),
 		"plan":           string(planContent),
-		"executed_steps": planExecuteFormatExecutedSteps(in.ExecutedSteps),
+		"executed_steps": planExecuteFormatExecutedSteps(in.ExecutedSteps, nil, nil),
 		"step":           in.Plan.FirstStep(),
 	})
 }

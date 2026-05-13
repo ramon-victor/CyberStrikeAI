@@ -205,6 +205,29 @@ func TestExecutor_ExecuteInternalTool_NoStorage(t *testing.T) {
 	}
 }
 
+func TestExecuteSystemCommand_BackgroundDoesNotBlockOnChildStdout(t *testing.T) {
+	executor, _ := setupTestExecutor(t)
+	// 子进程先向 stdout 写无换行字符再长时间 sleep；若与 echo $pid 共享管道且未重定向子进程 stdout，
+	// ReadString('\n') 会阻塞到子进程退出。后台包装须将子进程标准流与 PID 行分离。
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	args := map[string]interface{}{
+		"command": `(sh -c 'printf x; sleep 120') &`,
+		"shell":   "sh",
+	}
+	res, err := executor.executeSystemCommand(ctx, args)
+	if err != nil {
+		t.Fatalf("executeSystemCommand: %v", err)
+	}
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got %+v", res)
+	}
+	txt := res.Content[0].Text
+	if !strings.Contains(txt, "后台命令已启动") {
+		t.Fatalf("unexpected body: %q", txt)
+	}
+}
+
 func TestPaginateLines(t *testing.T) {
 	lines := []string{"Line 1", "Line 2", "Line 3", "Line 4", "Line 5"}
 

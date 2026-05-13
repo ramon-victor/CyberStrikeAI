@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"cyberstrike-ai/internal/config"
+	"cyberstrike-ai/internal/einomcp"
 
 	localbk "github.com/cloudwego/eino-ext/adk/backend/local"
 	"github.com/cloudwego/eino/adk"
@@ -75,12 +76,35 @@ func prepareEinoSkills(
 // subAgentFilesystemMiddleware returns filesystem middleware for a sub-agent when Deep itself
 // does not set Backend (fsTools false on orchestrator) but we still want tools on subs — not used;
 // when orchestrator has Backend, builtin FS is only on outer agent; subs need explicit FS for parity.
-func subAgentFilesystemMiddleware(ctx context.Context, loc *localbk.Local) (adk.ChatModelAgentMiddleware, error) {
+func subAgentFilesystemMiddleware(
+	ctx context.Context,
+	loc *localbk.Local,
+	invokeNotify *einomcp.ToolInvokeNotifyHolder,
+	einoAgentName string,
+	recordMonitor func(command, stdout string, success bool, invokeErr error),
+	toolTimeoutMinutes int,
+	outputChunk func(toolName, toolCallID, chunk string),
+) (adk.ChatModelAgentMiddleware, error) {
 	if loc == nil {
 		return nil, nil
 	}
 	return filesystem.New(ctx, &filesystem.MiddlewareConfig{
-		Backend:        loc,
-		StreamingShell: loc,
+		Backend: loc,
+		StreamingShell: &einoStreamingShellWrap{
+			inner:              loc,
+			invokeNotify:       invokeNotify,
+			einoAgentName:      strings.TrimSpace(einoAgentName),
+			outputChunk:        outputChunk,
+			recordMonitor:      recordMonitor,
+			toolTimeoutMinutes: toolTimeoutMinutes,
+		},
 	})
+}
+
+// agentToolTimeoutMinutes 返回 agent.tool_timeout_minutes（与 executeToolViaMCP 一致）；cfg 为 nil 时 0。
+func agentToolTimeoutMinutes(cfg *config.Config) int {
+	if cfg == nil {
+		return 0
+	}
+	return cfg.Agent.ToolTimeoutMinutes
 }

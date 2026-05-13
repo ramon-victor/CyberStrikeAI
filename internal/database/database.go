@@ -3,6 +3,8 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,7 +23,8 @@ func configureDBPool(db *sql.DB) {
 // DB 数据库连接
 type DB struct {
 	*sql.DB
-	logger *zap.Logger
+	logger                   *zap.Logger
+	conversationArtifactsDir string
 }
 
 // NewDB 创建数据库连接
@@ -40,6 +43,13 @@ func NewDB(dbPath string, logger *zap.Logger) (*DB, error) {
 	database := &DB{
 		DB:     db,
 		logger: logger,
+	}
+	// Keep conversation-scoped artifacts near database files, so cleanup can follow conversation lifecycle.
+	baseDir := filepath.Join(filepath.Dir(dbPath), "conversation_artifacts")
+	if mkErr := os.MkdirAll(baseDir, 0o755); mkErr == nil {
+		database.conversationArtifactsDir = baseDir
+	} else if logger != nil {
+		logger.Warn("创建 conversation artifacts 目录失败", zap.String("dir", baseDir), zap.Error(mkErr))
 	}
 
 	// 初始化表
@@ -72,6 +82,7 @@ func (db *DB) initTables() error {
 		content TEXT NOT NULL,
 		mcp_execution_ids TEXT,
 		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
 		FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 	);`
 
@@ -192,6 +203,16 @@ func (db *DB) initTables() error {
 		UNIQUE(conversation_id, group_id)
 	);`
 
+	// 机器人会话绑定表（用于跨重启保持「平台+租户+用户」到 conversation 的映射）
+	createRobotUserSessionsTable := `
+	CREATE TABLE IF NOT EXISTS robot_user_sessions (
+		session_key TEXT PRIMARY KEY,
+		conversation_id TEXT NOT NULL,
+		role_name TEXT NOT NULL DEFAULT '默认',
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+	);`
+
 	// 创建漏洞表
 	createVulnerabilitiesTable := `
 	CREATE TABLE IF NOT EXISTS vulnerabilities (
@@ -259,6 +280,8 @@ func (db *DB) initTables() error {
 		method TEXT NOT NULL DEFAULT 'post',
 		cmd_param TEXT NOT NULL DEFAULT '',
 		remark TEXT NOT NULL DEFAULT '',
+		encoding TEXT NOT NULL DEFAULT '',
+		os TEXT NOT NULL DEFAULT '',
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);`
 
@@ -269,6 +292,113 @@ func (db *DB) initTables() error {
 		state_json TEXT NOT NULL DEFAULT '{}',
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (connection_id) REFERENCES webshell_connections(id) ON DELETE CASCADE
+	);`
+
+	// ========================================================================
+	// C2 模块（监听器 / 会话 / 任务 / 文件 / 事件 / Malleable Profile）
+	// ========================================================================
+	createC2ListenersTable := `
+	CREATE TABLE IF NOT EXISTS c2_listeners (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		type TEXT NOT NULL,
+		bind_host TEXT NOT NULL DEFAULT '127.0.0.1',
+		bind_port INTEGER NOT NULL,
+		profile_id TEXT,
+		encryption_key TEXT NOT NULL DEFAULT '',
+		implant_token TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'stopped',
+		config_json TEXT NOT NULL DEFAULT '{}',
+		remark TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		started_at DATETIME,
+		last_error TEXT
+	);`
+
+	createC2SessionsTable := `
+	CREATE TABLE IF NOT EXISTS c2_sessions (
+		id TEXT PRIMARY KEY,
+		listener_id TEXT NOT NULL,
+		implant_uuid TEXT NOT NULL UNIQUE,
+		hostname TEXT,
+		username TEXT,
+		os TEXT,
+		arch TEXT,
+		pid INTEGER DEFAULT 0,
+		process_name TEXT,
+		is_admin INTEGER DEFAULT 0,
+		internal_ip TEXT,
+		external_ip TEXT,
+		user_agent TEXT,
+		sleep_seconds INTEGER NOT NULL DEFAULT 5,
+		jitter_percent INTEGER NOT NULL DEFAULT 0,
+		status TEXT NOT NULL DEFAULT 'active',
+		first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		last_check_in DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		metadata_json TEXT DEFAULT '{}',
+		note TEXT NOT NULL DEFAULT '',
+		FOREIGN KEY (listener_id) REFERENCES c2_listeners(id) ON DELETE CASCADE
+	);`
+
+	createC2TasksTable := `
+	CREATE TABLE IF NOT EXISTS c2_tasks (
+		id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		task_type TEXT NOT NULL,
+		payload_json TEXT NOT NULL DEFAULT '{}',
+		status TEXT NOT NULL DEFAULT 'queued',
+		result_text TEXT,
+		result_blob_path TEXT,
+		error TEXT,
+		source TEXT NOT NULL DEFAULT 'manual',
+		conversation_id TEXT,
+		approval_status TEXT,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		sent_at DATETIME,
+		started_at DATETIME,
+		completed_at DATETIME,
+		duration_ms INTEGER DEFAULT 0,
+		FOREIGN KEY (session_id) REFERENCES c2_sessions(id) ON DELETE CASCADE
+	);`
+
+	createC2FilesTable := `
+	CREATE TABLE IF NOT EXISTS c2_files (
+		id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		task_id TEXT,
+		direction TEXT NOT NULL,
+		remote_path TEXT NOT NULL,
+		local_path TEXT NOT NULL,
+		size_bytes INTEGER DEFAULT 0,
+		sha256 TEXT,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (session_id) REFERENCES c2_sessions(id) ON DELETE CASCADE
+	);`
+
+	createC2EventsTable := `
+	CREATE TABLE IF NOT EXISTS c2_events (
+		id TEXT PRIMARY KEY,
+		level TEXT NOT NULL DEFAULT 'info',
+		category TEXT NOT NULL,
+		session_id TEXT,
+		task_id TEXT,
+		message TEXT NOT NULL,
+		data_json TEXT,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);`
+
+	createC2ProfilesTable := `
+	CREATE TABLE IF NOT EXISTS c2_profiles (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL UNIQUE,
+		user_agent TEXT,
+		uris_json TEXT NOT NULL DEFAULT '[]',
+		request_headers_json TEXT,
+		response_headers_json TEXT,
+		body_template TEXT,
+		jitter_min_ms INTEGER DEFAULT 0,
+		jitter_max_ms INTEGER DEFAULT 0,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);`
 
 	// 创建索引
@@ -289,6 +419,7 @@ func (db *DB) initTables() error {
 	CREATE INDEX IF NOT EXISTS idx_knowledge_retrieval_logs_created_at ON knowledge_retrieval_logs(created_at);
 	CREATE INDEX IF NOT EXISTS idx_conversation_group_mappings_conversation ON conversation_group_mappings(conversation_id);
 	CREATE INDEX IF NOT EXISTS idx_conversation_group_mappings_group ON conversation_group_mappings(group_id);
+	CREATE INDEX IF NOT EXISTS idx_robot_user_sessions_updated_at ON robot_user_sessions(updated_at);
 	CREATE INDEX IF NOT EXISTS idx_conversations_pinned ON conversations(pinned);
 	CREATE INDEX IF NOT EXISTS idx_vulnerabilities_conversation_id ON vulnerabilities(conversation_id);
 	CREATE INDEX IF NOT EXISTS idx_vulnerabilities_conversation_tag ON vulnerabilities(conversation_tag);
@@ -301,6 +432,19 @@ func (db *DB) initTables() error {
 	CREATE INDEX IF NOT EXISTS idx_batch_task_queues_title ON batch_task_queues(title);
 	CREATE INDEX IF NOT EXISTS idx_webshell_connections_created_at ON webshell_connections(created_at);
 	CREATE INDEX IF NOT EXISTS idx_webshell_connection_states_updated_at ON webshell_connection_states(updated_at);
+	CREATE INDEX IF NOT EXISTS idx_c2_listeners_created_at ON c2_listeners(created_at);
+	CREATE INDEX IF NOT EXISTS idx_c2_listeners_status ON c2_listeners(status);
+	CREATE INDEX IF NOT EXISTS idx_c2_sessions_listener ON c2_sessions(listener_id);
+	CREATE INDEX IF NOT EXISTS idx_c2_sessions_status ON c2_sessions(status);
+	CREATE INDEX IF NOT EXISTS idx_c2_sessions_last_check_in ON c2_sessions(last_check_in);
+	CREATE INDEX IF NOT EXISTS idx_c2_tasks_session ON c2_tasks(session_id);
+	CREATE INDEX IF NOT EXISTS idx_c2_tasks_status ON c2_tasks(status);
+	CREATE INDEX IF NOT EXISTS idx_c2_tasks_created_at ON c2_tasks(created_at);
+	CREATE INDEX IF NOT EXISTS idx_c2_tasks_conversation ON c2_tasks(conversation_id);
+	CREATE INDEX IF NOT EXISTS idx_c2_files_session ON c2_files(session_id);
+	CREATE INDEX IF NOT EXISTS idx_c2_events_created_at ON c2_events(created_at);
+	CREATE INDEX IF NOT EXISTS idx_c2_events_category ON c2_events(category);
+	CREATE INDEX IF NOT EXISTS idx_c2_events_session ON c2_events(session_id);
 	`
 
 	if _, err := db.Exec(createConversationsTable); err != nil {
@@ -346,6 +490,9 @@ func (db *DB) initTables() error {
 	if _, err := db.Exec(createConversationGroupMappingsTable); err != nil {
 		return fmt.Errorf("创建conversation_group_mappings表失败: %w", err)
 	}
+	if _, err := db.Exec(createRobotUserSessionsTable); err != nil {
+		return fmt.Errorf("创建robot_user_sessions表失败: %w", err)
+	}
 
 	if _, err := db.Exec(createVulnerabilitiesTable); err != nil {
 		return fmt.Errorf("创建vulnerabilities表失败: %w", err)
@@ -367,9 +514,27 @@ func (db *DB) initTables() error {
 		return fmt.Errorf("创建webshell_connection_states表失败: %w", err)
 	}
 
+	for tableName, ddl := range map[string]string{
+		"c2_listeners": createC2ListenersTable,
+		"c2_sessions":  createC2SessionsTable,
+		"c2_tasks":     createC2TasksTable,
+		"c2_files":     createC2FilesTable,
+		"c2_events":    createC2EventsTable,
+		"c2_profiles":  createC2ProfilesTable,
+	} {
+		if _, err := db.Exec(ddl); err != nil {
+			return fmt.Errorf("创建%s表失败: %w", tableName, err)
+		}
+	}
+
 	// 为已有表添加新字段（如果不存在）- 必须在创建索引之前
 	if err := db.migrateConversationsTable(); err != nil {
 		db.logger.Warn("迁移conversations表失败", zap.Error(err))
+		// 不返回错误，允许继续运行
+	}
+
+	if err := db.migrateMessagesTable(); err != nil {
+		db.logger.Warn("迁移messages表失败", zap.Error(err))
 		// 不返回错误，允许继续运行
 	}
 
@@ -392,11 +557,62 @@ func (db *DB) initTables() error {
 		// 不返回错误，允许继续运行
 	}
 
+	if err := db.migrateWebshellConnectionsTable(); err != nil {
+		db.logger.Warn("迁移webshell_connections表失败", zap.Error(err))
+		// 不返回错误，允许继续运行
+	}
+
 	if _, err := db.Exec(createIndexes); err != nil {
 		return fmt.Errorf("创建索引失败: %w", err)
 	}
 
 	db.logger.Info("数据库表初始化完成")
+	return nil
+}
+
+// migrateMessagesTable 迁移 messages 表，补充 updated_at 字段。
+// 语义：updated_at 表示该条消息最后一次被写入/更新的时间（例如助手占位消息在任务结束时更新正文）。
+func (db *DB) migrateMessagesTable() error {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='updated_at'").Scan(&count)
+	if err != nil {
+		// 如果查询失败，尝试添加字段
+		if _, addErr := db.Exec("ALTER TABLE messages ADD COLUMN updated_at DATETIME"); addErr != nil {
+			errMsg := strings.ToLower(addErr.Error())
+			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+				return fmt.Errorf("添加 messages.updated_at 字段失败: %w", addErr)
+			}
+		}
+	} else if count == 0 {
+		if _, err := db.Exec("ALTER TABLE messages ADD COLUMN updated_at DATETIME"); err != nil {
+			errMsg := strings.ToLower(err.Error())
+			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+				return fmt.Errorf("添加 messages.updated_at 字段失败: %w", err)
+			}
+		}
+	}
+
+	// 回填已有数据：让 updated_at 至少等于 created_at，避免前端出现空/当前时间回退。
+	_, _ = db.Exec("UPDATE messages SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''")
+
+	// reasoning_content：DeepSeek 思考模式 + 工具调用续跑；与 last_react_input 互补，供消息表回退路径回放
+	var rcColCount int
+	errRC := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='reasoning_content'").Scan(&rcColCount)
+	if errRC != nil {
+		if _, addErr := db.Exec("ALTER TABLE messages ADD COLUMN reasoning_content TEXT"); addErr != nil {
+			errMsg := strings.ToLower(addErr.Error())
+			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+				return fmt.Errorf("添加 messages.reasoning_content 字段失败: %w", addErr)
+			}
+		}
+	} else if rcColCount == 0 {
+		if _, err := db.Exec("ALTER TABLE messages ADD COLUMN reasoning_content TEXT"); err != nil {
+			errMsg := strings.ToLower(err.Error())
+			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+				return fmt.Errorf("添加 messages.reasoning_content 字段失败: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -716,6 +932,37 @@ func (db *DB) migrateVulnerabilitiesTable() error {
 		if count == 0 {
 			if _, addErr := db.Exec(col.stmt); addErr != nil {
 				db.logger.Warn("添加vulnerabilities字段失败", zap.String("field", col.name), zap.Error(addErr))
+			}
+		}
+	}
+	return nil
+}
+
+// migrateWebshellConnectionsTable 迁移 webshell_connections 表，补充新字段
+func (db *DB) migrateWebshellConnectionsTable() error {
+	columns := []struct {
+		name string
+		stmt string
+	}{
+		{name: "encoding", stmt: "ALTER TABLE webshell_connections ADD COLUMN encoding TEXT NOT NULL DEFAULT ''"},
+		{name: "os", stmt: "ALTER TABLE webshell_connections ADD COLUMN os TEXT NOT NULL DEFAULT ''"},
+	}
+
+	for _, col := range columns {
+		var count int
+		err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('webshell_connections') WHERE name=?", col.name).Scan(&count)
+		if err != nil {
+			if _, addErr := db.Exec(col.stmt); addErr != nil {
+				errMsg := strings.ToLower(addErr.Error())
+				if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+					db.logger.Warn("添加webshell_connections字段失败", zap.String("field", col.name), zap.Error(addErr))
+				}
+			}
+			continue
+		}
+		if count == 0 {
+			if _, addErr := db.Exec(col.stmt); addErr != nil {
+				db.logger.Warn("添加webshell_connections字段失败", zap.String("field", col.name), zap.Error(addErr))
 			}
 		}
 	}

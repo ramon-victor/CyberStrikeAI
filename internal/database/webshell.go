@@ -16,6 +16,8 @@ type WebShellConnection struct {
 	Method    string    `json:"method"`
 	CmdParam  string    `json:"cmdParam"`
 	Remark    string    `json:"remark"`
+	Encoding  string    `json:"encoding"` // 目标响应编码：auto / utf-8 / gbk / gb18030，空值视为 auto
+	OS        string    `json:"os"`       // 目标操作系统：auto / linux / windows，空值/未知视为 auto
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -58,7 +60,8 @@ func (db *DB) UpsertWebshellConnectionState(connectionID, stateJSON string) erro
 // ListWebshellConnections 列出所有 WebShell 连接，按创建时间倒序
 func (db *DB) ListWebshellConnections() ([]WebShellConnection, error) {
 	query := `
-		SELECT id, url, password, type, method, cmd_param, remark, created_at
+		SELECT id, url, password, type, method, cmd_param, remark,
+			COALESCE(encoding, '') AS encoding, COALESCE(os, '') AS os, created_at
 		FROM webshell_connections
 		ORDER BY created_at DESC
 	`
@@ -72,7 +75,7 @@ func (db *DB) ListWebshellConnections() ([]WebShellConnection, error) {
 	var list []WebShellConnection
 	for rows.Next() {
 		var c WebShellConnection
-		err := rows.Scan(&c.ID, &c.URL, &c.Password, &c.Type, &c.Method, &c.CmdParam, &c.Remark, &c.CreatedAt)
+		err := rows.Scan(&c.ID, &c.URL, &c.Password, &c.Type, &c.Method, &c.CmdParam, &c.Remark, &c.Encoding, &c.OS, &c.CreatedAt)
 		if err != nil {
 			db.logger.Warn("扫描 WebShell 连接行失败", zap.Error(err))
 			continue
@@ -85,11 +88,12 @@ func (db *DB) ListWebshellConnections() ([]WebShellConnection, error) {
 // GetWebshellConnection 根据 ID 获取一条连接
 func (db *DB) GetWebshellConnection(id string) (*WebShellConnection, error) {
 	query := `
-		SELECT id, url, password, type, method, cmd_param, remark, created_at
+		SELECT id, url, password, type, method, cmd_param, remark,
+			COALESCE(encoding, '') AS encoding, COALESCE(os, '') AS os, created_at
 		FROM webshell_connections WHERE id = ?
 	`
 	var c WebShellConnection
-	err := db.QueryRow(query, id).Scan(&c.ID, &c.URL, &c.Password, &c.Type, &c.Method, &c.CmdParam, &c.Remark, &c.CreatedAt)
+	err := db.QueryRow(query, id).Scan(&c.ID, &c.URL, &c.Password, &c.Type, &c.Method, &c.CmdParam, &c.Remark, &c.Encoding, &c.OS, &c.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -103,10 +107,10 @@ func (db *DB) GetWebshellConnection(id string) (*WebShellConnection, error) {
 // CreateWebshellConnection 创建 WebShell 连接
 func (db *DB) CreateWebshellConnection(c *WebShellConnection) error {
 	query := `
-		INSERT INTO webshell_connections (id, url, password, type, method, cmd_param, remark, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO webshell_connections (id, url, password, type, method, cmd_param, remark, encoding, os, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err := db.Exec(query, c.ID, c.URL, c.Password, c.Type, c.Method, c.CmdParam, c.Remark, c.CreatedAt)
+	_, err := db.Exec(query, c.ID, c.URL, c.Password, c.Type, c.Method, c.CmdParam, c.Remark, c.Encoding, c.OS, c.CreatedAt)
 	if err != nil {
 		db.logger.Error("创建 WebShell 连接失败", zap.Error(err), zap.String("id", c.ID))
 		return err
@@ -118,10 +122,10 @@ func (db *DB) CreateWebshellConnection(c *WebShellConnection) error {
 func (db *DB) UpdateWebshellConnection(c *WebShellConnection) error {
 	query := `
 		UPDATE webshell_connections
-		SET url = ?, password = ?, type = ?, method = ?, cmd_param = ?, remark = ?
+		SET url = ?, password = ?, type = ?, method = ?, cmd_param = ?, remark = ?, encoding = ?, os = ?
 		WHERE id = ?
 	`
-	result, err := db.Exec(query, c.URL, c.Password, c.Type, c.Method, c.CmdParam, c.Remark, c.ID)
+	result, err := db.Exec(query, c.URL, c.Password, c.Type, c.Method, c.CmdParam, c.Remark, c.Encoding, c.OS, c.ID)
 	if err != nil {
 		db.logger.Error("更新 WebShell 连接失败", zap.Error(err), zap.String("id", c.ID))
 		return err

@@ -32,6 +32,8 @@ type ExternalMCPManager struct {
 	refreshWg    sync.WaitGroup            // 等待后台刷新goroutine完成
 	refreshing   atomic.Bool               // 防止 refreshToolCounts 并发堆积
 	mu           sync.RWMutex
+	runningCancels map[string]context.CancelFunc
+	abortUserNotes map[string]string
 }
 
 // NewExternalMCPManager 创建外部MCP管理器
@@ -42,16 +44,18 @@ func NewExternalMCPManager(logger *zap.Logger) *ExternalMCPManager {
 // NewExternalMCPManagerWithStorage 创建外部MCP管理器（带持久化存储）
 func NewExternalMCPManagerWithStorage(logger *zap.Logger, storage MonitorStorage) *ExternalMCPManager {
 	manager := &ExternalMCPManager{
-		clients:     make(map[string]ExternalMCPClient),
-		configs:     make(map[string]config.ExternalMCPServerConfig),
-		logger:      logger,
-		storage:     storage,
-		executions:  make(map[string]*ToolExecution),
-		stats:       make(map[string]*ToolStats),
-		errors:      make(map[string]string),
-		toolCounts:  make(map[string]int),
-		toolCache:   make(map[string][]Tool),
-		stopRefresh: make(chan struct{}),
+		clients:        make(map[string]ExternalMCPClient),
+		configs:        make(map[string]config.ExternalMCPServerConfig),
+		logger:         logger,
+		storage:        storage,
+		executions:     make(map[string]*ToolExecution),
+		stats:          make(map[string]*ToolStats),
+		errors:         make(map[string]string),
+		toolCounts:     make(map[string]int),
+		toolCache:      make(map[string][]Tool),
+		stopRefresh:    make(chan struct{}),
+		runningCancels: make(map[string]context.CancelFunc),
+		abortUserNotes: make(map[string]string),
 	}
 	// 启动后台刷新工具数量的goroutine
 	manager.startToolCountRefresh()
@@ -452,8 +456,18 @@ func (m *ExternalMCPManager) CallTool(ctx context.Context, toolName string, args
 		}
 	}
 
+	execCtx, runCancel := context.WithCancel(ctx)
+	m.registerRunningCancel(executionID, runCancel)
+	notifyToolRunBegin(ctx, executionID)
+	defer func() {
+		notifyToolRunEnd(ctx, executionID)
+		runCancel()
+		m.unregisterRunningCancel(executionID)
+	}()
+
 	// 调用工具
-	result, err := client.CallTool(ctx, actualToolName, args)
+	result, err := client.CallTool(execCtx, actualToolName, args)
+	cancelledWithUserNote := m.applyAbortUserNoteToCancelledToolResult(executionID, &result, &err)
 
 	// 更新执行记录
 	m.mu.Lock()
@@ -462,16 +476,23 @@ func (m *ExternalMCPManager) CallTool(ctx context.Context, toolName string, args
 	execution.Duration = now.Sub(execution.StartTime)
 
 	if err != nil {
-		execution.Status = "failed"
-		execution.Error = err.Error()
+		st, msg := executionStatusAndMessage(err)
+		execution.Status = st
+		execution.Error = msg
 	} else if result != nil && result.IsError {
-		execution.Status = "failed"
-		if len(result.Content) > 0 {
-			execution.Error = result.Content[0].Text
+		if cancelledWithUserNote {
+			execution.Status = "cancelled"
+			execution.Error = ""
+			execution.Result = result
 		} else {
-			execution.Error = "工具执行返回错误结果"
+			execution.Status = "failed"
+			if len(result.Content) > 0 {
+				execution.Error = result.Content[0].Text
+			} else {
+				execution.Error = "工具执行返回错误结果"
+			}
+			execution.Result = result
 		}
-		execution.Result = result
 	} else {
 		execution.Status = "completed"
 		if result == nil {
@@ -507,6 +528,50 @@ func (m *ExternalMCPManager) CallTool(ctx context.Context, toolName string, args
 	}
 
 	return result, executionID, nil
+}
+
+func (m *ExternalMCPManager) applyAbortUserNoteToCancelledToolResult(executionID string, result **ToolResult, err *error) (cancelledWithUserNote bool) {
+	note := strings.TrimSpace(m.readAbortUserNote(executionID))
+	if note == "" {
+		return false
+	}
+	hasErr := err != nil && *err != nil
+	hasRes := result != nil && *result != nil
+	if !hasErr && !hasRes {
+		return false
+	}
+	_ = m.takeAbortUserNote(executionID)
+	partial := ""
+	if hasRes {
+		partial = ToolResultPlainText(*result)
+	}
+	if partial == "" && hasErr {
+		partial = (*err).Error()
+	}
+	merged := MergePartialToolOutputAndAbortNote(partial, note)
+	*err = nil
+	*result = &ToolResult{Content: []Content{{Type: "text", Text: merged}}, IsError: true}
+	return true
+}
+
+func (m *ExternalMCPManager) readAbortUserNote(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.abortUserNotes == nil {
+		return ""
+	}
+	return m.abortUserNotes[id]
+}
+
+func (m *ExternalMCPManager) takeAbortUserNote(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.abortUserNotes == nil {
+		return ""
+	}
+	n := m.abortUserNotes[id]
+	delete(m.abortUserNotes, id)
+	return n
 }
 
 // cleanupOldExecutions 清理旧的执行记录（保持内存中的记录数量在限制内）
@@ -560,6 +625,42 @@ func (m *ExternalMCPManager) GetExecution(id string) (*ToolExecution, bool) {
 	}
 
 	return nil, false
+}
+
+func (m *ExternalMCPManager) registerRunningCancel(id string, cancel context.CancelFunc) {
+	m.mu.Lock()
+	m.runningCancels[id] = cancel
+	m.mu.Unlock()
+}
+
+func (m *ExternalMCPManager) unregisterRunningCancel(id string) {
+	m.mu.Lock()
+	delete(m.runningCancels, id)
+	m.mu.Unlock()
+}
+
+// CancelToolExecutionWithNote 取消外部 MCP 工具；note 非空时与已返回输出合并后交给模型。
+func (m *ExternalMCPManager) CancelToolExecutionWithNote(id string, note string) bool {
+	m.mu.Lock()
+	cancel, ok := m.runningCancels[id]
+	if !ok || cancel == nil {
+		m.mu.Unlock()
+		return false
+	}
+	if strings.TrimSpace(note) != "" {
+		if m.abortUserNotes == nil {
+			m.abortUserNotes = make(map[string]string)
+		}
+		m.abortUserNotes[id] = strings.TrimSpace(note)
+	}
+	m.mu.Unlock()
+	cancel()
+	return true
+}
+
+// CancelToolExecution 取消正在执行的外部 MCP 工具（无用户说明）。
+func (m *ExternalMCPManager) CancelToolExecution(id string) bool {
+	return m.CancelToolExecutionWithNote(id, "")
 }
 
 // updateStats 更新统计信息
