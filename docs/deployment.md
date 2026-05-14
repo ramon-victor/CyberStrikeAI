@@ -61,13 +61,15 @@ docker run ... --cap-add NET_ADMIN --cap-add NET_RAW cyberstrikeai:local
 
 ## 预装工具说明
 
-镜像会优先预装高频依赖和常见工具，包括：
+Docker 构建会安装内置工具定义实际调用的本地命令，包括：
 
-- Go 工具：`httpx`、`nuclei`、`subfinder`、`ffuf`、`gobuster`、`dalfox`
-- APT 工具：`nmap`、`sqlmap`、`nikto`、`masscan`、`john`、`gdb`、`binwalk`、`steghide`
-- Python / Ruby 工具：`checkov`、`volatility3`、`wafw00f`、`wpscan`，以及 `requirements.txt` 中声明的依赖
+- Go / Rust / Node 工具：`httpx`、`nuclei`、`subfinder`、`ffuf`、`gobuster`、`dalfox`、`amass`、`katana`、`rustscan`、`pwninit`、`spectral`
+- 二进制和 APT 工具：`nmap`、`sqlmap`、`nikto`、`masscan`、`john`、`gdb`、`binwalk`、`steghide`、`radare2`（`r2`）、`foremost`、`tshark`、`tcpdump`、`trivy`、`kube-bench`、`arp-scan`
+- Python / Ruby 工具：`checkov`、`volatility3`、`ROPgadget`、`ropper`、`smbmap`、`fierce`、`prowler`、`scout`、`kube-hunter`、`paramspider`、`responder`、`enum4linux-ng`、`one_gadget`、`wafw00f`、`wpscan`，以及 `requirements.txt` 中声明的依赖
 
-不同架构下可安装的工具集合可能不同。对当前发行版或 `arm64` 上无法稳定安装的工具，镜像会跳过安装并继续构建。
+在 `amd64` 上，必需工具命令缺失会导致镜像构建失败。`arm64` 构建会在上游发布兼容产物时使用相同安装路径；如存在特定架构例外，应明确记录受影响工具。
+
+`rustscan`、`tcpdump`、`arp-scan`、`responder`、`tshark` 等原始数据包和网络工具，根据扫描模式可能需要 `NET_RAW`、`NET_ADMIN`、host networking 或 `--privileged`。`prowler`、`scout` 等云安全工具需要挂载凭据文件或通过环境变量提供凭据。`kube-hunter`、`kube-bench` 等 Kubernetes 工具，根据检查类型可能需要 kubeconfig、节点文件系统访问、宿主机命名空间或显式目标配置。
 
 ## 升级
 

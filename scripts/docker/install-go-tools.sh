@@ -14,5 +14,7 @@ go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.14.0
 go install github.com/ffuf/ffuf/v2@v2.1.0
 go install github.com/OJ/gobuster/v3@v3.8.2
 go install github.com/hahwul/dalfox/v2@v2.12.0
+go install github.com/projectdiscovery/katana/cmd/katana@latest
+CGO_ENABLED=0 go install -v github.com/owasp-amass/amass/v5/cmd/amass@main
 go install github.com/tomnomnom/waybackurls@latest
 go install github.com/lc/gau/v2/cmd/gau@latest

@@ -61,13 +61,15 @@ The bundled `docker-compose.yml` includes commented `cap_add` lines you can enab
 
 ## Preinstalled Tools
 
-The image tries to preinstall a high-frequency tool set, including:
+The Docker build installs the local commands used by the bundled tool definitions, including:
 
-- Go tools: `httpx`, `nuclei`, `subfinder`, `ffuf`, `gobuster`, `dalfox`
-- APT tools: `nmap`, `sqlmap`, `nikto`, `masscan`, `john`, `gdb`, `binwalk`, `steghide`
-- Python / Ruby tools: `checkov`, `volatility3`, `wafw00f`, `wpscan`, plus everything from `requirements.txt`
+- Go / Rust / Node tools: `httpx`, `nuclei`, `subfinder`, `ffuf`, `gobuster`, `dalfox`, `amass`, `katana`, `rustscan`, `pwninit`, `spectral`
+- Binary and APT tools: `nmap`, `sqlmap`, `nikto`, `masscan`, `john`, `gdb`, `binwalk`, `steghide`, `radare2` (`r2`), `foremost`, `tshark`, `tcpdump`, `trivy`, `kube-bench`, `arp-scan`
+- Python / Ruby tools: `checkov`, `volatility3`, `ROPgadget`, `ropper`, `smbmap`, `fierce`, `prowler`, `scout`, `kube-hunter`, `paramspider`, `responder`, `enum4linux-ng`, `one_gadget`, `wafw00f`, `wpscan`, plus everything from `requirements.txt`
 
-Architecture support is best effort. If a tool cannot be installed reliably on the current distro or on `arm64`, the build skips it and continues.
+The required tool set is build-failing on `amd64` if a command is missing. `arm64` builds use the same install paths where upstream projects publish compatible artifacts; any architecture-specific exception should be documented with the affected tool.
+
+Raw packet and network tools such as `rustscan`, `tcpdump`, `arp-scan`, `responder`, and `tshark` may need `NET_RAW`, `NET_ADMIN`, host networking, or `--privileged` depending on the scan mode. Cloud tools such as `prowler` and `scout` need mounted credential files or environment credentials. Kubernetes tools such as `kube-hunter` and `kube-bench` may need a kubeconfig, node filesystem access, host namespaces, or explicit target configuration depending on the check.
 
 ## Upgrades
 
