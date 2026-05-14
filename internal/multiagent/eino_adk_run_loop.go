@@ -573,6 +573,8 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 			var subAssistantBuf string
 			var subReplyStreamID string
 			var mainAssistantBuf string
+			// 已通过 response_delta 推到前端的正文（与 monitor.js normalizeStreamingDeltaJs 累积一致）
+			var mainAssistWireAccum string
 			var mainAssistDupTarget string // 非空表示本段主助手流需缓冲至 EOF，与 execute 输出比对去重
 			var reasoningBuf string
 			var prevReasoningDisplay string // UI 用：剥离 Claude 内部 signature 尾缀后的累计展示
@@ -681,6 +683,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 										"einoAgent":       ev.AgentName,
 										"orchestration":   orchMode,
 									})
+									mainAssistWireAccum, _ = normalizeStreamingDelta(mainAssistWireAccum, contentDelta)
 								}
 							}
 						} else if !streamsMainAssistant(ev.AgentName) {
@@ -726,21 +729,29 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 						}
 					} else if s != "" {
 						if progress != nil {
-							progress("response_start", "", map[string]interface{}{
-								"conversationId":     conversationID,
-								"mcpExecutionIds":    snapshotMCPIDs(),
-								"messageGeneratedBy": "eino:" + ev.AgentName,
-								"einoRole":           "orchestrator",
-								"einoAgent":          ev.AgentName,
-								"orchestration":      orchMode,
-							})
-							progress("response_delta", s, map[string]interface{}{
-								"conversationId":  conversationID,
-								"mcpExecutionIds": snapshotMCPIDs(),
-								"einoRole":        "orchestrator",
-								"einoAgent":       ev.AgentName,
-								"orchestration":   orchMode,
-							})
+							// 仅用 TrimSpace 与 execute 比对；推到 UI 的必须是 mainAssistantBuf，
+							// 否则尾部空白/换行与已流式前缀不一致时，前端 normalize 会走拼接路径造成叠字。
+							_, eofTail := normalizeStreamingDelta(mainAssistWireAccum, mainAssistantBuf)
+							if eofTail != "" {
+								if !streamHeaderSent {
+									progress("response_start", "", map[string]interface{}{
+										"conversationId":     conversationID,
+										"mcpExecutionIds":    snapshotMCPIDs(),
+										"messageGeneratedBy": "eino:" + ev.AgentName,
+										"einoRole":           "orchestrator",
+										"einoAgent":          ev.AgentName,
+										"orchestration":      orchMode,
+									})
+								}
+								progress("response_delta", eofTail, map[string]interface{}{
+									"conversationId":  conversationID,
+									"mcpExecutionIds": snapshotMCPIDs(),
+									"einoRole":        "orchestrator",
+									"einoAgent":       ev.AgentName,
+									"orchestration":   orchMode,
+								})
+								mainAssistWireAccum, _ = normalizeStreamingDelta(mainAssistWireAccum, eofTail)
+							}
 						}
 						lastAssistant = s
 						runAccumulatedMsgs = append(runAccumulatedMsgs, schema.AssistantMessage(s, nil))

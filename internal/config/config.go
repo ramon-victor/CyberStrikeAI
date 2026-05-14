@@ -391,7 +391,8 @@ type MultiAgentAPIUpdate struct {
 	RobotUseMultiAgent           bool `json:"robot_use_multi_agent"`
 	BatchUseMultiAgent           bool `json:"batch_use_multi_agent"`
 	PlanExecuteLoopMaxIterations *int `json:"plan_execute_loop_max_iterations,omitempty"`
-	ToolSearchAlwaysVisibleTools []string `json:"tool_search_always_visible_tools,omitempty"`
+	// 指针区分「JSON 未传该字段」与「传空数组要清空」；省略时不应覆盖 YAML 中的常驻工具白名单。
+	ToolSearchAlwaysVisibleTools *[]string `json:"tool_search_always_visible_tools,omitempty"`
 }
 
 // RobotsConfig 机器人配置（企业微信、钉钉、飞书等）

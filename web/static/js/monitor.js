@@ -1885,6 +1885,14 @@ function handleStreamEvent(event, progressElement, progressId,
             }
 
             // 多代理模式下，迭代过程中的输出只显示在时间线中，不创建助手消息气泡
+            // 同一 progressId 再次 response_start 时先移除旧占位，避免多条「助手输出」卡片且仅最后一条收 delta
+            const prevStream = responseStreamStateByProgressId.get(progressId);
+            if (prevStream && prevStream.itemId) {
+                const oldItem = document.getElementById(prevStream.itemId);
+                if (oldItem && oldItem.parentNode) {
+                    oldItem.parentNode.removeChild(oldItem);
+                }
+            }
             // 创建时间线条目用于显示迭代过程中的输出
             const title = einoMainStreamPlanningTitle(responseData);
             const itemId = addTimelineItem(timeline, 'thinking', {

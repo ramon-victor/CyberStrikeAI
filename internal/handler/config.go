@@ -755,7 +755,9 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 		if req.MultiAgent.PlanExecuteLoopMaxIterations != nil {
 			h.config.MultiAgent.PlanExecuteLoopMaxIterations = *req.MultiAgent.PlanExecuteLoopMaxIterations
 		}
-		h.config.MultiAgent.EinoMiddleware.ToolSearchAlwaysVisibleTools = dedupeToolNameList(req.MultiAgent.ToolSearchAlwaysVisibleTools)
+		if req.MultiAgent.ToolSearchAlwaysVisibleTools != nil {
+			h.config.MultiAgent.EinoMiddleware.ToolSearchAlwaysVisibleTools = dedupeToolNameList(*req.MultiAgent.ToolSearchAlwaysVisibleTools)
+		}
 		h.logger.Info("更新多代理配置",
 			zap.Bool("enabled", h.config.MultiAgent.Enabled),
 			zap.Bool("robot_use_multi_agent", h.config.MultiAgent.RobotUseMultiAgent),
@@ -1474,6 +1476,11 @@ func updateRobotsConfig(doc *yaml.Node, cfg config.RobotsConfig) {
 	root := doc.Content[0]
 	robotsNode := ensureMap(root, "robots")
 
+	if cfg.Session.StrictUserIdentity != nil {
+		sessionNode := ensureMap(robotsNode, "session")
+		setBoolInMap(sessionNode, "strict_user_identity", *cfg.Session.StrictUserIdentity)
+	}
+
 	wecomNode := ensureMap(robotsNode, "wecom")
 	setBoolInMap(wecomNode, "enabled", cfg.Wecom.Enabled)
 	setStringInMap(wecomNode, "token", cfg.Wecom.Token)
@@ -1486,12 +1493,14 @@ func updateRobotsConfig(doc *yaml.Node, cfg config.RobotsConfig) {
 	setBoolInMap(dingtalkNode, "enabled", cfg.Dingtalk.Enabled)
 	setStringInMap(dingtalkNode, "client_id", cfg.Dingtalk.ClientID)
 	setStringInMap(dingtalkNode, "client_secret", cfg.Dingtalk.ClientSecret)
+	setBoolInMap(dingtalkNode, "allow_conversation_id_fallback", cfg.Dingtalk.AllowConversationIDFallback)
 
 	larkNode := ensureMap(robotsNode, "lark")
 	setBoolInMap(larkNode, "enabled", cfg.Lark.Enabled)
 	setStringInMap(larkNode, "app_id", cfg.Lark.AppID)
 	setStringInMap(larkNode, "app_secret", cfg.Lark.AppSecret)
 	setStringInMap(larkNode, "verify_token", cfg.Lark.VerifyToken)
+	setBoolInMap(larkNode, "allow_chat_id_fallback", cfg.Lark.AllowChatIDFallback)
 }
 
 func updateMultiAgentConfig(doc *yaml.Node, cfg config.MultiAgentConfig) {
