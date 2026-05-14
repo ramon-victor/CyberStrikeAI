@@ -7,7 +7,7 @@ services:
     container_name: cyberstrikeai
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "7022:7022"
       - "8081:8081"
     volumes:
       - ./.docker-runtime:/app/runtime-config

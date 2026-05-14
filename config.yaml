@@ -14,7 +14,7 @@ version: "v1.6.13"
 # 服务器配置
 server:
   host: 0.0.0.0 # 监听地址，0.0.0.0 表示监听所有网络接口
-  port: 8080 # HTTP 服务端口，可通过浏览器访问 http://localhost:8080
+  port: 7022 # HTTP 服务端口，可通过浏览器访问 http://localhost:7022
 # 认证配置
 auth:
   password:  # Web 登录密码，请修改为强密码

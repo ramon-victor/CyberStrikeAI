@@ -61,10 +61,10 @@ COPY config.docker.yaml ./config.example.yaml
 RUN mkdir -p runtime-config data tmp \
     && ln -s /app/runtime-config/config.yaml /app/config.yaml
 
-EXPOSE 8080 8081
+EXPOSE 7022 8081
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
-    CMD curl -fsS http://127.0.0.1:8080/ >/dev/null || exit 1
+    CMD curl -fsS http://127.0.0.1:7022/ >/dev/null || exit 1
 
 ENTRYPOINT ["tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["./cyberstrike-ai"]
