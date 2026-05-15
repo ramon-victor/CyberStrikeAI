@@ -1851,6 +1851,11 @@ header {
     min-width: 0;
 }
 
+.message.assistant.has-mcp-callouts .message-content {
+    max-width: min(980px, calc(100% - 44px));
+    width: calc(100% - 44px);
+}
+
 .message.system .message-content {
     max-width: 75%;
     align-items: stretch;
@@ -2305,35 +2310,42 @@ header {
 /* MCP调用区域 */
 .mcp-call-section {
     margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border-color);
+    padding: 12px;
     width: 100%;
+    min-width: 0;
+    background: linear-gradient(180deg, rgba(0, 102, 255, 0.045) 0%, rgba(0, 102, 255, 0.015) 100%);
+    border: 1px solid rgba(0, 102, 255, 0.14);
+    border-radius: 12px;
+    box-shadow: var(--shadow-sm);
 }
 
 .mcp-call-label {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-weight: 500;
+    gap: 8px;
+    margin-bottom: 10px;
+    color: var(--text-secondary);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
 }
 
 .mcp-call-label::before {
     content: '';
-    width: 4px;
-    height: 4px;
+    width: 6px;
+    height: 6px;
     background: var(--accent-color);
     border-radius: 50%;
     display: inline-block;
-    flex-shrink: 0;
+    flex: 0 0 auto;
 }
 
 .mcp-call-buttons {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 8px;
+    min-width: 0;
 }
 
 .process-detail-btn {
@@ -2360,24 +2372,26 @@ header {
 .process-details-container {
     margin-top: 12px;
     padding-top: 12px;
-    border-top: 1px solid var(--border-color);
+    border-top: 1px solid rgba(0, 102, 255, 0.12);
     width: 100%;
+    min-width: 0;
 }
 
 .process-details-content {
     width: 100%;
+    min-width: 0;
 }
 
 .process-details-content .progress-timeline {
     max-height: 0;
     overflow: hidden;
-    transition: max-height 0.3s ease;
+    transition: opacity 0.2s ease;
     opacity: 0;
 }
 
 .process-details-content .progress-timeline.expanded {
-    max-height: 2000px;
-    overflow-y: auto;
+    max-height: none;
+    overflow: visible;
     opacity: 1;
     margin-top: 12px;
 }
@@ -2982,16 +2996,25 @@ header {
 .mcp-detail-btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
+    min-width: 0;
+    max-width: 100%;
     padding: 6px 12px;
     background: var(--bg-primary);
     color: var(--accent-color);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border: 1px solid rgba(0, 102, 255, 0.24);
+    border-radius: 999px;
     font-size: 0.8125rem;
-    font-weight: 500;
+    font-weight: 600;
+    line-height: 1.25;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+
+.mcp-detail-btn span {
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .mcp-detail-btn:hover {
@@ -3000,6 +3023,11 @@ header {
     border-color: var(--accent-color);
     transform: translateY(-1px);
     box-shadow: var(--shadow-sm);
+}
+
+.mcp-detail-btn:focus-visible {
+    outline: 2px solid rgba(0, 102, 255, 0.35);
+    outline-offset: 2px;
 }
 
 .mcp-detail-btn:active {
@@ -3562,6 +3590,25 @@ header {
         max-width: 85%;
     }
     
+    .message.assistant.has-mcp-callouts .message-content {
+        max-width: calc(100% - 44px);
+        width: calc(100% - 44px);
+    }
+    
+    .mcp-call-section {
+        padding: 10px;
+        border-radius: 10px;
+    }
+    
+    .timeline-item-header {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+    
+    .timeline-item-time {
+        min-width: 0;
+    }
+    
     .chat-input-container {
         padding: 16px;
         flex-shrink: 0;
@@ -3688,18 +3735,20 @@ header {
 }
 
 .progress-timeline.expanded {
-    max-height: 2000px;
-    overflow-y: auto;
+    max-height: none;
+    overflow: visible;
 }
 
 .timeline-item {
+    min-width: 0;
     padding: 12px;
     margin-bottom: 8px;
     border-left: 3px solid var(--border-color);
-    padding-left: 16px;
+    padding-left: 14px;
     background: var(--bg-secondary);
-    border-radius: 4px;
-    transition: all 0.2s;
+    border-radius: 8px;
+    transition: background 0.2s;
+    overflow-wrap: anywhere;
 }
 
 .timeline-item:hover {
@@ -3810,32 +3859,40 @@ header {
 
 .timeline-item-header {
     display: flex;
-    align-items: center;
-    gap: 12px;
+    align-items: flex-start;
+    gap: 10px;
     margin-bottom: 8px;
+    min-width: 0;
 }
 
 .timeline-item-time {
+    flex: 0 0 auto;
     font-size: 0.75rem;
     color: var(--text-muted);
     font-family: monospace;
     min-width: 70px;
+    line-height: 1.4;
 }
 
 .timeline-item-title {
-    font-weight: 500;
+    min-width: 0;
+    font-weight: 600;
     color: var(--text-primary);
     font-size: 0.875rem;
+    line-height: 1.45;
     flex: 1;
+    overflow-wrap: anywhere;
 }
 
 .timeline-item-content {
+    min-width: 0;
     margin-top: 8px;
     padding-top: 8px;
-    border-top: 1px solid var(--border-color);
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
     font-size: 0.875rem;
     color: var(--text-secondary);
     line-height: 1.6;
+    overflow-wrap: anywhere;
 }
 
 /* 流式增量阶段纯文本展示（避免半段 Markdown 反复解析） */
@@ -3864,14 +3921,18 @@ header {
 .tool-args {
     background: var(--bg-tertiary);
     border: 1px solid var(--border-color);
-    border-radius: 4px;
+    border-radius: 8px;
     padding: 12px;
     font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
     font-size: 0.8125rem;
     line-height: 1.5;
-    overflow-x: auto;
+    overflow-x: visible;
+    overflow-y: visible;
     margin: 0;
     color: var(--text-primary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .tool-result-section {
@@ -3888,17 +3949,18 @@ header {
 .tool-result {
     background: var(--bg-tertiary);
     border: 1px solid var(--border-color);
-    border-radius: 4px;
+    border-radius: 8px;
     padding: 12px;
     font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
     font-size: 0.8125rem;
     line-height: 1.5;
-    overflow-x: auto;
-    max-height: 400px;
-    overflow-y: auto;
+    overflow-x: visible;
+    overflow-y: visible;
+    max-height: none;
     margin: 0;
     white-space: pre-wrap;
-    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    word-break: break-word;
     color: var(--text-primary);
 }
 
