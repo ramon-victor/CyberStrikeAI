@@ -147,6 +147,7 @@
     "active": "活跃",
     "highFreq": "高频",
     "noCallData": "暂无调用数据",
+    "severityClickHint": "点击查看",
     "lastUpdated": "上次更新",
     "viewAll": "查看全部 →",
     "recentVulns": "最近漏洞",

@@ -147,6 +147,7 @@
     "active": "Active",
     "highFreq": "High frequency",
     "noCallData": "No call data",
+    "severityClickHint": "Click to view",
     "lastUpdated": "Last updated",
     "viewAll": "View all →",
     "recentVulns": "Recent vulnerabilities",

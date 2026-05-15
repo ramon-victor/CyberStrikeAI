@@ -1390,6 +1390,17 @@ function dashboardBarTooltipOnOut(ev) {
     if (dashboardBarTooltipEl) dashboardBarTooltipEl.style.display = 'none';
 }
 
+// 仪表盘 → 漏洞管理：带严重程度/状态筛选跳转
+function navigateToVulnerabilitiesWithFilter(opts) {
+    opts = opts || {};
+    var params = new URLSearchParams();
+    if (opts.severity) params.set('severity', opts.severity);
+    if (opts.status) params.set('status', opts.status);
+    var qs = params.toString();
+    window.location.hash = qs ? 'vulnerabilities?' + qs : 'vulnerabilities';
+}
+window.navigateToVulnerabilitiesWithFilter = navigateToVulnerabilitiesWithFilter;
+
 // 漏洞严重程度分布：半环形（donut）渲染
 // 几何参数固定，便于配合 viewBox 0 0 560 320 的 SVG 容器
 // 段间分隔由 CSS 的白色 stroke 完成，不再使用 gapRad
@@ -1402,8 +1413,26 @@ var SEVERITY_DONUT_CFG = {
     rOuter: 165,
     rInner: 115,    // 环厚 = 50（介于原 90 和上一版 35 之间，自然且有质感）
     labelOffset: 14,
-    gapRad: 0
+    gapRad: 0.012
 };
+
+var SEVERITY_DONUT_GRADIENTS = {
+    critical: ['#fca5a5', '#ef4444'],
+    high: ['#fdba74', '#f97316'],
+    medium: ['#fde047', '#eab308'],
+    low: ['#5eead4', '#14b8a6'],
+    info: ['#93c5fd', '#3b82f6']
+};
+
+var severityDonutState = {
+    bySeverity: {},
+    total: 0,
+    hoverId: null,
+    bound: false
+};
+
+var severityDonutTooltipEl = null;
+var severityDonutTooltipTimer = null;
 
 var SEVERITY_DEFAULT_LABELS = {
     critical: '严重',
@@ -1422,13 +1451,35 @@ function severityLabel(id) {
     return SEVERITY_DEFAULT_LABELS[id] || id;
 }
 
+function ensureSeverityDonutGradients() {
+    var defsEl = document.getElementById('dashboard-severity-donut-defs');
+    if (!defsEl || defsEl.hasChildNodes()) return;
+    var html = '';
+    Object.keys(SEVERITY_DONUT_GRADIENTS).forEach(function (id) {
+        var stops = SEVERITY_DONUT_GRADIENTS[id];
+        html += '<linearGradient id="donut-grad-' + id + '" x1="0%" y1="0%" x2="100%" y2="100%">';
+        html += '<stop offset="0%" stop-color="' + stops[0] + '"/>';
+        html += '<stop offset="100%" stop-color="' + stops[1] + '"/>';
+        html += '</linearGradient>';
+    });
+    defsEl.innerHTML = html;
+}
+
 function renderSeverityDonut(bySeverity, total) {
+    var svgEl = document.getElementById('dashboard-severity-donut');
     var trackEl = document.getElementById('dashboard-severity-donut-track');
+    var leadersEl = document.getElementById('dashboard-severity-donut-leaders');
     var segmentsEl = document.getElementById('dashboard-severity-donut-segments');
     var labelsEl = document.getElementById('dashboard-severity-donut-labels');
     if (!trackEl || !segmentsEl || !labelsEl) return;
 
+    severityDonutState.bySeverity = bySeverity && typeof bySeverity === 'object' ? bySeverity : {};
+    severityDonutState.total = total || 0;
+    severityDonutState.hoverId = null;
+    resetSeverityDonutCenter();
+
     var cfg = SEVERITY_DONUT_CFG;
+    ensureSeverityDonutGradients();
 
     // 背景轨迹（完整半环）只渲染一次
     if (!trackEl.hasChildNodes()) {
@@ -1441,9 +1492,12 @@ function renderSeverityDonut(bySeverity, total) {
     });
     var visible = severities.filter(function (s) { return s.value > 0; });
 
+    if (svgEl) svgEl.classList.remove('is-highlighting');
     if (!total || total <= 0 || visible.length === 0) {
         segmentsEl.innerHTML = '';
         labelsEl.innerHTML = '';
+        if (leadersEl) leadersEl.innerHTML = '';
+        clearSeverityDonutLegendHighlight();
         return;
     }
 
@@ -1457,6 +1511,7 @@ function renderSeverityDonut(bySeverity, total) {
 
     var segmentsHtml = '';
     var labelsHtml = '';
+    var leadersHtml = '';
     var cumRad = 0;
 
     visible.forEach(function (seg, i) {
@@ -1466,17 +1521,19 @@ function renderSeverityDonut(bySeverity, total) {
         var angleEnd = angleStart - segRad;
 
         var path = arcSegmentPath(cfg.cx, cfg.cy, cfg.rOuter, cfg.rInner, angleStart, angleEnd);
-        segmentsHtml += '<path class="donut-segment seg-' + seg.id + '" d="' + path + '"/>';
+        var pctOfTotal = (seg.value / total) * 100;
+        var pctRounded = Math.round(pctOfTotal);
+        var name = esc(severityLabel(seg.id));
+        var ariaLabel = name + ' ' + seg.value + ' (' + pctRounded + '%)';
+        segmentsHtml += '<path class="donut-segment seg-' + seg.id + '" data-severity="' + seg.id + '" data-count="' + seg.value + '" data-pct="' + pctRounded + '" fill="url(#donut-grad-' + seg.id + ')" d="' + path + '" tabindex="0" role="button" aria-label="' + ariaLabel + '"/>';
 
         // 仅当占比 >= 5% 时显示外置标签，避免小段标签互相重叠
-        var pctOfTotal = (seg.value / total) * 100;
         if (pctOfTotal >= 5) {
             var midAngle = (angleStart + angleEnd) / 2;
-            var labelR = cfg.rOuter + cfg.labelOffset;
+            var labelR = cfg.rOuter + cfg.labelOffset + 6;
             var sinMid = Math.sin(midAngle);
             var cosMid = Math.cos(midAngle);
             var lx = cfg.cx + labelR * cosMid;
-            // 顶部区域标签整体向上抬一些，避免与外弧贴住；侧边标签则不调整
             var topLift = sinMid > 0.4 ? Math.round((sinMid - 0.3) * 10) : 0;
             var ly = cfg.cy - labelR * sinMid - topLift;
 
@@ -1484,11 +1541,15 @@ function renderSeverityDonut(bySeverity, total) {
             if (cosMid < -0.15) anchor = 'end';
             else if (cosMid > 0.15) anchor = 'start';
 
-            var pctText = Math.round(pctOfTotal) + '%';
-            var name = esc(severityLabel(seg.id));
+            var pctText = pctRounded + '%';
+            var arcR = cfg.rOuter + 4;
+            var lineX1 = cfg.cx + arcR * cosMid;
+            var lineY1 = cfg.cy - arcR * sinMid;
+            var lineX2 = cfg.cx + (cfg.rOuter + cfg.labelOffset - 2) * cosMid;
+            var lineY2 = cfg.cy - (cfg.rOuter + cfg.labelOffset - 2) * sinMid;
+            leadersHtml += '<line class="donut-leader label-' + seg.id + '" data-severity="' + seg.id + '" x1="' + lineX1.toFixed(1) + '" y1="' + lineY1.toFixed(1) + '" x2="' + lineX2.toFixed(1) + '" y2="' + lineY2.toFixed(1) + '"/>';
 
-            // 两行：第一行 "数量 (百分比)"（弧色），第二行 "严重度名称"（同色但稍小）
-            labelsHtml += '<text class="donut-label-text label-' + seg.id + '" text-anchor="' + anchor + '" x="' + lx.toFixed(1) + '" y="' + ly.toFixed(1) + '">';
+            labelsHtml += '<text class="donut-label-text label-' + seg.id + '" data-severity="' + seg.id + '" text-anchor="' + anchor + '" x="' + lx.toFixed(1) + '" y="' + ly.toFixed(1) + '">';
             labelsHtml += '<tspan x="' + lx.toFixed(1) + '" dy="0">' + seg.value + ' <tspan class="donut-label-pct">(' + pctText + ')</tspan></tspan>';
             labelsHtml += '<tspan class="donut-label-name" x="' + lx.toFixed(1) + '" dy="14">' + name + '</tspan>';
             labelsHtml += '</text>';
@@ -1498,8 +1559,224 @@ function renderSeverityDonut(bySeverity, total) {
         if (i < visibleCount - 1) cumRad += cfg.gapRad;
     });
 
+    if (leadersEl) leadersEl.innerHTML = leadersHtml;
     segmentsEl.innerHTML = segmentsHtml;
     labelsEl.innerHTML = labelsHtml;
+    if (svgEl) svgEl.classList.add('donut-ready');
+    attachSeverityDonutInteractivity();
+}
+
+function resetSeverityDonutCenter() {
+    var totalEl = document.getElementById('dashboard-severity-total');
+    var labelEl = document.getElementById('dashboard-severity-center-label');
+    var centerEl = document.getElementById('dashboard-severity-center');
+    if (totalEl) totalEl.textContent = String(severityDonutState.total || 0);
+    if (labelEl) {
+        labelEl.textContent = (typeof window.t === 'function' ? window.t('dashboard.totalVulns') : '总漏洞数');
+        labelEl.classList.remove('is-severity');
+    }
+    if (centerEl) centerEl.classList.remove('is-hovering');
+}
+
+function setSeverityDonutHover(severityId) {
+    var svgEl = document.getElementById('dashboard-severity-donut');
+    var centerEl = document.getElementById('dashboard-severity-center');
+    var totalEl = document.getElementById('dashboard-severity-total');
+    var labelEl = document.getElementById('dashboard-severity-center-label');
+    if (!severityId) {
+        severityDonutState.hoverId = null;
+        if (svgEl) svgEl.classList.remove('is-highlighting');
+        clearSeverityDonutLegendHighlight();
+        resetSeverityDonutCenter();
+        return;
+    }
+    var count = (severityDonutState.bySeverity && severityDonutState.bySeverity[severityId]) || 0;
+    severityDonutState.hoverId = severityId;
+    if (svgEl) svgEl.classList.add('is-highlighting');
+    highlightSeverityDonutParts(severityId);
+    highlightSeverityLegendItem(severityId);
+    if (totalEl) totalEl.textContent = String(count);
+    if (labelEl) {
+        labelEl.textContent = severityLabel(severityId);
+        labelEl.classList.add('is-severity');
+    }
+    if (centerEl) centerEl.classList.add('is-hovering');
+}
+
+function highlightSeverityDonutParts(severityId) {
+    var svgEl = document.getElementById('dashboard-severity-donut');
+    if (!svgEl) return;
+    svgEl.querySelectorAll('[data-severity]').forEach(function (el) {
+        var match = el.getAttribute('data-severity') === severityId;
+        el.classList.toggle('is-active', match);
+        el.classList.toggle('is-dimmed', !match);
+    });
+}
+
+function highlightSeverityLegendItem(severityId) {
+    var legend = document.getElementById('dashboard-vuln-bars');
+    if (!legend) return;
+    legend.querySelectorAll('.dashboard-severity-legend-item').forEach(function (item) {
+        var match = item.getAttribute('data-severity') === severityId;
+        item.classList.toggle('is-active', match);
+    });
+}
+
+function clearSeverityDonutLegendHighlight() {
+    var legend = document.getElementById('dashboard-vuln-bars');
+    if (legend) {
+        legend.querySelectorAll('.dashboard-severity-legend-item.is-active').forEach(function (el) {
+            el.classList.remove('is-active');
+        });
+    }
+    var svgEl = document.getElementById('dashboard-severity-donut');
+    if (svgEl) {
+        svgEl.querySelectorAll('.is-active, .is-dimmed').forEach(function (el) {
+            el.classList.remove('is-active', 'is-dimmed');
+        });
+    }
+}
+
+function severityDonutTooltipText(severityId) {
+    var count = (severityDonutState.bySeverity && severityDonutState.bySeverity[severityId]) || 0;
+    var pct = severityDonutState.total > 0 ? Math.round((count / severityDonutState.total) * 100) : 0;
+    var hint = (typeof window.t === 'function' ? window.t('dashboard.severityClickHint') : '点击查看');
+    return severityLabel(severityId) + ' · ' + count + ' (' + pct + '%) — ' + hint;
+}
+
+function showSeverityDonutTooltip(ev, severityId) {
+    if (!severityDonutTooltipEl) {
+        severityDonutTooltipEl = document.createElement('div');
+        severityDonutTooltipEl.className = 'dashboard-severity-donut-tooltip';
+        severityDonutTooltipEl.setAttribute('role', 'tooltip');
+        document.body.appendChild(severityDonutTooltipEl);
+    }
+    clearTimeout(severityDonutTooltipTimer);
+    severityDonutTooltipTimer = setTimeout(function () {
+        severityDonutTooltipEl.textContent = severityDonutTooltipText(severityId);
+        severityDonutTooltipEl.style.display = 'block';
+        requestAnimationFrame(function () {
+            var x = ev.clientX;
+            var y = ev.clientY;
+            var ttRect = severityDonutTooltipEl.getBoundingClientRect();
+            var left = x - ttRect.width / 2;
+            var top = y - ttRect.height - 12;
+            if (top < 8) top = y + 16;
+            var pad = 8;
+            if (left < pad) left = pad;
+            if (left + ttRect.width > window.innerWidth - pad) left = window.innerWidth - ttRect.width - pad;
+            severityDonutTooltipEl.style.left = left + 'px';
+            severityDonutTooltipEl.style.top = top + 'px';
+        });
+    }, 120);
+}
+
+function hideSeverityDonutTooltip() {
+    clearTimeout(severityDonutTooltipTimer);
+    severityDonutTooltipTimer = null;
+    if (severityDonutTooltipEl) severityDonutTooltipEl.style.display = 'none';
+}
+
+function attachSeverityDonutInteractivity() {
+    var svgEl = document.getElementById('dashboard-severity-donut');
+    var legend = document.getElementById('dashboard-vuln-bars');
+    if (!svgEl) return;
+
+    if (!severityDonutState.bound) {
+        severityDonutState.bound = true;
+        svgEl.addEventListener('mouseover', severityDonutPointerOver);
+        svgEl.addEventListener('mouseout', severityDonutPointerOut);
+        svgEl.addEventListener('click', severityDonutClick);
+        svgEl.addEventListener('keydown', severityDonutKeydown);
+        if (legend) {
+            legend.addEventListener('mouseover', severityLegendPointerOver);
+            legend.addEventListener('mouseout', severityLegendPointerOut);
+            legend.addEventListener('click', severityLegendClick);
+            legend.addEventListener('keydown', severityLegendKeydown);
+        }
+    }
+
+    legend && legend.querySelectorAll('.dashboard-severity-legend-item').forEach(function (item) {
+        if (!item.getAttribute('data-severity')) return;
+        var sev = item.getAttribute('data-severity');
+        var count = (severityDonutState.bySeverity && severityDonutState.bySeverity[sev]) || 0;
+        item.classList.toggle('is-zero', count === 0);
+        item.setAttribute('aria-label', severityDonutTooltipText(sev));
+    });
+}
+
+function severityDonutTarget(el) {
+    return el && el.closest && el.closest('[data-severity]');
+}
+
+function severityDonutPointerOver(ev) {
+    var target = severityDonutTarget(ev.target);
+    if (!target || !target.classList.contains('donut-segment')) return;
+    var id = target.getAttribute('data-severity');
+    if (!id) return;
+    setSeverityDonutHover(id);
+    showSeverityDonutTooltip(ev, id);
+}
+
+function severityDonutPointerOut(ev) {
+    var from = severityDonutTarget(ev.target);
+    var to = ev.relatedTarget && severityDonutTarget(ev.relatedTarget);
+    if (from && from === to) return;
+    setSeverityDonutHover(null);
+    hideSeverityDonutTooltip();
+}
+
+function severityDonutClick(ev) {
+    var target = severityDonutTarget(ev.target);
+    if (!target || !target.classList.contains('donut-segment')) return;
+    var id = target.getAttribute('data-severity');
+    if (!id) return;
+    ev.preventDefault();
+    navigateToVulnerabilitiesWithFilter({ severity: id });
+}
+
+function severityDonutKeydown(ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    var target = severityDonutTarget(ev.target);
+    if (!target || !target.classList.contains('donut-segment')) return;
+    ev.preventDefault();
+    var id = target.getAttribute('data-severity');
+    if (id) navigateToVulnerabilitiesWithFilter({ severity: id });
+}
+
+function severityLegendPointerOver(ev) {
+    var item = ev.target && ev.target.closest && ev.target.closest('.dashboard-severity-legend-item[data-severity]');
+    if (!item) return;
+    var id = item.getAttribute('data-severity');
+    if (!id) return;
+    setSeverityDonutHover(id);
+    showSeverityDonutTooltip(ev, id);
+}
+
+function severityLegendPointerOut(ev) {
+    var item = ev.target && ev.target.closest && ev.target.closest('.dashboard-severity-legend-item[data-severity]');
+    var related = ev.relatedTarget && ev.relatedTarget.closest && ev.relatedTarget.closest('.dashboard-severity-legend-item[data-severity]');
+    if (item && item === related) return;
+    setSeverityDonutHover(null);
+    hideSeverityDonutTooltip();
+}
+
+function severityLegendClick(ev) {
+    var item = ev.target && ev.target.closest && ev.target.closest('.dashboard-severity-legend-item[data-severity]');
+    if (!item) return;
+    var id = item.getAttribute('data-severity');
+    if (!id) return;
+    ev.preventDefault();
+    navigateToVulnerabilitiesWithFilter({ severity: id });
+}
+
+function severityLegendKeydown(ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    var item = ev.target && ev.target.closest && ev.target.closest('.dashboard-severity-legend-item[data-severity]');
+    if (!item) return;
+    ev.preventDefault();
+    var id = item.getAttribute('data-severity');
+    if (id) navigateToVulnerabilitiesWithFilter({ severity: id });
 }
 
 // SVG 半环（背景轨迹）路径

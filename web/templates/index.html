@@ -449,42 +449,45 @@
                                                 </div>
                                             </aside>
                                             <div class="dashboard-severity-chart">
-                                                <svg class="dashboard-severity-donut" id="dashboard-severity-donut" viewBox="0 0 480 260" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+                                                <svg class="dashboard-severity-donut" id="dashboard-severity-donut" viewBox="0 0 480 260" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="dashboard-severity-donut-title">
+                                                    <title id="dashboard-severity-donut-title" data-i18n="dashboard.severityDistribution">漏洞严重程度分布</title>
+                                                    <defs id="dashboard-severity-donut-defs"></defs>
                                                     <g id="dashboard-severity-donut-track"></g>
+                                                    <g id="dashboard-severity-donut-leaders"></g>
                                                     <g id="dashboard-severity-donut-segments"></g>
                                                     <g id="dashboard-severity-donut-labels"></g>
                                                 </svg>
-                                                <div class="dashboard-severity-center">
+                                                <div class="dashboard-severity-center" id="dashboard-severity-center">
                                                     <div class="dashboard-severity-center-value" id="dashboard-severity-total">0</div>
-                                                    <div class="dashboard-severity-center-label" data-i18n="dashboard.totalVulns">总漏洞数</div>
+                                                    <div class="dashboard-severity-center-label" id="dashboard-severity-center-label" data-i18n="dashboard.totalVulns">总漏洞数</div>
                                                 </div>
                                             </div>
                                             <div class="dashboard-severity-legend" id="dashboard-vuln-bars">
-                                                <div class="dashboard-severity-legend-item">
+                                                <div class="dashboard-severity-legend-item" data-severity="critical" role="button" tabindex="0">
                                                     <span class="dashboard-severity-legend-dot critical"></span>
                                                     <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityCritical">严重</span>
                                                     <span class="dashboard-severity-legend-value" id="dashboard-severity-critical">0</span>
                                                     <span class="dashboard-severity-legend-pct" id="dashboard-severity-critical-pct">0%</span>
                                                 </div>
-                                                <div class="dashboard-severity-legend-item">
+                                                <div class="dashboard-severity-legend-item" data-severity="high" role="button" tabindex="0">
                                                     <span class="dashboard-severity-legend-dot high"></span>
                                                     <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityHigh">高危</span>
                                                     <span class="dashboard-severity-legend-value" id="dashboard-severity-high">0</span>
                                                     <span class="dashboard-severity-legend-pct" id="dashboard-severity-high-pct">0%</span>
                                                 </div>
-                                                <div class="dashboard-severity-legend-item">
+                                                <div class="dashboard-severity-legend-item" data-severity="medium" role="button" tabindex="0">
                                                     <span class="dashboard-severity-legend-dot medium"></span>
                                                     <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityMedium">中危</span>
                                                     <span class="dashboard-severity-legend-value" id="dashboard-severity-medium">0</span>
                                                     <span class="dashboard-severity-legend-pct" id="dashboard-severity-medium-pct">0%</span>
                                                 </div>
-                                                <div class="dashboard-severity-legend-item">
+                                                <div class="dashboard-severity-legend-item" data-severity="low" role="button" tabindex="0">
                                                     <span class="dashboard-severity-legend-dot low"></span>
                                                     <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityLow">低危</span>
                                                     <span class="dashboard-severity-legend-value" id="dashboard-severity-low">0</span>
                                                     <span class="dashboard-severity-legend-pct" id="dashboard-severity-low-pct">0%</span>
                                                 </div>
-                                                <div class="dashboard-severity-legend-item">
+                                                <div class="dashboard-severity-legend-item" data-severity="info" role="button" tabindex="0">
                                                     <span class="dashboard-severity-legend-dot info"></span>
                                                     <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityInfo">信息</span>
                                                     <span class="dashboard-severity-legend-value" id="dashboard-severity-info">0</span>

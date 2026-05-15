@@ -14768,8 +14768,70 @@ header {
     stroke: #ffffff;
     stroke-width: 4;
     stroke-linejoin: round;
+    cursor: pointer;
+    outline: none;
+    transform-origin: 240px 215px;
+    transition: opacity 0.22s ease, filter 0.22s ease, transform 0.28s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+.dashboard-severity-donut.donut-ready .donut-segment {
+    animation: donut-segment-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.dashboard-severity-donut.donut-ready .donut-segment.seg-critical { animation-delay: 0.02s; }
+.dashboard-severity-donut.donut-ready .donut-segment.seg-high { animation-delay: 0.06s; }
+.dashboard-severity-donut.donut-ready .donut-segment.seg-medium { animation-delay: 0.10s; }
+.dashboard-severity-donut.donut-ready .donut-segment.seg-low { animation-delay: 0.14s; }
+.dashboard-severity-donut.donut-ready .donut-segment.seg-info { animation-delay: 0.18s; }
+
+@keyframes donut-segment-in {
+    from {
+        opacity: 0;
+        transform: scale(0.92);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.dashboard-severity-donut.is-highlighting .donut-segment.is-dimmed,
+.dashboard-severity-donut.is-highlighting .donut-label-text.is-dimmed,
+.dashboard-severity-donut.is-highlighting .donut-leader.is-dimmed {
+    opacity: 0.32;
+}
+
+.dashboard-severity-donut .donut-segment.is-active {
+    filter: drop-shadow(0 3px 10px rgba(15, 23, 42, 0.18));
+    transform: scale(1.045);
+    stroke-width: 5;
+    z-index: 1;
+}
+
+.dashboard-severity-donut .donut-segment:focus-visible {
+    outline: 2px solid rgba(0, 102, 255, 0.55);
+    outline-offset: 2px;
+}
+
+.dashboard-severity-donut .donut-leader {
+    stroke: rgba(148, 163, 184, 0.55);
+    stroke-width: 1;
+    pointer-events: none;
+    transition: opacity 0.2s ease, stroke 0.2s ease;
+}
+
+.dashboard-severity-donut .donut-leader.is-active {
+    stroke: rgba(100, 116, 139, 0.85);
+    stroke-width: 1.5;
+}
+
+.dashboard-severity-donut .donut-label-text {
+    pointer-events: none;
     transition: opacity 0.2s ease;
-    cursor: default;
+}
+
+.dashboard-severity-donut .donut-label-text.is-active {
+    font-weight: 800;
 }
 
 .dashboard-severity-donut .donut-segment.is-empty {
@@ -14799,12 +14861,7 @@ header {
 .dashboard-severity-donut .donut-label-text.label-low { fill: #14b8a6; }
 .dashboard-severity-donut .donut-label-text.label-info { fill: #3b82f6; }
 
-/* 半环形配色：保持原有浅色基调（红→橙→黄→青→蓝） */
-.dashboard-severity-donut .donut-segment.seg-critical { fill: #f87171; }
-.dashboard-severity-donut .donut-segment.seg-high { fill: #fb923c; }
-.dashboard-severity-donut .donut-segment.seg-medium { fill: #facc15; }
-.dashboard-severity-donut .donut-segment.seg-low { fill: #2dd4bf; }
-.dashboard-severity-donut .donut-segment.seg-info { fill: #60a5fa; }
+/* 半环形配色由 SVG linearGradient（#donut-grad-*）提供 */
 
 .dashboard-severity-center {
     position: absolute;
@@ -14816,6 +14873,17 @@ header {
     text-align: center;
     pointer-events: none;
     width: 60%;
+    transition: transform 0.25s ease;
+}
+
+.dashboard-severity-center.is-hovering {
+    transform: translate(-50%, -52%) scale(1.04);
+}
+
+.dashboard-severity-center-label.is-severity {
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: 0.02em;
 }
 
 .dashboard-severity-center-value {
@@ -14856,12 +14924,46 @@ header {
     padding: 10px 4px;
     font-size: 0.9375rem;
     border-bottom: 1px solid transparent;
-    transition: background 0.2s, border-color 0.2s;
+    transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
     border-radius: 4px;
+    cursor: pointer;
 }
 
-.dashboard-severity-legend-item:hover {
-    background: rgba(0, 0, 0, 0.025);
+.dashboard-severity-legend-item:hover,
+.dashboard-severity-legend-item.is-active {
+    background: rgba(0, 102, 255, 0.06);
+    border-radius: 8px;
+}
+
+.dashboard-severity-legend-item.is-active {
+    box-shadow: inset 3px 0 0 var(--accent-color, #0066ff);
+}
+
+.dashboard-severity-legend-item.is-zero {
+    opacity: 0.55;
+}
+
+.dashboard-severity-legend-item:focus-visible {
+    outline: 2px solid rgba(0, 102, 255, 0.45);
+    outline-offset: 2px;
+}
+
+.dashboard-severity-donut-tooltip {
+    display: none;
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 10000;
+    max-width: 280px;
+    padding: 8px 12px;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: #fff;
+    background: rgba(15, 23, 42, 0.94);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+    pointer-events: none;
+    white-space: nowrap;
 }
 
 .dashboard-severity-legend-dot {
