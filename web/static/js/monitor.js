@@ -865,6 +865,12 @@ function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecut
         removeMessage(progressId);
         return;
     }
+
+    if (typeof markAssistantHasMcpCallouts === 'function') {
+        markAssistantHasMcpCallouts(assistantElement);
+    } else if (assistantElement.classList) {
+        assistantElement.classList.add('has-mcp-callouts');
+    }
     
     // 查找或创建 MCP 区域
     let mcpSection = assistantElement.querySelector('.mcp-call-section');

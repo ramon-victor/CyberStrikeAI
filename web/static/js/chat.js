@@ -80,6 +80,16 @@ if (typeof window !== 'undefined') {
     window.showChatToast = showChatToast;
 }
 
+function markAssistantHasMcpCallouts(messageElement) {
+    if (!messageElement || !messageElement.classList || !messageElement.classList.contains('assistant')) {
+        return;
+    }
+    messageElement.classList.add('has-mcp-callouts');
+}
+if (typeof window !== 'undefined') {
+    window.markAssistantHasMcpCallouts = markAssistantHasMcpCallouts;
+}
+
 function normalizeOrchestrationClient(s) {
     const v = String(s || '').trim().toLowerCase().replace(/-/g, '_');
     if (v === 'plan_execute' || v === 'planexecute' || v === 'pe') return 'plan_execute';
@@ -2093,6 +2103,7 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     if (role === 'assistant' && (mcpExecutionIds && Array.isArray(mcpExecutionIds) && mcpExecutionIds.length > 0) && !progressId) {
         const mcpSection = document.createElement('div');
         mcpSection.className = 'mcp-call-section';
+        markAssistantHasMcpCallouts(messageDiv);
         
         const mcpLabel = document.createElement('div');
         mcpLabel.className = 'mcp-call-label';
@@ -2277,6 +2288,7 @@ function renderProcessDetails(messageId, processDetails) {
             return;
         }
     }
+    markAssistantHasMcpCallouts(messageElement);
     
     // 确保有标签和按钮容器（统一结构）
     let mcpLabel = mcpSection.querySelector('.mcp-call-label');
