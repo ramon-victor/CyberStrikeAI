@@ -105,7 +105,7 @@ func buildUserContextSupplement(userMessage string, history []agent.ChatMessage,
 		joined = truncateKeepFirstLast(userMsgs, maxRunes)
 	}
 
-	return "\n\n## 会话上下文（自动补充，确保你了解用户完整意图）\n" + joined
+	return "\n\n## Session Context (auto-appended to ensure you understand the user's full intent)\n" + joined
 }
 
 // truncateKeepFirstLast keeps the first and last user messages, giving each
@@ -118,7 +118,7 @@ func truncateKeepFirstLast(msgs []string, maxRunes int) string {
 
 	first := msgs[0]
 	last := msgs[len(msgs)-1]
-	sep := "\n---\n...(中间对话省略)...\n---\n"
+	sep := "\n---\n...(intermediate conversation omitted)...\n---\n"
 	sepLen := len([]rune(sep))
 
 	budget := maxRunes - sepLen

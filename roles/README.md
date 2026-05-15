@@ -1,61 +1,51 @@
-# 角色配置文件说明
+# Role Configuration Files
 
-本目录包含所有角色配置文件，每个角色定义了AI的行为模式与可用工具。
+This directory contains all role configuration files. Each role defines an AI behavior mode and the tools available to it.
 
-## 创建新角色
+## Creating a New Role
 
-创建新角色时，请在 `roles/` 目录下创建 YAML 文件，格式如下：
+Create a YAML file under `roles/` with one of the following formats:
 
-**方式1：显式指定工具列表（推荐）**
+**Option 1: Explicitly specify the tool list (recommended)**
+
 ```yaml
-name: 角色名称
-description: 角色描述
-user_prompt: 用户提示词（追加到用户消息前，用于引导AI行为）
-icon: "图标（可选）"
+name: Role name
+description: Role description
+user_prompt: User prompt (prepended to the user message to guide AI behavior)
+icon: "Icon (optional)"
 tools:
-    # 添加你需要的工具...
-    # ⚠️ 重要：建议包含以下核心内置 MCP 工具（漏洞与知识库）
+    # Add the tools you need...
+    # Important: include the following core built-in MCP tools when the role needs vulnerability and knowledge-base workflows.
     - record_vulnerability
     - list_knowledge_risk_types
     - search_knowledge_base
 enabled: true
 ```
 
-**方式2：不设置tools字段（使用所有已开启的工具）**
+**Option 2: Omit the `tools` field (use all enabled tools)**
+
 ```yaml
-name: 角色名称
-description: 角色描述
-user_prompt: 用户提示词（追加到用户消息前，用于引导AI行为）
-icon: "图标（可选）"
-# 不设置tools字段，将默认使用所有MCP管理中已开启的工具
+name: Role name
+description: Role description
+user_prompt: User prompt (prepended to the user message to guide AI behavior)
+icon: "Icon (optional)"
+# If the tools field is omitted, the role uses all tools enabled in MCP management by default.
 enabled: true
 ```
 
-## ⚠️ 重要提醒：核心内置 MCP 工具
+## Important: Core Built-in MCP Tools
 
-**如果设置了 `tools` 字段，请务必在列表中包含以下工具（至少这三项）：**
+If you set the `tools` field, include the following tools in the list when the role needs vulnerability tracking or knowledge-base access (at minimum these three):
 
-1. **`record_vulnerability`** - 漏洞管理工具，用于记录发现的漏洞
-2. **`list_knowledge_risk_types`** - 知识库工具，列出可用的风险类型
-3. **`search_knowledge_base`** - 知识库工具，搜索知识库内容
+1. **`record_vulnerability`** - Vulnerability management tool used to record discovered vulnerabilities.
+2. **`list_knowledge_risk_types`** - Knowledge-base risk-type listing tool used to view available vulnerability classifications.
+3. **`search_knowledge_base`** - Knowledge-base search tool used to retrieve relevant vulnerability knowledge and remediation guidance.
 
-按需还可加入 WebShell、批量任务等其它内置或外部工具（以 MCP 管理中已启用的为准）。
+## Field Reference
 
-**Skills（技能包）**：在 **多代理 / Eino** 会话中由内置 **`skill`** 工具按需加载 `skills_dir` 下的包，与角色 YAML 无绑定关系。
-
-**注意**：如果不设置 `tools` 字段，系统会默认使用所有 MCP 管理中已开启的工具。为明确控制角色可用工具，建议显式设置 `tools` 字段。
-
-## 角色配置字段说明
-
-- **name**: 角色名称（必填）
-- **description**: 角色描述（必填）
-- **user_prompt**: 用户提示词，会追加到用户消息前，用于引导AI采用特定的测试方法和关注点（可选）
-- **icon**: 角色图标，支持Unicode emoji（可选）
-- **tools**: 工具列表，指定该角色可用的工具（可选）
-  - **如果不设置 `tools` 字段**：默认会选中**全部MCP管理中已开启的工具**
-  - **如果设置了 `tools` 字段**：只使用列表中指定的工具（建议至少包含上述核心内置工具）
-- **enabled**: 是否启用该角色（必填，true/false）
-
-## 示例
-
-参考本目录下的其他角色文件，如 `渗透测试.yaml`、`Web应用扫描.yaml` 等。
+- `name`: Display name for the role.
+- `description`: Short description of the role.
+- `user_prompt`: Prompt text prepended to user messages for this role.
+- `icon`: Optional display icon.
+- `tools`: Optional list of tool names. Omit this field to use all enabled MCP tools.
+- `enabled`: Whether the role is available.

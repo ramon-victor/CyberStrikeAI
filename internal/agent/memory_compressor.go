@@ -17,42 +17,42 @@ import (
 )
 
 const (
-	// DefaultMinRecentMessage 压缩历史消息时保留的最近消息数量，确保最近的对话上下文不被压缩
+	// DefaultMinRecentMessage is the number of recent messages to keep when compressing history, ensuring recent context is not compressed.
 	DefaultMinRecentMessage = 5
-	// defaultChunkSize 压缩历史消息时每次处理的消息块大小，将旧消息分成多个块进行摘要
+	// defaultChunkSize is the message chunk size used when compressing history; old messages are split into chunks for summarization.
 	defaultChunkSize = 10
-	// defaultMaxImages 压缩时最多保留的图片数量，超过此数量的图片会被移除以节省上下文空间
+	// defaultMaxImages is the maximum number of images to keep during compression; excess images are removed to save context space.
 	defaultMaxImages = 3
-	// defaultSummaryTimeout 生成消息摘要时的超时时间
+	// defaultSummaryTimeout is the timeout for generating message summaries.
 	defaultSummaryTimeout = 10 * time.Minute
 
-	summaryPromptTemplate = `你是一名负责为安全代理执行上下文压缩的助手，任务是在保持所有关键渗透信息完整的前提下压缩扫描数据。
+	summaryPromptTemplate = `You are an assistant responsible for performing context compression for a security agent. Your task is to compress scan data while preserving all critical penetration-testing information.
 
-必须保留的关键信息：
-- 已发现的漏洞与潜在攻击路径
-- 扫描结果与工具输出（可压缩，但需保留核心发现）
-- 获取到的访问凭证、令牌或认证细节
-- 系统架构洞察与潜在薄弱点
-- 当前评估进展
-- 失败尝试与死路（避免重复劳动）
-- 关于测试策略的所有决策记录
+Key information that must be retained:
+- Discovered vulnerabilities and potential attack paths
+- Scan results and tool output (can be compressed, but core findings must be preserved)
+- Obtained credentials, tokens, or authentication details
+- System architecture insights and potential weak points
+- Current assessment progress
+- Failed attempts and dead ends (to avoid duplicate work)
+- All decision records regarding testing strategy
 
-压缩指南：
-- 保留精确技术细节（URL、路径、参数、Payload 等）
-- 将冗长的工具输出压缩成概述，但保留关键发现
-- 记录版本号与识别出的技术/组件信息
-- 保留可能暗示漏洞的原始报错
-- 将重复或相似发现整合成一条带有共性说明的结论
+Compression guidelines:
+- Preserve exact technical details (URLs, paths, parameters, payloads, etc.)
+- Compress lengthy tool outputs into summaries, keeping key findings
+- Record version numbers and identified technologies/components
+- Preserve raw errors that may indicate vulnerabilities
+- Consolidate repeated or similar findings into a single conclusion with shared characteristics
 
-请牢记：另一位安全代理会依赖这份摘要继续测试，他必须在不损失任何作战上下文的情况下无缝接手。
+Remember: another security agent will rely on this summary to continue testing. It must be able to seamlessly take over without losing any operational context.
 
-需要压缩的对话片段：
+Conversation fragment to compress:
 %s
 
-请给出技术精准且简明扼要的摘要，覆盖全部与安全评估相关的上下文。`
+Provide a technically precise and concise summary covering all security-assessment-related context.`
 )
 
-// MemoryCompressor 负责在调用LLM前压缩历史上下文，以避免Token爆炸。
+// MemoryCompressor compresses historical context before calling the LLM to avoid token explosion.
 type MemoryCompressor struct {
 	maxTotalTokens   int
 	minRecentMessage int

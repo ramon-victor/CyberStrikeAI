@@ -18,18 +18,18 @@ import (
 	"go.uber.org/zap"
 )
 
-// einoSummarizeUserInstruction 与单 Agent MemoryCompressor 目标一致：压缩时保留渗透关键信息。
-const einoSummarizeUserInstruction = `在保持所有关键安全测试信息完整的前提下压缩对话历史。
+// einoSummarizeUserInstruction shares the same goal as the single-agent MemoryCompressor: preserve critical penetration-testing information during compression.
+const einoSummarizeUserInstruction = `Compress the conversation history while preserving all critical security testing information.
 
-必须保留：已确认漏洞与攻击路径、工具输出中的核心发现、凭证与认证细节、架构与薄弱点、当前进度、失败尝试与死路、策略决策。
-保留精确技术细节（URL、路径、参数、Payload、版本号、报错原文可摘要但要点不丢）。
-将冗长扫描输出概括为结论；重复发现合并表述。
-已枚举资产须保留**可继承的摘要**：主域、关键子域/主机短表（或数量+代表样例）、高价值目标与已识别服务/端口要点，避免后续子代理因「看不见清单」而重复全量枚举。
+Must retain: confirmed vulnerabilities and attack paths, core findings in tool output, credentials and authentication details, architecture and weak points, current progress, failed attempts and dead ends, and strategy decisions.
+Preserve exact technical details (URLs, paths, parameters, payloads, version numbers; raw errors can be summarized but key points must not be lost).
+Summarize lengthy scan outputs into conclusions; merge repeated findings.
+Enumerated assets must retain an **inheritable summary**: primary domains, key subdomains/hosts short-list (or count + representative samples), high-value targets and identified services/ports highlights, to prevent subsequent sub-agents from repeating full enumeration because they cannot see the list.
 
-输出须使后续代理能无缝继续同一授权测试任务。`
+The output must enable a subsequent agent to seamlessly continue the same authorized testing task.`
 
-// newEinoSummarizationMiddleware 使用 Eino ADK Summarization 中间件（见 https://www.cloudwego.io/zh/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_summarization/）。
-// 触发阈值与单 Agent MemoryCompressor 一致：当估算 token 超过 openai.max_total_tokens 的 90% 时摘要。
+// newEinoSummarizationMiddleware uses the Eino ADK Summarization middleware (see https://www.cloudwego.io/zh/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_summarization/).
+// Trigger threshold matches the single-agent MemoryCompressor: summarize when estimated tokens exceed 90% of openai.max_total_tokens.
 func newEinoSummarizationMiddleware(
 	ctx context.Context,
 	summaryModel model.BaseChatModel,
@@ -39,7 +39,7 @@ func newEinoSummarizationMiddleware(
 	logger *zap.Logger,
 ) (adk.ChatModelAgentMiddleware, error) {
 	if summaryModel == nil || appCfg == nil {
-		return nil, fmt.Errorf("multiagent: summarization 需要 model 与配置")
+		return nil, fmt.Errorf("multiagent: summarization requires model and config")
 	}
 	maxTotal := appCfg.OpenAI.MaxTotalTokens
 	if maxTotal <= 0 {
@@ -111,7 +111,7 @@ func newEinoSummarizationMiddleware(
 			}
 			beforeTokens, _ := tokenCounter(ctx, &summarization.TokenCounterInput{Messages: before.Messages})
 			afterTokens, _ := tokenCounter(ctx, &summarization.TokenCounterInput{Messages: after.Messages})
-			logger.Info("eino summarization 已压缩上下文",
+			logger.Info("eino summarization compressed context",
 				zap.Int("messages_before", len(before.Messages)),
 				zap.Int("messages_after", len(after.Messages)),
 				zap.Int("tokens_before_estimated", beforeTokens),

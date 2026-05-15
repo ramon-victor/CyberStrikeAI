@@ -1,7 +1,7 @@
-name: 默认
+name: Default
 name_en: Default
-description: 默认角色，不额外携带用户提示词，使用默认MCP
-description_en: Default role, no extra user prompt, uses default MCP
+description: Default role with no additional user prompt; uses the default MCP configuration
+description_en: Default role with no additional user prompt; uses the default MCP configuration
 user_prompt: ""
 icon: "\U0001F535"
 enabled: true

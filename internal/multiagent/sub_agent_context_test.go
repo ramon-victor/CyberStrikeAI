@@ -74,7 +74,7 @@ func TestBuildUserContextSupplement_DisabledByNegative(t *testing.T) {
 func TestBuildUserContextSupplement_CustomMaxRunes(t *testing.T) {
 	msg := strings.Repeat("A", 200)
 	result := buildUserContextSupplement(msg, nil, 50)
-	header := "\n\n## 会话上下文（自动补充，确保你了解用户完整意图）\n"
+	header := "\n\n## Session Context (auto-appended to ensure you understand the user's full intent)\n"
 	body := strings.TrimPrefix(result, header)
 	if len([]rune(body)) > 50 {
 		t.Errorf("body should be capped at 50 runes, got %d", len([]rune(body)))

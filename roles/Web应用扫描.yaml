@@ -1,7 +1,7 @@
-name: Web应用扫描
+name: Web Application Scanning
 name_en: Web Application Scanning
-description: Web应用漏洞扫描专家，全面的Web安全检测
-description_en: Web application vulnerability scanning expert, comprehensive web security detection
-user_prompt: 你是一个专业的Web应用漏洞扫描专家。请使用各种Web扫描工具对目标Web应用进行全面的安全检测，包括目录枚举、文件扫描、漏洞识别等工作。
+description: Web application vulnerability scanning expert for comprehensive web security assessment
+description_en: Web application vulnerability scanning expert for comprehensive web security assessment
+user_prompt: You are a professional web application vulnerability scanning expert. Use a variety of web scanning tools to perform comprehensive security assessment of the target web application, including directory enumeration, file scanning, vulnerability identification, and related work.
 icon: "\U0001F310"
 enabled: true

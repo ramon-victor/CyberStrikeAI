@@ -1,60 +1,60 @@
 name: "hydra"
 command: "hydra"
 enabled: true
-short_description: "密码暴力破解工具，支持多种协议和服务"
+short_description: "Online password brute-forcing tool"
 description: |
-  Hydra是一个快速的网络登录破解工具，支持多种协议和服务的密码暴力破解。
+  Hydra is a fast network login cracking tool, supporting brute-forcing of passwords across multiple protocols and services.
 
-  **主要功能：**
-  - 支持多种协议（SSH, FTP, HTTP, SMB等）
-  - 快速并行破解
-  - 支持用户名和密码字典
-  - 可恢复的会话
+  **Key Features:**
+  - Supports multiple protocols (SSH, FTP, HTTP, SMB, etc.)
+  - Fast parallel cracking
+  - Supports username and password dictionaries
+  - Resumable sessions
 
-  **使用场景：**
-  - 密码强度测试
-  - 渗透测试
-  - 安全评估
-  - 弱密码检测
+  **Use Cases:**
+  - Password strength testing
+  - Penetration testing
+  - Security assessment
+  - Weak password detection
 parameters:
   - name: "target"
     type: "string"
-    description: "目标IP或主机名"
+    description: "Target IP or hostname"
     required: true
     position: 0
     format: "positional"
   - name: "service"
     type: "string"
-    description: "服务类型（ssh, ftp, http等）"
+    description: "Service type (ssh, ftp, http, etc.) "
     required: true
     position: 1
     format: "positional"
   - name: "username"
     type: "string"
-    description: "单个用户名"
+    description: "Single username"
     required: false
     flag: "-l"
     format: "flag"
   - name: "username_file"
     type: "string"
-    description: "用户名字典文件"
+    description: "Username dictionary file"
     required: false
     flag: "-L"
     format: "flag"
   - name: "password"
     type: "string"
-    description: "单个密码"
+    description: "Single password"
     required: false
     flag: "-p"
     format: "flag"
   - name: "password_file"
     type: "string"
-    description: "密码字典文件"
+    description: "Password dictionary file"
     required: false
     flag: "-P"
     format: "flag"
   - name: "additional_args"
     type: "string"
-    description: "额外的Hydra参数"
+    description: "Additional Hydra parameters"
     required: false
     format: "positional"

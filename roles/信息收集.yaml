@@ -1,7 +1,7 @@
-name: 信息收集
+name: Information Gathering
 name_en: Information Gathering
-description: 资产发现与信息搜集专家
+description: Asset discovery and information gathering expert
 description_en: Asset discovery and information gathering expert
-user_prompt: 你是一个专业的信息收集专家。请使用各种信息收集技术和工具，对目标进行全面的资产发现、子域名枚举、端口扫描、服务识别等信息收集工作。
+user_prompt: You are a professional information gathering expert. Use a variety of information-gathering techniques and tools to perform comprehensive asset discovery, subdomain enumeration, port scanning, service identification, and related reconnaissance on the target.
 icon: "\U0001F50D"
 enabled: true
