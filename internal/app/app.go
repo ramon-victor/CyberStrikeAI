@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,6 +32,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
 )
 
 // App 应用
@@ -60,7 +63,7 @@ type App struct {
 }
 
 // New 创建新应用
-func New(cfg *config.Config, log *logger.Logger) (*App, error) {
+func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error) {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
 
@@ -292,10 +295,10 @@ func New(cfg *config.Config, log *logger.Logger) (*App, error) {
 		}()
 	}
 
-	// 获取配置文件路径
-	configPath := "config.yaml"
-	if len(os.Args) > 1 {
-		configPath = os.Args[1]
+	// 配置文件路径必须由入口传入（与 flag -config 一致）。勿再用 os.Args[1]，否则 ./cyberstrike-ai --https 会把 --https 当成路径。
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		configPath = "config.yaml"
 	}
 
 	skillsDir := skillpackage.SkillsRootFromConfig(cfg.SkillsDir, configPath)
@@ -530,18 +533,49 @@ func (a *App) RunWithContext(ctx context.Context) error {
 		}()
 	}
 
-	// 启动主服务器
+	// 启动主服务器（可选 HTTPS + HTTP/2，见 config server.tls_*）
 	addr := fmt.Sprintf("%s:%d", a.config.Server.Host, a.config.Server.Port)
-	a.logger.Info("启动HTTP服务器", zap.String("address", addr))
+	tlsMode, tlsConf, certFile, keyFile, tlsErr := prepareMainServerTLS(&a.config.Server)
+	if tlsErr != nil {
+		return tlsErr
+	}
 
 	srv := &http.Server{Addr: addr, Handler: a.router}
+	var mainMux *mainServerMux
+	httpRedirect := config.ServerHTTPRedirectEnabled(&a.config.Server)
+	if tlsMode != mainTLSOff {
+		srv.TLSConfig = tlsConf
+		if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
+			return fmt.Errorf("主服务 HTTP/2 配置失败: %w", err)
+		}
+		switch tlsMode {
+		case mainTLSFromFiles:
+			a.logger.Info("启动 HTTPS 主服务（已启用 HTTP/2 协商）",
+				zap.String("address", addr),
+				zap.String("cert", certFile),
+			)
+		case mainTLSInMemorySelfSigned:
+			a.logger.Info("启动 HTTPS 主服务（内存自签证书，仅测试；已启用 HTTP/2 协商）",
+				zap.String("address", addr),
+			)
+		}
+		if httpRedirect {
+			a.logger.Info("已启用 HTTP→HTTPS 自动跳转（同端口嗅探分流）", zap.String("address", addr))
+		}
+	} else {
+		a.logger.Info("启动 HTTP 主服务", zap.String("address", addr))
+	}
 
 	// 监听 context 取消，优雅关闭 HTTP 服务器
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
+		if mainMux != nil {
+			if err := mainMux.Shutdown(shutdownCtx); err != nil {
+				a.logger.Error("HTTP/HTTPS 分流服务器关闭失败", zap.Error(err))
+			}
+		} else if err := srv.Shutdown(shutdownCtx); err != nil {
 			a.logger.Error("HTTP服务器关闭失败", zap.Error(err))
 		}
 		if mcpServer != nil {
@@ -551,7 +585,36 @@ func (a *App) RunWithContext(ctx context.Context) error {
 		}
 	}()
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	var err error
+	switch {
+	case tlsMode != mainTLSOff && httpRedirect:
+		var tlsConfReady *tls.Config
+		tlsConfReady, err = ensureMainTLSConfigCerts(tlsMode, tlsConf, certFile, keyFile)
+		if err != nil {
+			return fmt.Errorf("加载 TLS 证书: %w", err)
+		}
+		srv.TLSConfig = tlsConfReady
+		var ln net.Listener
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			return err
+		}
+		mainMux = newMainServerMux(ln, srv, portFromListenAddr(addr), a.logger.Logger)
+		err = mainMux.Serve()
+	case tlsMode == mainTLSOff:
+		err = srv.ListenAndServe()
+	case tlsMode == mainTLSFromFiles:
+		err = srv.ListenAndServeTLS(certFile, keyFile)
+	case tlsMode == mainTLSInMemorySelfSigned:
+		var ln net.Listener
+		ln, err = tls.Listen("tcp", addr, srv.TLSConfig)
+		if err == nil {
+			err = srv.Serve(ln)
+		}
+	default:
+		err = srv.ListenAndServe()
+	}
+	if err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil

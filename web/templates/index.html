@@ -190,10 +190,12 @@
                     <!-- C2 侧栏入口（带子菜单） -->
                     <div class="nav-item nav-item-has-submenu" data-page="c2" id="nav-c2">
                         <div class="nav-item-content" data-title="C2" onclick="window.toggleSubmenu('c2')" data-i18n="nav.c2" data-i18n-attr="data-title" data-i18n-skip-text="true">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
-                                <path d="M2 17l10 5 10-5"></path>
-                                <path d="M2 12l10 5 10-5"></path>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"></path>
+                                <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"></path>
+                                <circle cx="12" cy="12" r="2"></circle>
+                                <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"></path>
+                                <path d="M19.1 4.9C23 8.8 23 15.2 19.1 19"></path>
                             </svg>
                             <span data-i18n="nav.c2">C2</span>
                             <svg class="submenu-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -201,6 +203,7 @@
                             </svg>
                         </div>
                         <div class="nav-submenu" id="submenu-c2">
+                            <div class="nav-submenu-item" data-page="c2" onclick="switchPage('c2')" data-i18n="nav.c2Manage">C2 管理</div>
                             <div class="nav-submenu-item" data-page="c2-listeners" onclick="switchPage('c2-listeners')" data-i18n="nav.c2Listeners">监听器</div>
                             <div class="nav-submenu-item" data-page="c2-sessions" onclick="switchPage('c2-sessions')" data-i18n="nav.c2Sessions">会话</div>
                             <div class="nav-submenu-item" data-page="c2-tasks" onclick="switchPage('c2-tasks')" data-i18n="nav.c2Tasks">任务</div>
@@ -446,42 +449,46 @@
                                                 </div>
                                             </aside>
                                             <div class="dashboard-severity-chart">
-                                                <svg class="dashboard-severity-donut" id="dashboard-severity-donut" viewBox="0 0 480 260" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+                                                <svg class="dashboard-severity-donut" id="dashboard-severity-donut" viewBox="0 0 480 260" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="dashboard-severity-donut-title">
+                                                    <title id="dashboard-severity-donut-title" data-i18n="dashboard.severityDistribution">漏洞严重程度分布</title>
+                                                    <defs id="dashboard-severity-donut-defs"></defs>
                                                     <g id="dashboard-severity-donut-track"></g>
+                                                    <g id="dashboard-severity-donut-leaders"></g>
                                                     <g id="dashboard-severity-donut-segments"></g>
+                                                    <g id="dashboard-severity-donut-hits"></g>
                                                     <g id="dashboard-severity-donut-labels"></g>
                                                 </svg>
-                                                <div class="dashboard-severity-center">
+                                                <div class="dashboard-severity-center" id="dashboard-severity-center">
                                                     <div class="dashboard-severity-center-value" id="dashboard-severity-total">0</div>
-                                                    <div class="dashboard-severity-center-label" data-i18n="dashboard.totalVulns">总漏洞数</div>
+                                                    <div class="dashboard-severity-center-label" id="dashboard-severity-center-label" data-i18n="dashboard.totalVulns">总漏洞数</div>
                                                 </div>
                                             </div>
                                             <div class="dashboard-severity-legend" id="dashboard-vuln-bars">
-                                                <div class="dashboard-severity-legend-item">
+                                                <div class="dashboard-severity-legend-item" data-severity="critical" role="button" tabindex="0">
                                                     <span class="dashboard-severity-legend-dot critical"></span>
                                                     <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityCritical">严重</span>
                                                     <span class="dashboard-severity-legend-value" id="dashboard-severity-critical">0</span>
                                                     <span class="dashboard-severity-legend-pct" id="dashboard-severity-critical-pct">0%</span>
                                                 </div>
-                                                <div class="dashboard-severity-legend-item">
+                                                <div class="dashboard-severity-legend-item" data-severity="high" role="button" tabindex="0">
                                                     <span class="dashboard-severity-legend-dot high"></span>
                                                     <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityHigh">高危</span>
                                                     <span class="dashboard-severity-legend-value" id="dashboard-severity-high">0</span>
                                                     <span class="dashboard-severity-legend-pct" id="dashboard-severity-high-pct">0%</span>
                                                 </div>
-                                                <div class="dashboard-severity-legend-item">
+                                                <div class="dashboard-severity-legend-item" data-severity="medium" role="button" tabindex="0">
                                                     <span class="dashboard-severity-legend-dot medium"></span>
                                                     <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityMedium">中危</span>
                                                     <span class="dashboard-severity-legend-value" id="dashboard-severity-medium">0</span>
                                                     <span class="dashboard-severity-legend-pct" id="dashboard-severity-medium-pct">0%</span>
                                                 </div>
-                                                <div class="dashboard-severity-legend-item">
+                                                <div class="dashboard-severity-legend-item" data-severity="low" role="button" tabindex="0">
                                                     <span class="dashboard-severity-legend-dot low"></span>
                                                     <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityLow">低危</span>
                                                     <span class="dashboard-severity-legend-value" id="dashboard-severity-low">0</span>
                                                     <span class="dashboard-severity-legend-pct" id="dashboard-severity-low-pct">0%</span>
                                                 </div>
-                                                <div class="dashboard-severity-legend-item">
+                                                <div class="dashboard-severity-legend-item" data-severity="info" role="button" tabindex="0">
                                                     <span class="dashboard-severity-legend-dot info"></span>
                                                     <span class="dashboard-severity-legend-label" data-i18n="dashboard.severityInfo">信息</span>
                                                     <span class="dashboard-severity-legend-value" id="dashboard-severity-info">0</span>
@@ -1605,11 +1612,13 @@
                             <div id="c2-main" class="c2-main">
                                 <div class="c2-welcome">
                                     <div class="c2-welcome-icon">
-                                        <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="url(#c2-grad)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                        <svg width="72" height="72" viewBox="0 0 24 24" fill="none" stroke="url(#c2-grad)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                             <defs><linearGradient id="c2-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00d4ff"/><stop offset="100%" stop-color="#a855f7"/></linearGradient></defs>
-                                            <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
-                                            <path d="M2 17l10 5 10-5"></path>
-                                            <path d="M2 12l10 5 10-5"></path>
+                                            <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"></path>
+                                            <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"></path>
+                                            <circle cx="12" cy="12" r="2"></circle>
+                                            <path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"></path>
+                                            <path d="M19.1 4.9C23 8.8 23 15.2 19.1 19"></path>
                                         </svg>
                                     </div>
                                     <h3 data-i18n="c2.welcomeTitle">AI-Native C2 框架</h3>

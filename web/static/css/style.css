@@ -14749,6 +14749,76 @@ header {
     max-width: 480px;
     margin: 0 auto;
     aspect-ratio: 480 / 260;
+    isolation: isolate;
+}
+
+/* 底部氛围光：轻微呼吸 + 悬停扇区时整体染上该等级色调 */
+.dashboard-severity-chart::before {
+    content: '';
+    position: absolute;
+    inset: -14% -12% -10%;
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.92;
+    background:
+        radial-gradient(ellipse 82% 64% at 50% 74%, rgba(99, 102, 241, 0.17), transparent 58%),
+        radial-gradient(ellipse 52% 42% at 14% 94%, rgba(56, 189, 248, 0.11), transparent 52%),
+        radial-gradient(ellipse 48% 38% at 88% 90%, rgba(244, 114, 182, 0.08), transparent 50%);
+    animation: dashboard-donut-aura 7s ease-in-out infinite alternate;
+}
+
+.dashboard-severity-chart[data-hover-severity="critical"]::before {
+    opacity: 1;
+    animation: none;
+    background: radial-gradient(ellipse 82% 64% at 50% 74%, rgba(239, 68, 68, 0.38), transparent 58%),
+                radial-gradient(ellipse 50% 44% at 22% 92%, rgba(249, 115, 22, 0.18), transparent 54%);
+}
+
+.dashboard-severity-chart[data-hover-severity="high"]::before {
+    opacity: 1;
+    animation: none;
+    background: radial-gradient(ellipse 82% 64% at 50% 74%, rgba(249, 115, 22, 0.36), transparent 58%),
+                radial-gradient(ellipse 48% 40% at 78% 88%, rgba(234, 179, 8, 0.14), transparent 52%);
+}
+
+.dashboard-severity-chart[data-hover-severity="medium"]::before {
+    opacity: 1;
+    animation: none;
+    background: radial-gradient(ellipse 82% 64% at 50% 74%, rgba(234, 179, 8, 0.34), transparent 58%),
+                radial-gradient(ellipse 46% 38% at 18% 88%, rgba(250, 204, 21, 0.16), transparent 52%);
+}
+
+.dashboard-severity-chart[data-hover-severity="low"]::before {
+    opacity: 1;
+    animation: none;
+    background: radial-gradient(ellipse 82% 64% at 50% 74%, rgba(45, 212, 191, 0.34), transparent 58%),
+                radial-gradient(ellipse 46% 38% at 86% 88%, rgba(14, 165, 233, 0.14), transparent 52%);
+}
+
+.dashboard-severity-chart[data-hover-severity="info"]::before {
+    opacity: 1;
+    animation: none;
+    background: radial-gradient(ellipse 82% 64% at 50% 74%, rgba(59, 130, 246, 0.34), transparent 58%),
+                radial-gradient(ellipse 46% 38% at 30% 86%, rgba(129, 140, 248, 0.16), transparent 52%);
+}
+
+@keyframes dashboard-donut-aura {
+    0% {
+        opacity: 0.78;
+        transform: scale(0.97);
+        filter: saturate(0.92);
+    }
+    100% {
+        opacity: 1;
+        transform: scale(1.03);
+        filter: saturate(1.08);
+    }
+}
+
+.dashboard-severity-chart > .dashboard-severity-donut {
+    position: relative;
+    z-index: 1;
 }
 
 .dashboard-severity-donut {
@@ -14758,28 +14828,168 @@ header {
     overflow: visible;
 }
 
-.dashboard-severity-donut .donut-track {
-    fill: #f1f5f9;
+.dashboard-severity-donut .donut-track-shadow {
+    fill: #c9d4e3;
+    opacity: 0.85;
+}
+
+.dashboard-severity-donut .donut-track-vignette {
+    pointer-events: none;
+}
+
+.dashboard-severity-donut .donut-segment-gloss {
+    mix-blend-mode: soft-light;
+    opacity: 0.48;
+    transition: opacity 0.26s ease;
+    pointer-events: none;
+}
+
+.dashboard-severity-donut .donut-segment-gloss.is-active {
+    opacity: 0.72;
 }
 
 .dashboard-severity-donut .donut-segment {
-    /* 段与段之间用白色描边制造“切割线”效果，与参考图二一致；
-       环回到黄金比例（厚度 50）后，描边也用回 4，切割线感更强 */
+    filter: url(#donut-segment-soften);
     stroke: #ffffff;
     stroke-width: 4;
     stroke-linejoin: round;
-    transition: opacity 0.2s ease;
-    cursor: default;
+    pointer-events: none;
+    transition: opacity 0.22s ease, filter 0.22s ease;
 }
 
-.dashboard-severity-donut .donut-segment.is-empty {
-    display: none;
+/* 透明命中层：几何固定，悬停时只改视觉层，避免 scale/描边导致边缘频闪 */
+.dashboard-severity-donut .donut-segment-hit {
+    fill: transparent;
+    stroke: transparent;
+    stroke-width: 0;
+    cursor: pointer;
+    outline: none;
+    pointer-events: visible;
+}
+
+.dashboard-severity-donut .donut-segment-hit:focus-visible {
+    outline: 2px solid rgba(0, 102, 255, 0.55);
+    outline-offset: 2px;
+}
+
+.dashboard-severity-donut.donut-ready .donut-segment {
+    animation: donut-segment-in 0.72s cubic-bezier(0.22, 1.18, 0.36, 1) backwards;
+}
+
+.dashboard-severity-donut.donut-ready .donut-segment.seg-critical { animation-delay: 0.03s; }
+.dashboard-severity-donut.donut-ready .donut-segment.seg-high { animation-delay: 0.07s; }
+.dashboard-severity-donut.donut-ready .donut-segment.seg-medium { animation-delay: 0.11s; }
+.dashboard-severity-donut.donut-ready .donut-segment.seg-low { animation-delay: 0.15s; }
+.dashboard-severity-donut.donut-ready .donut-segment.seg-info { animation-delay: 0.19s; }
+
+@keyframes donut-segment-in {
+    from {
+        opacity: 0;
+        transform: scale(0.72) translateY(10px);
+    }
+    72% {
+        opacity: 1;
+        transform: scale(1.06) translateY(0);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+}
+
+.dashboard-severity-donut.is-highlighting .donut-segment.is-dimmed,
+.dashboard-severity-donut.is-highlighting .donut-label-text.is-dimmed,
+.dashboard-severity-donut.is-highlighting .donut-leader.is-dimmed,
+.dashboard-severity-donut.is-highlighting .donut-segment-gloss.is-dimmed {
+    opacity: 0.26;
+}
+
+.dashboard-severity-donut .donut-segment.is-active {
+    /* 不用 scale / stroke-width，防止命中区抖动 */
+    z-index: 1;
+}
+
+.dashboard-severity-donut[data-hover-severity="critical"] .donut-segment.is-active {
+    filter: url(#donut-segment-soften) drop-shadow(0 0 28px rgba(239, 68, 68, 0.55)) drop-shadow(0 10px 26px rgba(239, 68, 68, 0.28));
+}
+
+.dashboard-severity-donut[data-hover-severity="high"] .donut-segment.is-active {
+    filter: url(#donut-segment-soften) drop-shadow(0 0 26px rgba(249, 115, 22, 0.52)) drop-shadow(0 10px 24px rgba(249, 115, 22, 0.26));
+}
+
+.dashboard-severity-donut[data-hover-severity="medium"] .donut-segment.is-active {
+    filter: url(#donut-segment-soften) drop-shadow(0 0 26px rgba(234, 179, 8, 0.48)) drop-shadow(0 10px 22px rgba(202, 138, 4, 0.22));
+}
+
+.dashboard-severity-donut[data-hover-severity="low"] .donut-segment.is-active {
+    filter: url(#donut-segment-soften) drop-shadow(0 0 26px rgba(45, 212, 191, 0.48)) drop-shadow(0 10px 22px rgba(13, 148, 136, 0.22));
+}
+
+.dashboard-severity-donut[data-hover-severity="info"] .donut-segment.is-active {
+    filter: url(#donut-segment-soften) drop-shadow(0 0 26px rgba(59, 130, 246, 0.48)) drop-shadow(0 10px 22px rgba(37, 99, 235, 0.22));
+}
+
+.dashboard-severity-donut .donut-leader {
+    stroke: rgba(148, 163, 184, 0.45);
+    stroke-width: 1.25;
+    pointer-events: none;
+    stroke-linecap: round;
+    transition: opacity 0.22s ease, stroke 0.22s ease;
+}
+
+.dashboard-severity-donut.donut-ready .donut-leader {
+    stroke-dasharray: 100;
+    stroke-dashoffset: 100;
+    animation: donut-leader-draw 0.75s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.dashboard-severity-donut.donut-ready .donut-leader.label-critical { animation-delay: 0.12s; }
+.dashboard-severity-donut.donut-ready .donut-leader.label-high { animation-delay: 0.18s; }
+.dashboard-severity-donut.donut-ready .donut-leader.label-medium { animation-delay: 0.24s; }
+.dashboard-severity-donut.donut-ready .donut-leader.label-low { animation-delay: 0.30s; }
+.dashboard-severity-donut.donut-ready .donut-leader.label-info { animation-delay: 0.36s; }
+
+@keyframes donut-leader-draw {
+    to { stroke-dashoffset: 0; }
+}
+
+.dashboard-severity-donut .donut-leader.is-active {
+    stroke: rgba(71, 85, 105, 0.95);
+    stroke-width: 2;
 }
 
 .dashboard-severity-donut .donut-label-text {
+    pointer-events: none;
+    transition: opacity 0.22s ease, transform 0.28s cubic-bezier(0.34, 1.35, 0.48, 1);
     font-size: 14px;
     font-weight: 700;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+
+.dashboard-severity-donut.donut-ready .donut-label-text {
+    animation: donut-label-pop 0.58s cubic-bezier(0.34, 1.25, 0.48, 1) backwards;
+}
+
+.dashboard-severity-donut.donut-ready .donut-label-text.label-critical { animation-delay: 0.2s; }
+.dashboard-severity-donut.donut-ready .donut-label-text.label-high { animation-delay: 0.26s; }
+.dashboard-severity-donut.donut-ready .donut-label-text.label-medium { animation-delay: 0.32s; }
+.dashboard-severity-donut.donut-ready .donut-label-text.label-low { animation-delay: 0.38s; }
+.dashboard-severity-donut.donut-ready .donut-label-text.label-info { animation-delay: 0.44s; }
+
+@keyframes donut-label-pop {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.dashboard-severity-donut .donut-label-text.is-active {
+    font-weight: 800;
+    transform: translateY(-2px);
 }
 
 .dashboard-severity-donut .donut-label-text .donut-label-pct {
@@ -14799,45 +15009,86 @@ header {
 .dashboard-severity-donut .donut-label-text.label-low { fill: #14b8a6; }
 .dashboard-severity-donut .donut-label-text.label-info { fill: #3b82f6; }
 
-/* 半环形配色：保持原有浅色基调（红→橙→黄→青→蓝） */
-.dashboard-severity-donut .donut-segment.seg-critical { fill: #f87171; }
-.dashboard-severity-donut .donut-segment.seg-high { fill: #fb923c; }
-.dashboard-severity-donut .donut-segment.seg-medium { fill: #facc15; }
-.dashboard-severity-donut .donut-segment.seg-low { fill: #2dd4bf; }
-.dashboard-severity-donut .donut-segment.seg-info { fill: #60a5fa; }
+/* 半环形主体配色由 SVG linearGradient（#donut-grad-*）提供 */
 
+.dashboard-severity-donut .donut-segment.is-empty {
+    display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .dashboard-severity-chart::before {
+        animation: none;
+    }
+    .dashboard-severity-donut.donut-ready .donut-segment,
+    .dashboard-severity-donut.donut-ready .donut-leader,
+    .dashboard-severity-donut.donut-ready .donut-label-text {
+        animation: none !important;
+    }
+    .dashboard-severity-center.is-hovering {
+        transform: translateX(-50%);
+    }
+}
+
+/* 中心数字：纯文字，贴在半圆开口下方（直径线附近），不遮挡彩色弧带 */
 .dashboard-severity-center {
     position: absolute;
     left: 50%;
-    /* cy 在 viewBox(0,0,480,260) 中是 215，约 83% 处；
-       这里把中心文字放在内圈靠下、靠近直径线的位置，让数字看起来"坐"在半圆里。 */
-    top: 76%;
-    transform: translate(-50%, -50%);
+    bottom: 6%;
+    transform: translateX(-50%);
     text-align: center;
     pointer-events: none;
-    width: 60%;
+    width: auto;
+    max-width: 7rem;
+    padding: 0;
+    margin: 0;
+    background: none;
+    border: none;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    transition: transform 0.28s cubic-bezier(0.34, 1.35, 0.48, 1);
+    z-index: 2;
+}
+
+.dashboard-severity-center.is-hovering {
+    transform: translateX(-50%) scale(1.06);
+}
+
+.dashboard-severity-center-label.is-severity {
+    font-weight: 700;
+    letter-spacing: 0.02em;
 }
 
 .dashboard-severity-center-value {
-    font-size: 2.75rem;
+    font-size: 2.5rem;
     font-weight: 800;
     line-height: 1;
     color: var(--text-primary);
-    letter-spacing: -0.03em;
+    letter-spacing: -0.04em;
     font-variant-numeric: tabular-nums;
+    text-shadow:
+        0 0 20px rgba(255, 255, 255, 0.95),
+        0 1px 2px rgba(255, 255, 255, 0.8);
 }
 
 .dashboard-severity-center-label {
-    font-size: 0.8125rem;
+    font-size: 0.75rem;
     color: var(--text-secondary);
-    margin-top: 8px;
-    letter-spacing: 0.04em;
+    margin-top: 4px;
+    letter-spacing: 0.06em;
     font-weight: 500;
+    text-shadow: 0 0 12px rgba(255, 255, 255, 0.9);
 }
 
+.dashboard-severity-center-label[data-severity="critical"] { color: #dc2626; }
+.dashboard-severity-center-label[data-severity="high"] { color: #ea580c; }
+.dashboard-severity-center-label[data-severity="medium"] { color: #b45309; }
+.dashboard-severity-center-label[data-severity="low"] { color: #0f766e; }
+.dashboard-severity-center-label[data-severity="info"] { color: #2563eb; }
+
 @media (max-width: 720px) {
-    .dashboard-severity-center-value { font-size: 2.25rem; }
-    .dashboard-severity-center-label { font-size: 0.75rem; }
+    .dashboard-severity-center-value { font-size: 2.1rem; }
+    .dashboard-severity-center-label { font-size: 0.6875rem; }
 }
 
 .dashboard-severity-legend {
@@ -14856,12 +15107,46 @@ header {
     padding: 10px 4px;
     font-size: 0.9375rem;
     border-bottom: 1px solid transparent;
-    transition: background 0.2s, border-color 0.2s;
+    transition: background 0.2s, border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
     border-radius: 4px;
+    cursor: pointer;
 }
 
-.dashboard-severity-legend-item:hover {
-    background: rgba(0, 0, 0, 0.025);
+.dashboard-severity-legend-item:hover,
+.dashboard-severity-legend-item.is-active {
+    background: rgba(0, 102, 255, 0.06);
+    border-radius: 8px;
+}
+
+.dashboard-severity-legend-item.is-active {
+    box-shadow: inset 3px 0 0 var(--accent-color, #0066ff);
+}
+
+.dashboard-severity-legend-item.is-zero {
+    opacity: 0.55;
+}
+
+.dashboard-severity-legend-item:focus-visible {
+    outline: 2px solid rgba(0, 102, 255, 0.45);
+    outline-offset: 2px;
+}
+
+.dashboard-severity-donut-tooltip {
+    display: none;
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 10000;
+    max-width: 280px;
+    padding: 8px 12px;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: #fff;
+    background: rgba(15, 23, 42, 0.94);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+    pointer-events: none;
+    white-space: nowrap;
 }
 
 .dashboard-severity-legend-dot {

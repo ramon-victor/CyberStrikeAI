@@ -772,7 +772,7 @@ function toggleProgressDetails(progressId) {
     }
 }
 
-// 编排器开始输出最终回复时隐藏整条进度消息（迭代阶段保持展开可见；此处整行收起而非仅折叠时间线）
+// 编排器开始输出最终回复时隐藏整条进度消息（过程已迁入助手气泡的「展开详情」，避免与进度卡重复）
 function hideProgressMessageForFinalReply(progressId) {
     if (!progressId) return;
     const el = document.getElementById(progressId);
@@ -970,7 +970,7 @@ function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecut
         });
     }
     
-    // 移除原来的进度消息
+    // 移除原来的进度消息（详情已快照到助手消息下的 process-details）
     removeMessage(progressId);
 }
 
@@ -1886,13 +1886,7 @@ function handleStreamEvent(event, progressElement, progressId,
 
             // 多代理模式下，迭代过程中的输出只显示在时间线中，不创建助手消息气泡
             // 同一 progressId 再次 response_start 时先移除旧占位，避免多条「助手输出」卡片且仅最后一条收 delta
-            const prevStream = responseStreamStateByProgressId.get(progressId);
-            if (prevStream && prevStream.itemId) {
-                const oldItem = document.getElementById(prevStream.itemId);
-                if (oldItem && oldItem.parentNode) {
-                    oldItem.parentNode.removeChild(oldItem);
-                }
-            }
+            // 改为保留旧占位，让每一段 response_start 都能在时间线中完整展示。
             // 创建时间线条目用于显示迭代过程中的输出
             const title = einoMainStreamPlanningTitle(responseData);
             const itemId = addTimelineItem(timeline, 'thinking', {

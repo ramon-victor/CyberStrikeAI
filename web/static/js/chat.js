@@ -2224,6 +2224,39 @@ function showCopySuccess(button) {
     }
 }
 
+/** 相邻且类型/正文/data 完全一致的过程详情只保留一条（与后端去重一致，避免时间线叠多条相同块） */
+function dedupeConsecutiveProcessDetailRows(details) {
+    if (!Array.isArray(details) || details.length < 2) {
+        return details;
+    }
+    const out = [details[0]];
+    for (let i = 1; i < details.length; i++) {
+        const cur = details[i];
+        if (processDetailRowFingerprint(out[out.length - 1]) === processDetailRowFingerprint(cur)) {
+            continue;
+        }
+        out.push(cur);
+    }
+    return out;
+}
+
+function processDetailRowFingerprint(d) {
+    if (!d || typeof d !== 'object') {
+        return '';
+    }
+    const et = String(d.eventType || '');
+    const msg = String(d.message != null ? d.message : '').trim();
+    let dataKey = '';
+    try {
+        if (d.data != null) {
+            dataKey = JSON.stringify(d.data);
+        }
+    } catch (e) {
+        dataKey = String(d.data);
+    }
+    return et + '\0' + msg + '\0' + dataKey;
+}
+
 // 渲染过程详情
 function renderProcessDetails(messageId, processDetails) {
     const messageElement = document.getElementById(messageId);
@@ -2323,6 +2356,7 @@ function renderProcessDetails(messageId, processDetails) {
     }
     detailsContainer.dataset.lazyNotLoaded = '0';
     detailsContainer.dataset.loaded = '1';
+    processDetails = dedupeConsecutiveProcessDetailRows(processDetails);
     // 如果没有processDetails或为空，显示空状态
     if (!processDetails || processDetails.length === 0) {
         // 显示空状态提示

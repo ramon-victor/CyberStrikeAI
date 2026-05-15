@@ -64,6 +64,7 @@ show_progress() {
 echo ""
 echo "=========================================="
 echo "  CyberStrikeAI 一键部署启动脚本"
+echo "  （默认 HTTPS 自签证书；纯 HTTP 请用: $0 --http）"
 echo "=========================================="
 echo ""
 
@@ -353,7 +354,18 @@ need_rebuild() {
 }
 
 # 主流程
+# 默认启动主站 HTTPS（--https 传给二进制）；传 --http 则走明文 HTTP。
 main() {
+    USE_HTTPS=1
+    FORWARD_ARGS=()
+    for arg in "$@"; do
+        if [ "$arg" = "--http" ]; then
+            USE_HTTPS=0
+            continue
+        fi
+        FORWARD_ARGS+=("$arg")
+    done
+
     # 环境检查
     info "检查运行环境..."
     check_python
@@ -377,13 +389,30 @@ main() {
     # 启动服务器
     success "所有准备工作完成！"
     echo ""
-    info "启动 CyberStrikeAI 服务器..."
+    if [ "$USE_HTTPS" -eq 1 ]; then
+        info "启动 CyberStrikeAI 服务器（HTTPS + HTTP/2，自签证书）..."
+        note "纯 HTTP 启动请使用: $0 --http"
+    else
+        info "启动 CyberStrikeAI 服务器（HTTP）..."
+    fi
     echo "=========================================="
     echo ""
-    
-    # 运行服务器
-    exec "./$BINARY_NAME"
+
+    # 始终传入项目根目录下的 config.yaml，避免 cwd 不在项目根时找不到配置；额外参数仍可追加（如再次 -config 覆盖，以 Go flag 后写为准）。
+    if [ "$USE_HTTPS" -eq 1 ]; then
+        if [ "${#FORWARD_ARGS[@]}" -gt 0 ]; then
+            exec "./$BINARY_NAME" -config "$CONFIG_FILE" --https "${FORWARD_ARGS[@]}"
+        else
+            exec "./$BINARY_NAME" -config "$CONFIG_FILE" --https
+        fi
+    else
+        if [ "${#FORWARD_ARGS[@]}" -gt 0 ]; then
+            exec "./$BINARY_NAME" -config "$CONFIG_FILE" "${FORWARD_ARGS[@]}"
+        else
+            exec "./$BINARY_NAME" -config "$CONFIG_FILE"
+        fi
+    fi
 }
 
-# 执行主流程
-main
+# 执行主流程（支持参数，如: ./run.sh --http）
+main "$@"

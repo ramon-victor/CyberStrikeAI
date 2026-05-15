@@ -173,9 +173,11 @@ chmod +x run.sh && ./run.sh
 - ✅ 编译构建项目
 - ✅ 启动服务器
 
+**网络默认：** `run.sh` 会以 **`--https`** 并传入项目根 **`config.yaml`** 启动（本机自签证书，多路流式场景更稳）。只要明文 HTTP 用 **`./run.sh --http`**。生产环境在 **`config.yaml`** 的 **`server.tls_cert_path` / `server.tls_key_path`** 配正式证书（见文件内注释）。手动启动可加 **`--https`** 或环境变量 **`CYBERSTRIKE_HTTPS=1`**；`-config` 写错时程序会在终端提示正确写法。
+
 **首次配置：**
 1. **配置 AI 模型 API**（首次使用前必填）
-   - 启动后访问 http://localhost:8080
+   - 启动后在浏览器打开 **`https://127.0.0.1:7022/`**（或 **`https://localhost:7022/`**；端口以 `config.yaml` 中 **`server.port`** 为准，默认 7022），并按提示信任自签证书。若使用 **`./run.sh --http`**，则改用 **`http://`** 访问。
    - 进入 `设置` → 填写 API 配置信息：
      ```yaml
      openai:
@@ -196,13 +198,15 @@ chmod +x run.sh && ./run.sh
 
 **其他启动方式：**
 ```bash
-# 直接运行（需手动配置环境）
-go run cmd/server/main.go
+# 直接运行（需自行配环境）；与 run.sh 默认一致可加 --https
+go run cmd/server/main.go --https
 
 # 手动编译
 go build -o cyberstrike-ai cmd/server/main.go
-./cyberstrike-ai
+./cyberstrike-ai --https
 ```
+
+若日志出现 `client sent an HTTP request to an HTTPS server`，说明仍有客户端用 **`http://`** 访问只提供 HTTPS 的端口，请改为 **`https://`**。
 
 **说明：** Python 虚拟环境（`venv/`）由 `run.sh` 自动创建和管理。需要 Python 的工具（如 `api-fuzzer`、`http-framework-test` 等）会自动使用该环境。
 
@@ -212,7 +216,7 @@ go build -o cyberstrike-ai cmd/server/main.go
 
 ```bash
 docker build -t cyberstrikeai:local .
-docker run -d --name cyberstrikeai -p 8080:8080 -p 8081:8081 -v "$(pwd)/.docker-runtime:/app/runtime-config" -v "$(pwd)/data:/app/data" -v "$(pwd)/tmp:/app/tmp" -v "$(pwd)/knowledge_base:/app/knowledge_base" cyberstrikeai:local
+docker run -d --name cyberstrikeai -p 7022:7022 -p 8081:8081 -v "$(pwd)/.docker-runtime:/app/runtime-config" -v "$(pwd)/data:/app/data" -v "$(pwd)/tmp:/app/tmp" -v "$(pwd)/knowledge_base:/app/knowledge_base" cyberstrikeai:local
 ```
 
 或者直接在仓库根目录使用 Compose：
@@ -513,7 +517,7 @@ auth:
   session_duration_hours: 12
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: 7022
 log:
   level: "info"
   output: "stdout"

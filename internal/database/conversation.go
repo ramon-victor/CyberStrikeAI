@@ -26,7 +26,7 @@ type Conversation struct {
 // Message 消息
 type Message struct {
 	ID               string                   `json:"id"`
-	ConversationID string                   `json:"conversationId"`
+	ConversationID   string                   `json:"conversationId"`
 	Role             string                   `json:"role"`
 	Content          string                   `json:"content"`
 	ReasoningContent string                   `json:"reasoningContent,omitempty"`
@@ -117,6 +117,7 @@ func (db *DB) GetConversationByWebshellConnectionID(connectionID string) (*Conve
 	}
 	for i := range conv.Messages {
 		if details, ok := processDetailsMap[conv.Messages[i].ID]; ok {
+			details = DedupeConsecutiveProcessDetails(details)
 			detailsJSON := make([]map[string]interface{}, len(details))
 			for j, detail := range details {
 				var data interface{}
@@ -235,6 +236,7 @@ func (db *DB) GetConversation(id string) (*Conversation, error) {
 	// 将过程详情附加到对应的消息上
 	for i := range conv.Messages {
 		if details, ok := processDetailsMap[conv.Messages[i].ID]; ok {
+			details = DedupeConsecutiveProcessDetails(details)
 			// 将ProcessDetail转换为JSON格式，以便前端使用
 			detailsJSON := make([]map[string]interface{}, len(details))
 			for j, detail := range details {

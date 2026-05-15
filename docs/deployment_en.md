@@ -13,7 +13,7 @@ Run with local config and data mounts:
 ```bash
 docker run -d \
   --name cyberstrikeai \
-  -p 8080:8080 \
+  -p 7022:7022 \
   -p 8081:8081 \
   -v "$(pwd)/.docker-runtime:/app/runtime-config" \
   -v "$(pwd)/data:/app/data" \
@@ -29,6 +29,8 @@ docker compose up -d --build
 ```
 
 The bundled `docker-compose.yml` builds from the checked-out source tree, which is the best fit for source-based deployments and local customization.
+
+The default Docker config serves the Web UI on port `7022` with HTTPS enabled by an in-memory self-signed certificate, and redirects same-port HTTP requests to HTTPS with 308. Open `https://127.0.0.1:7022/` and trust the self-signed certificate on first use. For plain HTTP, disable `server.tls_enabled` and `server.tls_auto_self_sign` in `/app/runtime-config/config.yaml`, then restart the container.
 
 ## GHCR Image
 
@@ -87,5 +89,5 @@ For GHCR image deployments:
 ```bash
 docker pull ghcr.io/ed1s0nz/cyberstrikeai:latest
 docker rm -f cyberstrikeai
-docker run -d --name cyberstrikeai -p 8080:8080 -p 8081:8081 -v "$(pwd)/.docker-runtime:/app/runtime-config" -v "$(pwd)/data:/app/data" -v "$(pwd)/tmp:/app/tmp" -v "$(pwd)/knowledge_base:/app/knowledge_base" ghcr.io/ed1s0nz/cyberstrikeai:latest
+docker run -d --name cyberstrikeai -p 7022:7022 -p 8081:8081 -v "$(pwd)/.docker-runtime:/app/runtime-config" -v "$(pwd)/data:/app/data" -v "$(pwd)/tmp:/app/tmp" -v "$(pwd)/knowledge_base:/app/knowledge_base" ghcr.io/ed1s0nz/cyberstrikeai:latest
 ```

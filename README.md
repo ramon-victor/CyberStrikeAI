@@ -174,9 +174,11 @@ The `run.sh` script will automatically:
 - ✅ Build the project
 - ✅ Start the server
 
+**Networking defaults:** `run.sh` starts the server with **`--https`** and the repo **`config.yaml`** (local self-signed TLS; better for many concurrent streams). Use **`./run.sh --http`** for plain HTTP. In production, set **`server.tls_cert_path`** / **`server.tls_key_path`** in **`config.yaml`** (see comments there). For manual runs, add **`--https`** or **`CYBERSTRIKE_HTTPS=1`**; if **`-config`** is wrong, the binary prints a short usage hint on stderr.
+
 **First-Time Configuration:**
 1. **Configure OpenAI-compatible API** (required before first use)
-   - Open http://localhost:8080 after launch
+   - After launch, open **`https://127.0.0.1:7022/`** (or **`https://localhost:7022/`**; replace **7022** with `server.port` in `config.yaml`) and accept the self-signed certificate warning once. If you used `./run.sh --http`, use **`http://`** instead.
    - Go to `Settings` → Fill in your API credentials:
      ```yaml
      openai:
@@ -197,13 +199,15 @@ The `run.sh` script will automatically:
 
 **Alternative Launch Methods:**
 ```bash
-# Direct Go run (requires manual setup)
-go run cmd/server/main.go
+# Direct Go run (set up env yourself); add --https to match run.sh defaults
+go run cmd/server/main.go --https
 
 # Manual build
 go build -o cyberstrike-ai cmd/server/main.go
-./cyberstrike-ai
+./cyberstrike-ai --https
 ```
+
+If server logs show `client sent an HTTP request to an HTTPS server`, a client is still using **`http://`** on a TLS-only port—switch the URL to **`https://`**.
 
 **Note:** The Python virtual environment (`venv/`) is automatically created and managed by `run.sh`. Tools that require Python (like `api-fuzzer`, `http-framework-test`, etc.) will automatically use this environment.
 
@@ -213,7 +217,7 @@ Build and run with Docker:
 
 ```bash
 docker build -t cyberstrikeai:local .
-docker run -d --name cyberstrikeai -p 8080:8080 -p 8081:8081 -v "$(pwd)/.docker-runtime:/app/runtime-config" -v "$(pwd)/data:/app/data" -v "$(pwd)/tmp:/app/tmp" -v "$(pwd)/knowledge_base:/app/knowledge_base" cyberstrikeai:local
+docker run -d --name cyberstrikeai -p 7022:7022 -p 8081:8081 -v "$(pwd)/.docker-runtime:/app/runtime-config" -v "$(pwd)/data:/app/data" -v "$(pwd)/tmp:/app/tmp" -v "$(pwd)/knowledge_base:/app/knowledge_base" cyberstrikeai:local
 ```
 
 Or start from the repo with Compose:
@@ -515,7 +519,7 @@ auth:
   session_duration_hours: 12
 server:
   host: "0.0.0.0"
-  port: 8080
+  port: 7022
 log:
   level: "info"
   output: "stdout"

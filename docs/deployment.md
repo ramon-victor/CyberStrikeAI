@@ -13,7 +13,7 @@ docker build -t cyberstrikeai:local .
 ```bash
 docker run -d \
   --name cyberstrikeai \
-  -p 8080:8080 \
+  -p 7022:7022 \
   -p 8081:8081 \
   -v "$(pwd)/.docker-runtime:/app/runtime-config" \
   -v "$(pwd)/data:/app/data" \
@@ -29,6 +29,8 @@ docker compose up -d --build
 ```
 
 仓库自带的 `docker-compose.yml` 会从当前检出的源码本地构建镜像，适合源码部署和二次开发。
+
+默认 Docker 配置在 `7022` 端口启用 HTTPS（内存自签证书）并将同端口 HTTP 自动 308 跳转到 HTTPS。首次访问请打开 `https://127.0.0.1:7022/` 并信任自签证书；如需纯 HTTP，可在 `/app/runtime-config/config.yaml` 中关闭 `server.tls_enabled` 与 `server.tls_auto_self_sign` 后重启容器。
 
 ## GHCR 镜像
 
@@ -87,5 +89,5 @@ GHCR 预构建镜像部署：
 ```bash
 docker pull ghcr.io/ed1s0nz/cyberstrikeai:latest
 docker rm -f cyberstrikeai
-docker run -d --name cyberstrikeai -p 8080:8080 -p 8081:8081 -v "$(pwd)/.docker-runtime:/app/runtime-config" -v "$(pwd)/data:/app/data" -v "$(pwd)/tmp:/app/tmp" -v "$(pwd)/knowledge_base:/app/knowledge_base" ghcr.io/ed1s0nz/cyberstrikeai:latest
+docker run -d --name cyberstrikeai -p 7022:7022 -p 8081:8081 -v "$(pwd)/.docker-runtime:/app/runtime-config" -v "$(pwd)/data:/app/data" -v "$(pwd)/tmp:/app/tmp" -v "$(pwd)/knowledge_base:/app/knowledge_base" ghcr.io/ed1s0nz/cyberstrikeai:latest
 ```

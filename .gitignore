@@ -5,3 +5,4 @@
 *.log
 /cyberstrike-ai
 /cyberstrike-ai-mcp
+.env

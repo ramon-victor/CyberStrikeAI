@@ -117,6 +117,8 @@ func (h *ConversationHandler) GetMessageProcessDetails(c *gin.Context) {
 		return
 	}
 
+	details = database.DedupeConsecutiveProcessDetails(details)
+
 	// 转换为前端期望的 JSON 结构（与 GetConversation 中 processDetails 结构一致）
 	out := make([]map[string]interface{}, 0, len(details))
 	for _, d := range details {

@@ -260,8 +260,14 @@
     gap: 12px;
     justify-content: center;
     flex-wrap: wrap;
+    max-width: 420px;
+    margin-inline: auto;
 }
 
+.c2-actions > button {
+    flex: 1;
+    min-width: min(100%, 160px);
+}
 /* ============================================================================
    Listener Cards
    ============================================================================ */

@@ -1,0 +1,38 @@
+services:
+  gluetun:
+    image: qmcgaw/gluetun
+    container_name: gluetun
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "7022:7022"
+      - "8081:8081"
+    environment:
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${PROTON_WIREGUARD_PRIVATE_KEY:?set PROTON_WIREGUARD_PRIVATE_KEY}
+      - SERVER_COUNTRIES=${PROTON_SERVER_COUNTRIES:-Canada}
+      - FREE_ONLY=${PROTON_FREE_ONLY:-on}
+
+  cyberstrikeai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cyberstrikeai:local
+    container_name: cyberstrikeai
+    restart: unless-stopped
+    network_mode: "service:gluetun"
+    depends_on:
+      - gluetun
+    volumes:
+      - ./.docker-runtime:/app/runtime-config
+      - ./data:/app/data
+      - ./tmp:/app/tmp
+      - ./knowledge_base:/app/knowledge_base
+    # Uncomment if you need raw-socket or advanced scan modes.
+    # cap_add:
+    #   - NET_ADMIN
+    #   - NET_RAW
