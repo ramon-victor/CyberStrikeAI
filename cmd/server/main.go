@@ -58,6 +58,9 @@ func main() {
 	if scheme == "https" && cfg.Server.TLSAutoSelfSign {
 		fmt.Println("  （内存自签证书：浏览器首次需确认「继续访问」）")
 	}
+	if scheme == "https" && config.ServerHTTPRedirectEnabled(&cfg.Server) {
+		fmt.Printf("  （http://127.0.0.1:%d/ 将自动跳转到 HTTPS）\n", port)
+	}
 	fmt.Println()
 
 	// MCP 启用且 auth_header_value 为空时，自动生成随机密钥并写回配置
