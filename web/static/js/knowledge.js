@@ -90,7 +90,7 @@ async function loadKnowledgeCategories() {
         
         return knowledgeCategories;
     } catch (error) {
-        console.error('加载分类失败:', error);
+        console.error('Failed to load categories:', error);
         // 只在非功能未启用的情况下显示错误
         if (!error.message.includes('知识库功能未启用')) {
             showNotification('加载分类失败: ' + error.message, 'error');

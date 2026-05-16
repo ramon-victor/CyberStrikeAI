@@ -221,7 +221,7 @@ async function submitFofaSearch() {
         }
         renderFofaResults(result);
     } catch (e) {
-        console.error('FOFA 查询失败:', e);
+        console.error('FOFA query failed:', e);
         setFofaMeta(_t('infoCollect.queryFailed'));
         renderFofaResults({ query, fields: [], results: [], total: 0, page: 1, size: 0 });
         alert(_t('infoCollect.queryFailed') + ': ' + (e && e.message ? e.message : String(e)));
@@ -279,7 +279,7 @@ async function parseFofaNaturalLanguage() {
             showInlineToast(_t('infoCollect.parseCancelled'));
             return;
         }
-        console.error('FOFA 自然语言解析失败:', e);
+        console.error('FOFA NL parse failed:', e);
         showInlineToast(_t('infoCollect.parseFailed') + (e && e.message ? e.message : String(e)), { duration: 2800 });
     }
     finally {

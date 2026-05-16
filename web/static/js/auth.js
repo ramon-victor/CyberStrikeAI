@@ -19,7 +19,7 @@ function saveAuth(token, expiresAt) {
             expiresAt: expiry.toISOString(),
         }));
     } catch (error) {
-        console.warn('无法持久化认证信息:', error);
+        console.warn('Failed to persist auth info:', error);
     }
 }
 
@@ -29,7 +29,7 @@ function clearAuthStorage() {
     try {
         localStorage.removeItem(AUTH_STORAGE_KEY);
     } catch (error) {
-        console.warn('无法清除认证信息:', error);
+        console.warn('Failed to clear auth info:', error);
     }
 }
 
@@ -53,7 +53,7 @@ function loadAuthFromStorage() {
         authTokenExpiry = expiry;
         return isTokenValid();
     } catch (error) {
-        console.error('读取认证信息失败:', error);
+        console.error('Failed to read auth info:', error);
         clearAuthStorage();
         return false;
     }
@@ -266,7 +266,7 @@ async function submitLogin(event) {
             await refreshAppData();
         }
     } catch (error) {
-        console.error('登录失败:', error);
+        console.error('Login failed:', error);
         if (errorBox) {
             const fallback = (typeof window !== 'undefined' && typeof window.t === 'function')
                 ? window.t('auth.loginFailedRetry')
@@ -296,7 +296,7 @@ async function bootstrapApp() {
                 await window.i18nReady;
             }
         } catch (e) {
-            console.warn('等待 i18n 就绪失败，继续初始化聊天', e);
+            console.warn('Waiting for i18n ready failed, continuing chat init', e);
         }
         initializeChatUI();
         isAppInitialized = true;
@@ -358,7 +358,7 @@ function formatMarkdown(text) {
                 const parsedContent = marked.parse(src, { async: false });
                 return DOMPurify.sanitize(parsedContent, sanitizeConfig);
             } catch (e) {
-                console.error('Markdown 解析失败:', e);
+                console.error('Markdown parsing failed:', e);
                 return DOMPurify.sanitize(src, sanitizeConfig);
             }
         } else {
@@ -372,7 +372,7 @@ function formatMarkdown(text) {
             });
             return marked.parse(src, { async: false });
         } catch (e) {
-            console.error('Markdown 解析失败:', e);
+            console.error('Markdown parsing failed:', e);
             return escapeHtml(src).replace(/\n/g, '<br>');
         }
     } else {
@@ -402,7 +402,7 @@ async function initializeApp() {
                 return;
             }
         } catch (error) {
-            console.warn('本地会话已失效，需重新登录');
+            console.warn('Local session expired, re-login required');
         }
     }
 
@@ -452,7 +452,7 @@ async function logout() {
             });
         }
     } catch (error) {
-        console.error('退出登录API调用失败:', error);
+        console.error('Logout API call failed:', error);
     } finally {
         // 无论如何都清除本地认证信息
         clearAuthStorage();

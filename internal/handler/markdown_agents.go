@@ -29,11 +29,11 @@ func NewMarkdownAgentsHandler(dir string) *MarkdownAgentsHandler {
 func (h *MarkdownAgentsHandler) safeJoin(filename string) (string, error) {
 	filename = strings.TrimSpace(filename)
 	if filename == "" || !markdownAgentFilenameRe.MatchString(filename) {
-		return "", fmt.Errorf("非法文件名")
+		return "", fmt.Errorf("Invalid filename")
 	}
 	clean := filepath.Clean(filename)
 	if clean != filename || strings.Contains(clean, "..") {
-		return "", fmt.Errorf("非法文件名")
+		return "", fmt.Errorf("Invalid filename")
 	}
 	return filepath.Join(h.dir, clean), nil
 }
@@ -69,7 +69,7 @@ func existingOtherOrchestrator(dir, writingBasename string) (other string, err e
 // ListMarkdownAgents GET /api/multi-agent/markdown-agents
 func (h *MarkdownAgentsHandler) ListMarkdownAgents(c *gin.Context) {
 	if h.dir == "" {
-		c.JSON(http.StatusOK, gin.H{"agents": []any{}, "dir": "", "error": "未配置 agents 目录"})
+		c.JSON(http.StatusOK, gin.H{"agents": []any{}, "dir": "", "error": "agents directory not configured"})
 		return
 	}
 	files, err := agents.LoadMarkdownAgentFiles(h.dir)
@@ -103,7 +103,7 @@ func (h *MarkdownAgentsHandler) GetMarkdownAgent(c *gin.Context) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "文件不存在"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -146,7 +146,7 @@ type markdownAgentBody struct {
 // CreateMarkdownAgent POST /api/multi-agent/markdown-agents
 func (h *MarkdownAgentsHandler) CreateMarkdownAgent(c *gin.Context) {
 	if h.dir == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "未配置 agents 目录"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "agents directory not configured"})
 		return
 	}
 	var body markdownAgentBody
@@ -172,7 +172,7 @@ func (h *MarkdownAgentsHandler) CreateMarkdownAgent(c *gin.Context) {
 		return
 	}
 	if _, err := os.Stat(path); err == nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "文件已存在"})
+		c.JSON(http.StatusConflict, gin.H{"error": "File already exists"})
 		return
 	}
 	sub := config.MultiAgentSubConfig{
@@ -195,7 +195,7 @@ func (h *MarkdownAgentsHandler) CreateMarkdownAgent(c *gin.Context) {
 		sub.ID = agents.SlugID(sub.Name)
 	}
 	if sub.Name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name 必填"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
 	}
 	var out []byte
@@ -215,7 +215,7 @@ func (h *MarkdownAgentsHandler) CreateMarkdownAgent(c *gin.Context) {
 			return
 		}
 		if other != "" {
-			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("已存在主代理定义：%s，请先删除或取消其主代理标记", other)})
+			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("Primary agent definition already exists: %s, please delete or remove its primary agent marker first", other)})
 			return
 		}
 	}
@@ -227,7 +227,7 @@ func (h *MarkdownAgentsHandler) CreateMarkdownAgent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"filename": filepath.Base(path), "message": "已创建"})
+	c.JSON(http.StatusOK, gin.H{"filename": filepath.Base(path), "message": "Created"})
 }
 
 // UpdateMarkdownAgent PUT /api/multi-agent/markdown-agents/:filename
@@ -259,7 +259,7 @@ func (h *MarkdownAgentsHandler) UpdateMarkdownAgent(c *gin.Context) {
 		sub.Kind = "orchestrator"
 	}
 	if sub.Name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name 必填"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
 	}
 	if sub.ID == "" {
@@ -282,19 +282,19 @@ func (h *MarkdownAgentsHandler) UpdateMarkdownAgent(c *gin.Context) {
 			return
 		}
 		if other != "" {
-			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("已存在主代理定义：%s，请先删除或取消其主代理标记", other)})
+			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("Primary agent definition already exists: %s, please delete or remove its primary agent marker first", other)})
 			return
 		}
 	}
 	if err := os.WriteFile(path, out, 0644); err != nil {
 		if os.IsNotExist(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "文件不存在"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "已保存"})
+	c.JSON(http.StatusOK, gin.H{"message": "Saved"})
 }
 
 // DeleteMarkdownAgent DELETE /api/multi-agent/markdown-agents/:filename
@@ -307,11 +307,11 @@ func (h *MarkdownAgentsHandler) DeleteMarkdownAgent(c *gin.Context) {
 	}
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "文件不存在"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "已删除"})
+	c.JSON(http.StatusOK, gin.H{"message": "Deleted"})
 }

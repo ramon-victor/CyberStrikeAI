@@ -89,7 +89,7 @@ async function loadToken() {
         }
         currentToken = localStorage.getItem('swagger_auth_token');
     } catch (e) {
-        console.error('加载token失败:', e);
+        console.error('Failed to load token:', e);
     }
 }
 
@@ -113,7 +113,7 @@ async function loadAPISpec() {
         apiSpec = await response.json();
         buildApiSpecTagToKey();
     } catch (error) {
-        console.error('加载API规范失败:', error);
+        console.error('Failed to load API spec:', error);
         showError(_t('apiDocs.errorLoadFailed') + error.message);
     }
 }

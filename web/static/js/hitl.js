@@ -160,7 +160,7 @@ async function syncHitlConfigFromServer(conversationId) {
                 enabled: true,
                 timeoutSeconds: merged.timeoutSeconds
             }).catch(function (err) {
-                console.warn('HITL 会话配置同步到服务器失败（将仅保留本地 UI）:', err);
+                console.warn('HITL session config sync to server failed (keeping local UI only):', err);
             });
         } else {
             const gl = typeof window.getHitlLastGlobalConfig === 'function' ? window.getHitlLastGlobalConfig() : null;
@@ -180,7 +180,7 @@ async function syncHitlConfigFromServer(conversationId) {
                     enabled: true,
                     timeoutSeconds: merged.timeoutSeconds
                 }).catch(function (err) {
-                    console.warn('HITL 会话配置同步到服务器失败（将仅保留本地 UI）:', err);
+                    console.warn('HITL session config sync to server failed (keeping local UI only):', err);
                 });
             }
         }

@@ -1,6 +1,6 @@
 // 前端国际化初始化（基于 i18next 浏览器版本）
 (function () {
-    const DEFAULT_LANG = 'zh-CN';
+    const DEFAULT_LANG = 'en-US';
     const STORAGE_KEY = 'csai_lang';
     const RESOURCES_PREFIX = '/static/i18n';
 
@@ -19,7 +19,7 @@
                 return stored;
             }
         } catch (e) {
-            console.warn('无法读取语言设置:', e);
+            console.warn('Failed to read language setting:', e);
         }
 
         const navLang = (navigator.language || navigator.userLanguage || '').toLowerCase();
@@ -41,7 +41,7 @@
                 cache: 'no-cache'
             });
             if (!resp.ok) {
-                console.warn('加载语言包失败:', lang, resp.status);
+                console.warn('Failed to load language pack:', lang, resp.status);
                 return;
             }
             const data = await resp.json();
@@ -50,7 +50,7 @@
             }
             loadedLangs[lang] = true;
         } catch (e) {
-            console.error('加载语言包异常:', lang, e);
+            console.error('Language pack load exception:', lang, e);
         }
     }
 
@@ -150,7 +150,7 @@
         try {
             localStorage.setItem(STORAGE_KEY, lang);
         } catch (e) {
-            console.warn('无法保存语言设置:', e);
+            console.warn('Failed to save language setting:', e);
         }
         applyTranslations(document);
         updateLangLabel();
@@ -164,7 +164,7 @@
 
     async function initI18n() {
         if (typeof i18next === 'undefined') {
-            console.warn('i18next 未加载，跳过前端国际化初始化');
+            console.warn('i18next not loaded, skipping i18n init');
             if (typeof i18nReadyResolve === 'function') i18nReadyResolve();
             return;
         }
@@ -222,7 +222,7 @@
     document.addEventListener('DOMContentLoaded', function () {
         // i18n 初始化在 DOM Ready 后执行
         initI18n().catch(function (e) {
-            console.error('初始化国际化失败:', e);
+            console.error('i18n initialization failed:', e);
             if (typeof i18nReadyResolve === 'function') i18nReadyResolve();
         });
     });

@@ -764,7 +764,7 @@ function saveChatDraft(content) {
         }
     } catch (error) {
         // localStorage可能已满或不可用，静默失败
-        console.warn('保存草稿失败:', error);
+        console.warn('Failed to save draft:', error);
     }
 }
 
@@ -798,7 +798,7 @@ function restoreChatDraft() {
             localStorage.removeItem(DRAFT_STORAGE_KEY);
         }
     } catch (error) {
-        console.warn('恢复草稿失败:', error);
+        console.warn('Failed to restore draft:', error);
     }
 }
 
@@ -808,7 +808,7 @@ function clearChatDraft() {
         // 同步清除，确保立即生效
         localStorage.removeItem(DRAFT_STORAGE_KEY);
     } catch (error) {
-        console.warn('清除草稿失败:', error);
+        console.warn('Failed to clear draft:', error);
     }
 }
 
@@ -982,7 +982,7 @@ async function sendMessage() {
                                              () => assistantMessageId, (id) => { assistantMessageId = id; },
                                              () => mcpExecutionIds, (ids) => { mcpExecutionIds = ids; });
                         } catch (e) {
-                            console.error('解析事件数据失败:', e, line);
+                            console.error('Failed to parse event data:', e, line);
                         }
                     }
                 }
@@ -999,7 +999,7 @@ async function sendMessage() {
                                              () => assistantMessageId, (id) => { assistantMessageId = id; },
                                              () => mcpExecutionIds, (ids) => { mcpExecutionIds = ids; });
                         } catch (e) {
-                            console.error('解析事件数据失败:', e, line);
+                            console.error('Failed to parse event data:', e, line);
                         }
                     }
                 }
@@ -1330,7 +1330,7 @@ async function fetchMentionTools() {
                 });
             }
         } catch (mcpError) {
-            console.warn('加载外部MCP列表失败:', mcpError);
+            console.warn('Failed to load external MCP list:', mcpError);
             externalMcpNames = [];
         }
 
@@ -1385,7 +1385,7 @@ async function fetchMentionTools() {
         mentionTools = collected;
         mentionToolsLoaded = true;
     } catch (error) {
-        console.warn('加载工具列表失败，@提及功能可能不可用:', error);
+        console.warn('Failed to load tool list, @mention may be unavailable:', error);
     }
     return mentionTools;
 }
@@ -1982,7 +1982,7 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
                 : raw;
             return marked.parse(src, { async: false });
         } catch (e) {
-            console.error('Markdown 解析失败:', e);
+            console.error('Markdown parsing failed:', e);
             return null;
         }
     };
@@ -2181,7 +2181,7 @@ function copyMessageToClipboard(messageDiv, button) {
                 return navigator.clipboard.writeText(text).then(() => {
                     showCopySuccess(button);
                 }).catch(err => {
-                    console.error('Clipboard API 复制失败:', err);
+                    console.error('Clipboard API copy failed:', err);
                     fallbackCopy(text);
                 });
             } else {
@@ -2212,8 +2212,8 @@ function copyMessageToClipboard(messageDiv, button) {
                     throw new Error('execCommand copy failed');
                 }
             } catch (execErr) {
-                console.error('降级复制失败:', execErr);
-                alert(typeof window.t === 'function' ? window.t('chat.copyFailedManual') : '复制失败，请手动选择内容复制');
+                console.error('Fallback copy failed:', execErr);
+                alert(typeof window.t === 'function' ? window.t('chat.copyFailedManual') : 'Copy failed, please manually copy the content');
             }
         };
 
@@ -2242,8 +2242,8 @@ function copyMessageToClipboard(messageDiv, button) {
         // 使用原始Markdown内容
         doCopy(originalContent);
     } catch (error) {
-        console.error('复制消息时出错:', error);
-        alert(typeof window.t === 'function' ? window.t('chat.copyFailedManual') : '复制失败，请手动选择内容复制');
+        console.error('Error copying message:', error);
+        alert(typeof window.t === 'function' ? window.t('chat.copyFailedManual') : 'Copy failed, please manually copy the content');
     }
 }
 
@@ -2511,7 +2511,7 @@ function renderProcessDetails(messageId, processDetails) {
         // 更新按钮文本为"展开详情"
         const processDetailBtn = messageElement.querySelector('.process-detail-btn');
         if (processDetailBtn) {
-            processDetailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.expandDetail') : '展开详情') + '</span>';
+            processDetailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.expandDetail') : 'Expand detail') + '</span>';
         }
     }
 }
@@ -2573,7 +2573,7 @@ async function updateButtonWithToolName(button, executionId, index) {
         }
     } catch (error) {
         // 如果获取失败，保持原有文本不变
-        console.error('获取工具名称失败:', error);
+        console.error('Failed to get tool name:', error);
     }
 }
 
@@ -2601,7 +2601,7 @@ async function batchUpdateButtonToolNames(buttonsContainer, executionIds) {
             }
         });
     } catch (error) {
-        console.error('批量获取工具名称失败:', error);
+        console.error('Failed to batch get tool names:', error);
     }
 }
 
@@ -2700,9 +2700,9 @@ async function showMCPDetail(executionId) {
                 }
             } else {
                 if (normalizedStatus === 'running') {
-                    responseElement.textContent = typeof window.t === 'function' ? window.t('mcpDetailModal.runningNoResponseYet') : '尚无返回，工具可能仍在执行。若长时间无响应，可在下方终止本次调用。';
+                    responseElement.textContent = typeof window.t === 'function' ? window.t('mcpDetailModal.runningNoResponseYet') : 'No response yet, tool may still be executing. If no response for a long time, abort below.';
                 } else {
-                    responseElement.textContent = typeof window.t === 'function' ? window.t('chat.noResponseData') : '暂无响应数据';
+                    responseElement.textContent = typeof window.t === 'function' ? window.t('chat.noResponseData') : 'No response data';
                 }
             }
 
@@ -2712,7 +2712,7 @@ async function showMCPDetail(executionId) {
                 if (normalizedStatus === 'running') {
                     abortSection.style.display = 'block';
                     abortBtn.dataset.execId = exec.id || '';
-                    abortBtn.textContent = typeof window.t === 'function' ? window.t('mcpDetailModal.abortBtn') : '终止工具';
+                    abortBtn.textContent = typeof window.t === 'function' ? window.t('mcpDetailModal.abortBtn') : 'Abort tool';
                 } else {
                     abortSection.style.display = 'none';
                     delete abortBtn.dataset.execId;
@@ -2722,10 +2722,10 @@ async function showMCPDetail(executionId) {
             // 显示模态框
             document.getElementById('mcp-detail-modal').style.display = 'block';
         } else {
-            alert((typeof window.t === 'function' ? window.t('mcpDetailModal.getDetailFailed') : '获取详情失败') + ': ' + (exec.error || (typeof window.t === 'function' ? window.t('mcpDetailModal.unknown') : '未知错误')));
+            alert((typeof window.t === 'function' ? window.t('mcpDetailModal.getDetailFailed') : 'Failed to get details') + ': ' + (exec.error || (typeof window.t === 'function' ? window.t('mcpDetailModal.unknown') : 'Unknown error')));
         }
     } catch (error) {
-        alert((typeof window.t === 'function' ? window.t('mcpDetailModal.getDetailFailed') : '获取详情失败') + ': ' + error.message);
+        alert((typeof window.t === 'function' ? window.t('mcpDetailModal.getDetailFailed') : 'Failed to get details') + ': ' + error.message);
     }
 }
 
@@ -2849,11 +2849,11 @@ function copyDetailBlock(elementId, triggerBtn = null) {
         if (!triggerBtn) {
             return;
         }
-        triggerBtn.textContent = '已复制';
+        triggerBtn.textContent = 'Copied';
         triggerBtn.disabled = true;
         setTimeout(() => {
             triggerBtn.disabled = false;
-            triggerBtn.textContent = triggerBtn.dataset.originalLabel || originalLabel || '复制';
+            triggerBtn.textContent = triggerBtn.dataset.originalLabel || originalLabel || 'Copy';
         }, 1200);
     };
 
@@ -2892,9 +2892,9 @@ function copyDetailBlock(elementId, triggerBtn = null) {
         .catch(() => {
             if (triggerBtn) {
                 triggerBtn.disabled = false;
-                triggerBtn.textContent = triggerBtn.dataset.originalLabel || originalLabel || '复制';
+                triggerBtn.textContent = triggerBtn.dataset.originalLabel || originalLabel || 'Copy';
             }
-            alert('复制失败，请手动选择文本复制。');
+            alert('Copy failed, please manually select and copy text.');
         });
 }
 
@@ -3105,7 +3105,7 @@ async function loadConversation(conversationId) {
         const conversation = await response.json();
         
         if (!response.ok) {
-            showChatToast('加载对话失败: ' + (conversation.error || '未知错误'), 'error');
+            showChatToast('Failed to load conversation: ' + (conversation.error || 'Unknown error'), 'error');
             return;
         }
         if (seq !== loadConversationRequestSeq) {
@@ -3210,7 +3210,7 @@ async function loadConversation(conversationId) {
                     return;
                 }
                 let displayContent = msg.content;
-                if (msg.role === 'assistant' && msg.content === '处理中...' && msg.processDetails && msg.processDetails.length > 0) {
+                if (msg.role === 'assistant' && msg.content === 'Processing...' && msg.processDetails && msg.processDetails.length > 0) {
                     for (let i = msg.processDetails.length - 1; i >= 0; i--) {
                         const detail = msg.processDetails[i];
                         if (detail.eventType === 'error' || detail.eventType === 'cancelled') {
@@ -3315,8 +3315,8 @@ async function loadConversation(conversationId) {
                 });
         }
     } catch (error) {
-        console.error('加载对话失败:', error);
-        showChatToast('加载对话失败: ' + (error && error.message ? error.message : String(error)), 'error');
+        console.error('Failed to load conversation:', error);
+        showChatToast('Failed to load conversation: ' + (error && error.message ? error.message : String(error)), 'error');
     }
 }
 
@@ -3435,8 +3435,8 @@ async function deleteConversation(conversationId, skipConfirm = false) {
             document.dispatchEvent(new CustomEvent('conversation-deleted', { detail: { conversationId } }));
         } catch (e) { /* ignore */ }
     } catch (error) {
-        console.error('删除对话失败:', error);
-        alert('删除对话失败: ' + error.message);
+        console.error('Failed to delete conversation:', error);
+        alert('Failed to delete conversation: ' + error.message);
     }
 }
 
@@ -3526,7 +3526,7 @@ async function showAttackChain(conversationId) {
         // 如果模态框已经打开且显示的是同一个对话，不重复打开
         const modal = document.getElementById('attack-chain-modal');
         if (modal && modal.style.display === 'block') {
-            console.log('攻击链正在加载中，模态框已打开');
+            console.log('Attack chain is loading, modal already open');
             return;
         }
     }
@@ -3534,7 +3534,7 @@ async function showAttackChain(conversationId) {
     currentAttackChainConversationId = conversationId;
     const modal = document.getElementById('attack-chain-modal');
     if (!modal) {
-        console.error('攻击链模态框未找到');
+        console.error('Attack chain modal not found');
         return;
     }
     
@@ -3545,7 +3545,7 @@ async function showAttackChain(conversationId) {
     // 清空容器
     const container = document.getElementById('attack-chain-container');
     if (container) {
-        container.innerHTML = '<div class="loading-spinner">' + (typeof window.t === 'function' ? window.t('chat.loading') : '加载中...') + '</div>';
+        container.innerHTML = '<div class="loading-spinner">' + (typeof window.t === 'function' ? window.t('chat.loading') : 'Loading...') + '</div>';
     }
     
     // 隐藏详情面板
@@ -3624,7 +3624,7 @@ async function loadAttackChain(conversationId) {
         
         // 检查当前显示的对话ID是否匹配，防止串台
         if (currentAttackChainConversationId !== conversationId) {
-            console.log('攻击链数据已返回，但当前显示的对话已切换，忽略此次渲染', {
+            console.log('Attack chain data returned but conversation changed, ignoring render', {
                 returned: conversationId,
                 current: currentAttackChainConversationId
             });
@@ -3642,10 +3642,10 @@ async function loadAttackChain(conversationId) {
         setAttackChainLoading(conversationId, false);
         
     } catch (error) {
-        console.error('加载攻击链失败:', error);
+        console.error('Failed to load attack chain:', error);
         const container = document.getElementById('attack-chain-container');
         if (container) {
-            container.innerHTML = '<div class="error-message">' + (typeof window.t === 'function' ? window.t('chat.loadFailed', { message: error.message }) : '加载失败: ' + error.message) + '</div>';
+            container.innerHTML = '<div class="error-message">' + (typeof window.t === 'function' ? window.t('chat.loadFailed', { message: error.message }) : 'Load failed: ' + error.message) + '</div>';
         }
         // 错误时也重置加载状态
         setAttackChainLoading(conversationId, false);
@@ -3671,7 +3671,7 @@ function renderAttackChain(chainData) {
     container.innerHTML = '';
     
     if (!chainData.nodes || chainData.nodes.length === 0) {
-        container.innerHTML = '<div class="empty-message">' + (typeof window.t === 'function' ? window.t('chat.noAttackChainData') : '暂无攻击链数据') + '</div>';
+        container.innerHTML = '<div class="empty-message">' + (typeof window.t === 'function' ? window.t('chat.noAttackChainData') : 'No attack chain data') + '</div>';
         return;
     }
     
@@ -3842,7 +3842,7 @@ function renderAttackChain(chainData) {
                 }
             });
         } else {
-            console.warn('跳过无效的边：源节点或目标节点不存在', {
+            console.warn('Skipping invalid edge: source or target node does not exist', {
                 edgeId: edge.id,
                 source: edge.source,
                 target: edge.target,
@@ -4036,7 +4036,7 @@ function renderAttackChain(chainData) {
         try {
             elkInstance = new ELK();
         } catch (e) {
-            console.warn('ELK初始化失败:', e);
+            console.warn('ELK init failed:', e);
         }
     }
     
@@ -4115,7 +4115,7 @@ function renderAttackChain(chainData) {
                     throw new Error('ELK布局返回无效结果');
                 }
             }).catch(err => {
-                console.warn('ELK布局计算失败，使用默认布局:', err);
+                console.warn('ELK layout calculation failed, using default layout:', err);
                 // 回退到默认布局
                 const layout = attackChainCytoscape.layout(layoutOptions);
                 layout.one('layoutstop', () => {
@@ -4126,7 +4126,7 @@ function renderAttackChain(chainData) {
                 layout.run();
             });
         } catch (e) {
-            console.warn('ELK布局初始化失败，使用默认布局:', e);
+            console.warn('ELK layout init failed, using default layout:', e);
             // 回退到默认布局
             const layout = attackChainCytoscape.layout(layoutOptions);
             layout.one('layoutstop', () => {
@@ -4137,7 +4137,7 @@ function renderAttackChain(chainData) {
             layout.run();
         }
     } else {
-        console.warn('ELK.js未加载，使用默认布局。请检查elkjs库是否正确加载。');
+        console.warn('ELK.js not loaded, using default layout. Check elkjs library.');
         // 使用默认布局
         const layout = attackChainCytoscape.layout(layoutOptions);
         layout.one('layoutstop', () => {
@@ -4197,7 +4197,7 @@ function renderAttackChain(chainData) {
                 attackChainCytoscape.center();
             }, 60);
         } catch (error) {
-            console.warn('居中图表时出错:', error);
+            console.warn('Error centering graph:', error);
         }
     }
     
@@ -4264,7 +4264,7 @@ function getEdgeNodes(edge) {
         
         return { source: source, target: target, valid: true };
     } catch (error) {
-        console.warn('获取边的节点时出错:', error, edge.id());
+        console.warn('Error getting edge nodes:', error, edge.id());
         return { source: null, target: null, valid: false };
     }
 }
@@ -4715,7 +4715,7 @@ async function regenerateAttackChain() {
     
     // 防止重复点击（只检查当前对话的加载状态）
     if (isAttackChainLoading(currentAttackChainConversationId)) {
-        console.log('攻击链正在生成中，请稍候...');
+        console.log('Attack chain is being generated, please wait...');
         return;
     }
     
@@ -4725,7 +4725,7 @@ async function regenerateAttackChain() {
     
     const container = document.getElementById('attack-chain-container');
     if (container) {
-        container.innerHTML = '<div class="loading-spinner">重新生成中...</div>';
+        container.innerHTML = '<div class="loading-spinner">Regenerating...</div>';
     }
     
     // 禁用重新生成按钮
@@ -4779,7 +4779,7 @@ async function regenerateAttackChain() {
         
         // 检查当前显示的对话ID是否匹配，防止串台
         if (currentAttackChainConversationId !== savedConversationId) {
-            console.log('攻击链数据已返回，但当前显示的对话已切换，忽略此次渲染', {
+            console.log('Attack chain data returned but conversation changed, ignoring render', {
                 returned: savedConversationId,
                 current: currentAttackChainConversationId
             });
@@ -4794,9 +4794,9 @@ async function regenerateAttackChain() {
         updateAttackChainStats(chainData);
         
     } catch (error) {
-        console.error('重新生成攻击链失败:', error);
+        console.error('Failed to regenerate attack chain:', error);
         if (container) {
-            container.innerHTML = `<div class="error-message">重新生成失败: ${error.message}</div>`;
+            container.innerHTML = `<div class="error-message">Regeneration failed: ${error.message}</div>`;
         }
     } finally {
         setAttackChainLoading(savedConversationId, false);
@@ -5573,7 +5573,7 @@ function _acSvgToPng(svgString, scale) {
 // 导出攻击链（美化版）
 function exportAttackChain(format) {
     if (!attackChainCytoscape) {
-        alert(typeof window.t === 'function' ? window.t('chat.pleaseLoadAttackChainFirst', {}, '请先加载攻击链') : '请先加载攻击链');
+        alert(typeof window.t === 'function' ? window.t('chat.pleaseLoadAttackChainFirst', {}, 'Please load the attack chain first') : 'Please load the attack chain first');
         return;
     }
 
@@ -5591,28 +5591,28 @@ function exportAttackChain(format) {
                 _acSvgToPng(svgString, 2)
                     .then(pngBlob => _acDownloadBlob(pngBlob, `attack-chain-${convId}-${tsName}.png`))
                     .catch(err => {
-                        console.error('导出 PNG 失败，回退到 Cytoscape 原生导出:', err);
+                        console.error('PNG export failed, falling back to Cytoscape native export:', err);
                         // 回退方案：使用 Cytoscape 自带导出
                         try {
                             const p = attackChainCytoscape.png({ output: 'blob', bg: '#ffffff', full: true, scale: 2 });
                             if (p && typeof p.then === 'function') {
                                 p.then(b => _acDownloadBlob(b, `attack-chain-${convId}-${tsName}.png`))
-                                    .catch(e => alert('导出 PNG 失败: ' + (e && e.message || e)));
+                                    .catch(e => alert('PNG export failed: ' + (e && e.message || e)));
                             } else if (p) {
                                 _acDownloadBlob(p, `attack-chain-${convId}-${tsName}.png`);
                             } else {
-                                alert('导出 PNG 失败');
+                                alert('PNG export failed');
                             }
                         } catch (e2) {
-                            alert('导出 PNG 失败: ' + (e2 && e2.message || e2));
+                            alert('PNG export failed: ' + (e2 && e2.message || e2));
                         }
                     });
             } else {
-                alert('不支持的导出格式: ' + format);
+                alert('Unsupported export format: ' + format);
             }
         } catch (error) {
-            console.error('导出失败:', error);
-            alert('导出失败: ' + (error && error.message || '未知错误'));
+            console.error('Export failed:', error);
+            alert('Export failed: ' + (error && error.message || 'Unknown error'));
         }
     }, 80);
 }
@@ -5718,7 +5718,7 @@ async function loadGroups() {
             groupsList.appendChild(groupItem);
         });
     } catch (error) {
-        console.error('加载分组列表失败:', error);
+        console.error('Failed to load group list:', error);
     }
 }
 
@@ -5906,7 +5906,7 @@ async function loadConversationsWithGroups(searchQuery = '') {
         }
     } catch (error) {
         if (loadSeq !== conversationsListLoadSeq) return;
-        console.error('加载对话列表失败:', error);
+        console.error('Failed to load conversation list:', error);
         // 错误时显示空状态，而不是错误提示（更友好的用户体验）
         const listContainer = document.getElementById('conversations-list');
         if (listContainer) {
@@ -6075,15 +6075,15 @@ async function showConversationContextMenu(event) {
             if (pinMenuText && typeof window.t === 'function') {
                 pinMenuText.textContent = isPinned ? window.t('contextMenu.unpinConversation') : window.t('contextMenu.pinConversation');
             } else if (pinMenuText) {
-                pinMenuText.textContent = isPinned ? '取消置顶' : '置顶此对话';
+                pinMenuText.textContent = isPinned ? 'Unpin' : 'Pin this conversation';
             }
         } catch (error) {
-            console.error('获取对话置顶状态失败:', error);
+            console.error('Failed to get conversation pin status:', error);
             const pinMenuText = document.getElementById('pin-conversation-menu-text');
             if (pinMenuText && typeof window.t === 'function') {
                 pinMenuText.textContent = window.t('contextMenu.pinConversation');
             } else if (pinMenuText) {
-                pinMenuText.textContent = '置顶此对话';
+                pinMenuText.textContent = 'Pin this conversation';
             }
         }
     } else {
@@ -6091,7 +6091,7 @@ async function showConversationContextMenu(event) {
         if (pinMenuText && typeof window.t === 'function') {
             pinMenuText.textContent = window.t('contextMenu.pinConversation');
         } else if (pinMenuText) {
-            pinMenuText.textContent = '置顶此对话';
+            pinMenuText.textContent = 'Pin this conversation';
         }
     }
 
@@ -6220,15 +6220,15 @@ async function showGroupContextMenu(event, groupId) {
         if (pinMenuText && typeof window.t === 'function') {
             pinMenuText.textContent = isPinned ? window.t('contextMenu.unpinGroup') : window.t('contextMenu.pinGroup');
         } else if (pinMenuText) {
-            pinMenuText.textContent = isPinned ? '取消置顶' : '置顶此分组';
+            pinMenuText.textContent = isPinned ? 'Unpin' : 'Pin this group';
         }
     } catch (error) {
-        console.error('获取分组置顶状态失败:', error);
+        console.error('Failed to get group pin status:', error);
         const pinMenuText = document.getElementById('pin-group-menu-text');
         if (pinMenuText && typeof window.t === 'function') {
             pinMenuText.textContent = window.t('contextMenu.pinGroup');
         } else if (pinMenuText) {
-            pinMenuText.textContent = '置顶此分组';
+            pinMenuText.textContent = 'Pin this group';
         }
     }
 
@@ -6329,9 +6329,9 @@ async function renameConversation() {
         // 重新加载对话列表
         loadConversationsWithGroups();
     } catch (error) {
-        console.error('重命名对话失败:', error);
-        const failedLabel = typeof window.t === 'function' ? window.t('chat.renameFailed') : '重命名失败';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : '未知错误';
+        console.error('Failed to rename conversation:', error);
+        const failedLabel = typeof window.t === 'function' ? window.t('chat.renameFailed') : 'Rename failed';
+        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
         alert(failedLabel + ': ' + (error.message || unknownErr));
     }
 
@@ -6390,8 +6390,8 @@ async function pinConversation() {
             loadConversationsWithGroups();
         }
     } catch (error) {
-        console.error('置顶对话失败:', error);
-        alert('置顶失败: ' + (error.message || '未知错误'));
+        console.error('Failed to pin conversation:', error);
+        alert('Pin failed: ' + (error.message || 'Unknown error'));
     }
 
     closeContextMenu();
@@ -6437,13 +6437,13 @@ async function showMoveToGroupSubmenu() {
                 }
             } catch (err) {
                 // 如果刷新失败，使用缓存的数据
-                console.warn('刷新分组列表失败，使用缓存数据:', err);
+                console.warn('Failed to refresh group list, using cached data:', err);
             }
         }
         
         // 再次验证缓存
         if (!Array.isArray(groupsCache)) {
-            console.warn('groupsCache 不是有效数组，重置为空数组');
+            console.warn('groupsCache is not a valid array, resetting to empty array');
             groupsCache = [];
             // 如果仍然无效，尝试重新加载
             if (groupsCache.length === 0) {
@@ -6451,7 +6451,7 @@ async function showMoveToGroupSubmenu() {
             }
         }
     } catch (error) {
-        console.error('加载分组列表失败:', error);
+        console.error('Failed to load group list:', error);
         // 即使加载失败，也继续显示菜单，使用现有缓存
     }
 
@@ -6483,7 +6483,7 @@ async function showMoveToGroupSubmenu() {
 
     // 验证 groupsCache 是否为有效数组
     if (!Array.isArray(groupsCache)) {
-        console.warn('groupsCache 不是有效数组，重置为空数组');
+        console.warn('groupsCache is not a valid array, resetting to empty array');
         groupsCache = [];
     }
 
@@ -6497,7 +6497,7 @@ async function showMoveToGroupSubmenu() {
         groupsCache.forEach(group => {
             // 验证分组对象是否有效
             if (!group || !group.id || !group.name) {
-                console.warn('无效的分组对象:', group);
+                console.warn('Invalid group object:', group);
                 return;
             }
             
@@ -6521,7 +6521,7 @@ async function showMoveToGroupSubmenu() {
         });
     } else {
         // 如果仍然没有分组，记录日志以便调试
-        console.warn('showMoveToGroupSubmenu: groupsCache 为空，无法显示分组列表');
+        console.warn('showMoveToGroupSubmenu: groupsCache is empty, cannot display group list');
     }
 
     // 始终显示"创建分组"选项
@@ -6733,8 +6733,8 @@ async function moveConversationToGroup(convId, groupId) {
         // 刷新分组列表，更新高亮状态
         await loadGroups();
     } catch (error) {
-        console.error('移动对话到分组失败:', error);
-        alert('移动失败: ' + (error.message || '未知错误'));
+        console.error('Failed to move conversation to group:', error);
+        alert('Move failed: ' + (error.message || 'Unknown error'));
     }
 
     closeContextMenu();
@@ -6775,8 +6775,8 @@ async function removeConversationFromGroup(convId, groupId) {
         await loadConversationsWithGroups();
         currentGroupId = savedGroupId;
     } catch (error) {
-        console.error('从分组中移除对话失败:', error);
-        alert('移除失败: ' + (error.message || '未知错误'));
+        console.error('Failed to remove conversation from group:', error);
+        alert('Remove failed: ' + (error.message || 'Unknown error'));
     }
 
     closeContextMenu();
@@ -6809,7 +6809,7 @@ async function loadConversationGroupMapping() {
         // 恢复待保留的映射（这些是后端API尚未同步的映射）
         Object.assign(conversationGroupMappingCache, preservedMappings);
     } catch (error) {
-        console.error('加载对话分组映射失败:', error);
+        console.error('Failed to load conversation group mapping:', error);
     }
 }
 
@@ -6957,8 +6957,8 @@ async function downloadConversationMarkdownFromContext(includeToolDetails = fals
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
     } catch (error) {
-        console.error('下载对话 Markdown 失败:', error);
-        const failedLabel = typeof window.t === 'function' ? window.t('chat.downloadConversationFailed') : '下载失败';
+        console.error('Failed to download conversation Markdown:', error);
+        const failedLabel = typeof window.t === 'function' ? window.t('chat.downloadConversationFailed') : 'Download failed';
         const errMsg = error && error.message ? error.message : 'unknown error';
         alert(failedLabel + ': ' + errMsg);
     }
@@ -7044,7 +7044,7 @@ async function showBatchManageModal() {
             modal.style.display = 'flex';
         }
     } catch (error) {
-        console.error('加载对话列表失败:', error);
+        console.error('Failed to load conversation list:', error);
         // 错误时使用空数组，不显示错误提示（更友好的用户体验）
         allConversationsForBatch = [];
         const modal = document.getElementById('batch-manage-modal');
@@ -7180,7 +7180,7 @@ function toggleSelectAllBatch() {
 async function deleteSelectedConversations() {
     const checkboxes = document.querySelectorAll('.batch-conversation-checkbox:checked');
     if (checkboxes.length === 0) {
-        alert(typeof window.t === 'function' ? window.t('batchManageModal.confirmDeleteNone') : '请先选择要删除的对话');
+        alert(typeof window.t === 'function' ? window.t('batchManageModal.confirmDeleteNone') : 'Please select conversations to delete first');
         return;
     }
 
@@ -7198,9 +7198,9 @@ async function deleteSelectedConversations() {
         closeBatchManageModal();
         loadConversationsWithGroups();
     } catch (error) {
-        console.error('删除失败:', error);
-        const failedMsg = typeof window.t === 'function' ? window.t('batchManageModal.deleteFailed') : '删除失败';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : '未知错误';
+        console.error('Delete failed:', error);
+        const failedMsg = typeof window.t === 'function' ? window.t('batchManageModal.deleteFailed') : 'Delete failed';
+        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
         alert(failedMsg + ': ' + (error.message || unknownErr));
     }
 }
@@ -7473,13 +7473,13 @@ async function createGroup(event) {
 
     const input = document.getElementById('create-group-name-input');
     if (!input) {
-        console.error('找不到输入框');
+        console.error('Input element not found');
         return;
     }
 
     const name = input.value.trim();
     if (!name) {
-        alert(typeof window.t === 'function' ? window.t('createGroupModal.groupNamePlaceholder') : '请输入分组名称');
+        alert(typeof window.t === 'function' ? window.t('createGroupModal.groupNamePlaceholder') : 'Please enter a group name');
         return;
     }
 
@@ -7500,11 +7500,11 @@ async function createGroup(event) {
         
         const nameExists = groups.some(g => g.name === name);
         if (nameExists) {
-            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : '分组名称已存在，请使用其他名称');
+            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name');
             return;
         }
     } catch (error) {
-        console.error('检查分组名称失败:', error);
+        console.error('Failed to check group name:', error);
     }
 
     // 获取选中的图标
@@ -7525,12 +7525,12 @@ async function createGroup(event) {
 
         if (!response.ok) {
             const error = await response.json();
-            const nameExistsMsg = typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : '分组名称已存在，请使用其他名称';
+            const nameExistsMsg = typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name';
             if (error.error && error.error.includes('已存在')) {
                 alert(nameExistsMsg);
                 return;
             }
-            const createFailedMsg = typeof window.t === 'function' ? window.t('createGroupModal.createFailed') : '创建失败';
+            const createFailedMsg = typeof window.t === 'function' ? window.t('createGroupModal.createFailed') : 'Create failed';
             throw new Error(error.error || createFailedMsg);
         }
 
@@ -7556,9 +7556,9 @@ async function createGroup(event) {
             await showMoveToGroupSubmenu();
         }
     } catch (error) {
-        console.error('创建分组失败:', error);
-        const createFailedMsg = typeof window.t === 'function' ? window.t('createGroupModal.createFailed') : '创建失败';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : '未知错误';
+        console.error('Failed to create group:', error);
+        const createFailedMsg = typeof window.t === 'function' ? window.t('createGroupModal.createFailed') : 'Create failed';
+        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
         alert(createFailedMsg + ': ' + (error.message || unknownErr));
     }
 }
@@ -7598,7 +7598,7 @@ async function enterGroupDetail(groupId) {
         // 加载分组对话（如果有搜索查询则使用搜索查询）
         loadGroupConversations(groupId, currentGroupSearchQuery);
     } catch (error) {
-        console.error('加载分组失败:', error);
+        console.error('Failed to load group:', error);
         currentGroupId = null;
     }
 }
@@ -7651,7 +7651,7 @@ async function loadGroupConversations(groupId, searchQuery = '') {
         if (searchQuery) {
             list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.searching') : '搜索中...') + '</div>';
         } else {
-            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.loading') : '加载中...') + '</div>';
+            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.loading') : 'Loading...') + '</div>';
         }
 
         // 构建URL，如果有搜索关键词则添加search参数
@@ -7704,9 +7704,9 @@ async function loadGroupConversations(groupId, searchQuery = '') {
             const emptyMsg = typeof window.t === 'function' ? window.t('chat.emptyGroupConversations') : '该分组暂无对话';
             const noMatchMsg = typeof window.t === 'function' ? window.t('chat.noMatchingConversationsInGroup') : '未找到匹配的对话';
             if (searchQuery && searchQuery.trim()) {
-                list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (noMatchMsg || '未找到匹配的对话') + '</div>';
+                list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (noMatchMsg || 'No matching conversations found') + '</div>';
             } else {
-                list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (emptyMsg || '该分组暂无对话') + '</div>';
+                list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (emptyMsg || 'This group has no conversations') + '</div>';
             }
             return;
         }
@@ -7821,11 +7821,11 @@ async function loadGroupConversations(groupId, searchQuery = '') {
 
                 list.appendChild(item);
             } catch (err) {
-                console.error(`加载对话 ${conv.id} 失败:`, err);
+                console.error(`Failed to load conversation ${conv.id}:`, err);
             }
         }
     } catch (error) {
-        console.error('加载分组对话失败:', error);
+        console.error('Failed to load group conversations:', error);
     }
 }
 
@@ -7860,7 +7860,7 @@ async function editGroup() {
         
         const nameExists = groups.some(g => g.name === trimmedName && g.id !== currentGroupId);
         if (nameExists) {
-            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : '分组名称已存在，请使用其他名称');
+            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name');
             return;
         }
 
@@ -7878,7 +7878,7 @@ async function editGroup() {
         if (!updateResponse.ok) {
             const error = await updateResponse.json();
             if (error.error && error.error.includes('已存在')) {
-                alert('分组名称已存在，请使用其他名称');
+                alert('Group name already exists, please use another name');
                 return;
             }
             throw new Error(error.error || '更新失败');
@@ -7891,8 +7891,8 @@ async function editGroup() {
             titleEl.textContent = trimmedName;
         }
     } catch (error) {
-        console.error('编辑分组失败:', error);
-        alert('编辑失败: ' + (error.message || '未知错误'));
+        console.error('Failed to edit group:', error);
+        alert('Edit failed: ' + (error.message || 'Unknown error'));
     }
 }
 
@@ -7932,8 +7932,8 @@ async function deleteGroup() {
         // 刷新对话列表，确保之前被分组的对话能立即显示
         await loadConversationsWithGroups();
     } catch (error) {
-        console.error('删除分组失败:', error);
-        alert('删除失败: ' + (error.message || '未知错误'));
+        console.error('Failed to delete group:', error);
+        alert('Delete failed: ' + (error.message || 'Unknown error'));
     }
 }
 
@@ -7972,7 +7972,7 @@ async function renameGroupFromContext() {
         
         const nameExists = groups.some(g => g.name === trimmedName && g.id !== groupId);
         if (nameExists) {
-            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : '分组名称已存在，请使用其他名称');
+            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name');
             return;
         }
 
@@ -7990,7 +7990,7 @@ async function renameGroupFromContext() {
         if (!updateResponse.ok) {
             const error = await updateResponse.json();
             if (error.error && error.error.includes('已存在')) {
-                alert('分组名称已存在，请使用其他名称');
+                alert('Group name already exists, please use another name');
                 return;
             }
             throw new Error(error.error || '更新失败');
@@ -8006,9 +8006,9 @@ async function renameGroupFromContext() {
             }
         }
     } catch (error) {
-        console.error('重命名分组失败:', error);
-        const failedLabel = typeof window.t === 'function' ? window.t('chat.renameFailed') : '重命名失败';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : '未知错误';
+        console.error('Failed to rename group:', error);
+        const failedLabel = typeof window.t === 'function' ? window.t('chat.renameFailed') : 'Rename failed';
+        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
         alert(failedLabel + ': ' + (error.message || unknownErr));
     }
 
@@ -8047,8 +8047,8 @@ async function pinGroupFromContext() {
         // 重新加载分组列表以更新显示顺序
         loadGroups();
     } catch (error) {
-        console.error('置顶分组失败:', error);
-        alert('置顶失败: ' + (error.message || '未知错误'));
+        console.error('Failed to pin group:', error);
+        alert('Pin failed: ' + (error.message || 'Unknown error'));
     }
 
     closeGroupContextMenu();
@@ -8095,8 +8095,8 @@ async function deleteGroupFromContext() {
         // 刷新对话列表，确保之前被分组的对话能立即显示
         await loadConversationsWithGroups();
     } catch (error) {
-        console.error('删除分组失败:', error);
-        alert('删除失败: ' + (error.message || '未知错误'));
+        console.error('Failed to delete group:', error);
+        alert('Delete failed: ' + (error.message || 'Unknown error'));
     }
 
     closeGroupContextMenu();

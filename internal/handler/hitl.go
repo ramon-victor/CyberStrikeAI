@@ -491,7 +491,7 @@ func (h *AgentHandler) waitHITLApproval(runCtx context.Context, cancelRun contex
 		return &d, nil
 	}
 	if sendEventFunc != nil {
-		sendEventFunc("hitl_resumed", "人工确认通过，继续执行", map[string]interface{}{
+		sendEventFunc("hitl_resumed", "Human approval granted, continuing execution", map[string]interface{}{
 			"conversationId": conversationID,
 			"interruptId":    p.InterruptID,
 			"toolName":       toolName,
@@ -763,9 +763,9 @@ func (h *AgentHandler) UpsertHITLConversationConfig(c *gin.Context) {
 	}
 	if h.hitlWhitelistSaver != nil && len(req.SensitiveTools) > 0 {
 		if err := h.hitlWhitelistSaver.MergeHitlToolWhitelistIntoConfig(req.SensitiveTools); err != nil {
-			h.logger.Warn("HITL 会话配置已保存，但合并工具白名单到 config.yaml 失败", zap.Error(err))
+			h.logger.Warn("HITL session config saved, but failed to merge tool whitelist into config.yaml", zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "会话配置已保存，但写入 config.yaml 失败: " + err.Error(),
+				"error": "Session config saved, but failed to write config.yaml: " + err.Error(),
 			})
 			return
 		}
@@ -781,7 +781,7 @@ type mergeHitlGlobalWhitelistReq struct {
 // MergeHITLGlobalToolWhitelist 无会话 ID 时将侧栏提交的免审批工具合并进 config.yaml（与 PUT /hitl/config 中白名单落盘规则一致）。
 func (h *AgentHandler) MergeHITLGlobalToolWhitelist(c *gin.Context) {
 	if h.hitlWhitelistSaver == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "HITL 配置持久化不可用"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "HITL configuration persistence unavailable"})
 		return
 	}
 	var req mergeHitlGlobalWhitelistReq
@@ -798,7 +798,7 @@ func (h *AgentHandler) MergeHITLGlobalToolWhitelist(c *gin.Context) {
 		return
 	}
 	if err := h.hitlWhitelistSaver.MergeHitlToolWhitelistIntoConfig(req.SensitiveTools); err != nil {
-		h.logger.Warn("合并 HITL 工具白名单到 config.yaml 失败", zap.Error(err))
+		h.logger.Warn("Failed to merge HITL tool whitelist into config.yaml", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

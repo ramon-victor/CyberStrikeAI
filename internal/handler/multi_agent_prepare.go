@@ -24,7 +24,7 @@ type multiAgentPrepared struct {
 
 func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest) (*multiAgentPrepared, error) {
 	if len(req.Attachments) > maxAttachments {
-		return nil, fmt.Errorf("附件最多 %d 个", maxAttachments)
+		return nil, fmt.Errorf("Maximum %d attachment(s)", maxAttachments)
 	}
 
 	conversationID := strings.TrimSpace(req.ConversationID)
@@ -39,13 +39,13 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest) (*multiAgentPr
 			conv, err = h.db.CreateConversation(title)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("创建对话失败: %w", err)
+			return nil, fmt.Errorf("Failed to create conversation: %w", err)
 		}
 		conversationID = conv.ID
 		createdNew = true
 	} else {
 		if _, err := h.db.GetConversation(conversationID); err != nil {
-			return nil, fmt.Errorf("对话不存在")
+			return nil, fmt.Errorf("Conversation not found")
 		}
 	}
 
@@ -64,15 +64,15 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest) (*multiAgentPr
 	if req.WebShellConnectionID != "" {
 		conn, errConn := h.db.GetWebshellConnection(strings.TrimSpace(req.WebShellConnectionID))
 		if errConn != nil || conn == nil {
-			h.logger.Warn("WebShell AI 助手：未找到连接", zap.String("id", req.WebShellConnectionID), zap.Error(errConn))
-			return nil, fmt.Errorf("未找到该 WebShell 连接")
+			h.logger.Warn("WebShell AI assistant: connection not found", zap.String("id", req.WebShellConnectionID), zap.Error(errConn))
+			return nil, fmt.Errorf("WebShell connection not found")
 		}
 		webshellContext := BuildWebshellAssistantContext(conn, WebshellSkillHintMultiAgent, req.Message)
 		// WebShell 模式下如果同时指定了角色，追加角色 user_prompt（工具集仍仅限 webshell 专用工具）
-		if req.Role != "" && req.Role != "默认" && h.config != nil && h.config.Roles != nil {
+		if req.Role != "" && req.Role != "default" && h.config != nil && h.config.Roles != nil {
 			if role, exists := h.config.Roles[req.Role]; exists && role.Enabled && role.UserPrompt != "" {
 				finalMessage = role.UserPrompt + "\n\n" + webshellContext
-				h.logger.Info("WebShell + 角色: 应用角色提示词（多代理）", zap.String("role", req.Role))
+				h.logger.Info("WebShell + Role: applying role prompt (multi-agent)", zap.String("role", req.Role))
 			} else {
 				finalMessage = webshellContext
 			}
@@ -88,7 +88,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest) (*multiAgentPr
 			builtin.ToolListKnowledgeRiskTypes,
 			builtin.ToolSearchKnowledgeBase,
 		}
-	} else if req.Role != "" && req.Role != "默认" && h.config != nil && h.config.Roles != nil {
+	} else if req.Role != "" && req.Role != "default" && h.config != nil && h.config.Roles != nil {
 		if role, exists := h.config.Roles[req.Role]; exists && role.Enabled {
 			if role.UserPrompt != "" {
 				finalMessage = role.UserPrompt + "\n\n" + req.Message
@@ -102,7 +102,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest) (*multiAgentPr
 		var aerr error
 		savedPaths, aerr = saveAttachmentsToDateAndConversationDir(req.Attachments, conversationID, h.logger)
 		if aerr != nil {
-			return nil, fmt.Errorf("保存上传文件失败: %w", aerr)
+			return nil, fmt.Errorf("Failed to save uploaded file: %w", aerr)
 		}
 	}
 	finalMessage = appendAttachmentsToMessage(finalMessage, req.Attachments, savedPaths)
@@ -110,18 +110,18 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest) (*multiAgentPr
 	userContent := userMessageContentForStorage(req.Message, req.Attachments, savedPaths)
 	userMsgRow, uerr := h.db.AddMessage(conversationID, "user", userContent, nil)
 	if uerr != nil {
-		h.logger.Error("保存用户消息失败", zap.Error(uerr))
-		return nil, fmt.Errorf("保存用户消息失败: %w", uerr)
+		h.logger.Error("Failed to save user message", zap.Error(uerr))
+		return nil, fmt.Errorf("Failed to save user message: %w", uerr)
 	}
 	userMessageID := ""
 	if userMsgRow != nil {
 		userMessageID = userMsgRow.ID
 	}
 
-	assistantMsg, aerr := h.db.AddMessage(conversationID, "assistant", "处理中...", nil)
+	assistantMsg, aerr := h.db.AddMessage(conversationID, "assistant", "Processing...", nil)
 	var assistantMessageID string
 	if aerr != nil {
-		h.logger.Warn("创建助手消息占位失败", zap.Error(aerr))
+		h.logger.Warn("Failed to create assistant message placeholder", zap.Error(aerr))
 	} else if assistantMsg != nil {
 		assistantMessageID = assistantMsg.ID
 	}

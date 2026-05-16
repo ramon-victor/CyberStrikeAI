@@ -33,12 +33,12 @@ func NewAttackChainHandler(db *database.DB, openAIConfig *config.OpenAIConfig, l
 	}
 }
 
-// UpdateConfig 更新OpenAI配置
+// UpdateConfig Updating OpenAI config
 func (h *AttackChainHandler) UpdateConfig(cfg *config.OpenAIConfig) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.openAIConfig = cfg
-	h.logger.Info("AttackChainHandler配置已更新",
+	h.logger.Info("AttackChainHandlerConfig updated",
 		zap.String("base_url", cfg.BaseURL),
 		zap.String("model", cfg.Model),
 	)
@@ -74,7 +74,7 @@ func (h *AttackChainHandler) GetAttackChain(c *gin.Context) {
 	chain, err := builder.LoadChainFromDatabase(conversationID)
 	if err == nil && len(chain.Nodes) > 0 {
 		// 如果已存在，直接返回
-		h.logger.Info("返回已存在的攻击链", zap.String("conversationId", conversationID))
+		h.logger.Info("Returning existing attack chain", zap.String("conversationId", conversationID))
 		c.JSON(http.StatusOK, chain)
 		return
 	}
@@ -87,7 +87,7 @@ func (h *AttackChainHandler) GetAttackChain(c *gin.Context) {
 	// 尝试获取锁，如果正在生成则返回错误
 	acquired := lock.TryLock()
 	if !acquired {
-		h.logger.Info("攻击链正在生成中，请稍后再试", zap.String("conversationId", conversationID))
+		h.logger.Info("Attack chain is being generated, please try again later", zap.String("conversationId", conversationID))
 		c.JSON(http.StatusConflict, gin.H{"error": "Attack chain is being generated, please try again later"})
 		return
 	}
@@ -96,20 +96,20 @@ func (h *AttackChainHandler) GetAttackChain(c *gin.Context) {
 	// 再次检查是否已生成（可能在等待锁的过程中已经生成完成）
 	chain, err = builder.LoadChainFromDatabase(conversationID)
 	if err == nil && len(chain.Nodes) > 0 {
-		h.logger.Info("返回已存在的攻击链（在锁等待期间已生成）", zap.String("conversationId", conversationID))
+		h.logger.Info("Returning existing attack chain(generated during lock wait)", zap.String("conversationId", conversationID))
 		c.JSON(http.StatusOK, chain)
 		return
 	}
 
-	h.logger.Info("开始生成攻击链", zap.String("conversationId", conversationID))
+	h.logger.Info("Starting attack chain generation", zap.String("conversationId", conversationID))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	chain, err = builder.BuildChainFromConversation(ctx, conversationID)
 	if err != nil {
-		h.logger.Error("生成攻击链失败", zap.String("conversationId", conversationID), zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成攻击链失败: " + err.Error()})
+		h.logger.Error("Failed to generate attack chain", zap.String("conversationId", conversationID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate attack chain: " + err.Error()})
 		return
 	}
 
@@ -119,7 +119,7 @@ func (h *AttackChainHandler) GetAttackChain(c *gin.Context) {
 	c.JSON(http.StatusOK, chain)
 }
 
-// RegenerateAttackChain 重新生成攻击链
+// RegenerateAttackChain Regenerating attack chain
 // POST /api/attack-chain/:conversationId/regenerate
 func (h *AttackChainHandler) RegenerateAttackChain(c *gin.Context) {
 	conversationID := c.Param("conversationId")
@@ -138,7 +138,7 @@ func (h *AttackChainHandler) RegenerateAttackChain(c *gin.Context) {
 
 	// 删除旧的攻击链
 	if err := h.db.DeleteAttackChain(conversationID); err != nil {
-		h.logger.Warn("删除旧攻击链失败", zap.Error(err))
+		h.logger.Warn("Failed to delete old attack chain", zap.Error(err))
 	}
 
 	// 使用锁机制防止并发生成
@@ -147,14 +147,14 @@ func (h *AttackChainHandler) RegenerateAttackChain(c *gin.Context) {
 
 	acquired := lock.TryLock()
 	if !acquired {
-		h.logger.Info("攻击链正在生成中，请稍后再试", zap.String("conversationId", conversationID))
+		h.logger.Info("Attack chain is being generated, please try again later", zap.String("conversationId", conversationID))
 		c.JSON(http.StatusConflict, gin.H{"error": "Attack chain is being generated, please try again later"})
 		return
 	}
 	defer lock.Unlock()
 
 	// 生成新的攻击链
-	h.logger.Info("重新生成攻击链", zap.String("conversationId", conversationID))
+	h.logger.Info("Regenerating attack chain", zap.String("conversationId", conversationID))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -163,8 +163,8 @@ func (h *AttackChainHandler) RegenerateAttackChain(c *gin.Context) {
 	builder := attackchain.NewBuilder(h.db, openAIConfig, h.logger)
 	chain, err := builder.BuildChainFromConversation(ctx, conversationID)
 	if err != nil {
-		h.logger.Error("生成攻击链失败", zap.String("conversationId", conversationID), zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成攻击链失败: " + err.Error()})
+		h.logger.Error("Failed to generate attack chain", zap.String("conversationId", conversationID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate attack chain: " + err.Error()})
 		return
 	}
 

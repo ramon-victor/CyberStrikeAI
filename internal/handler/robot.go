@@ -52,7 +52,7 @@ type RobotHandler struct {
 	logger         *zap.Logger
 	mu             sync.RWMutex
 	sessions       map[string]string             // key: "platform_userID", value: conversationID
-	sessionRoles   map[string]string             // key: "platform_userID", value: roleName（默认"默认"）
+	sessionRoles   map[string]string             // key: "platform_userID", value: roleName（default"default"）
 	cancelMu       sync.Mutex                    // 保护 runningCancels
 	runningCancels map[string]context.CancelFunc // key: "platform_userID", 用于停止命令中断任务
 }
@@ -157,7 +157,7 @@ func (h *RobotHandler) setConversation(platform, userID, convID string) {
 	h.persistSessionBinding(sk, convID, role)
 }
 
-// getRole 获取当前用户使用的角色，未设置时返回"默认"
+// getRole 获取当前用户使用的角色，未设置时返回"default"
 func (h *RobotHandler) getRole(platform, userID string) string {
 	sk := h.sessionKey(platform, userID)
 	h.mu.RLock()
@@ -172,7 +172,7 @@ func (h *RobotHandler) getRole(platform, userID string) string {
 		h.mu.Unlock()
 		return persistedRole
 	}
-	return "默认"
+	return "default"
 }
 
 // setRole 设置当前用户使用的角色
@@ -300,7 +300,7 @@ func (h *RobotHandler) cmdSwitch(platform, userID, convID string) string {
 	}
 	conv, err := h.db.GetConversation(convID)
 	if err != nil {
-		return "对话不存在或 ID 错误。"
+		return "Conversation not found或 ID 错误。"
 	}
 	h.setConversation(platform, userID, conv.ID)
 	return fmt.Sprintf("已切换到对话：「%s」\nID: %s", conv.Title, conv.ID)
@@ -362,10 +362,10 @@ func (h *RobotHandler) cmdRoles() string {
 		return "暂无可用角色。"
 	}
 	sort.Slice(names, func(i, j int) bool {
-		if names[i] == "默认" {
+		if names[i] == "default" {
 			return true
 		}
-		if names[j] == "默认" {
+		if names[j] == "default" {
 			return false
 		}
 		return names[i] < names[j]
@@ -420,7 +420,7 @@ func (h *RobotHandler) cmdDelete(platform, userID, convID string) string {
 	if err := h.db.DeleteConversation(convID); err != nil {
 		return "删除失败: " + err.Error()
 	}
-	return fmt.Sprintf("已删除对话 ID: %s", convID)
+	return fmt.Sprintf("Deleted对话 ID: %s", convID)
 }
 
 func (h *RobotHandler) cmdVersion() string {

@@ -25,7 +25,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 
 	var req ChatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		ev := StreamEvent{Type: "error", Message: "请求参数错误: " + err.Error()}
+		ev := StreamEvent{Type: "error", Message: "Invalid request parameters: " + err.Error()}
 		b, _ := json.Marshal(ev)
 		fmt.Fprintf(c.Writer, "data: %s\n\n", b)
 		done := StreamEvent{Type: "done", Message: ""}
@@ -86,7 +86,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 		sseWriteMu.Unlock()
 	}
 
-	h.logger.Info("收到 Eino ADK 单代理流式请求",
+	h.logger.Info("Received Eino ADK single agent stream request",
 		zap.String("conversationId", req.ConversationID),
 	)
 
@@ -157,13 +157,13 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 	if _, err := h.tasks.StartTask(conversationID, req.Message, cancelWithCause); err != nil {
 		var errorMsg string
 		if errors.Is(err, ErrTaskAlreadyRunning) {
-			errorMsg = "⚠️ 当前会话已有任务正在执行中，请等待当前任务完成或点击「停止任务」后再尝试。"
+			errorMsg = "A task is already running in this conversation. Please wait for it to complete or click \"Stop Task\" before retrying."
 			sendEvent("error", errorMsg, map[string]interface{}{
 				"conversationId": conversationID,
 				"errorType":      "task_already_running",
 			})
 		} else {
-			errorMsg = "❌ 无法启动任务: " + err.Error()
+			errorMsg = "Failed to start task: " + err.Error()
 			sendEvent("error", errorMsg, nil)
 		}
 		if assistantMessageID != "" {
@@ -324,7 +324,7 @@ func (h *AgentHandler) EinoSingleAgentLoop(c *gin.Context) {
 		return
 	}
 
-	h.logger.Info("收到 Eino ADK 单代理非流式请求", zap.String("conversationId", req.ConversationID))
+	h.logger.Info("Received Eino ADK single agent non-stream request", zap.String("conversationId", req.ConversationID))
 
 	prep, err := h.prepareMultiAgentSession(&req)
 	if err != nil {
@@ -351,7 +351,7 @@ func (h *AgentHandler) EinoSingleAgentLoop(c *gin.Context) {
 	})
 
 	if h.config == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器配置未加载"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Server configuration not loaded"})
 		return
 	}
 

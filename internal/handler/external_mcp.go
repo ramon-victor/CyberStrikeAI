@@ -163,7 +163,7 @@ func (h *ExternalMCPHandler) AddOrUpdateExternalMCP(c *gin.Context) {
 	if cfg.Disabled {
 		cfg.ExternalMCPEnable = false
 	} else if !cfg.ExternalMCPEnable {
-		// 用户未显式设置 external_mcp_enable，官方配置默认就是启用的
+		// 用户未显式设置 external_mcp_enable，官方配置default就是启用的
 		cfg.ExternalMCPEnable = true
 	}
 
@@ -174,13 +174,13 @@ func (h *ExternalMCPHandler) AddOrUpdateExternalMCP(c *gin.Context) {
 
 	// 保存到配置文件
 	if err := h.saveConfig(); err != nil {
-		h.logger.Error("保存配置失败", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存配置失败: " + err.Error()})
+		h.logger.Error("Failed to save config", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save config: " + err.Error()})
 		return
 	}
 
-	h.logger.Info("外部MCP配置已更新", zap.String("name", name))
-	c.JSON(http.StatusOK, gin.H{"message": "配置已更新"})
+	h.logger.Info("External MCP config updated", zap.String("name", name))
+	c.JSON(http.StatusOK, gin.H{"message": "Config updated"})
 }
 
 // DeleteExternalMCP 删除外部MCP配置
@@ -192,7 +192,7 @@ func (h *ExternalMCPHandler) DeleteExternalMCP(c *gin.Context) {
 
 	// 移除配置
 	if err := h.manager.RemoveConfig(name); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "配置不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Config not found"})
 		return
 	}
 
@@ -203,16 +203,16 @@ func (h *ExternalMCPHandler) DeleteExternalMCP(c *gin.Context) {
 
 	// 保存到配置文件
 	if err := h.saveConfig(); err != nil {
-		h.logger.Error("保存配置失败", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存配置失败: " + err.Error()})
+		h.logger.Error("Failed to save config", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save config: " + err.Error()})
 		return
 	}
 
-	h.logger.Info("外部MCP配置已删除", zap.String("name", name))
-	c.JSON(http.StatusOK, gin.H{"message": "配置已删除"})
+	h.logger.Info("External MCP config deleted", zap.String("name", name))
+	c.JSON(http.StatusOK, gin.H{"message": "Config deleted"})
 }
 
-// StartExternalMCP 启动外部MCP
+// StartExternalMCP Starting external MCP
 func (h *ExternalMCPHandler) StartExternalMCP(c *gin.Context) {
 	name := c.Param("name")
 
@@ -229,15 +229,15 @@ func (h *ExternalMCPHandler) StartExternalMCP(c *gin.Context) {
 
 	// 保存到配置文件
 	if err := h.saveConfig(); err != nil {
-		h.logger.Error("保存配置失败", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存配置失败: " + err.Error()})
+		h.logger.Error("Failed to save config", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save config: " + err.Error()})
 		return
 	}
 
 	// 启动客户端（立即创建客户端并设置状态为connecting，实际连接在后台进行）
-	h.logger.Info("开始启动外部MCP", zap.String("name", name))
+	h.logger.Info("Starting external MCP", zap.String("name", name))
 	if err := h.manager.StartClient(name); err != nil {
-		h.logger.Error("启动外部MCP失败", zap.String("name", name), zap.Error(err))
+		h.logger.Error("Failed to start external MCP", zap.String("name", name), zap.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":  err.Error(),
 			"status": "error",
@@ -255,7 +255,7 @@ func (h *ExternalMCPHandler) StartExternalMCP(c *gin.Context) {
 	// 立即返回，不等待连接完成
 	// 客户端会在后台异步连接，用户可以通过状态查询接口查看连接状态
 	c.JSON(http.StatusOK, gin.H{
-		"message": "外部MCP启动请求已提交，正在后台连接中",
+		"message": "External MCP start request submitted, connecting in background",
 		"status":  status,
 	})
 }
@@ -283,13 +283,13 @@ func (h *ExternalMCPHandler) StopExternalMCP(c *gin.Context) {
 
 	// 保存到配置文件
 	if err := h.saveConfig(); err != nil {
-		h.logger.Error("保存配置失败", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存配置失败: " + err.Error()})
+		h.logger.Error("Failed to save config", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save config: " + err.Error()})
 		return
 	}
 
-	h.logger.Info("外部MCP已停止", zap.String("name", name))
-	c.JSON(http.StatusOK, gin.H{"message": "外部MCP已停止"})
+	h.logger.Info("External MCP stopped", zap.String("name", name))
+	c.JSON(http.StatusOK, gin.H{"message": "External MCP stopped"})
 }
 
 // GetExternalMCPStats 获取统计信息
@@ -302,24 +302,24 @@ func (h *ExternalMCPHandler) GetExternalMCPStats(c *gin.Context) {
 func (h *ExternalMCPHandler) validateConfig(cfg config.ExternalMCPServerConfig) error {
 	transport := cfg.GetTransportType()
 	if transport == "" {
-		return fmt.Errorf("需要指定 command（stdio模式）或 url + type（http/sse模式）")
+		return fmt.Errorf("Must specify command (stdio mode) or url + type (http/sse mode)")
 	}
 
 	switch transport {
 	case "http":
 		if cfg.URL == "" {
-			return fmt.Errorf("HTTP模式需要 url")
+			return fmt.Errorf("HTTP mode requires url")
 		}
 	case "stdio":
 		if cfg.Command == "" {
-			return fmt.Errorf("stdio模式需要 command")
+			return fmt.Errorf("stdio mode requires command")
 		}
 	case "sse":
 		if cfg.URL == "" {
-			return fmt.Errorf("SSE模式需要 url")
+			return fmt.Errorf("SSE mode requires url")
 		}
 	default:
-		return fmt.Errorf("不支持的传输模式: %s，支持的模式: http, stdio, sse", transport)
+		return fmt.Errorf("Unsupported transport mode: %s, supported modes: http, stdio, sse", transport)
 	}
 
 	return nil
@@ -334,25 +334,25 @@ func (h *ExternalMCPHandler) isEnabled(cfg config.ExternalMCPServerConfig) bool 
 func (h *ExternalMCPHandler) saveConfig() error {
 	data, err := os.ReadFile(h.configPath)
 	if err != nil {
-		return fmt.Errorf("读取配置文件失败: %w", err)
+		return fmt.Errorf("Failed to read config file: %w", err)
 	}
 
 	if err := os.WriteFile(h.configPath+".backup", data, 0644); err != nil {
-		h.logger.Warn("创建配置备份失败", zap.Error(err))
+		h.logger.Warn("Failed to create config backup", zap.Error(err))
 	}
 
 	root, err := loadYAMLDocument(h.configPath)
 	if err != nil {
-		return fmt.Errorf("解析配置文件失败: %w", err)
+		return fmt.Errorf("Failed to parse config file: %w", err)
 	}
 
 	updateExternalMCPConfig(root, h.config.ExternalMCP)
 
 	if err := writeYAMLDocument(h.configPath, root); err != nil {
-		return fmt.Errorf("保存配置文件失败: %w", err)
+		return fmt.Errorf("Failed to save config file: %w", err)
 	}
 
-	h.logger.Info("配置已保存", zap.String("path", h.configPath))
+	h.logger.Info("配置Saved", zap.String("path", h.configPath))
 	return nil
 }
 
