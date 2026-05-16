@@ -29,7 +29,7 @@ func (db *DB) GetWebshellConnectionState(connectionID string) (string, error) {
 		return "{}", nil
 	}
 	if err != nil {
-		db.logger.Error("查询 WebShell 连接状态失败", zap.Error(err), zap.String("connectionID", connectionID))
+		db.logger.Error("Failed to query WebShell connection state", zap.Error(err), zap.String("connectionID", connectionID))
 		return "", err
 	}
 	if stateJSON == "" {
@@ -51,7 +51,7 @@ func (db *DB) UpsertWebshellConnectionState(connectionID, stateJSON string) erro
 			updated_at = excluded.updated_at
 	`
 	if _, err := db.Exec(query, connectionID, stateJSON, time.Now()); err != nil {
-		db.logger.Error("保存 WebShell 连接状态失败", zap.Error(err), zap.String("connectionID", connectionID))
+		db.logger.Error("Failed to save WebShell connection state", zap.Error(err), zap.String("connectionID", connectionID))
 		return err
 	}
 	return nil
@@ -67,7 +67,7 @@ func (db *DB) ListWebshellConnections() ([]WebShellConnection, error) {
 	`
 	rows, err := db.Query(query)
 	if err != nil {
-		db.logger.Error("查询 WebShell 连接列表失败", zap.Error(err))
+		db.logger.Error("Failed to query WebShell connection list", zap.Error(err))
 		return nil, err
 	}
 	defer rows.Close()
@@ -77,7 +77,7 @@ func (db *DB) ListWebshellConnections() ([]WebShellConnection, error) {
 		var c WebShellConnection
 		err := rows.Scan(&c.ID, &c.URL, &c.Password, &c.Type, &c.Method, &c.CmdParam, &c.Remark, &c.Encoding, &c.OS, &c.CreatedAt)
 		if err != nil {
-			db.logger.Warn("扫描 WebShell 连接行失败", zap.Error(err))
+			db.logger.Warn("Failed to scan WebShell connection row", zap.Error(err))
 			continue
 		}
 		list = append(list, c)
@@ -98,7 +98,7 @@ func (db *DB) GetWebshellConnection(id string) (*WebShellConnection, error) {
 		return nil, nil
 	}
 	if err != nil {
-		db.logger.Error("查询 WebShell 连接失败", zap.Error(err), zap.String("id", id))
+		db.logger.Error("Failed to query WebShell connection", zap.Error(err), zap.String("id", id))
 		return nil, err
 	}
 	return &c, nil
@@ -112,7 +112,7 @@ func (db *DB) CreateWebshellConnection(c *WebShellConnection) error {
 	`
 	_, err := db.Exec(query, c.ID, c.URL, c.Password, c.Type, c.Method, c.CmdParam, c.Remark, c.Encoding, c.OS, c.CreatedAt)
 	if err != nil {
-		db.logger.Error("创建 WebShell 连接失败", zap.Error(err), zap.String("id", c.ID))
+		db.logger.Error("Failed to create WebShell connection", zap.Error(err), zap.String("id", c.ID))
 		return err
 	}
 	return nil
@@ -127,7 +127,7 @@ func (db *DB) UpdateWebshellConnection(c *WebShellConnection) error {
 	`
 	result, err := db.Exec(query, c.URL, c.Password, c.Type, c.Method, c.CmdParam, c.Remark, c.Encoding, c.OS, c.ID)
 	if err != nil {
-		db.logger.Error("更新 WebShell 连接失败", zap.Error(err), zap.String("id", c.ID))
+		db.logger.Error("Failed to update WebShell connection", zap.Error(err), zap.String("id", c.ID))
 		return err
 	}
 	affected, _ := result.RowsAffected()
@@ -141,7 +141,7 @@ func (db *DB) UpdateWebshellConnection(c *WebShellConnection) error {
 func (db *DB) DeleteWebshellConnection(id string) error {
 	result, err := db.Exec(`DELETE FROM webshell_connections WHERE id = ?`, id)
 	if err != nil {
-		db.logger.Error("删除 WebShell 连接失败", zap.Error(err), zap.String("id", id))
+		db.logger.Error("Failed to delete WebShell connection", zap.Error(err), zap.String("id", id))
 		return err
 	}
 	affected, _ := result.RowsAffected()

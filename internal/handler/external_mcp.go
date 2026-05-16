@@ -86,7 +86,7 @@ func (h *ExternalMCPHandler) GetExternalMCP(c *gin.Context) {
 	configs := h.manager.GetConfigs()
 	cfg, exists := configs[name]
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "外部MCP配置不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "External MCP config not found"})
 		return
 	}
 
@@ -126,13 +126,13 @@ func (h *ExternalMCPHandler) GetExternalMCP(c *gin.Context) {
 func (h *ExternalMCPHandler) AddOrUpdateExternalMCP(c *gin.Context) {
 	var req AddOrUpdateExternalMCPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
 		return
 	}
 
 	name := c.Param("name")
 	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "名称不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Name cannot be empty"})
 		return
 	}
 
@@ -147,8 +147,8 @@ func (h *ExternalMCPHandler) AddOrUpdateExternalMCP(c *gin.Context) {
 
 	// 添加或更新配置
 	if err := h.manager.AddOrUpdateConfig(name, req.Config); err != nil {
-		h.logger.Error("添加或更新外部MCP配置失败", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "添加或更新配置失败: " + err.Error()})
+		h.logger.Error("Failed to add or update external MCP config", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add or update config: " + err.Error()})
 		return
 	}
 

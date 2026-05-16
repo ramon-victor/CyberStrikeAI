@@ -14,8 +14,8 @@ import (
 )
 
 func main() {
-	var configPath = flag.String("config", "config.yaml", "配置文件路径")
-	var httpsBootstrap = flag.Bool("https", false, "启用主站 HTTPS：未配置 tls_cert_path/tls_key_path 时使用内存自签证书（本地测试）；与 run.sh 默认行为一致")
+	var configPath = flag.String("config", "config.yaml", "config file path")
+	var httpsBootstrap = flag.Bool("https", false, "enable HTTPS for main site: uses in-memory self-signed cert when tls_cert_path/tls_key_path not configured (local testing); consistent with run.sh default")
 	flag.Parse()
 
 	// 环境变量兼容（便于 systemd/docker 等不传参场景）
@@ -32,12 +32,12 @@ func main() {
 		cp = "config.yaml"
 	}
 	if strings.HasPrefix(cp, "-") {
-		fmt.Fprintf(os.Stderr, "无效的 -config 路径 %q。\n若同时需要 HTTPS，请写成: ./cyberstrike-ai --https -config config.yaml（-config 后必须是 yaml 文件路径）。\n", cp)
+		fmt.Fprintf(os.Stderr, "Invalid -config path %q.\nFor HTTPS with config: ./cyberstrike-ai --https -config config.yaml (-config must be followed by a yaml file path).\n", cp)
 		os.Exit(2)
 	}
 	cfg, err := config.Load(cp)
 	if err != nil {
-		fmt.Printf("加载配置失败: %v\n", err)
+		fmt.Printf("Failed to load config: %v\n", err)
 		return
 	}
 
@@ -54,18 +54,18 @@ func main() {
 		scheme = "https"
 	}
 	fmt.Println()
-	fmt.Printf("→ Web 界面: %s://127.0.0.1:%d/\n", scheme, port)
+	fmt.Printf("→ Web UI: %s://127.0.0.1:%d/\n", scheme, port)
 	if scheme == "https" && cfg.Server.TLSAutoSelfSign {
-		fmt.Println("  （内存自签证书：浏览器首次需确认「继续访问」）")
+		fmt.Println("  (Self-signed cert: browser will ask to confirm on first visit)")
 	}
 	if scheme == "https" && config.ServerHTTPRedirectEnabled(&cfg.Server) {
-		fmt.Printf("  （http://127.0.0.1:%d/ 将自动跳转到 HTTPS）\n", port)
+		fmt.Printf("  (http://127.0.0.1:%d/ will auto-redirect to HTTPS)\n", port)
 	}
 	fmt.Println()
 
 	// MCP 启用且 auth_header_value 为空时，自动生成随机密钥并写回配置
 	if err := config.EnsureMCPAuth(cp, cfg); err != nil {
-		fmt.Printf("MCP 鉴权配置失败: %v\n", err)
+		fmt.Printf("MCP auth config failed: %v\n", err)
 		return
 	}
 	if cfg.MCP.Enabled {
@@ -86,13 +86,13 @@ func main() {
 	// 创建应用
 	application, err := app.New(cfg, log, cp)
 	if err != nil {
-		log.Fatal("应用初始化失败", "error", err)
+		log.Fatal("App initialization failed", "error", err)
 	}
 
 	// 在后台监听信号
 	go func() {
 		sig := <-sigCh
-		log.Info("收到系统信号，开始优雅关闭: " + sig.String())
+		log.Info("Received system signal, starting graceful shutdown: " + sig.String())
 		application.Shutdown()
 		cancel()
 	}()
@@ -101,9 +101,9 @@ func main() {
 	if err := application.RunWithContext(ctx); err != nil {
 		// context 取消导致的关闭不视为错误
 		if ctx.Err() != nil {
-			log.Info("服务器已优雅关闭")
+			log.Info("Server shut down gracefully")
 		} else {
-			log.Fatal("服务器启动失败", "error", err)
+			log.Fatal("Server startup failed", "error", err)
 		}
 	}
 }

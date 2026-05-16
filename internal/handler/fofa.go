@@ -111,17 +111,17 @@ func (h *FofaHandler) resolveBaseURL() string {
 func (h *FofaHandler) ParseNaturalLanguage(c *gin.Context) {
 	var req fofaParseRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
 		return
 	}
 	req.Text = strings.TrimSpace(req.Text)
 	if req.Text == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "text 不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "text cannot be empty"})
 		return
 	}
 
 	if h.cfg == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "系统配置未初始化"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "System config not initialized"})
 		return
 	}
 	if strings.TrimSpace(h.cfg.OpenAI.APIKey) == "" || strings.TrimSpace(h.cfg.OpenAI.Model) == "" {
@@ -132,7 +132,7 @@ func (h *FofaHandler) ParseNaturalLanguage(c *gin.Context) {
 		return
 	}
 	if h.openAIClient == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI 客户端未初始化"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI client not initialized"})
 		return
 	}
 

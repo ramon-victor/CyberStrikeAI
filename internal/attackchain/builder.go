@@ -84,16 +84,16 @@ func NewBuilder(db *database.DB, openAIConfig *config.OpenAIConfig, logger *zap.
 
 // BuildChainFromConversation 从对话构建攻击链（简化版本：用户输入+最后一轮ReAct输入+大模型输出）
 func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID string) (*Chain, error) {
-	b.logger.Info("开始构建攻击链（简化版本）", zap.String("conversationId", conversationID))
+	b.logger.Info("Starting attack chain construction (simplified version)", zap.String("conversationId", conversationID))
 
 	// 0. 首先检查是否有实际的工具执行记录
 	messages, err := b.db.GetMessages(conversationID)
 	if err != nil {
-		return nil, fmt.Errorf("获取对话消息失败: %w", err)
+		return nil, fmt.Errorf("failed to get conversation messages: %w", err)
 	}
 
 	if len(messages) == 0 {
-		b.logger.Info("对话中没有数据", zap.String("conversationId", conversationID))
+		b.logger.Info("No data in conversation", zap.String("conversationId", conversationID))
 		return &Chain{Nodes: []Node{}, Edges: []Edge{}}, nil
 	}
 

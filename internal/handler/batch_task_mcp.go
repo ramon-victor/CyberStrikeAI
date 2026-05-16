@@ -74,7 +74,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		}
 		queues, total, err := h.batchTaskManager.ListQueues(pageSize, offset, status, keyword)
 		if err != nil {
-			return batchMCPTextResult(fmt.Sprintf("列出队列失败: %v", err), true), nil
+			return batchMCPTextResult(fmt.Sprintf("Failed to list queues: %v", err), true), nil
 		}
 		totalPages := (total + pageSize - 1) / pageSize
 		if totalPages == 0 {
@@ -116,11 +116,11 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	}, func(ctx context.Context, args map[string]interface{}) (*mcp.ToolResult, error) {
 		qid := mcpArgString(args, "queue_id")
 		if qid == "" {
-			return batchMCPTextResult("queue_id 不能为空", true), nil
+			return batchMCPTextResult("queue_id cannot be empty", true), nil
 		}
 		queue, ok := h.batchTaskManager.GetBatchQueue(qid)
 		if !ok {
-			return batchMCPTextResult("队列不存在: "+qid, true), nil
+			return batchMCPTextResult("Queue not found: "+qid, true), nil
 		}
 		return batchMCPJSONResult(queue)
 	})
@@ -191,11 +191,11 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		var nextRunAt *time.Time
 		if scheduleMode == "cron" {
 			if cronExpr == "" {
-				return batchMCPTextResult("Cron 调度模式下 cron_expr 不能为空", true), nil
+				return batchMCPTextResult("cron_expr cannot be empty in Cron schedule mode", true), nil
 			}
 			sch, err := h.batchCronParser.Parse(cronExpr)
 			if err != nil {
-				return batchMCPTextResult("无效的 Cron 表达式: "+err.Error(), true), nil
+				return batchMCPTextResult("Invalid Cron expression: "+err.Error(), true), nil
 			}
 			n := sch.Next(time.Now())
 			nextRunAt = &n
@@ -206,16 +206,16 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		}
 		queue, createErr := h.batchTaskManager.CreateBatchQueue(title, role, agentMode, scheduleMode, cronExpr, nextRunAt, tasks)
 		if createErr != nil {
-			return batchMCPTextResult("创建队列失败: "+createErr.Error(), true), nil
+			return batchMCPTextResult("Failed to create queue: "+createErr.Error(), true), nil
 		}
 		started := false
 		if executeNow {
 			ok, err := h.startBatchQueueExecution(queue.ID, false)
 			if !ok {
-				return batchMCPTextResult("队列不存在: "+queue.ID, true), nil
+				return batchMCPTextResult("Queue not found: "+queue.ID, true), nil
 			}
 			if err != nil {
-				return batchMCPTextResult("创建成功但启动失败: "+err.Error(), true), nil
+				return batchMCPTextResult("Created successfully but failed to start: "+err.Error(), true), nil
 			}
 			started = true
 			if refreshed, exists := h.batchTaskManager.GetBatchQueue(queue.ID); exists {
@@ -230,9 +230,9 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 			"execute_now": executeNow,
 			"reminder": func() string {
 				if started {
-					return "队列已创建并立即启动。"
+					return "Queue created and started immediately."
 				}
-				return "队列已创建，当前为 pending。需要开始执行时请调用 MCP 工具 batch_task_start（queue_id 同上）。Cron 自动调度需 schedule_enabled 为 true，可用 batch_task_schedule_enabled。"
+				return "Queue created, currently pending. Call MCP tool batch_task_start to begin execution. Cron auto-scheduling requires schedule_enabled=true, use batch_task_schedule_enabled."
 			}(),
 		})
 	})
@@ -258,17 +258,17 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	}, func(ctx context.Context, args map[string]interface{}) (*mcp.ToolResult, error) {
 		qid := mcpArgString(args, "queue_id")
 		if qid == "" {
-			return batchMCPTextResult("queue_id 不能为空", true), nil
+			return batchMCPTextResult("queue_id cannot be empty", true), nil
 		}
 		ok, err := h.startBatchQueueExecution(qid, false)
 		if !ok {
-			return batchMCPTextResult("队列不存在: "+qid, true), nil
+			return batchMCPTextResult("Queue not found: "+qid, true), nil
 		}
 		if err != nil {
-			return batchMCPTextResult("启动失败: "+err.Error(), true), nil
+			return batchMCPTextResult("Failed to start: "+err.Error(), true), nil
 		}
 		logger.Info("MCP batch_task_start", zap.String("queueId", qid))
-		return batchMCPTextResult("已提交启动，队列将开始执行。", false), nil
+		return batchMCPTextResult("Start submitted, queue will begin execution.", false), nil
 	})
 
 	// --- rerun (reset + start for completed/cancelled queues) ---
@@ -289,27 +289,27 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	}, func(ctx context.Context, args map[string]interface{}) (*mcp.ToolResult, error) {
 		qid := mcpArgString(args, "queue_id")
 		if qid == "" {
-			return batchMCPTextResult("queue_id 不能为空", true), nil
+			return batchMCPTextResult("queue_id cannot be empty", true), nil
 		}
 		queue, exists := h.batchTaskManager.GetBatchQueue(qid)
 		if !exists {
-			return batchMCPTextResult("队列不存在: "+qid, true), nil
+			return batchMCPTextResult("Queue not found: "+qid, true), nil
 		}
 		if queue.Status != "completed" && queue.Status != "cancelled" {
-			return batchMCPTextResult("仅已完成或已取消的队列可以重跑，当前状态: "+queue.Status, true), nil
+			return batchMCPTextResult("Only completed or cancelled queues can be rerun, current status: "+queue.Status, true), nil
 		}
 		if !h.batchTaskManager.ResetQueueForRerun(qid) {
-			return batchMCPTextResult("重置队列失败", true), nil
+			return batchMCPTextResult("Failed to reset queue", true), nil
 		}
 		ok, err := h.startBatchQueueExecution(qid, false)
 		if !ok {
-			return batchMCPTextResult("启动失败", true), nil
+			return batchMCPTextResult("Failed to start", true), nil
 		}
 		if err != nil {
-			return batchMCPTextResult("启动失败: "+err.Error(), true), nil
+			return batchMCPTextResult("Failed to start: "+err.Error(), true), nil
 		}
 		logger.Info("MCP batch_task_rerun", zap.String("queueId", qid))
-		return batchMCPTextResult("已重置并重新启动队列。", false), nil
+		return batchMCPTextResult("Queue reset and restarted.", false), nil
 	})
 
 	// --- pause ---
@@ -330,13 +330,13 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	}, func(ctx context.Context, args map[string]interface{}) (*mcp.ToolResult, error) {
 		qid := mcpArgString(args, "queue_id")
 		if qid == "" {
-			return batchMCPTextResult("queue_id 不能为空", true), nil
+			return batchMCPTextResult("queue_id cannot be empty", true), nil
 		}
 		if !h.batchTaskManager.PauseQueue(qid) {
-			return batchMCPTextResult("无法暂停：队列不存在或当前非 running 状态", true), nil
+			return batchMCPTextResult("Cannot pause: queue does not exist or is not running", true), nil
 		}
 		logger.Info("MCP batch_task_pause", zap.String("queueId", qid))
-		return batchMCPTextResult("队列已暂停。", false), nil
+		return batchMCPTextResult("Queue paused.", false), nil
 	})
 
 	// --- delete queue ---
@@ -357,13 +357,13 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	}, func(ctx context.Context, args map[string]interface{}) (*mcp.ToolResult, error) {
 		qid := mcpArgString(args, "queue_id")
 		if qid == "" {
-			return batchMCPTextResult("queue_id 不能为空", true), nil
+			return batchMCPTextResult("queue_id cannot be empty", true), nil
 		}
 		if !h.batchTaskManager.DeleteQueue(qid) {
-			return batchMCPTextResult("删除失败：队列不存在", true), nil
+			return batchMCPTextResult("Delete failed: queue does not exist", true), nil
 		}
 		logger.Info("MCP batch_task_delete", zap.String("queueId", qid))
-		return batchMCPTextResult("队列已删除。", false), nil
+		return batchMCPTextResult("Queue deleted.", false), nil
 	})
 
 	// --- update metadata (title/role/agentMode) ---
@@ -397,7 +397,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	}, func(ctx context.Context, args map[string]interface{}) (*mcp.ToolResult, error) {
 		qid := mcpArgString(args, "queue_id")
 		if qid == "" {
-			return batchMCPTextResult("queue_id 不能为空", true), nil
+			return batchMCPTextResult("queue_id cannot be empty", true), nil
 		}
 		title := mcpArgString(args, "title")
 		role := mcpArgString(args, "role")
@@ -440,25 +440,25 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 	}, func(ctx context.Context, args map[string]interface{}) (*mcp.ToolResult, error) {
 		qid := mcpArgString(args, "queue_id")
 		if qid == "" {
-			return batchMCPTextResult("queue_id 不能为空", true), nil
+			return batchMCPTextResult("queue_id cannot be empty", true), nil
 		}
 		queue, exists := h.batchTaskManager.GetBatchQueue(qid)
 		if !exists {
-			return batchMCPTextResult("队列不存在: "+qid, true), nil
+			return batchMCPTextResult("Queue not found: "+qid, true), nil
 		}
 		if queue.Status == "running" {
-			return batchMCPTextResult("队列正在运行中，无法修改调度配置", true), nil
+			return batchMCPTextResult("Queue is running, cannot modify schedule config", true), nil
 		}
 		scheduleMode := normalizeBatchQueueScheduleMode(mcpArgString(args, "schedule_mode"))
 		cronExpr := strings.TrimSpace(mcpArgString(args, "cron_expr"))
 		var nextRunAt *time.Time
 		if scheduleMode == "cron" {
 			if cronExpr == "" {
-				return batchMCPTextResult("Cron 调度模式下 cron_expr 不能为空", true), nil
+				return batchMCPTextResult("cron_expr cannot be empty in Cron schedule mode", true), nil
 			}
 			sch, err := h.batchCronParser.Parse(cronExpr)
 			if err != nil {
-				return batchMCPTextResult("无效的 Cron 表达式: "+err.Error(), true), nil
+				return batchMCPTextResult("Invalid Cron expression: "+err.Error(), true), nil
 			}
 			n := sch.Next(time.Now())
 			nextRunAt = &n
@@ -494,17 +494,17 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 	}, func(ctx context.Context, args map[string]interface{}) (*mcp.ToolResult, error) {
 		qid := mcpArgString(args, "queue_id")
 		if qid == "" {
-			return batchMCPTextResult("queue_id 不能为空", true), nil
+			return batchMCPTextResult("queue_id cannot be empty", true), nil
 		}
 		en, ok := mcpArgBool(args, "schedule_enabled")
 		if !ok {
-			return batchMCPTextResult("schedule_enabled 必须为布尔值", true), nil
+			return batchMCPTextResult("schedule_enabled must be a boolean", true), nil
 		}
 		if _, exists := h.batchTaskManager.GetBatchQueue(qid); !exists {
-			return batchMCPTextResult("队列不存在", true), nil
+			return batchMCPTextResult("Queue not found", true), nil
 		}
 		if !h.batchTaskManager.SetScheduleEnabled(qid, en) {
-			return batchMCPTextResult("更新失败", true), nil
+			return batchMCPTextResult("Update failed", true), nil
 		}
 		queue, _ := h.batchTaskManager.GetBatchQueue(qid)
 		logger.Info("MCP batch_task_schedule_enabled", zap.String("queueId", qid), zap.Bool("enabled", en))
@@ -534,7 +534,7 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 		qid := mcpArgString(args, "queue_id")
 		msg := strings.TrimSpace(mcpArgString(args, "message"))
 		if qid == "" || msg == "" {
-			return batchMCPTextResult("queue_id 与 message 均不能为空", true), nil
+			return batchMCPTextResult("queue_id and message cannot both be empty", true), nil
 		}
 		task, err := h.batchTaskManager.AddTaskToQueue(qid, msg)
 		if err != nil {
@@ -573,7 +573,7 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 		tid := mcpArgString(args, "task_id")
 		msg := strings.TrimSpace(mcpArgString(args, "message"))
 		if qid == "" || tid == "" || msg == "" {
-			return batchMCPTextResult("queue_id、task_id、message 均不能为空", true), nil
+			return batchMCPTextResult("queue_id, task_id, and message cannot all be empty", true), nil
 		}
 		if err := h.batchTaskManager.UpdateTaskMessage(qid, tid, msg); err != nil {
 			return batchMCPTextResult(err.Error(), true), nil
@@ -606,7 +606,7 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 		qid := mcpArgString(args, "queue_id")
 		tid := mcpArgString(args, "task_id")
 		if qid == "" || tid == "" {
-			return batchMCPTextResult("queue_id 与 task_id 均不能为空", true), nil
+			return batchMCPTextResult("queue_id and task_id cannot both be empty", true), nil
 		}
 		if err := h.batchTaskManager.DeleteTask(qid, tid); err != nil {
 			return batchMCPTextResult(err.Error(), true), nil
@@ -616,7 +616,7 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 		return batchMCPJSONResult(queue)
 	})
 
-	logger.Info("批量任务 MCP 工具已注册", zap.Int("count", 12))
+	logger.Info("Batch task MCP tools registered", zap.Int("count", 12))
 }
 
 // --- batch_task_list 精简结构（避免把每条子任务的 result 等大段文本塞进列表上下文） ---
@@ -725,7 +725,7 @@ func batchMCPTextResult(text string, isErr bool) *mcp.ToolResult {
 func batchMCPJSONResult(v interface{}) (*mcp.ToolResult, error) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return batchMCPTextResult(fmt.Sprintf("JSON 编码失败: %v", err), true), nil
+		return batchMCPTextResult(fmt.Sprintf("JSON encoding failed: %v", err), true), nil
 	}
 	return &mcp.ToolResult{Content: []mcp.Content{{Type: "text", Text: string(b)}}}, nil
 }
@@ -759,7 +759,7 @@ func batchMCPTasksFromArgs(args map[string]interface{}) ([]string, string) {
 			return out, ""
 		}
 	}
-	return nil, "需要提供 tasks（字符串数组）或 tasks_text（多行文本，每行一条任务）"
+	return nil, "Need to provide tasks (string array) or tasks_text (multiline text, one task per line)"
 }
 
 func mcpArgString(args map[string]interface{}, key string) string {

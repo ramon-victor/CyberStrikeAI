@@ -63,8 +63,8 @@ func (h *AttackChainHandler) GetAttackChain(c *gin.Context) {
 	// 检查对话是否存在
 	_, err := h.db.GetConversation(conversationID)
 	if err != nil {
-		h.logger.Warn("对话不存在", zap.String("conversationId", conversationID), zap.Error(err))
-		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
+		h.logger.Warn("Conversation not found", zap.String("conversationId", conversationID), zap.Error(err))
+		c.JSON(http.StatusNotFound, gin.H{"error": "Conversation not found"})
 		return
 	}
 
@@ -88,7 +88,7 @@ func (h *AttackChainHandler) GetAttackChain(c *gin.Context) {
 	acquired := lock.TryLock()
 	if !acquired {
 		h.logger.Info("攻击链正在生成中，请稍后再试", zap.String("conversationId", conversationID))
-		c.JSON(http.StatusConflict, gin.H{"error": "攻击链正在生成中，请稍后再试"})
+		c.JSON(http.StatusConflict, gin.H{"error": "Attack chain is being generated, please try again later"})
 		return
 	}
 	defer lock.Unlock()
@@ -131,8 +131,8 @@ func (h *AttackChainHandler) RegenerateAttackChain(c *gin.Context) {
 	// 检查对话是否存在
 	_, err := h.db.GetConversation(conversationID)
 	if err != nil {
-		h.logger.Warn("对话不存在", zap.String("conversationId", conversationID), zap.Error(err))
-		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
+		h.logger.Warn("Conversation not found", zap.String("conversationId", conversationID), zap.Error(err))
+		c.JSON(http.StatusNotFound, gin.H{"error": "Conversation not found"})
 		return
 	}
 
@@ -148,7 +148,7 @@ func (h *AttackChainHandler) RegenerateAttackChain(c *gin.Context) {
 	acquired := lock.TryLock()
 	if !acquired {
 		h.logger.Info("攻击链正在生成中，请稍后再试", zap.String("conversationId", conversationID))
-		c.JSON(http.StatusConflict, gin.H{"error": "攻击链正在生成中，请稍后再试"})
+		c.JSON(http.StatusConflict, gin.H{"error": "Attack chain is being generated, please try again later"})
 		return
 	}
 	defer lock.Unlock()

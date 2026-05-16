@@ -61,7 +61,7 @@ async function refreshDashboard() {
             setEl('dashboard-resource-' + k, '…');
         });
         var chartPlaceholder = document.getElementById('dashboard-tools-pie-placeholder');
-        if (chartPlaceholder) { chartPlaceholder.style.removeProperty('display'); chartPlaceholder.textContent = (typeof window.t === 'function' ? window.t('common.loading') : '加载中…'); }
+        if (chartPlaceholder) { chartPlaceholder.style.removeProperty('display'); chartPlaceholder.textContent = (typeof window.t === 'function' ? window.t('common.loading') : 'Loading\u2026'); }
         var barChartEl = document.getElementById('dashboard-tools-bar-chart');
         if (barChartEl) { barChartEl.style.display = 'none'; barChartEl.innerHTML = ''; }
     }
@@ -167,12 +167,12 @@ async function refreshDashboard() {
         // KPI 副标：N 待执行 / 全部空闲
         if (batchPendingCount > 0) {
             setKpiSubBadge('dashboard-kpi-tasks-sub-text',
-                dt('dashboard.pendingCountLabel', { count: batchPendingCount }, batchPendingCount + ' 待执行'),
+                dt('dashboard.pendingCountLabel', { count: batchPendingCount }, batchPendingCount + ' pending'),
                 'pending');
         } else if (totalRunning === 0) {
-            setKpiSubBadge('dashboard-kpi-tasks-sub-text', dt('dashboard.allIdle', null, '系统空闲'), 'idle');
+            setKpiSubBadge('dashboard-kpi-tasks-sub-text', dt('dashboard.allIdle', null, 'System idle'), 'idle');
         } else {
-            setKpiSubBadge('dashboard-kpi-tasks-sub-text', dt('dashboard.executingNow', null, '正在执行'), 'running');
+            setKpiSubBadge('dashboard-kpi-tasks-sub-text', dt('dashboard.executingNow', null, 'Executing'), 'running');
         }
 
         // 解析「待处理」口径的真实计数（专门拉的接口）；若该接口失败则退回 by_severity
@@ -228,14 +228,14 @@ async function refreshDashboard() {
             const subTextEl = document.getElementById('dashboard-kpi-vuln-sub-text');
             if (subTextEl) {
                 if (total === 0) {
-                    subTextEl.textContent = dt('dashboard.allClear', null, '暂无新增风险');
+                    subTextEl.textContent = dt('dashboard.allClear', null, 'No new risks');
                 } else if (openCriticalCount === 0 && openHighCount === 0) {
                     // 高严重度全部已处置 → 给正反馈
-                    subTextEl.textContent = dt('dashboard.allHandled', null, '高严重度已全部处置');
+                    subTextEl.textContent = dt('dashboard.allHandled', null, 'All high severity handled');
                 } else if (openHighCount > 0) {
-                    subTextEl.textContent = dt('dashboard.openHighCountLabel', { count: openHighCount }, '待处理高危 ' + openHighCount);
+                    subTextEl.textContent = dt('dashboard.openHighCountLabel', { count: openHighCount }, 'Pending high: ' + openHighCount);
                 } else {
-                    subTextEl.textContent = dt('dashboard.totalCount', { count: total }, '共 ' + total + ' 个');
+                    subTextEl.textContent = dt('dashboard.totalCount', { count: total }, total + ' total');
                 }
             }
         } else {
@@ -266,7 +266,7 @@ async function refreshDashboard() {
             setEl('dashboard-batch-pending', String(pending));
             setEl('dashboard-batch-running', String(running));
             setEl('dashboard-batch-done', String(done));
-            setEl('dashboard-batch-total', total > 0 ? (typeof window.t === 'function' ? window.t('dashboard.totalCount', { count: total }) : `共 ${total} 个`) : (typeof window.t === 'function' ? window.t('dashboard.noTasks') : '暂无任务'));
+            setEl('dashboard-batch-total', total > 0 ? (typeof window.t === 'function' ? window.t('dashboard.totalCount', { count: total }) : `${total} total`) : (typeof window.t === 'function' ? window.t('dashboard.noTasks') : 'No tasks'));
             
             // 更新进度条
             if (total > 0) {
@@ -310,7 +310,7 @@ async function refreshDashboard() {
             toolsFailedCount = totalFailed;
             setEl('dashboard-kpi-tools-calls', formatNumber(totalCalls));
             setKpiSubText('dashboard-kpi-tools-sub-text',
-                dt('dashboard.toolsCountLabel', { count: toolsCount }, toolsCount + ' 个工具'));
+                dt('dashboard.toolsCountLabel', { count: toolsCount }, toolsCount + ' tools'));
             if (totalCalls > 0) {
                 toolsSuccessRate = (totalSuccess / totalCalls) * 100;
                 const rateStr = toolsSuccessRate.toFixed(1) + '%';
@@ -318,7 +318,7 @@ async function refreshDashboard() {
                 setKpiRateBadge('dashboard-kpi-rate-sub-text', toolsSuccessRate, totalFailed);
             } else {
                 setEl('dashboard-kpi-success-rate', '-');
-                setKpiSubText('dashboard-kpi-rate-sub-text', dt('dashboard.noCallYet', null, '暂无调用'));
+                setKpiSubText('dashboard-kpi-rate-sub-text', dt('dashboard.noCallYet', null, 'No calls yet'));
             }
             renderDashboardToolsBar(monitorRes);
         } else {
@@ -341,7 +341,7 @@ async function refreshDashboard() {
         // 知识：填充能力总览中的「知识」一行
         if (knowledgeRes && typeof knowledgeRes === 'object') {
             if (knowledgeRes.enabled === false) {
-                setEl('dashboard-resource-knowledge', dt('dashboard.notEnabled', null, '未启用'));
+                setEl('dashboard-resource-knowledge', dt('dashboard.notEnabled', null, 'Not enabled'));
             } else {
                 const items = knowledgeRes.total_items ?? 0;
                 setEl('dashboard-resource-knowledge', formatNumber(items));
@@ -456,7 +456,7 @@ async function refreshDashboard() {
         setRecentVulnsError();
         renderDashboardToolsBar(null);
         var ph = document.getElementById('dashboard-tools-pie-placeholder');
-        if (ph) { ph.style.removeProperty('display'); ph.textContent = (typeof window.t === 'function' ? window.t('dashboard.noCallData') : '暂无调用数据'); }
+        if (ph) { ph.style.removeProperty('display'); ph.textContent = (typeof window.t === 'function' ? window.t('dashboard.noCallData') : 'No call data'); }
     } finally {
         if (dashboardState.currentController === controller) {
             dashboardState.currentController = null;
@@ -569,13 +569,13 @@ function setKpiRateBadge(id, rate, failedCount) {
     if (!el) return;
     el.classList.remove('is-pending', 'is-running', 'is-idle', 'is-warning', 'is-success', 'is-danger');
     if (rate >= 95) {
-        el.textContent = dt('dashboard.healthyStatus', null, '运行平稳');
+        el.textContent = dt('dashboard.healthyStatus', null, 'Healthy');
         el.classList.add('is-success');
     } else if (rate >= 80) {
-        el.textContent = dt('dashboard.normalStatus', null, '基本正常') + (failedCount > 0 ? ' · ' + dt('dashboard.failedNCalls', { count: failedCount }, failedCount + ' 失败') : '');
+        el.textContent = dt('dashboard.normalStatus', null, 'Normal') + (failedCount > 0 ? ' \u00b7 ' + dt('dashboard.failedNCalls', { count: failedCount }, failedCount + ' failed') : '');
         el.classList.add('is-warning');
     } else {
-        el.textContent = dt('dashboard.degradedStatus', null, '需要关注') + (failedCount > 0 ? ' · ' + dt('dashboard.failedNCalls', { count: failedCount }, failedCount + ' 失败') : '');
+        el.textContent = dt('dashboard.degradedStatus', null, 'Needs attention') + (failedCount > 0 ? ' \u00b7 ' + dt('dashboard.failedNCalls', { count: failedCount }, failedCount + ' failed') : '');
         el.classList.add('is-danger');
     }
 }
@@ -622,27 +622,27 @@ function renderDashboardAlertBanner(stats) {
 
     if (stats.criticalCount > 0) {
         reasons.push(dt('dashboard.alertCriticalReason', { count: stats.criticalCount },
-            '存在 ' + stats.criticalCount + ' 个待处理的严重漏洞，建议立即处置'));
+            stats.criticalCount + ' pending critical vulnerabilities. Immediate action recommended'));
         reasonKeys.push('crit:' + stats.criticalCount);
         level = 'danger';
     }
     if (stats.hitlPending > 0) {
         // HITL 待审批是阻塞 Agent 流程的，独立成一条；不影响 level（除非已经是 info 升 warning）
         reasons.push(dt('dashboard.alertHitlReason', { count: stats.hitlPending },
-            '有 ' + stats.hitlPending + ' 个待审批的人机协同请求，Agent 正在等待你的决策'));
+            stats.hitlPending + ' pending HITL approval requests. Agent is waiting for your decision'));
         reasonKeys.push('hitl:' + stats.hitlPending);
         if (level === 'info') level = 'warning';
     }
     if (stats.successRate >= 0 && stats.successRate < 80 && stats.failedTools > 0) {
         reasons.push(dt('dashboard.alertFailedReason', { count: stats.failedTools },
-            '工具调用成功率偏低（' + stats.failedTools + ' 次失败），请检查 MCP 监控'));
+            'Low tool call success rate (' + stats.failedTools + ' failures). Check MCP monitor'));
         reasonKeys.push('rate:' + Math.round(stats.successRate) + ':' + stats.failedTools);
         if (level === 'info') level = 'warning';
     }
     if (stats.externalMcpDown > 0) {
         // External MCP 异常服务器数 > 0：影响工具可用性
         reasons.push(dt('dashboard.alertMcpDownReason', { count: stats.externalMcpDown },
-            'External MCP 服务器有 ' + stats.externalMcpDown + ' 个未运行，相关工具不可用'));
+            'External MCP has ' + stats.externalMcpDown + ' server(s) not running. Related tools unavailable'));
         reasonKeys.push('mcp:' + stats.externalMcpDown);
         if (level === 'info') level = 'warning';
     }
@@ -683,11 +683,11 @@ function renderDashboardAlertBanner(stats) {
     banner.classList.add('is-' + level);
 
     if (level === 'danger') {
-        titleEl.textContent = dt('dashboard.alertDangerTitle', null, '需要立即处理');
+        titleEl.textContent = dt('dashboard.alertDangerTitle', null, 'Action required');
     } else if (level === 'warning') {
-        titleEl.textContent = dt('dashboard.alertWarningTitle', null, '需要关注');
+        titleEl.textContent = dt('dashboard.alertWarningTitle', null, 'Needs attention');
     } else {
-        titleEl.textContent = dt('dashboard.alertTitle', null, '提醒');
+        titleEl.textContent = dt('dashboard.alertTitle', null, 'Notice');
     }
 
     descEl.textContent = reasons.join('；');
@@ -696,28 +696,28 @@ function renderDashboardAlertBanner(stats) {
     if (stats.criticalCount > 0) {
         const btn = document.createElement('button');
         btn.className = 'dashboard-alert-btn';
-        btn.textContent = dt('dashboard.viewVulns', null, '查看漏洞');
+        btn.textContent = dt('dashboard.viewVulns', null, 'View vulnerabilities');
         btn.onclick = function () { try { switchPage('vulnerabilities'); } catch (e) {} };
         actsEl.appendChild(btn);
     }
     if (stats.hitlPending > 0) {
         const btn = document.createElement('button');
         btn.className = 'dashboard-alert-btn dashboard-alert-btn-secondary';
-        btn.textContent = dt('dashboard.viewHitl', null, '前往审批');
+        btn.textContent = dt('dashboard.viewHitl', null, 'Go to approval');
         btn.onclick = function () { try { switchPage('hitl'); } catch (e) {} };
         actsEl.appendChild(btn);
     }
     if (stats.successRate >= 0 && stats.successRate < 80) {
         const btn = document.createElement('button');
         btn.className = 'dashboard-alert-btn dashboard-alert-btn-secondary';
-        btn.textContent = dt('dashboard.viewMonitor', null, '查看监控');
+        btn.textContent = dt('dashboard.viewMonitor', null, 'View monitor');
         btn.onclick = function () { try { switchPage('mcp-monitor'); } catch (e) {} };
         actsEl.appendChild(btn);
     }
     if (stats.externalMcpDown > 0) {
         const btn = document.createElement('button');
         btn.className = 'dashboard-alert-btn dashboard-alert-btn-secondary';
-        btn.textContent = dt('dashboard.viewMcpManagement', null, '管理 MCP');
+        btn.textContent = dt('dashboard.viewMcpManagement', null, 'Manage MCP');
         btn.onclick = function () { try { switchPage('mcp-management'); } catch (e) {} };
         actsEl.appendChild(btn);
     }
@@ -758,14 +758,14 @@ function renderExternalMcpHealth(stats) {
         healthEl.classList.remove('is-ok', 'is-warning', 'is-danger');
         if (down === 0) {
             healthEl.classList.add('is-ok');
-            healthEl.textContent = dt('dashboard.mcpAllRunning', null, '全部运行');
+            healthEl.textContent = dt('dashboard.mcpAllRunning', null, 'All running');
         } else if (down < enabled) {
             healthEl.classList.add('is-warning');
             healthEl.textContent = dt('dashboard.mcpPartialDown', { count: down },
-                down + ' 个未运行');
+                down + ' not running');
         } else {
             healthEl.classList.add('is-danger');
-            healthEl.textContent = dt('dashboard.mcpAllDown', null, '全部未运行');
+            healthEl.textContent = dt('dashboard.mcpAllDown', null, 'All down');
         }
         healthEl.hidden = false;
     }
@@ -821,7 +821,7 @@ function renderRecentEvents(notifRes) {
 
     listEl.innerHTML = top.map(function (it) {
         var level = it.level || 'p2';
-        var title = esc(it.title || it.message || dt('dashboard.eventUntitled', null, '事件'));
+        var title = esc(it.title || it.message || dt('dashboard.eventUntitled', null, 'Event'));
         var msg = esc(it.message || it.summary || it.desc || '');
         var whenRaw = timeAgoStr(it.ts || it.createdAt || it.created_at);
         var when = esc(whenRaw || '—');
@@ -854,8 +854,8 @@ function renderRecommendedActions(state) {
             level: 'urgent',
             icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none"/></svg>',
             title: dt('dashboard.recoFixCritical', { count: state.openCriticalCount },
-                '修复 ' + state.openCriticalCount + ' 个待处理严重漏洞'),
-            desc: dt('dashboard.recoFixCriticalDesc', null, '严重等级的漏洞应优先处置'),
+                'Fix ' + state.openCriticalCount + ' pending critical vulnerabilities'),
+            desc: dt('dashboard.recoFixCriticalDesc', null, 'Critical vulnerabilities should be addressed first'),
             page: 'vulnerabilities'
         });
     }
@@ -865,8 +865,8 @@ function renderRecommendedActions(state) {
             level: 'urgent',
             icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
             title: dt('dashboard.recoApproveHitl', { count: state.hitlPending },
-                '审批 ' + state.hitlPending + ' 个 HITL 请求'),
-            desc: dt('dashboard.recoApproveHitlDesc', null, 'Agent 正在等待你的决策才能继续'),
+                'Approve ' + state.hitlPending + ' HITL requests'),
+            desc: dt('dashboard.recoApproveHitlDesc', null, 'Agent is waiting for your decision to continue'),
             page: 'hitl'
         });
     }
@@ -876,8 +876,8 @@ function renderRecommendedActions(state) {
             level: 'warning',
             icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
             title: dt('dashboard.recoRestartMcp', { count: state.externalMcpDown },
-                '检查 ' + state.externalMcpDown + ' 个未运行的 External MCP'),
-            desc: dt('dashboard.recoRestartMcpDesc', null, '相关工具在 MCP 服务恢复前不可用'),
+                'Check ' + state.externalMcpDown + ' non-running External MCP servers'),
+            desc: dt('dashboard.recoRestartMcpDesc', null, 'Related tools are unavailable until MCP services recover'),
             page: 'mcp-management'
         });
     }
@@ -887,8 +887,8 @@ function renderRecommendedActions(state) {
             level: 'warning',
             icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
             title: dt('dashboard.recoCheckMonitor', { count: state.failedTools },
-                '排查 ' + state.failedTools + ' 次工具调用失败'),
-            desc: dt('dashboard.recoCheckMonitorDesc', null, '在 MCP 监控中查看失败的请求详情'),
+                'Investigate ' + state.failedTools + ' failed tool calls'),
+            desc: dt('dashboard.recoCheckMonitorDesc', null, 'Check failed request details in MCP monitor'),
             page: 'mcp-monitor'
         });
     }
@@ -897,8 +897,8 @@ function renderRecommendedActions(state) {
         actions.push({
             level: 'setup',
             icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
-            title: dt('dashboard.recoSetupMcp', null, '配置首个 MCP 工具'),
-            desc: dt('dashboard.recoSetupMcpDesc', null, '安装 MCP 服务后 Agent 才能调用具体能力'),
+            title: dt('dashboard.recoSetupMcp', null, 'Configure your first MCP tool'),
+            desc: dt('dashboard.recoSetupMcpDesc', null, 'After installing MCP services, the Agent can call specific capabilities'),
             page: 'mcp-management'
         });
     }
@@ -906,8 +906,8 @@ function renderRecommendedActions(state) {
         actions.push({
             level: 'setup',
             icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
-            title: dt('dashboard.recoStartScan', null, '在对话中发起扫描'),
-            desc: dt('dashboard.recoStartScanDesc', null, '在对话中描述目标，让 AI 协助执行'),
+            title: dt('dashboard.recoStartScan', null, 'Start a scan in chat'),
+            desc: dt('dashboard.recoStartScanDesc', null, 'Describe your target in chat and let AI assist'),
             page: 'chat'
         });
     }
@@ -1027,7 +1027,7 @@ function stopDashboardAutoRefresh() {
 
 // 严重度配色及中文标签
 var SEVERITY_LABELS_FALLBACK = {
-    critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息'
+    critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low', info: 'Info'
 };
 
 function severityShortLabel(id) {
@@ -1041,13 +1041,13 @@ function timeAgoStr(iso) {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return '';
     const diffSec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
-    if (diffSec < 60) return dt('common.justNow', null, '刚刚');
+    if (diffSec < 60) return dt('common.justNow', null, 'Just now');
     const min = Math.floor(diffSec / 60);
-    if (min < 60) return dt('common.minutesAgo', { n: min }, min + ' 分钟前');
+    if (min < 60) return dt('common.minutesAgo', { n: min }, min + ' min ago');
     const hr = Math.floor(min / 60);
-    if (hr < 24) return dt('common.hoursAgo', { n: hr }, hr + ' 小时前');
+    if (hr < 24) return dt('common.hoursAgo', { n: hr }, hr + ' hr ago');
     const day = Math.floor(hr / 24);
-    if (day < 7) return dt('common.daysAgo', { n: day }, day + ' 天前');
+    if (day < 7) return dt('common.daysAgo', { n: day }, day + ' days ago');
     // 超过一周显示日期
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
@@ -1061,7 +1061,7 @@ function setRecentVulnsLoading() {
     if (empty) {
         empty.hidden = false;
         empty.classList.remove('is-rich');
-        empty.textContent = dt('common.loading', null, '加载中…');
+        empty.textContent = dt('common.loading', null, 'Loading\u2026');
     }
 }
 
@@ -1073,7 +1073,7 @@ function setRecentVulnsError() {
     if (empty) {
         empty.hidden = false;
         empty.classList.remove('is-rich');
-        empty.textContent = dt('common.loadFailed', null, '加载失败');
+        empty.textContent = dt('common.loadFailed', null, 'Load failed');
     }
 }
 
@@ -1094,10 +1094,10 @@ function renderRecentVulns(res) {
                 '<span class="dashboard-empty-icon" aria-hidden="true">' +
                 '<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>' +
                 '</span>' +
-                '<div class="dashboard-empty-title">' + esc(dt('dashboard.noVulnYet', null, '暂无最近漏洞')) + '</div>' +
-                '<div class="dashboard-empty-desc">' + esc(dt('dashboard.noVulnDesc', null, '此处展示近期漏洞记录；在对话中完成检测后，新结果会出现在这里')) + '</div>' +
+                '<div class="dashboard-empty-title">' + esc(dt('dashboard.noVulnYet', null, 'No recent vulnerabilities')) + '</div>' +
+                '<div class="dashboard-empty-desc">' + esc(dt('dashboard.noVulnDesc', null, 'Recent vulnerability records appear here. New results will show up after completing a scan in chat.')) + '</div>' +
                 '<button type="button" class="dashboard-empty-action" data-action="scan">' +
-                esc(dt('dashboard.startScanBtn', null, '前往对话发起扫描')) + ' →</button>'
+                esc(dt('dashboard.startScanBtn', null, 'Go to chat to start a scan')) + ' \u2192</button>'
             );
             var btn = empty.querySelector('[data-action="scan"]');
             if (btn) btn.onclick = function () { try { switchPage('chat'); } catch (_) {} };
@@ -1120,7 +1120,7 @@ function renderRecentVulns(res) {
         item.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); item.click(); } };
 
         const severityBadge = '<span class="dashboard-recent-vuln-sev sev-' + sev + '">' + esc(severityShortLabel(sev)) + '</span>';
-        const title = '<span class="dashboard-recent-vuln-title" title="' + esc(v.title || '') + '">' + esc(v.title || dt('common.untitled', null, '无标题')) + '</span>';
+        const title = '<span class="dashboard-recent-vuln-title" title="' + esc(v.title || '') + '">' + esc(v.title || dt('common.untitled', null, 'Untitled')) + '</span>';
         const target = v.target ? ('<span class="dashboard-recent-vuln-target" title="' + esc(v.target) + '">' + esc(v.target) + '</span>') : '<span class="dashboard-recent-vuln-target"></span>';
         const statusPill = '<span class="dashboard-recent-vuln-status st-' + esc(statusKey(status)) + '"><span class="dashboard-recent-vuln-status-dot"></span>' + esc(statusShortLabel(status)) + '</span>';
         const time = '<span class="dashboard-recent-vuln-time">' + esc(timeAgoStr(v.created_at)) + '</span>';
@@ -1141,10 +1141,10 @@ function statusKey(s) {
 
 function statusShortLabel(s) {
     const k = statusKey(s);
-    if (k === 'fixed') return dt('dashboard.statusFixed', null, '已修复');
-    if (k === 'confirmed') return dt('dashboard.statusConfirmed', null, '已确认');
-    if (k === 'fp') return dt('dashboard.statusFalsePositive', null, '误报');
-    return dt('dashboard.statusOpen', null, '待处理');
+    if (k === 'fixed') return dt('dashboard.statusFixed', null, 'Fixed');
+    if (k === 'confirmed') return dt('dashboard.statusConfirmed', null, 'Confirmed');
+    if (k === 'fp') return dt('dashboard.statusFalsePositive', null, 'False positive');
+    return dt('dashboard.statusOpen', null, 'Pending');
 }
 
 // 格式化数字，添加千位分隔符
@@ -1248,15 +1248,15 @@ function renderSeverityInsights(bySeverityOpen, totalOpen, recentVulnsRes) {
     var level, levelKey, levelFallback;
     var t = Number(totalOpen || 0) || 0;
     if (t === 0 || score === 0) {
-        level = 'safe'; levelKey = 'dashboard.riskSafe'; levelFallback = '安全';
+        level = 'safe'; levelKey = 'dashboard.riskSafe'; levelFallback = 'Safe';
     } else if (score <= 3) {
-        level = 'low'; levelKey = 'dashboard.riskLow'; levelFallback = '低';
+        level = 'low'; levelKey = 'dashboard.riskLow'; levelFallback = 'Low';
     } else if (score <= 10) {
-        level = 'medium'; levelKey = 'dashboard.riskMedium'; levelFallback = '中';
+        level = 'medium'; levelKey = 'dashboard.riskMedium'; levelFallback = 'Medium';
     } else if (score <= 30) {
-        level = 'high'; levelKey = 'dashboard.riskHigh'; levelFallback = '高';
+        level = 'high'; levelKey = 'dashboard.riskHigh'; levelFallback = 'High';
     } else {
-        level = 'severe'; levelKey = 'dashboard.riskSevere'; levelFallback = '极高';
+        level = 'severe'; levelKey = 'dashboard.riskSevere'; levelFallback = 'Severe';
     }
 
     if (riskBox) riskBox.setAttribute('data-level', level);
@@ -1284,7 +1284,7 @@ function renderSeverityInsights(bySeverityOpen, totalOpen, recentVulnsRes) {
             latestEl.textContent = timeStr;
             latestEl.classList.remove('is-empty');
         } else {
-            latestEl.textContent = dt('dashboard.noneYet', null, '暂无');
+            latestEl.textContent = dt('dashboard.noneYet', null, 'None');
             latestEl.classList.add('is-empty');
         }
     }
@@ -1297,7 +1297,7 @@ function renderDashboardToolsBar(monitorRes) {
 
     if (!monitorRes || typeof monitorRes !== 'object') {
         placeholder.style.removeProperty('display');
-        placeholder.textContent = (typeof window.t === 'function' ? window.t('dashboard.noCallData') : '暂无调用数据');
+        placeholder.textContent = (typeof window.t === 'function' ? window.t('dashboard.noCallData') : 'No call data');
         barChartEl.style.display = 'none';
         barChartEl.innerHTML = '';
         return;
@@ -1313,7 +1313,7 @@ function renderDashboardToolsBar(monitorRes) {
 
     if (entries.length === 0) {
         placeholder.style.removeProperty('display');
-        placeholder.textContent = (typeof window.t === 'function' ? window.t('dashboard.noCallData') : '暂无调用数据');
+        placeholder.textContent = (typeof window.t === 'function' ? window.t('dashboard.noCallData') : 'No call data');
         barChartEl.style.display = 'none';
         barChartEl.innerHTML = '';
         return;
@@ -1438,11 +1438,11 @@ var severityDonutTooltipTimer = null;
 var severityDonutHoverClearTimer = null;
 
 var SEVERITY_DEFAULT_LABELS = {
-    critical: '严重',
-    high: '高危',
-    medium: '中危',
-    low: '低危',
-    info: '信息'
+    critical: 'Critical',
+    high: 'High',
+    medium: 'Medium',
+    low: 'Low',
+    info: 'Info'
 };
 
 function severityLabel(id) {
@@ -1659,7 +1659,7 @@ function resetSeverityDonutCenter(skipTotalSnapshot) {
     if (!skipTotalSnapshot) severityDonutCenterDisplayed.total = n;
     severityDonutCenterDisplayed.hoverCount = null;
     if (labelEl) {
-        labelEl.textContent = (typeof window.t === 'function' ? window.t('dashboard.totalVulns') : '总漏洞数');
+        labelEl.textContent = (typeof window.t === 'function' ? window.t('dashboard.totalVulns') : 'Total vulnerabilities');
         labelEl.classList.remove('is-severity');
         labelEl.removeAttribute('data-severity');
     }
@@ -1746,7 +1746,7 @@ function clearSeverityDonutLegendHighlight() {
 function severityDonutTooltipText(severityId) {
     var count = (severityDonutState.bySeverity && severityDonutState.bySeverity[severityId]) || 0;
     var pct = severityDonutState.total > 0 ? Math.round((count / severityDonutState.total) * 100) : 0;
-    var hint = (typeof window.t === 'function' ? window.t('dashboard.severityClickHint') : '点击查看');
+    var hint = (typeof window.t === 'function' ? window.t('dashboard.severityClickHint') : 'Click to view');
     return severityLabel(severityId) + ' · ' + count + ' (' + pct + '%) — ' + hint;
 }
 

@@ -132,7 +132,7 @@ function handleUnauthorized({ message = null, silent = false } = {}) {
         if (typeof window !== 'undefined' && typeof window.t === 'function') {
             finalMessage = window.t('auth.sessionExpired');
         } else {
-            finalMessage = '认证已过期，请重新登录';
+            finalMessage = 'Authentication expired, please log in again';
         }
     }
     if (!silent) {
@@ -157,7 +157,7 @@ async function apiFetch(url, options = {}) {
         handleUnauthorized();
         const msg = (typeof window !== 'undefined' && typeof window.t === 'function')
             ? window.t('auth.unauthorized')
-            : '未授权访问';
+            : 'Unauthorized access';
         throw new Error(msg);
     }
     return response;
@@ -189,7 +189,7 @@ async function apiUploadWithProgress(url, formData, options = {}) {
                 handleUnauthorized();
                 const msg = (typeof window !== 'undefined' && typeof window.t === 'function')
                     ? window.t('auth.unauthorized')
-                    : '未授权访问';
+                    : 'Unauthorized access';
                 reject(new Error(msg));
                 return;
             }
@@ -226,7 +226,7 @@ async function submitLogin(event) {
         if (errorBox) {
             const msgEmpty = (typeof window !== 'undefined' && typeof window.t === 'function')
                 ? window.t('auth.enterPassword')
-                : '请输入密码';
+                : 'Please enter password';
             errorBox.textContent = msgEmpty;
             errorBox.style.display = 'block';
         }
@@ -250,7 +250,7 @@ async function submitLogin(event) {
             if (errorBox) {
                 const fallback = (typeof window !== 'undefined' && typeof window.t === 'function')
                     ? window.t('auth.loginFailedCheck')
-                    : '登录失败，请检查密码';
+                    : 'Login failed, please check password';
                 errorBox.textContent = result.error || fallback;
                 errorBox.style.display = 'block';
             }
@@ -270,7 +270,7 @@ async function submitLogin(event) {
         if (errorBox) {
             const fallback = (typeof window !== 'undefined' && typeof window.t === 'function')
                 ? window.t('auth.loginFailedRetry')
-                : '登录失败，请稍后重试';
+                : 'Login failed, please try again later';
             errorBox.textContent = fallback;
             errorBox.style.display = 'block';
         }
@@ -308,7 +308,7 @@ async function bootstrapApp() {
 function getStatusText(status) {
     const s = (status && String(status).toLowerCase()) || '';
     if (typeof window.t !== 'function') {
-        const fallback = { pending: '等待中', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已终止' };
+        const fallback = { pending: 'Pending', running: 'Running', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' };
         return fallback[s] || status;
     }
     const keyMap = { pending: 'mcpDetailModal.statusPending', running: 'mcpDetailModal.statusRunning', completed: 'mcpDetailModal.statusCompleted', failed: 'mcpDetailModal.statusFailed', cancelled: 'mcpDetailModal.statusCancelled' };
@@ -322,11 +322,11 @@ function formatDuration(ms) {
     const hours = Math.floor(minutes / 60);
     
     if (hours > 0) {
-        return `${hours}小时${minutes % 60}分钟`;
+        return `${hours}h${minutes % 60}m`;
     } else if (minutes > 0) {
-        return `${minutes}分钟${seconds % 60}秒`;
+        return `${minutes}m${seconds % 60}s`;
     } else {
-        return `${seconds}秒`;
+        return `${seconds}s`;
     }
 }
 
@@ -457,7 +457,7 @@ async function logout() {
         // 无论如何都清除本地认证信息
         clearAuthStorage();
         hideLoginOverlay();
-        showLoginOverlay(typeof window.t === 'function' ? window.t('auth.loggedOut') : '已退出登录');
+        showLoginOverlay(typeof window.t === 'function' ? window.t('auth.loggedOut') : 'Logged out');
     }
 }
 

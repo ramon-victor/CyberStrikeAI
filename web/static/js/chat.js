@@ -25,9 +25,9 @@ const DRAFT_SAVE_DELAY = 500; // 500ms防抖延迟
 
 // 对话文件上传相关（后端会拼接路径与内容发给大模型，前端不再重复发文件列表）
 const MAX_CHAT_FILES = 10;
-const CHAT_FILE_DEFAULT_PROMPT = '请根据上传的文件内容进行分析。';
+const CHAT_FILE_DEFAULT_PROMPT = 'Please analyze the uploaded file contents.';
 /** 与 handler.formatInterruptContinueUserMessage 首段一致；主对话不展示，仅迭代详情（user_interrupt_continue） */
-const CHAT_INTERRUPT_CONTINUE_USER_PREFIX = '【用户补充 / 中断后继续】';
+const CHAT_INTERRUPT_CONTINUE_USER_PREFIX = '[User supplement / Continue after interrupt]';
 function isInterruptContinueInjectChatMessage(content) {
     return typeof content === 'string' && content.trimStart().startsWith(CHAT_INTERRUPT_CONTINUE_USER_PREFIX);
 }
@@ -382,18 +382,18 @@ async function applyHitlSidebarConfig() {
 
         if (cid && typeof window.saveHitlConversationConfig === 'function') {
             await window.saveHitlConversationConfig(cid, cfg);
-            const ok = typeof window.t === 'function' ? window.t('chat.hitlApplyOkSync') : '人机协同配置已保存并同步到服务器。';
+            const ok = typeof window.t === 'function' ? window.t('chat.hitlApplyOkSync') : 'HITL config saved and synced to server.';
             showHitlApplyFeedback(ok, false);
         } else if (yamlMerged) {
-            const okYaml = typeof window.t === 'function' ? window.t('chat.hitlApplyOkWhitelistYaml') : '免审批工具已合并进 config.yaml 并生效。协同模式、超时等仍须选中会话后再点「应用」才会写入服务器。';
+            const okYaml = typeof window.t === 'function' ? window.t('chat.hitlApplyOkWhitelistYaml') : 'Whitelist tools merged into config.yaml and active. Mode, timeout etc. still require selecting a conversation and clicking "Apply" to write to server.';
             showHitlApplyFeedback(okYaml, false);
         } else {
-            const localOnly = typeof window.t === 'function' ? window.t('chat.hitlApplyOkLocal') : '已保存到本浏览器。';
+            const localOnly = typeof window.t === 'function' ? window.t('chat.hitlApplyOkLocal') : 'Saved to this browser.';
             showHitlApplyFeedback(localOnly, false);
         }
     } catch (e) {
         console.warn('applyHitlSidebarConfig', e);
-        const prefix = typeof window.t === 'function' ? window.t('chat.hitlApplyFail') : '同步到服务器失败';
+        const prefix = typeof window.t === 'function' ? window.t('chat.hitlApplyFail') : 'Failed to sync to server';
         const detail = (e && e.message) ? e.message : String(e);
         showHitlApplyFeedback(prefix + (detail ? '：' + detail : ''), true);
     } finally {
@@ -473,8 +473,8 @@ function getAgentModeLabelForValue(mode) {
         }
     }
     switch (mode) {
-        case CHAT_AGENT_MODE_REACT: return '原生 ReAct';
-        case CHAT_AGENT_MODE_EINO_SINGLE: return 'Eino 单代理';
+        case CHAT_AGENT_MODE_REACT: return 'Native ReAct';
+        case CHAT_AGENT_MODE_EINO_SINGLE: return 'Eino Single Agent';
         case 'deep': return 'Deep';
         case 'plan_execute': return 'Plan-Execute';
         case 'supervisor': return 'Supervisor';
@@ -834,7 +834,7 @@ async function sendMessage() {
         if (needWait) {
             const waitLabel = (typeof window.t === 'function')
                 ? window.t('chat.waitingAttachmentsUpload')
-                : '正在等待附件上传完成…';
+                : 'Waiting for attachments to finish uploading\u2026';
             chatAttachmentProgressSet(true, 0, waitLabel);
         }
         try {
@@ -846,7 +846,7 @@ async function sendMessage() {
         if (bad.length) {
             const hint = (typeof window.t === 'function')
                 ? window.t('chat.attachmentsUploadIncomplete')
-                : '部分附件未上传成功，请移除失败项或重新选择文件后再发送。';
+                : 'Some attachments failed to upload. Please remove failed items or re-select files before sending.';
             alert(hint);
             return;
         }
@@ -939,7 +939,7 @@ async function sendMessage() {
         });
         
         if (!response.ok) {
-            throw new Error('请求失败: ' + response.status);
+            throw new Error('Request failed: ' + response.status);
         }
 
         window.__csAgentLiveStream = {
@@ -1009,9 +1009,9 @@ async function sendMessage() {
         if (isNetwork && typeof window.t === 'function') {
             addMessage('system', window.t('chat.streamNetworkErrorHint', { detail: msg }));
         } else if (isNetwork) {
-            addMessage('system', '连接已中断（' + msg + '）。长时间任务可能仍在后端执行，请查看顶部运行中任务或稍后刷新对话。');
+            addMessage('system', 'Connection interrupted (' + msg + '). Long-running tasks may still be executing on the backend. Check active tasks above or refresh the conversation later.');
         } else {
-            addMessage('system', '错误: ' + msg);
+            addMessage('system', 'Error: ' + msg);
         }
         if (typeof loadActiveTasks === 'function') {
             loadActiveTasks();
@@ -1037,17 +1037,17 @@ function renderChatFileChips() {
         name.title = a.fileName;
         let label = a.fileName;
         if (a.uploading) {
-            label += ' · ' + ((typeof window.t === 'function') ? window.t('chat.attachmentUploading') : '上传中…');
+            label += ' \u00b7 ' + ((typeof window.t === 'function') ? window.t('chat.attachmentUploading') : 'Uploading\u2026');
         } else if (a.uploadError) {
-            label += ' · ' + ((typeof window.t === 'function') ? window.t('chat.attachmentUploadFailed') : '失败');
+            label += ' \u00b7 ' + ((typeof window.t === 'function') ? window.t('chat.attachmentUploadFailed') : 'Failed');
         }
         name.textContent = label;
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'chat-file-chip-remove';
-        remove.title = typeof window.t === 'function' ? window.t('chatGroup.remove') : '移除';
+        remove.title = typeof window.t === 'function' ? window.t('chatGroup.remove') : 'Remove';
         remove.innerHTML = '×';
-        remove.setAttribute('aria-label', '移除 ' + a.fileName);
+        remove.setAttribute('aria-label', 'Remove ' + a.fileName);
         remove.addEventListener('click', () => removeChatAttachment(i));
         chip.appendChild(name);
         chip.appendChild(remove);
@@ -1109,7 +1109,7 @@ function refreshChatAttachmentUploadProgress() {
             total: chatAttachments.length,
             percent: overall
         })
-        : ('上传附件 ' + (chatAttachments.length - uploading.length) + '/' + chatAttachments.length + ' · ' + overall + '%');
+        : ('Uploading attachments ' + (chatAttachments.length - uploading.length) + '/' + chatAttachments.length + ' \u00b7 ' + overall + '%');
     chatAttachmentProgressSet(true, overall, line);
 }
 
@@ -1156,7 +1156,7 @@ async function uploadOneChatAttachment(entry, file) {
             cur.uploadError = msg;
             cur.serverPath = null;
         }
-        alert(((typeof window.t === 'function') ? window.t('chat.attachmentUploadAlert', { name: file.name }) : ('上传失败：' + file.name)) + '\n' + msg);
+        alert(((typeof window.t === 'function') ? window.t('chat.attachmentUploadAlert', { name: file.name }) : ('Upload failed: ' + file.name)) + '\n' + msg);
     }
     renderChatFileChips();
     refreshChatAttachmentUploadProgress();
@@ -1166,7 +1166,7 @@ async function addFilesToChat(files) {
     if (!files || !files.length) return;
     const next = Array.from(files);
     if (chatAttachments.length + next.length > MAX_CHAT_FILES) {
-        alert('最多同时上传 ' + MAX_CHAT_FILES + ' 个文件，当前已选 ' + chatAttachments.length + ' 个。');
+        alert('Max ' + MAX_CHAT_FILES + ' files at once. Currently selected: ' + chatAttachments.length + '.');
         return;
     }
     next.forEach((file) => {
@@ -1579,14 +1579,14 @@ function renderMentionSuggestions({ showLoading = false } = {}) {
     const previousScrollTop = canPreserveScroll ? existingList.scrollTop : 0;
 
     if (showLoading) {
-        mentionSuggestionsEl.innerHTML = '<div class="mention-empty">' + (typeof window.t === 'function' ? window.t('chat.loadingTools') : '正在加载工具...') + '</div>';
+        mentionSuggestionsEl.innerHTML = '<div class="mention-empty">' + (typeof window.t === 'function' ? window.t('chat.loadingTools') : 'Loading tools...') + '</div>';
         mentionSuggestionsEl.style.display = 'block';
         delete mentionSuggestionsEl.dataset.lastMentionQuery;
         return;
     }
 
     if (!mentionFilteredTools.length) {
-        mentionSuggestionsEl.innerHTML = '<div class="mention-empty">' + (typeof window.t === 'function' ? window.t('chat.noMatchTools') : '没有匹配的工具') + '</div>';
+        mentionSuggestionsEl.innerHTML = '<div class="mention-empty">' + (typeof window.t === 'function' ? window.t('chat.noMatchTools') : 'No matching tools') + '</div>';
         mentionSuggestionsEl.style.display = 'block';
         mentionSuggestionsEl.dataset.lastMentionQuery = currentQuery;
         return;
@@ -1597,16 +1597,16 @@ function renderMentionSuggestions({ showLoading = false } = {}) {
         // 如果工具有 roleEnabled 字段（指定了角色），使用它；否则使用 enabled
         const toolEnabled = tool.roleEnabled !== undefined ? tool.roleEnabled : tool.enabled;
         const disabledClass = toolEnabled ? '' : 'disabled';
-        const badge = tool.isExternal ? '<span class="mention-item-badge">外部</span>' : '<span class="mention-item-badge internal">内置</span>';
+        const badge = tool.isExternal ? '<span class="mention-item-badge">External</span>' : '<span class="mention-item-badge internal">Built-in</span>';
         const nameHtml = escapeHtml(tool.name);
-        const description = tool.description && tool.description.length > 0 ? escapeHtml(tool.description) : (typeof window.t === 'function' ? window.t('chat.noDescription') : '暂无描述');
+        const description = tool.description && tool.description.length > 0 ? escapeHtml(tool.description) : (typeof window.t === 'function' ? window.t('chat.noDescription') : 'No description');
         const descHtml = `<div class="mention-item-desc">${description}</div>`;
         // 根据工具在当前角色中的启用状态显示状态标签
-        const statusLabel = toolEnabled ? '可用' : (tool.roleEnabled !== undefined ? '已禁用（当前角色）' : '已禁用');
+        const statusLabel = toolEnabled ? 'Available' : (tool.roleEnabled !== undefined ? 'Disabled (current role)' : 'Disabled');
         const statusClass = toolEnabled ? 'enabled' : 'disabled';
         const originLabel = tool.isExternal
-            ? (tool.externalMcp ? `来源：${escapeHtml(tool.externalMcp)}` : '来源：外部MCP')
-            : '来源：内置工具';
+            ? (tool.externalMcp ? `Source: ${escapeHtml(tool.externalMcp)}` : 'Source: External MCP')
+            : 'Source: Built-in tool';
 
         return `
             <button type="button" class="mention-item ${activeClass} ${disabledClass}" data-index="${index}">
@@ -1796,7 +1796,7 @@ function initializeChatUI() {
 
     const messagesDiv = document.getElementById('chat-messages');
     if (messagesDiv && messagesDiv.childElementCount === 0) {
-        const readyMsg = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : '系统已就绪。请输入您的测试需求，系统将自动执行相应的安全测试。';
+        const readyMsg = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System ready. Please enter your test requirements and the system will automatically execute the corresponding security tests.';
         addMessage('assistant', readyMsg, null, null, null, { systemReadyMessage: true });
     }
 
@@ -2060,8 +2060,8 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     if (role === 'assistant') {
         const copyBtn = document.createElement('button');
         copyBtn.className = 'message-copy-btn';
-        copyBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span>' + (typeof window.t === 'function' ? window.t('common.copy') : '复制') + '</span>';
-        copyBtn.title = typeof window.t === 'function' ? window.t('chat.copyMessageTitle') : '复制消息内容';
+        copyBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span>' + (typeof window.t === 'function' ? window.t('common.copy') : 'Copy') + '</span>';
+        copyBtn.title = typeof window.t === 'function' ? window.t('chat.copyMessageTitle') : 'Copy message content';
         copyBtn.onclick = function(e) {
             e.stopPropagation();
             copyMessageToClipboard(messageDiv, this);
@@ -2107,7 +2107,7 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
         
         const mcpLabel = document.createElement('div');
         mcpLabel.className = 'mcp-call-label';
-        mcpLabel.textContent = '📋 ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : '渗透测试详情');
+        mcpLabel.textContent = '\uD83D\uDCCB ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : 'Penetration test details');
         mcpSection.appendChild(mcpLabel);
         
         const buttonsContainer = document.createElement('div');
@@ -2118,7 +2118,7 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
             detailBtn.className = 'mcp-detail-btn';
             detailBtn.dataset.execId = execId;
             detailBtn.dataset.execIndex = String(index + 1);
-            detailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.callNumber', { n: index + 1 }) : '调用 #' + (index + 1)) + '</span>';
+            detailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.callNumber', { n: index + 1 }) : 'Call #' + (index + 1)) + '</span>';
             detailBtn.onclick = () => showMCPDetail(execId);
             buttonsContainer.appendChild(detailBtn);
         });
@@ -2298,11 +2298,11 @@ function renderProcessDetails(messageId, processDetails) {
     if (!mcpLabel && !buttonsContainer) {
         mcpLabel = document.createElement('div');
         mcpLabel.className = 'mcp-call-label';
-        mcpLabel.textContent = '📋 ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : '渗透测试详情');
+        mcpLabel.textContent = '\uD83D\uDCCB ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : 'Penetration test details');
         mcpSection.appendChild(mcpLabel);
-    } else if (mcpLabel && mcpLabel.textContent !== ('📋 ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : '渗透测试详情'))) {
+    } else if (mcpLabel && mcpLabel.textContent !== ('\uD83D\uDCCB ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : 'Penetration test details'))) {
         // 如果标签存在但不是统一格式，更新它
-        mcpLabel.textContent = '📋 ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : '渗透测试详情');
+        mcpLabel.textContent = '\uD83D\uDCCB ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : 'Penetration test details');
     }
     
     // 如果没有按钮容器，创建一个
@@ -2317,7 +2317,7 @@ function renderProcessDetails(messageId, processDetails) {
     if (!processDetailBtn) {
         processDetailBtn = document.createElement('button');
         processDetailBtn.className = 'mcp-detail-btn process-detail-btn';
-        processDetailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.expandDetail') : '展开详情') + '</span>';
+        processDetailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.expandDetail') : 'Expand details') + '</span>';
         processDetailBtn.onclick = () => toggleProcessDetails(null, messageId);
         buttonsContainer.appendChild(processDetailBtn);
     }
@@ -2360,8 +2360,8 @@ function renderProcessDetails(messageId, processDetails) {
         detailsContainer.dataset.lazyNotLoaded = '1';
         detailsContainer.dataset.loaded = '0';
         timeline.innerHTML = '<div class="progress-timeline-empty">' +
-            (typeof window.t === 'function' ? window.t('chat.expandDetail') : '展开详情') +
-            '（点击后加载）</div>';
+            (typeof window.t === 'function' ? window.t('chat.expandDetail') : 'Expand details') +
+            ' (click to load)</div>';
         // 默认折叠
         timeline.classList.remove('expanded');
         return;

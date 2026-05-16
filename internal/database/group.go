@@ -36,7 +36,7 @@ func (db *DB) GroupExistsByName(name string, excludeID string) (bool, error) {
 	}
 
 	if err != nil {
-		return false, fmt.Errorf("检查分组名称失败: %w", err)
+		return false, fmt.Errorf("failed to check group name: %w", err)
 	}
 
 	return count > 0, nil
@@ -50,7 +50,7 @@ func (db *DB) CreateGroup(name, icon string) (*ConversationGroup, error) {
 		return nil, err
 	}
 	if exists {
-		return nil, fmt.Errorf("分组名称已存在")
+		return nil, fmt.Errorf("group name already exists")
 	}
 
 	id := uuid.New().String()
@@ -65,7 +65,7 @@ func (db *DB) CreateGroup(name, icon string) (*ConversationGroup, error) {
 		id, name, icon, 0, now, now,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("创建分组失败: %w", err)
+		return nil, fmt.Errorf("failed to create group: %w", err)
 	}
 
 	return &ConversationGroup{
@@ -84,7 +84,7 @@ func (db *DB) ListGroups() ([]*ConversationGroup, error) {
 		"SELECT id, name, icon, COALESCE(pinned, 0), created_at, updated_at FROM conversation_groups ORDER BY COALESCE(pinned, 0) DESC, created_at ASC",
 	)
 	if err != nil {
-		return nil, fmt.Errorf("查询分组列表失败: %w", err)
+		return nil, fmt.Errorf("failed to query group list: %w", err)
 	}
 	defer rows.Close()
 
@@ -95,7 +95,7 @@ func (db *DB) ListGroups() ([]*ConversationGroup, error) {
 		var pinned int
 
 		if err := rows.Scan(&group.ID, &group.Name, &group.Icon, &pinned, &createdAt, &updatedAt); err != nil {
-			return nil, fmt.Errorf("扫描分组失败: %w", err)
+			return nil, fmt.Errorf("failed to scan group: %w", err)
 		}
 
 		group.Pinned = pinned != 0
@@ -136,9 +136,9 @@ func (db *DB) GetGroup(id string) (*ConversationGroup, error) {
 	).Scan(&group.ID, &group.Name, &group.Icon, &pinned, &createdAt, &updatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("分组不存在")
+			return nil, fmt.Errorf("group not found")
 		}
-		return nil, fmt.Errorf("查询分组失败: %w", err)
+		return nil, fmt.Errorf("failed to query group: %w", err)
 	}
 
 	// 尝试多种时间格式解析
@@ -172,7 +172,7 @@ func (db *DB) UpdateGroup(id, name, icon string) error {
 		return err
 	}
 	if exists {
-		return fmt.Errorf("分组名称已存在")
+		return fmt.Errorf("group name already exists")
 	}
 
 	_, err = db.Exec(
@@ -180,7 +180,7 @@ func (db *DB) UpdateGroup(id, name, icon string) error {
 		name, icon, time.Now(), id,
 	)
 	if err != nil {
-		return fmt.Errorf("更新分组失败: %w", err)
+		return fmt.Errorf("failed to update group: %w", err)
 	}
 	return nil
 }
@@ -189,7 +189,7 @@ func (db *DB) UpdateGroup(id, name, icon string) error {
 func (db *DB) DeleteGroup(id string) error {
 	_, err := db.Exec("DELETE FROM conversation_groups WHERE id = ?", id)
 	if err != nil {
-		return fmt.Errorf("删除分组失败: %w", err)
+		return fmt.Errorf("failed to delete group: %w", err)
 	}
 	return nil
 }
@@ -203,7 +203,7 @@ func (db *DB) AddConversationToGroup(conversationID, groupID string) error {
 		conversationID,
 	)
 	if err != nil {
-		return fmt.Errorf("删除对话旧分组关联失败: %w", err)
+		return fmt.Errorf("failed to delete old conversation group associations: %w", err)
 	}
 
 	// 然后插入新的分组关联
@@ -213,7 +213,7 @@ func (db *DB) AddConversationToGroup(conversationID, groupID string) error {
 		id, conversationID, groupID, time.Now(),
 	)
 	if err != nil {
-		return fmt.Errorf("添加对话到分组失败: %w", err)
+		return fmt.Errorf("failed to add conversation to group: %w", err)
 	}
 	return nil
 }
@@ -225,7 +225,7 @@ func (db *DB) RemoveConversationFromGroup(conversationID, groupID string) error 
 		conversationID, groupID,
 	)
 	if err != nil {
-		return fmt.Errorf("从分组中移除对话失败: %w", err)
+		return fmt.Errorf("failed to remove conversation from group: %w", err)
 	}
 	return nil
 }
@@ -241,7 +241,7 @@ func (db *DB) GetConversationsByGroup(groupID string) ([]*Conversation, error) {
 		groupID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("查询分组对话失败: %w", err)
+		return nil, fmt.Errorf("failed to query group conversations: %w", err)
 	}
 	defer rows.Close()
 
@@ -253,7 +253,7 @@ func (db *DB) GetConversationsByGroup(groupID string) ([]*Conversation, error) {
 		var groupPinned int
 
 		if err := rows.Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &groupPinned); err != nil {
-			return nil, fmt.Errorf("扫描对话失败: %w", err)
+			return nil, fmt.Errorf("failed to scan conversation: %w", err)
 		}
 
 		// 尝试多种时间格式解析
@@ -313,7 +313,7 @@ func (db *DB) SearchConversationsByGroup(groupID string, searchQuery string) ([]
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("搜索分组对话失败: %w", err)
+		return nil, fmt.Errorf("failed to search group conversations: %w", err)
 	}
 	defer rows.Close()
 
@@ -325,7 +325,7 @@ func (db *DB) SearchConversationsByGroup(groupID string, searchQuery string) ([]
 		var groupPinned int
 
 		if err := rows.Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &groupPinned); err != nil {
-			return nil, fmt.Errorf("扫描对话失败: %w", err)
+			return nil, fmt.Errorf("failed to scan conversation: %w", err)
 		}
 
 		// 尝试多种时间格式解析
@@ -365,7 +365,7 @@ func (db *DB) GetGroupByConversation(conversationID string) (string, error) {
 		if err == sql.ErrNoRows {
 			return "", nil // 没有分组
 		}
-		return "", fmt.Errorf("查询对话分组失败: %w", err)
+		return "", fmt.Errorf("failed to query conversation group: %w", err)
 	}
 	return groupID, nil
 }
@@ -382,7 +382,7 @@ func (db *DB) UpdateConversationPinned(id string, pinned bool) error {
 		pinnedValue, id,
 	)
 	if err != nil {
-		return fmt.Errorf("更新对话置顶状态失败: %w", err)
+		return fmt.Errorf("failed to update conversation pin status: %w", err)
 	}
 	return nil
 }
@@ -398,7 +398,7 @@ func (db *DB) UpdateGroupPinned(id string, pinned bool) error {
 		pinnedValue, time.Now(), id,
 	)
 	if err != nil {
-		return fmt.Errorf("更新分组置顶状态失败: %w", err)
+		return fmt.Errorf("failed to update group pin status: %w", err)
 	}
 	return nil
 }
@@ -413,7 +413,7 @@ type GroupMapping struct {
 func (db *DB) GetAllGroupMappings() ([]GroupMapping, error) {
 	rows, err := db.Query("SELECT conversation_id, group_id FROM conversation_group_mappings")
 	if err != nil {
-		return nil, fmt.Errorf("查询分组映射失败: %w", err)
+		return nil, fmt.Errorf("failed to query group mappings: %w", err)
 	}
 	defer rows.Close()
 
@@ -421,7 +421,7 @@ func (db *DB) GetAllGroupMappings() ([]GroupMapping, error) {
 	for rows.Next() {
 		var m GroupMapping
 		if err := rows.Scan(&m.ConversationID, &m.GroupID); err != nil {
-			return nil, fmt.Errorf("扫描分组映射失败: %w", err)
+			return nil, fmt.Errorf("failed to scan group mapping: %w", err)
 		}
 		mappings = append(mappings, m)
 	}
@@ -443,7 +443,7 @@ func (db *DB) UpdateConversationPinnedInGroup(conversationID, groupID string, pi
 		pinnedValue, conversationID, groupID,
 	)
 	if err != nil {
-		return fmt.Errorf("更新分组对话置顶状态失败: %w", err)
+		return fmt.Errorf("failed to update group conversation pin status: %w", err)
 	}
 	return nil
 }

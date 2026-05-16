@@ -449,11 +449,11 @@ func (h *AgentHandler) waitHITLApproval(runCtx context.Context, cancelRun contex
 	payloadRaw, _ := json.Marshal(payload)
 	p, err := h.hitlManager.CreatePendingInterrupt(conversationID, assistantMessageID, cfg.Mode, toolName, toolCallID, string(payloadRaw))
 	if err != nil {
-		h.logger.Warn("创建 HITL 中断失败", zap.Error(err))
+		h.logger.Warn("Failed to create HITL interrupt", zap.Error(err))
 		return nil, err
 	}
 	if sendEventFunc != nil {
-		sendEventFunc("hitl_interrupt", "命中人机协同审批", map[string]interface{}{
+		sendEventFunc("hitl_interrupt", "Human-in-the-loop approval triggered", map[string]interface{}{
 			"conversationId": conversationID,
 			"interruptId":    p.InterruptID,
 			"mode":           cfg.Mode,
@@ -481,7 +481,7 @@ func (h *AgentHandler) waitHITLApproval(runCtx context.Context, cancelRun contex
 	}
 	if d.Decision == "reject" {
 		if sendEventFunc != nil {
-			sendEventFunc("hitl_rejected", "人工拒绝本次工具调用，模型将基于反馈继续迭代", map[string]interface{}{
+			sendEventFunc("hitl_rejected", "Human rejected this tool call, model will iterate based on feedback", map[string]interface{}{
 				"conversationId": conversationID,
 				"interruptId":    p.InterruptID,
 				"toolName":       toolName,

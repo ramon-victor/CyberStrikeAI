@@ -217,7 +217,7 @@ async function submitFofaSearch() {
 
         const result = await response.json().catch(() => ({}));
         if (!response.ok) {
-            throw new Error(result.error || `请求失败: ${response.status}`);
+            throw new Error(result.error || `Request failed: ${response.status}`);
         }
         renderFofaResults(result);
     } catch (e) {
@@ -269,7 +269,7 @@ async function parseFofaNaturalLanguage() {
         });
         const result = await resp.json().catch(() => ({}));
         if (!resp.ok) {
-            throw new Error(result.error || `请求失败: ${resp.status}`);
+            throw new Error(result.error || `Request failed: ${resp.status}`);
         }
         showFofaParseModal(text, result);
         showInlineToast(_t('infoCollect.parseDone'));
