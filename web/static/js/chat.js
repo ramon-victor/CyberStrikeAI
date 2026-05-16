@@ -90,6 +90,19 @@ if (typeof window !== 'undefined') {
     window.markAssistantHasMcpCallouts = markAssistantHasMcpCallouts;
 }
 
+/** Show the welcome/empty state panel when no conversation is loaded */
+function showChatWelcomeState() {
+ const el = document.getElementById('chat-welcome-state');
+ if (el) el.style.display = '';
+}
+
+/** Hide the welcome/empty state panel when a conversation is loaded */
+function hideChatWelcomeState() {
+ const el = document.getElementById('chat-welcome-state');
+ if (el) el.style.display = 'none';
+}
+
+
 function normalizeOrchestrationClient(s) {
     const v = String(s || '').trim().toLowerCase().replace(/-/g, '_');
     if (v === 'plan_execute' || v === 'planexecute' || v === 'pe') return 'plan_execute';
@@ -862,6 +875,7 @@ async function sendMessage() {
         ? message + '\n' + chatAttachments.map(a => '📎 ' + a.fileName).join('\n')
         : message;
     addMessage('user', displayMessage);
+ hideChatWelcomeState();
     
     // 清除防抖定时器，防止在清空输入框后重新保存草稿
     if (draftSaveTimer) {
@@ -1794,11 +1808,10 @@ function initializeChatUI() {
         }
     }
 
-    const messagesDiv = document.getElementById('chat-messages');
-    if (messagesDiv && messagesDiv.childElementCount === 0) {
-        const readyMsg = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System ready. Please enter your test requirements and the system will automatically execute the corresponding security tests.';
-        addMessage('assistant', readyMsg, null, null, null, { systemReadyMessage: true });
-    }
+ const messagesDiv = document.getElementById('chat-messages');
+ if (messagesDiv && messagesDiv.childElementCount === 0) {
+ showChatWelcomeState();
+ }
 
     addAttackChainButton(currentConversationId);
     loadActiveTasks(true);
@@ -1886,6 +1899,17 @@ function refreshSystemReadyMessageBubbles() {
         };
         bubble.appendChild(copyBtnNew);
     });
+
+ // Also update the welcome state panel text on language change
+ const welcomeState = document.getElementById('chat-welcome-state');
+ if (welcomeState && welcomeState.style.display !== 'none') {
+ const titleEl = welcomeState.querySelector('.chat-welcome-title');
+ const subtitleEl = welcomeState.querySelector('.chat-welcome-subtitle');
+ const hintEl = welcomeState.querySelector('.chat-welcome-hint');
+ if (titleEl) titleEl.textContent = window.t('chat.welcomeTitle') || 'CyberStrike';
+ if (subtitleEl) subtitleEl.textContent = window.t('chat.welcomeSubtitle') || 'AI-Powered Security Testing Platform';
+ if (hintEl) hintEl.textContent = window.t('chat.welcomeHint') || 'Enter your test target or command to get started';
+ }
 }
 
 // 添加消息（options.systemReadyMessage 为 true 时，语言切换会刷新该条文案）
@@ -1896,6 +1920,11 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     const id = 'msg-' + Date.now() + '-' + messageCounter + '-' + Math.random().toString(36).substr(2, 9);
     messageDiv.id = id;
     messageDiv.className = 'message ' + role;
+
+ // Hide welcome state when real messages are added (not system ready placeholders)
+ if (!options || !options.systemReadyMessage) {
+ hideChatWelcomeState();
+ }
     
     // 创建头像
     const avatar = document.createElement('div');
@@ -2888,9 +2917,8 @@ async function startNewConversation() {
         window.currentConversationId = '';
     } catch (e) { /* ignore */ }
     currentConversationGroupId = null; // 新对话不属于任何分组
-    document.getElementById('chat-messages').innerHTML = '';
-    const readyMsgNew = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : '系统已就绪。请输入您的测试需求，系统将自动执行相应的安全测试。';
-    addMessage('assistant', readyMsgNew, null, null, null, { systemReadyMessage: true });
+ document.getElementById('chat-messages').innerHTML = '';
+ showChatWelcomeState();
     addAttackChainButton(null);
     updateActiveConversation();
     // 刷新分组列表，清除分组高亮
@@ -3145,6 +3173,7 @@ async function loadConversation(conversationId) {
             return;
         }
         messagesDiv.innerHTML = '';
+ hideChatWelcomeState();
         
         // 检查对话中是否有最近的消息，如果有，清除草稿（避免恢复已发送的消息）
         let hasRecentUserMessage = false;
@@ -3259,8 +3288,7 @@ async function loadConversation(conversationId) {
                 await window.restoreHitlInlineForConversation(conversationId);
             }
         } else {
-            const readyMsgEmpty = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : '系统已就绪。请输入您的测试需求，系统将自动执行相应的安全测试。';
-            addMessage('assistant', readyMsgEmpty, null, null, null, { systemReadyMessage: true });
+ showChatWelcomeState();
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
             addAttackChainButton(conversationId);
             if (seq !== loadConversationRequestSeq) {
@@ -3381,9 +3409,8 @@ async function deleteConversation(conversationId, skipConfirm = false) {
             try {
                 window.currentConversationId = '';
             } catch (e) { /* ignore */ }
-            document.getElementById('chat-messages').innerHTML = '';
-            const readyMsgLoad = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : '系统已就绪。请输入您的测试需求，系统将自动执行相应的安全测试。';
-            addMessage('assistant', readyMsgLoad, null, null, null, { systemReadyMessage: true });
+ document.getElementById('chat-messages').innerHTML = '';
+ showChatWelcomeState();
             addAttackChainButton(null);
         }
         
@@ -8220,9 +8247,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 window.currentConversationId = '';
             } catch (e) { /* ignore */ }
             const messagesDiv = document.getElementById('chat-messages');
-            if (messagesDiv) messagesDiv.innerHTML = '';
-            const readyMsg = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : '系统已就绪。请输入您的测试需求，系统将自动执行相应的安全测试。';
-            addMessage('assistant', readyMsg, null, null, null, { systemReadyMessage: true });
+ if (messagesDiv) messagesDiv.innerHTML = '';
+ showChatWelcomeState();
             addAttackChainButton(null);
         }
         if (typeof loadConversationsWithGroups === 'function') {
