@@ -98,7 +98,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 	}
 	ssePublishConversationID = prep.ConversationID
 	if prep.CreatedNew {
-		sendEvent("conversation", "会话已创建", map[string]interface{}{
+		sendEvent("conversation", "Conversation created", map[string]interface{}{
 			"conversationId": prep.ConversationID,
 		})
 	}
@@ -132,7 +132,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 		}
 	}()
 
-	sendEvent("progress", "正在启动 Eino ADK 单代理（ChatModelAgent）...", map[string]interface{}{
+	sendEvent("progress", "Starting Eino ADK single agent (ChatModelAgent)...", map[string]interface{}{
 		"conversationId": conversationID,
 	})
 
@@ -143,7 +143,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 	if h.config == nil {
 		taskStatus = "failed"
 		h.tasks.UpdateTaskStatus(conversationID, taskStatus)
-		sendEvent("error", "服务器配置未加载", nil)
+		sendEvent("error", "Server config not loaded", nil)
 		sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
 		return
 	}
@@ -227,7 +227,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 				curHistory = hist
 			}
 			curFinalMessage = inject
-			sendEvent("progress", "已合并用户补充与最新轨迹，正在继续推理…", map[string]interface{}{
+			sendEvent("progress", "Merged user supplement with latest trace, continuing reasoning...", map[string]interface{}{
 				"conversationId": conversationID,
 				"source":         "interrupt_continue",
 			})
@@ -244,15 +244,15 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 		if errors.Is(cause, ErrTaskCancelled) {
 			taskStatus = "cancelled"
 			h.tasks.UpdateTaskStatus(conversationID, taskStatus)
-			cancelMsg := "任务已被用户取消，后续操作已停止。"
+			cancelMsg := "Task cancelled by user, operations stopped."
 			if assistantMessageID != "" {
 				if result != nil {
 					if err := h.mergeAssistantMessagePartialOnCancel(assistantMessageID, result.Response); err != nil {
-						h.logger.Warn("合并取消前的部分回复失败", zap.Error(err))
+						h.logger.Warn("Failed to merge partial response before cancel", zap.Error(err))
 					}
 				}
 				if err := h.appendAssistantMessageNotice(assistantMessageID, cancelMsg); err != nil {
-					h.logger.Warn("更新取消后的助手消息失败", zap.Error(err))
+					h.logger.Warn("Failed to update assistant message after cancel", zap.Error(err))
 				}
 				_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "cancelled", cancelMsg, nil)
 			}
@@ -267,7 +267,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 		if errors.Is(runErr, context.DeadlineExceeded) || errors.Is(context.Cause(taskCtx), context.DeadlineExceeded) {
 			taskStatus = "timeout"
 			h.tasks.UpdateTaskStatus(conversationID, taskStatus)
-			timeoutMsg := "任务执行超时，已自动终止。"
+			timeoutMsg := "Task execution timed out, auto-terminated."
 			if assistantMessageID != "" {
 				_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", timeoutMsg, time.Now(), assistantMessageID)
 				_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "timeout", timeoutMsg, nil)
@@ -281,10 +281,10 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 			return
 		}
 
-		h.logger.Error("Eino ADK 单代理执行失败", zap.Error(runErr))
+		h.logger.Error("Eino ADK single agent execution failed", zap.Error(runErr))
 		taskStatus = "failed"
 		h.tasks.UpdateTaskStatus(conversationID, taskStatus)
-		errMsg := "执行失败: " + runErr.Error()
+		errMsg := "Execution failed: " + runErr.Error()
 		if assistantMessageID != "" {
 			_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
 			_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errMsg, nil)
@@ -303,7 +303,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 
 	if result.LastAgentTraceInput != "" || result.LastAgentTraceOutput != "" {
 		if err := h.db.SaveAgentTrace(conversationID, result.LastAgentTraceInput, result.LastAgentTraceOutput); err != nil {
-			h.logger.Warn("保存代理轨迹失败", zap.Error(err))
+			h.logger.Warn("Failed to save agent trace", zap.Error(err))
 		}
 	}
 

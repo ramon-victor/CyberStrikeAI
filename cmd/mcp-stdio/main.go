@@ -14,13 +14,13 @@ import (
 )
 
 func main() {
-	var configPath = flag.String("config", "config.yaml", "配置文件路径")
+	var configPath = flag.String("config", "config.yaml", "config file path")
 	flag.Parse()
 
 	// 加载配置
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -40,12 +40,12 @@ func main() {
 		resultStorageDir = cfg.Agent.ResultStorageDir
 	}
 	if err := os.MkdirAll(resultStorageDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "创建结果存储目录失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to create result storage directory: %v\n", err)
 		os.Exit(1)
 	}
 	resultStorage, err := storage.NewFileResultStorage(resultStorageDir, log.Logger)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "初始化结果存储失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to initialize result storage: %v\n", err)
 		os.Exit(1)
 	}
 	executor.SetResultStorage(resultStorage)
@@ -53,11 +53,11 @@ func main() {
 	// 注册工具
 	executor.RegisterTools(mcpServer)
 
-	log.Logger.Info("MCP服务器（stdio模式）已启动，等待消息...")
+	log.Logger.Info("MCP server (stdio mode) started, waiting for messages...")
 
 	// 运行 stdio 循环
 	if err := mcpServer.HandleStdio(); err != nil {
-		log.Logger.Error("MCP服务器运行失败", zap.Error(err))
+		log.Logger.Error("MCP server run failed", zap.Error(err))
 		os.Exit(1)
 	}
 }

@@ -31,7 +31,7 @@ func (db *DB) GetRobotSessionBinding(sessionKey string) (*RobotSessionBinding, e
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("查询机器人会话绑定失败: %w", err)
+		return nil, fmt.Errorf("failed to query robot session binding: %w", err)
 	}
 	if t, e := time.Parse("2006-01-02 15:04:05.999999999-07:00", updatedAt); e == nil {
 		b.UpdatedAt = t
@@ -66,7 +66,7 @@ func (db *DB) UpsertRobotSessionBinding(sessionKey, conversationID, roleName str
 			updated_at = excluded.updated_at
 	`, sessionKey, conversationID, roleName, time.Now())
 	if err != nil {
-		return fmt.Errorf("写入机器人会话绑定失败: %w", err)
+		return fmt.Errorf("failed to upsert robot session binding: %w", err)
 	}
 	return nil
 }
@@ -78,7 +78,7 @@ func (db *DB) DeleteRobotSessionBinding(sessionKey string) error {
 		return nil
 	}
 	if _, err := db.Exec("DELETE FROM robot_user_sessions WHERE session_key = ?", sessionKey); err != nil {
-		return fmt.Errorf("删除机器人会话绑定失败: %w", err)
+		return fmt.Errorf("failed to delete robot session binding: %w", err)
 	}
 	return nil
 }

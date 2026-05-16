@@ -109,13 +109,13 @@ func (m *BatchTaskManager) CreateBatchQueue(
 ) (*BatchTaskQueue, error) {
 	// 输入校验
 	if utf8.RuneCountInString(title) > MaxBatchQueueTitleLen {
-		return nil, fmt.Errorf("标题不能超过 %d 个字符", MaxBatchQueueTitleLen)
+		return nil, fmt.Errorf("Title cannot exceed %d characters", MaxBatchQueueTitleLen)
 	}
 	if utf8.RuneCountInString(role) > MaxBatchQueueRoleLen {
-		return nil, fmt.Errorf("角色名不能超过 %d 个字符", MaxBatchQueueRoleLen)
+		return nil, fmt.Errorf("Role name cannot exceed %d characters", MaxBatchQueueRoleLen)
 	}
 	if len(tasks) > MaxBatchTasksPerQueue {
-		return nil, fmt.Errorf("单个队列最多 %d 条任务", MaxBatchTasksPerQueue)
+		return nil, fmt.Errorf("Max %d tasks per queue", MaxBatchTasksPerQueue)
 	}
 
 	m.mu.Lock()
@@ -642,10 +642,10 @@ func (m *BatchTaskManager) UpdateQueueSchedule(queueID, scheduleMode, cronExpr s
 // UpdateQueueMetadata 更新队列标题、角色和代理模式（非 running 时可用）
 func (m *BatchTaskManager) UpdateQueueMetadata(queueID, title, role, agentMode string) error {
 	if utf8.RuneCountInString(title) > MaxBatchQueueTitleLen {
-		return fmt.Errorf("标题不能超过 %d 个字符", MaxBatchQueueTitleLen)
+		return fmt.Errorf("Title cannot exceed %d characters", MaxBatchQueueTitleLen)
 	}
 	if utf8.RuneCountInString(role) > MaxBatchQueueRoleLen {
-		return fmt.Errorf("角色名不能超过 %d 个字符", MaxBatchQueueRoleLen)
+		return fmt.Errorf("Role name cannot exceed %d characters", MaxBatchQueueRoleLen)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

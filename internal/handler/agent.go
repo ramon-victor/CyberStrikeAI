@@ -144,7 +144,7 @@ func NewAgentHandler(agent *agent.Agent, db *database.DB, cfg *config.Config, lo
 
 	// 从数据库加载所有批量任务队列
 	if err := batchTaskManager.LoadFromDB(); err != nil {
-		logger.Warn("从数据库加载批量任务队列失败", zap.Error(err))
+		logger.Warn("Failed to load batch task queues from database", zap.Error(err))
 	}
 
 	bus := NewTaskEventBus()
@@ -163,7 +163,7 @@ func NewAgentHandler(agent *agent.Agent, db *database.DB, cfg *config.Config, lo
 		batchRunning:     make(map[string]struct{}),
 	}
 	if err := handler.hitlManager.EnsureSchema(); err != nil {
-		logger.Warn("初始化 HITL 表失败", zap.Error(err))
+		logger.Warn("Failed to initialize HITL tables", zap.Error(err))
 	}
 	go handler.batchQueueSchedulerLoop()
 	return handler

@@ -88,7 +88,7 @@ func (h *ChatUploadsHandler) List(c *gin.Context) {
 	}
 	// 保证根目录存在，否则「按文件夹」浏览时无法 mkdir，且首次列表为空时界面无路径工具栏
 	if err := os.MkdirAll(root, 0755); err != nil {
-		h.logger.Warn("创建 chat_uploads 根目录失败", zap.Error(err))
+		h.logger.Warn("Failed to create chat_uploads root directory", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -143,7 +143,7 @@ func (h *ChatUploadsHandler) List(c *gin.Context) {
 		return nil
 	})
 	if err != nil {
-		h.logger.Warn("列举对话附件失败", zap.Error(err))
+		h.logger.Warn("Failed to list conversation attachments", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

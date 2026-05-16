@@ -580,7 +580,7 @@ func (h *WebShellHandler) GetAIHistory(c *gin.Context) {
 	}
 	conv, err := h.db.GetConversationByWebshellConnectionID(id)
 	if err != nil {
-		h.logger.Warn("获取 WebShell AI 对话失败", zap.String("connectionId", id), zap.Error(err))
+		h.logger.Warn("Failed to get WebShell AI conversation", zap.String("connectionId", id), zap.Error(err))
 		c.JSON(http.StatusOK, gin.H{"conversationId": nil, "messages": []database.Message{}})
 		return
 	}
@@ -604,7 +604,7 @@ func (h *WebShellHandler) ListAIConversations(c *gin.Context) {
 	}
 	list, err := h.db.ListConversationsByWebshellConnectionID(id)
 	if err != nil {
-		h.logger.Warn("列出 WebShell AI 对话失败", zap.String("connectionId", id), zap.Error(err))
+		h.logger.Warn("Failed to list WebShell AI conversations", zap.String("connectionId", id), zap.Error(err))
 		c.JSON(http.StatusOK, []database.WebShellConversationItem{})
 		return
 	}
