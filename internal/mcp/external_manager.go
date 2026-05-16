@@ -498,7 +498,7 @@ func (m *ExternalMCPManager) CallTool(ctx context.Context, toolName string, args
 		if result == nil {
 			result = &ToolResult{
 				Content: []Content{
-					{Type: "text", Text: "工具执行完成，但未返回结果"},
+					{Type: "text", Text: "Tool execution completed, but no result returned"},
 				},
 			}
 		}

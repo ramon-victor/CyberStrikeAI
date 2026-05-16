@@ -194,7 +194,7 @@ func (e *Executor) ExecuteTool(ctx context.Context, toolName string, args map[st
 		if exitCode != nil && toolConfig.AllowedExitCodes != nil {
 			for _, allowedCode := range toolConfig.AllowedExitCodes {
 				if *exitCode == allowedCode {
-					e.logger.Info("工具执行完成（退出码在允许列表中）",
+					e.logger.Info("Tool execution completed (exit code in allowed list)",
 						zap.String("tool", toolName),
 						zap.Int("exitCode", *exitCode),
 						zap.String("output", string(output)),

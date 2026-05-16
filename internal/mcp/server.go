@@ -544,7 +544,7 @@ func (s *Server) handleCallTool(msg *Message) *Message {
 		if result == nil {
 			result = &ToolResult{
 				Content: []Content{
-					{Type: "text", Text: "工具执行完成，但未返回结果"},
+					{Type: "text", Text: "Tool execution completed, but no result returned"},
 				},
 			}
 		}
@@ -613,20 +613,19 @@ func (s *Server) handleCallTool(msg *Message) *Message {
 	if finalResult == nil {
 		finalResult = &ToolResult{
 			Content: []Content{
-				{Type: "text", Text: "工具执行完成，但未返回结果"},
+				{Type: "text", Text: "Tool execution completed, but no result returned"},
 			},
 		}
 	}
 
+	s.logger.Info("Tool execution completed",
+		zap.String("toolName", req.Name),
+		zap.Bool("isError", finalResult.IsError),
+	)
 	resultJSON, _ := json.Marshal(CallToolResponse{
 		Content: finalResult.Content,
 		IsError: false,
 	})
-
-	s.logger.Info("工具执行完成",
-		zap.String("toolName", req.Name),
-		zap.Bool("isError", finalResult.IsError),
-	)
 
 	return &Message{
 		ID:      msg.ID,
@@ -885,7 +884,7 @@ func (s *Server) CallTool(ctx context.Context, toolName string, args map[string]
 		if result == nil {
 			result = &ToolResult{
 				Content: []Content{
-					{Type: "text", Text: "工具执行完成，但未返回结果"},
+					{Type: "text", Text: "Tool execution completed, but no result returned"},
 				},
 			}
 		}

@@ -1317,12 +1317,12 @@ type ToolExecutionResult struct {
 // executeToolViaMCP 通过MCP执行工具
 // 即使工具执行失败，也返回结果而不是错误，让AI能够处理错误情况
 func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map[string]interface{}) (*ToolExecutionResult, error) {
-	a.logger.Info("通过MCP执行工具",
+	a.logger.Info("Executing tool via MCP",
 		zap.String("tool", toolName),
 		zap.Any("args", args),
 	)
 
-	// 如果是record_vulnerability工具，自动添加conversation_id
+	// If record_vulnerability tool, auto-add conversation_id
 	if toolName == builtin.ToolRecordVulnerability {
 		conversationID := agentConversationIDFromContext(ctx)
 		if conversationID == "" {
@@ -1333,11 +1333,11 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 
 		if conversationID != "" {
 			args["conversation_id"] = conversationID
-			a.logger.Debug("自动添加conversation_id到record_vulnerability工具",
+			a.logger.Debug("Auto-added conversation_id to record_vulnerability tool",
 				zap.String("conversation_id", conversationID),
 			)
 		} else {
-			a.logger.Warn("record_vulnerability工具调用时conversation_id为空")
+			a.logger.Warn("conversation_id empty when calling record_vulnerability tool")
 		}
 	}
 
@@ -1365,14 +1365,14 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 	a.mu.RUnlock()
 
 	if isExternalTool && a.externalMCPMgr != nil {
-		// 使用原始工具名称调用外部MCP工具
-		a.logger.Debug("调用外部MCP工具",
+		// Call external MCP tool using original name
+		a.logger.Debug("Calling external MCP tool",
 			zap.String("openAIName", toolName),
 			zap.String("originalName", originalToolName),
 		)
 		result, executionID, err = a.externalMCPMgr.CallTool(toolCtx, originalToolName, args)
 	} else {
-		// 调用内部MCP工具
+		// Call internal MCP tool
 		result, executionID, err = a.mcpServer.CallTool(toolCtx, toolName, args)
 	}
 
@@ -1380,31 +1380,31 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 	if err != nil {
 		detail := err.Error()
 		if errors.Is(err, context.Canceled) {
-			detail = "工具调用已被手动终止（MCP 监控页）。智能体将携带此结果继续后续步骤，整条任务不会因此被停止。"
+			detail = "Tool call was manually terminated (MCP monitor page). The agent will continue with this result; the entire task is not stopped."
 		} else if errors.Is(err, context.DeadlineExceeded) {
 			min := 10
 			if a.agentConfig != nil && a.agentConfig.ToolTimeoutMinutes > 0 {
 				min = a.agentConfig.ToolTimeoutMinutes
 			}
-			detail = fmt.Sprintf("工具执行超过 %d 分钟被自动终止（可在 config.yaml 的 agent.tool_timeout_minutes 中调整）", min)
+			detail = fmt.Sprintf("Tool execution exceeded %d minutes and was auto-terminated (adjust agent.tool_timeout_minutes in config.yaml)", min)
 		}
-		errorMsg := fmt.Sprintf(`工具调用失败
+		errorMsg := fmt.Sprintf(`Tool call failed
 
-工具名称: %s
-错误类型: 系统错误
-错误详情: %s
+Tool name: %s
+Error type: System error
+Error details: %s
 
-可能的原因：
-- 工具 "%s" 不存在或未启用
-- 单次执行超时（agent.tool_timeout_minutes）
-- 系统配置问题
-- 网络或权限问题
+Possible causes:
+- Tool "%s" does not exist or is not enabled
+- Single execution timeout (agent.tool_timeout_minutes)
+- System configuration issue
+- Network or permission issue
 
-建议：
-- 检查工具名称是否正确
-- 若需更长执行时间，可适当增大 agent.tool_timeout_minutes
-- 尝试使用其他替代工具
-- 如果这是必需的工具，请向用户说明情况`, toolName, detail, toolName)
+Suggestions:
+- Check if the tool name is correct
+- Increase agent.tool_timeout_minutes if more execution time is needed
+- Try alternative tools
+- If this is a required tool, explain the situation to the user`, toolName, detail, toolName)
 
 		return &ToolExecutionResult{
 			Result:      errorMsg,
@@ -1439,7 +1439,7 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 					zap.Error(err),
 				)
 			} else {
-				a.logger.Info("大结果已保存",
+				a.logger.Info("Large result saved",
 					zap.String("executionID", executionID),
 					zap.String("toolName", toolName),
 					zap.Int("size", resultSize),
@@ -1469,52 +1469,53 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 	}, nil
 }
 
-// formatMinimalNotification 格式化最小化通知
+
+// formatMinimalNotification formats a minimal notification for large result storage
 func (a *Agent) formatMinimalNotification(executionID string, toolName string, size int, lineCount int, filePath string) string {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("工具执行完成。结果已保存（ID: %s）。\n\n", executionID))
-	sb.WriteString("结果信息：\n")
-	sb.WriteString(fmt.Sprintf("  - 工具: %s\n", toolName))
-	sb.WriteString(fmt.Sprintf("  - 大小: %d 字节 (%.2f KB)\n", size, float64(size)/1024))
-	sb.WriteString(fmt.Sprintf("  - 行数: %d 行\n", lineCount))
+	sb.WriteString(fmt.Sprintf("Tool execution completed. Result saved (ID: %s).\n\n", executionID))
+	sb.WriteString("Result info:\n")
+	sb.WriteString(fmt.Sprintf("  - Tool: %s\n", toolName))
+	sb.WriteString(fmt.Sprintf("  - Size: %d bytes (%.2f KB)\n", size, float64(size)/1024))
+	sb.WriteString(fmt.Sprintf("  - Lines: %d\n", lineCount))
 	if filePath != "" {
-		sb.WriteString(fmt.Sprintf("  - 文件路径: %s\n", filePath))
+		sb.WriteString(fmt.Sprintf("  - File path: %s\n", filePath))
 	}
 	sb.WriteString("\n")
-	sb.WriteString("推荐使用 query_execution_result 工具查询完整结果：\n")
-	sb.WriteString(fmt.Sprintf("  - 查询第一页: query_execution_result(execution_id=\"%s\", page=1, limit=100)\n", executionID))
-	sb.WriteString(fmt.Sprintf("  - 搜索关键词: query_execution_result(execution_id=\"%s\", search=\"关键词\")\n", executionID))
-	sb.WriteString(fmt.Sprintf("  - 过滤条件: query_execution_result(execution_id=\"%s\", filter=\"error\")\n", executionID))
-	sb.WriteString(fmt.Sprintf("  - 正则匹配: query_execution_result(execution_id=\"%s\", search=\"\\\\d+\\\\.\\\\d+\\\\.\\\\d+\\\\.\\\\d+\", use_regex=true)\n", executionID))
+	sb.WriteString("Recommended: use query_execution_result tool to query full results:\n")
+	sb.WriteString(fmt.Sprintf("  - Query first page: query_execution_result(execution_id=\"%s\", page=1, limit=100)\n", executionID))
+	sb.WriteString(fmt.Sprintf("  - Search keyword: query_execution_result(execution_id=\"%s\", search=\"keyword\")\n", executionID))
+	sb.WriteString(fmt.Sprintf("  - Filter: query_execution_result(execution_id=\"%s\", filter=\"error\")\n", executionID))
+	sb.WriteString(fmt.Sprintf("  - Regex match: query_execution_result(execution_id=\"%s\", search=\"\\\\d+\\\\.\\\\d+\\\\.\\\\d+\\\\.\\\\d+\", use_regex=true)\n", executionID))
 	sb.WriteString("\n")
 	if filePath != "" {
-		sb.WriteString("如果 query_execution_result 工具不满足需求，也可以使用其他工具处理文件：\n")
+		sb.WriteString("If query_execution_result doesn't meet your needs, use other tools:\n")
 		sb.WriteString("\n")
-		sb.WriteString("**分段读取示例：**\n")
-		sb.WriteString(fmt.Sprintf("  - 查看前100行: exec(command=\"head\", args=[\"-n\", \"100\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - 查看后100行: exec(command=\"tail\", args=[\"-n\", \"100\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - 查看第50-150行: exec(command=\"sed\", args=[\"-n\", \"50,150p\", \"%s\"])\n", filePath))
+		sb.WriteString("**Segmented read examples:**\n")
+		sb.WriteString(fmt.Sprintf("  - View first 100 lines: exec(command=\"head\", args=[\"-n\", \"100\", \"%s\"])\n", filePath))
+		sb.WriteString(fmt.Sprintf("  - View last 100 lines: exec(command=\"tail\", args=[\"-n\", \"100\", \"%s\"])\n", filePath))
+		sb.WriteString(fmt.Sprintf("  - View lines 50-150: exec(command=\"sed\", args=[\"-n\", \"50,150p\", \"%s\"])\n", filePath))
 		sb.WriteString("\n")
-		sb.WriteString("**搜索和正则匹配示例：**\n")
-		sb.WriteString(fmt.Sprintf("  - 搜索关键词: exec(command=\"grep\", args=[\"关键词\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - 正则匹配IP地址: exec(command=\"grep\", args=[\"-E\", \"\\\\d+\\\\.\\\\d+\\\\.\\\\d+\\\\.\\\\d+\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - 不区分大小写搜索: exec(command=\"grep\", args=[\"-i\", \"关键词\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - 显示匹配行号: exec(command=\"grep\", args=[\"-n\", \"关键词\", \"%s\"])\n", filePath))
+		sb.WriteString("**Search and regex examples:**\n")
+		sb.WriteString(fmt.Sprintf("  - Search keyword: exec(command=\"grep\", args=[\"keyword\", \"%s\"])\n", filePath))
+		sb.WriteString(fmt.Sprintf("  - Regex match IP addresses: exec(command=\"grep\", args=[\"-E\", \"\\\\d+\\\\.\\\\d+\\\\.\\\\d+\\\\.\\\\d+\", \"%s\"])\n", filePath))
+		sb.WriteString(fmt.Sprintf("  - Case-insensitive search: exec(command=\"grep\", args=[\"-i\", \"keyword\", \"%s\"])\n", filePath))
+		sb.WriteString(fmt.Sprintf("  - Show matching line numbers: exec(command=\"grep\", args=[\"-n\", \"keyword\", \"%s\"])\n", filePath))
 		sb.WriteString("\n")
-		sb.WriteString("**过滤和统计示例：**\n")
-		sb.WriteString(fmt.Sprintf("  - 统计总行数: exec(command=\"wc\", args=[\"-l\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - 过滤包含error的行: exec(command=\"grep\", args=[\"error\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - 排除空行: exec(command=\"grep\", args=[\"-v\", \"^$\", \"%s\"])\n", filePath))
+		sb.WriteString("**Filter and statistics examples:**\n")
+		sb.WriteString(fmt.Sprintf("  - Count total lines: exec(command=\"wc\", args=[\"-l\", \"%s\"])\n", filePath))
+		sb.WriteString(fmt.Sprintf("  - Filter lines containing error: exec(command=\"grep\", args=[\"error\", \"%s\"])\n", filePath))
+		sb.WriteString(fmt.Sprintf("  - Exclude empty lines: exec(command=\"grep\", args=[\"-v\", \"^$\", \"%s\"])\n", filePath))
 		sb.WriteString("\n")
-		sb.WriteString("**完整读取（不推荐大文件）：**\n")
-		sb.WriteString(fmt.Sprintf("  - 使用 cat 工具: cat(file=\"%s\")\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - 使用 exec 工具: exec(command=\"cat\", args=[\"%s\"])\n", filePath))
+		sb.WriteString("**Full read (not recommended for large files):**\n")
+		sb.WriteString(fmt.Sprintf("  - Using cat tool: cat(file=\"%s\")\n", filePath))
+		sb.WriteString(fmt.Sprintf("  - Using exec tool: exec(command=\"cat\", args=[\"%s\"])\n", filePath))
 		sb.WriteString("\n")
-		sb.WriteString("**注意：**\n")
-		sb.WriteString("  - 直接读取大文件可能会再次触发大结果保存机制\n")
-		sb.WriteString("  - 建议优先使用分段读取和搜索功能，避免一次性加载整个文件\n")
-		sb.WriteString("  - 正则表达式语法遵循标准 POSIX 正则表达式规范\n")
+		sb.WriteString("**Note:**\n")
+		sb.WriteString("  - Reading large files directly may trigger the result save mechanism again\n")
+		sb.WriteString("  - Prefer segmented reading and search to avoid loading entire file at once\n")
+		sb.WriteString("  - Regex syntax follows standard POSIX regex specification\n")
 	}
 
 	return sb.String()
@@ -1531,7 +1532,7 @@ func (a *Agent) UpdateConfig(cfg *config.OpenAIConfig) {
 		a.memoryCompressor.UpdateConfig(cfg)
 	}
 
-	a.logger.Info("Agent配置已更新",
+	a.logger.Info("Agent config updated",
 		zap.String("base_url", cfg.BaseURL),
 		zap.String("model", cfg.Model),
 	)
@@ -1543,7 +1544,7 @@ func (a *Agent) UpdateMaxIterations(maxIterations int) {
 	defer a.mu.Unlock()
 	if maxIterations > 0 {
 		a.maxIterations = maxIterations
-		a.logger.Info("Agent最大迭代次数已更新", zap.Int("max_iterations", maxIterations))
+		a.logger.Info("Agent max iterations updated", zap.Int("max_iterations", maxIterations))
 	}
 }
 
