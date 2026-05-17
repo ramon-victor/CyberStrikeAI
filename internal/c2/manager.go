@@ -239,13 +239,15 @@ func (m *Manager) StartListener(id string) (*database.C2Listener, error) {
 	}
 	cfg.ApplyDefaults()
 
-	// 通过工厂创建具体实现
+	// 通过工厂创建具体实现。必须使用 rec 的副本：HTTP handler 在返回 JSON 前会清空
+	// rec.ImplantToken / EncryptionKey 做脱敏，若 listener 实现持有同一指针会导致 beacon 鉴权永久失败。
+	listenerRec := *rec
 	factory := m.registry.Get(rec.Type)
 	if factory == nil {
 		return nil, ErrUnsupportedType
 	}
 	inst, err := factory(ListenerCreationCtx{
-		Listener: rec,
+		Listener: &listenerRec,
 		Config:   cfg,
 		Manager:  m,
 		Logger:   m.logger.With(zap.String("listener_id", rec.ID), zap.String("type", rec.Type)),
