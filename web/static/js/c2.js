@@ -151,6 +151,25 @@
         return div.innerHTML;
     }
 
+    /** 任务列表操作按钮（查看/取消/删除）— 事件委托 */
+    function bindC2TaskActionDelegation() {
+        if (document.documentElement.dataset.c2TaskActionsBound === '1') return;
+        document.documentElement.dataset.c2TaskActionsBound = '1';
+        document.addEventListener('click', function(e) {
+            const btn = e.target.closest('[data-c2-task-action]');
+            if (!btn) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const action = btn.getAttribute('data-c2-task-action');
+            const id = btn.getAttribute('data-task-id');
+            if (!id) return;
+            if (action === 'view') C2.viewTask(id);
+            else if (action === 'cancel') C2.cancelTask(id);
+            else if (action === 'delete') C2.deleteTaskById(id);
+        });
+    }
+    bindC2TaskActionDelegation();
+
     /** 监听器表单：Malleable Profile 下拉选项 HTML（value / 文本已转义） */
     function listenerProfileSelectHtml(selectedProfileId) {
         const sel = selectedProfileId ? String(selectedProfileId) : '';
@@ -1293,14 +1312,17 @@
                 return;
             }
             
-            container.innerHTML = tasks.map(t => `
+            container.innerHTML = tasks.map(t => {
+                const rawId = t.id || '';
+                return `
                 <div class="c2-task-item-compact">
-                    <span class="c2-task-status-dot ${t.status}"></span>
-                    <span class="c2-task-type">${t.taskType}</span>
+                    <span class="c2-task-status-dot ${escapeHtml(t.status || '')}"></span>
+                    <span class="c2-task-type">${escapeHtml(t.taskType || '')}</span>
                     <span class="c2-task-meta">${escapeHtml(taskStatusLabel(t.status))} | ${formatDuration(t.durationMs)}</span>
-                    <button class="btn-ghost btn-sm" onclick="C2.viewTask('${t.id}')">${escapeHtml(c2t('c2.tasks.view'))}</button>
+                    <button type="button" class="btn-secondary btn-small" data-c2-task-action="view" data-task-id="${escapeHtml(rawId)}">${escapeHtml(c2t('c2.tasks.view'))}</button>
                 </div>
-            `).join('');
+            `;
+            }).join('');
         });
     };
 
@@ -1334,13 +1356,12 @@
                         <th>${escapeHtml(c2t('c2.tasks.colStatus'))}</th>
                         <th>${escapeHtml(c2t('c2.tasks.colDuration'))}</th>
                         <th>${escapeHtml(c2t('c2.tasks.colCreated'))}</th>
-                        <th>${escapeHtml(c2t('c2.tasks.colActions'))}</th>
+                        <th class="c2-task-table-col-actions">${escapeHtml(c2t('c2.tasks.colActions'))}</th>
                     </tr>
                 </thead>
                 <tbody>
                     ${C2.tasks.map(t => {
                         const rawId = t.id || '';
-                        const idJson = JSON.stringify(rawId);
                         const shortTaskId = rawId.length > 14 ? escapeHtml(rawId.substring(0, 12)) + '\u2026' : escapeHtml(rawId);
                         const sid = t.sessionId ? escapeHtml(String(t.sessionId).substring(0, 8)) + '\u2026' : '-';
                         return `
@@ -1356,12 +1377,14 @@
                             <td><span class="c2-status-badge ${escapeHtml(t.status || '')}">${escapeHtml(taskStatusLabel(t.status))}</span></td>
                             <td>${formatDuration(t.durationMs)}</td>
                             <td>${formatTime(t.createdAt)}</td>
-                            <td>
-                                <button type="button" class="btn-ghost btn-sm" onclick="C2.viewTask(${idJson})">${escapeHtml(c2t('c2.tasks.view'))}</button>
+                            <td class="c2-task-table-col-actions">
+                                <div class="c2-task-table-actions">
+                                <button type="button" class="btn-secondary btn-small" data-c2-task-action="view" data-task-id="${escapeHtml(rawId)}">${escapeHtml(c2t('c2.tasks.view'))}</button>
                                 ${t.status === 'queued' || t.status === 'sent'
-                                    ? `<button type="button" class="btn-danger btn-sm" onclick="C2.cancelTask(${idJson})">${escapeHtml(c2t('c2.tasks.cancelBtn'))}</button>`
+                                    ? `<button type="button" class="btn-danger btn-small" data-c2-task-action="cancel" data-task-id="${escapeHtml(rawId)}">${escapeHtml(c2t('c2.tasks.cancelBtn'))}</button>`
                                     : ''}
-                                <button type="button" class="btn-secondary btn-sm c2-task-row-delete" onclick="C2.deleteTaskById(${idJson})" title="${delTitle}" aria-label="${delTitle}">${escapeHtml(c2t('c2.tasks.deleteBtn'))}</button>
+                                <button type="button" class="btn-danger btn-small" data-c2-task-action="delete" data-task-id="${escapeHtml(rawId)}" title="${delTitle}" aria-label="${delTitle}">${escapeHtml(c2t('c2.tasks.deleteBtn'))}</button>
+                                </div>
                             </td>
                         </tr>
                     `;
@@ -1387,10 +1410,10 @@
             </div>
             <div class="c2-modal-body">
                 <div class="c2-task-detail">
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelId'))}:</strong> ${t.id}</div>
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelSession'))}:</strong> ${t.sessionId}</div>
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelType'))}:</strong> ${t.taskType}</div>
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelStatus'))}:</strong> <span class="c2-status-badge ${t.status}">${escapeHtml(taskStatusLabel(t.status))}</span></div>
+                    <div><strong>${escapeHtml(c2t('c2.tasks.labelId'))}:</strong> ${escapeHtml(t.id || '')}</div>
+                    <div><strong>${escapeHtml(c2t('c2.tasks.labelSession'))}:</strong> ${escapeHtml(t.sessionId || '')}</div>
+                    <div><strong>${escapeHtml(c2t('c2.tasks.labelType'))}:</strong> ${escapeHtml(t.taskType || '')}</div>
+                    <div><strong>${escapeHtml(c2t('c2.tasks.labelStatus'))}:</strong> <span class="c2-status-badge ${escapeHtml(t.status || '')}">${escapeHtml(taskStatusLabel(t.status))}</span></div>
                     <div><strong>${escapeHtml(c2t('c2.tasks.labelCreated'))}:</strong> ${formatTime(t.createdAt)}</div>
                     <div><strong>${escapeHtml(c2t('c2.tasks.labelSent'))}:</strong> ${formatTime(t.sentAt)}</div>
                     <div><strong>${escapeHtml(c2t('c2.tasks.labelCompleted'))}:</strong> ${formatTime(t.completedAt)}</div>
@@ -1416,19 +1439,24 @@
             renderTaskModal(local);
             return;
         }
-        apiRequest('GET', `${API_BASE}/tasks/${id}`).then(data => {
+        apiRequest('GET', `${API_BASE}/tasks/${encodeURIComponent(id)}`).then(data => {
+            if (data.error) {
+                showToast(String(data.error), 'error');
+                return;
+            }
             if (data.task) renderTaskModal(data.task);
-        });
+            else showToast(c2t('c2.tasks.emptyAll'), 'warn');
+        }).catch(err => showToast(err.message || String(err), 'error'));
     };
 
     C2.cancelTask = function(id) {
-        apiRequest('POST', `${API_BASE}/tasks/${id}/cancel`, {}).then(data => {
-            if (data.error) showToast(data.error, 'error');
+        apiRequest('POST', `${API_BASE}/tasks/${encodeURIComponent(id)}/cancel`, {}).then(data => {
+            if (data.error) showToast(String(data.error), 'error');
             else {
                 showToast(c2t('c2.tasks.toastCancelled'), 'success');
                 C2.loadTasks(C2.tasksPage || 1);
             }
-        });
+        }).catch(err => showToast(err.message || String(err), 'error'));
     };
 
     // ============================================================================

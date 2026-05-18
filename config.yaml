@@ -10,7 +10,7 @@
 # ============================================
 
 # 前端显示的版本号（可选，不填则显示默认版本）
-version: "v1.6.14"
+version: "v1.6.15"
 # 服务器配置
 server:
   host: 0.0.0.0 # 监听地址，0.0.0.0 表示监听所有网络接口
@@ -54,7 +54,7 @@ openai:
   max_total_tokens: 120000 # LLM 相关上下文的最大 Token 数限制（内存压缩和攻击链构建会共用此配置）
   # Eino 路径模型推理：DeepSeek/OpenAI 为 thinking / reasoning_effort 等；provider 为 claude 时合并为 Anthropic 顶层 thinking（extended thinking），mode: off 关闭
   reasoning:
-    mode: off # auto | on | off；off 时不附加任何推理扩展字段
+    mode: on # auto | on | off；off 时不附加任何推理扩展字段
     effort: max # low | medium | high | max；空表示不指定（openai_compat 下 auto 且无强度时不发请求扩展）
     allow_client_reasoning: true # false 时忽略对话请求体 reasoning，仅以下方为准
     profile: openai_compat # auto | deepseek_compat | openai_compat | output_config_effort

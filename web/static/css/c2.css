@@ -857,10 +857,35 @@
     background: var(--c2-surface);
     border-radius: var(--c2-radius);
     border: 1px solid var(--c2-border);
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: visible;
 }
 
-.c2-task-table { width: 100%; border-collapse: collapse; }
+/* 操作列：仅占按钮宽度，避免 100% 表格把余白摊到最右列 */
+.c2-task-table th.c2-task-table-col-actions,
+.c2-task-table td.c2-task-table-col-actions {
+    width: 1%;
+    white-space: nowrap;
+    text-align: right;
+    vertical-align: middle;
+}
+
+.c2-task-table-actions {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-wrap: nowrap;
+}
+
+.c2-task-table-actions .btn-small,
+.c2-task-table-actions .btn-sm {
+    min-height: 30px;
+    min-width: 52px;
+    justify-content: center;
+}
+
+.c2-task-table { width: 100%; border-collapse: collapse; table-layout: auto; }
 
 .c2-task-table th {
     text-align: left;
@@ -1261,7 +1286,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: 10050;
     padding: 24px;
     animation: c2-fade-in 0.15s ease-out;
 }
