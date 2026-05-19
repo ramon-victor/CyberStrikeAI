@@ -657,9 +657,9 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 										"orchestration": orchMode,
 									})
 								}
-								progress("reasoning_chain_stream_delta", displayDelta, map[string]interface{}{
+								progress("reasoning_chain_stream_delta", displayDelta, openai.WithSSEAccumulated(map[string]interface{}{
 									"streamId": reasoningStreamID,
-								})
+								}, fullDisplay))
 							}
 						}
 					}
@@ -689,13 +689,13 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 										})
 										streamHeaderSent = true
 									}
-									progress("response_delta", contentDelta, map[string]interface{}{
+									progress("response_delta", contentDelta, openai.WithSSEAccumulated(map[string]interface{}{
 										"conversationId":  conversationID,
 										"mcpExecutionIds": snapshotMCPIDs(),
 										"einoRole":        "orchestrator",
 										"einoAgent":       ev.AgentName,
 										"orchestration":   orchMode,
-									})
+									}, mainAssistantBuf))
 									mainAssistWireAccum, _ = normalizeStreamingDelta(mainAssistWireAccum, contentDelta)
 								}
 							}
@@ -714,10 +714,10 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 											"source":         "eino",
 										})
 									}
-									progress("eino_agent_reply_stream_delta", subDelta, map[string]interface{}{
+									progress("eino_agent_reply_stream_delta", subDelta, openai.WithSSEAccumulated(map[string]interface{}{
 										"streamId":       subReplyStreamID,
 										"conversationId": conversationID,
-									})
+									}, subAssistantBuf))
 								}
 							}
 						}
@@ -756,13 +756,13 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 										"orchestration":      orchMode,
 									})
 								}
-								progress("response_delta", eofTail, map[string]interface{}{
+								progress("response_delta", eofTail, openai.WithSSEAccumulated(map[string]interface{}{
 									"conversationId":  conversationID,
 									"mcpExecutionIds": snapshotMCPIDs(),
 									"einoRole":        "orchestrator",
 									"einoAgent":       ev.AgentName,
 									"orchestration":   orchMode,
-								})
+								}, mainAssistantBuf))
 								mainAssistWireAccum, _ = normalizeStreamingDelta(mainAssistWireAccum, eofTail)
 							}
 						}
@@ -872,13 +872,13 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 								"einoAgent":          ev.AgentName,
 								"orchestration":      orchMode,
 							})
-							progress("response_delta", body, map[string]interface{}{
+							progress("response_delta", body, openai.WithSSEAccumulated(map[string]interface{}{
 								"conversationId":  conversationID,
 								"mcpExecutionIds": snapshotMCPIDs(),
 								"einoRole":        "orchestrator",
 								"einoAgent":       ev.AgentName,
 								"orchestration":   orchMode,
-							})
+							}, body))
 						}
 						lastAssistant = body
 						if orchMode == "plan_execute" && strings.EqualFold(strings.TrimSpace(ev.AgentName), "executor") {

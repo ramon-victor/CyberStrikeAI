@@ -598,9 +598,15 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 		thinkingStreamSeq++
 		thinkingStreamId := fmt.Sprintf("thinking-stream-%s-%d-%d", conversationID, i+1, thinkingStreamSeq)
 		thinkingStreamStarted := false
+		var thinkingWire string
 
 		response, err := a.callOpenAIStreamWithToolCalls(ctx, messages, tools, func(delta string) error {
 			if delta == "" {
+				return nil
+			}
+			var deltaOut string
+			thinkingWire, deltaOut = openai.NormalizeStreamingDelta(thinkingWire, delta)
+			if deltaOut == "" {
 				return nil
 			}
 			if !thinkingStreamStarted {
@@ -611,10 +617,10 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 					"toolStream": false,
 				})
 			}
-			sendProgress("thinking_stream_delta", delta, map[string]interface{}{
+			sendProgress("thinking_stream_delta", deltaOut, openai.WithSSEAccumulated(map[string]interface{}{
 				"streamId":  thinkingStreamId,
 				"iteration": i + 1,
-			})
+			}, thinkingWire))
 			return nil
 		})
 		if err != nil {
@@ -827,10 +833,16 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 					"mcpExecutionIds":    result.MCPExecutionIDs,
 					"messageGeneratedBy": "summary",
 				})
+				var summaryWire string
 				streamText, _ := a.callOpenAIStreamText(ctx, messages, []Tool{}, func(delta string) error {
-					sendProgress("response_delta", delta, map[string]interface{}{
+					var deltaOut string
+					summaryWire, deltaOut = openai.NormalizeStreamingDelta(summaryWire, delta)
+					if deltaOut == "" {
+						return nil
+					}
+					sendProgress("response_delta", deltaOut, openai.WithSSEAccumulated(map[string]interface{}{
 						"conversationId": conversationID,
-					})
+					}, summaryWire))
 					return nil
 				})
 				if strings.TrimSpace(streamText) != "" {
@@ -874,10 +886,16 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 				"mcpExecutionIds":    result.MCPExecutionIDs,
 				"messageGeneratedBy": "summary",
 			})
+			var summaryWire string
 			streamText, _ := a.callOpenAIStreamText(ctx, messages, []Tool{}, func(delta string) error {
-				sendProgress("response_delta", delta, map[string]interface{}{
+				var deltaOut string
+				summaryWire, deltaOut = openai.NormalizeStreamingDelta(summaryWire, delta)
+				if deltaOut == "" {
+					return nil
+				}
+				sendProgress("response_delta", deltaOut, openai.WithSSEAccumulated(map[string]interface{}{
 					"conversationId": conversationID,
-				})
+				}, summaryWire))
 				return nil
 			})
 			if strings.TrimSpace(streamText) != "" {
@@ -921,10 +939,16 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 		"mcpExecutionIds":    result.MCPExecutionIDs,
 		"messageGeneratedBy": "max_iter_summary",
 	})
+	var summaryWire string
 	streamText, _ := a.callOpenAIStreamText(ctx, messages, []Tool{}, func(delta string) error {
-		sendProgress("response_delta", delta, map[string]interface{}{
+		var deltaOut string
+		summaryWire, deltaOut = openai.NormalizeStreamingDelta(summaryWire, delta)
+		if deltaOut == "" {
+			return nil
+		}
+		sendProgress("response_delta", deltaOut, openai.WithSSEAccumulated(map[string]interface{}{
 			"conversationId": conversationID,
-		})
+		}, summaryWire))
 		return nil
 	})
 	if strings.TrimSpace(streamText) != "" {
