@@ -2424,11 +2424,8 @@ function renderProcessDetails(messageId, processDetails) {
             const toolName = data.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : '未知工具');
             const index = data.index || 0;
             const total = data.total || 0;
-            const argsHint = typeof window.toolCallArgHint === 'function'
-                ? window.toolCallArgHint(typeof window.parseToolCallArgsFromData === 'function' ? window.parseToolCallArgsFromData(data) : {})
-                : '';
             const callTitle = typeof window.formatToolCallTimelineTitle === 'function'
-                ? window.formatToolCallTimelineTitle(toolName, index, total, argsHint)
+                ? window.formatToolCallTimelineTitle(toolName, index, total)
                 : (typeof window.t === 'function' ? window.t('chat.callTool', { name: escapeHtml(toolName), index: index, total: total }) : '调用工具: ' + escapeHtml(toolName) + ' (' + index + '/' + total + ')');
             itemTitle = agPx + '🔧 ' + callTitle;
         } else if (eventType === 'tool_result') {

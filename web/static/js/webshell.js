@@ -1666,11 +1666,8 @@ function buildWebshellTimelineItemFromDetail(detail) {
         var tn = data.toolName || ((typeof window.t === 'function') ? window.t('chat.unknownTool') : '未知工具');
         var idx = data.index || 0;
         var total = data.total || 0;
-        var wsHint = typeof window.toolCallArgHint === 'function'
-            ? window.toolCallArgHint(typeof window.parseToolCallArgsFromData === 'function' ? window.parseToolCallArgsFromData(data) : {})
-            : '';
         var wsCallTitle = typeof window.formatToolCallTimelineTitle === 'function'
-            ? window.formatToolCallTimelineTitle(tn, idx, total, wsHint)
+            ? window.formatToolCallTimelineTitle(tn, idx, total)
             : ((typeof window.t === 'function') ? window.t('chat.callTool', { name: tn, index: idx, total: total }) : ('调用: ' + tn + (total ? ' (' + idx + '/' + total + ')' : '')));
         title = ap + '🔧 ' + wsCallTitle;
     } else if (eventType === 'tool_result') {
@@ -3064,11 +3061,8 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                         var tn = _ed.toolName || '未知工具';
                         var idx = _ed.index || 0;
                         var total = _ed.total || 0;
-                        var wsHintLive = typeof window.toolCallArgHint === 'function'
-                            ? window.toolCallArgHint(typeof window.parseToolCallArgsFromData === 'function' ? window.parseToolCallArgsFromData(_ed) : {})
-                            : '';
                         var callTitle = typeof window.formatToolCallTimelineTitle === 'function'
-                            ? window.formatToolCallTimelineTitle(tn, idx, total, wsHintLive)
+                            ? window.formatToolCallTimelineTitle(tn, idx, total)
                             : (wsTOr('chat.callTool', '') || ('调用工具: ' + tn + (total ? ' (' + idx + '/' + total + ')' : '')));
                         var callItem = appendTimelineItem('tool_call', webshellAgentPx(_ed) + '🔧 ' + callTitle, _em || '', _ed);
                         if (_ed.toolCallId && callItem) {

@@ -1592,9 +1592,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const index = toolInfo.index || 0;
             const total = toolInfo.total || 0;
             const toolCallId = toolInfo.toolCallId || null;
-            const toolCallArgs = parseToolCallArgsFromData(toolInfo);
-            const toolCallHint = toolCallArgHint(toolCallArgs);
-            const toolCallTitle = formatToolCallTimelineTitle(toolName, index, total, toolCallHint);
+            const toolCallTitle = formatToolCallTimelineTitle(toolName, index, total);
             const toolCallItemId = addTimelineItem(timeline, 'tool_call', {
                 title: timelineAgentBracketPrefix(toolInfo) + '🔧 ' + toolCallTitle,
                 message: event.message,
@@ -2531,38 +2529,14 @@ function parseToolCallArgsFromData(data) {
     return args;
 }
 
-function toolCallArgHint(args) {
-    if (!args || typeof args !== 'object') return '';
-    const method = args.method != null ? String(args.method).trim().toUpperCase() : '';
-    const url = args.url || args.URL || args.target || args.uri;
-    if (url != null && String(url).trim() !== '') {
-        let s = String(url).trim();
-        if (method) s = method + ' ' + s;
-        return s.length > 56 ? s.slice(0, 53) + '...' : s;
-    }
-    if (method) {
-        return method;
-    }
-    const cmd = args.command || args.cmd || args.script;
-    if (cmd != null && String(cmd).trim() !== '') {
-        const s = String(cmd).trim();
-        return s.length > 48 ? s.slice(0, 45) + '...' : s;
-    }
-    return '';
-}
-
-function formatToolCallTimelineTitle(toolName, index, total, argsHint) {
+function formatToolCallTimelineTitle(toolName, index, total) {
     const name = toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : '未知工具');
     const idx = index || 0;
     const tot = total || 0;
-    let base;
     if (typeof window.t === 'function') {
-        base = window.t('chat.callTool', { name: name, index: idx, total: tot });
-    } else {
-        base = '调用工具: ' + name + (tot ? ' (' + idx + '/' + tot + ')' : '');
+        return window.t('chat.callTool', { name: name, index: idx, total: tot });
     }
-    const hint = (argsHint && String(argsHint).trim()) ? String(argsHint).trim() : '';
-    return hint ? (base + ' · ' + hint) : base;
+    return '调用工具: ' + name + (tot ? ' (' + idx + '/' + tot + ')' : '');
 }
 
 function buildToolResultSectionHtml(data, opts) {
@@ -2741,7 +2715,6 @@ window.attachToolResultToCall = attachToolResultToCall;
 window.mergeToolResultIntoCallItem = mergeToolResultIntoCallItem;
 window.formatToolCallTimelineTitle = formatToolCallTimelineTitle;
 window.parseToolCallArgsFromData = parseToolCallArgsFromData;
-window.toolCallArgHint = toolCallArgHint;
 window.buildToolResultSectionHtml = buildToolResultSectionHtml;
 
 // 更新工具调用状态
@@ -2809,11 +2782,6 @@ function addTimelineItem(timeline, type, options) {
         item.dataset.toolTotal = (d.total != null) ? String(d.total) : '0';
         if (d.toolCallId != null && String(d.toolCallId).trim() !== '') {
             item.dataset.toolCallId = String(d.toolCallId).trim();
-        }
-        const callArgs = parseToolCallArgsFromData(d);
-        const argHint = toolCallArgHint(callArgs);
-        if (argHint) {
-            item.dataset.toolArgHint = argHint;
         }
         const merged = options.mergedResult || d._mergedResult;
         if (merged) {
@@ -4320,9 +4288,8 @@ function refreshProgressAndTimelineI18n() {
             const name = (item.dataset.toolName != null && item.dataset.toolName !== '') ? item.dataset.toolName : _t('chat.unknownTool');
             const index = parseInt(item.dataset.toolIndex, 10) || 0;
             const total = parseInt(item.dataset.toolTotal, 10) || 0;
-            const hint = item.dataset.toolArgHint || '';
             const callTitle = typeof formatToolCallTimelineTitle === 'function'
-                ? formatToolCallTimelineTitle(name, index, total, hint)
+                ? formatToolCallTimelineTitle(name, index, total)
                 : _t('chat.callTool', { name: name, index: index, total: total });
             titleSpan.textContent = ap + '\uD83D\uDD27 ' + callTitle;
         } else if (type === 'tool_result' && (item.dataset.toolName !== undefined || item.dataset.toolSuccess !== undefined)) {
