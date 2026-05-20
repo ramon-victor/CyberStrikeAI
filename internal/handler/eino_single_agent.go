@@ -90,7 +90,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 		zap.String("conversationId", req.ConversationID),
 	)
 
-	prep, err := h.prepareMultiAgentSession(&req)
+	prep, err := h.prepareMultiAgentSession(&req, c, "eino_agent_stream")
 	if err != nil {
 		sendEvent("error", err.Error(), nil)
 		sendEvent("done", "", nil)
@@ -326,7 +326,7 @@ func (h *AgentHandler) EinoSingleAgentLoop(c *gin.Context) {
 
 	h.logger.Info("Received Eino ADK single agent non-stream request", zap.String("conversationId", req.ConversationID))
 
-	prep, err := h.prepareMultiAgentSession(&req)
+	prep, err := h.prepareMultiAgentSession(&req, c, "eino_agent")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

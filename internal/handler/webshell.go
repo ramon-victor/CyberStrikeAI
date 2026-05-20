@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/database"
 
 	"github.com/gin-gonic/gin"
@@ -304,6 +305,12 @@ type WebShellHandler struct {
 	logger *zap.Logger
 	client *http.Client
 	db     *database.DB
+	audit  *audit.Service
+}
+
+// SetAudit wires platform audit logging.
+func (h *WebShellHandler) SetAudit(s *audit.Service) {
+	h.audit = s
 }
 
 // NewWebShellHandler 创建 WebShell 处理器，db 可为 nil（连接配置接口将不可用）
@@ -403,6 +410,15 @@ func (h *WebShellHandler) CreateConnection(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if h.audit != nil {
+		host := req.URL
+		if u, err := url.Parse(req.URL); err == nil {
+			host = u.Host
+		}
+		h.audit.RecordOK(c, "webshell", "connection_create", "创建 WebShell 连接", "webshell_connection", conn.ID, map[string]interface{}{
+			"host": host, "type": shellType,
+		})
+	}
 	c.JSON(http.StatusOK, conn)
 }
 
@@ -484,6 +500,9 @@ func (h *WebShellHandler) DeleteConnection(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "webshell", "connection_delete", "删除 WebShell 连接", "webshell_connection", id, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -714,8 +733,9 @@ func (h *WebShellHandler) Exec(c *gin.Context) {
 	output := decodeWebshellOutput(out, req.Encoding)
 	httpCode := resp.StatusCode
 
+	ok := resp.StatusCode == http.StatusOK
 	c.JSON(http.StatusOK, ExecResponse{
-		OK:       resp.StatusCode == http.StatusOK,
+		OK:       ok,
 		Output:   output,
 		HTTPCode: httpCode,
 	})

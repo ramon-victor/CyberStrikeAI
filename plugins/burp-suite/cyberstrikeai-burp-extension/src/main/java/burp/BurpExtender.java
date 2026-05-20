@@ -73,14 +73,33 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory {
             public void onEvent(String type, String message, String rawJson) {
                 if (type == null) type = "";
                 switch (type) {
+                    case "response_start":
+                        tab.appendProgressToRun(runId, "\n\n[主回复]\n");
+                        break;
                     case "response_delta":
-                    case "eino_agent_reply_stream_delta":
-                        tab.appendFinalToRun(runId, message);
+                        if (message != null && !message.isEmpty()) {
+                            tab.appendFinalToRun(runId, message);
+                        }
                         break;
                     case "response":
-                        tab.appendFinalToRun(runId, "\n\n--- Final Response ---\n");
                         tab.appendFinalToRun(runId, message);
                         tab.setFinalResponse(runId, message);
+                        break;
+                    case "eino_agent_reply_stream_start":
+                        tab.appendProgressToRun(runId, "\n\n[子代理回复]\n");
+                        break;
+                    case "eino_agent_reply_stream_delta":
+                        if (message != null && !message.isEmpty()) {
+                            tab.appendProgressToRun(runId, message);
+                        }
+                        break;
+                    case "eino_agent_reply_stream_end":
+                        tab.appendProgressToRun(runId, "\n");
+                        break;
+                    case "eino_agent_reply":
+                        if (message != null && !message.isEmpty()) {
+                            tab.appendProgressToRun(runId, "\n\n[子代理回复]\n" + message + "\n");
+                        }
                         break;
                     case "progress":
                         tab.appendProgressToRun(runId, "\n[progress] " + message + "\n");
@@ -94,21 +113,40 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory {
                         tab.appendProgressToRun(runId, "\n[error] " + message + "\n");
                         tab.setRunStatus(runId, "error");
                         break;
+                    case "reasoning_chain_stream_start":
+                        tab.appendProgressToRun(runId, "\n\n[推理过程]\n");
+                        break;
+                    case "reasoning_chain_stream_delta":
+                        if (message != null && !message.isEmpty()) {
+                            tab.appendProgressToRun(runId, message);
+                        }
+                        break;
+                    case "reasoning_chain_stream_end":
+                        tab.appendProgressToRun(runId, "\n");
+                        break;
+                    case "reasoning_chain":
+                        if (message != null && !message.isEmpty()) {
+                            String streamId = rawJson != null ? SimpleJson.extractStringField(rawJson, "streamId") : "";
+                            if (streamId == null || streamId.isEmpty()) {
+                                tab.appendProgressToRun(runId, "\n\n[推理过程]\n" + message + "\n");
+                            }
+                        }
+                        break;
                     case "thinking_stream_start":
                         if (tab.isShowDebugEvents()) {
                             tab.resetThinkingStream(runId);
                         }
                         break;
                     case "thinking_stream_delta":
+                        if (tab.isShowDebugEvents() && message != null && !message.isEmpty()) {
+                            tab.appendProgressToRun(runId, message);
+                        }
+                        break;
                     case "tool_call":
                     case "tool_result":
                     case "tool_result_delta":
                         if (tab.isShowDebugEvents() && message != null && !message.isEmpty()) {
-                            if ("thinking_stream_delta".equals(type)) {
-                                tab.appendThinkingDelta(runId, message);
-                            } else {
-                                tab.appendProgressToRun(runId, "\n[" + type + "] " + message + "\n");
-                            }
+                            tab.appendProgressToRun(runId, "\n[" + type + "] " + message + "\n");
                         }
                         break;
                     case "conversation":
@@ -125,7 +163,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory {
                     case "done":
                         break;
                     default:
-                        if (tab.isShowDebugEvents() && message != null && !message.isEmpty()) {
+                        if (tab.isShowDebugEvents() && message != null && !message.isEmpty()
+                                && !type.endsWith("_stream_delta") && !type.endsWith("_stream_start")
+                                && !type.endsWith("_stream_end")) {
                             tab.appendProgressToRun(runId, "\n[" + type + "] " + message + "\n");
                         }
                         break;
@@ -134,8 +174,9 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory {
 
             @Override
             public void onError(String message, Exception e) {
-                tab.appendProgressToRun(runId, "\n[error] " + message + "\n");
-                tab.setRunStatus(runId, "error");
+                boolean cancelled = message != null && message.toLowerCase().contains("cancel");
+                tab.appendProgressToRun(runId, cancelled ? "\n[info] " + message + "\n" : "\n[error] " + message + "\n");
+                tab.setRunStatus(runId, cancelled ? "cancelled" : "error");
                 callbacks.printError("CyberStrikeAI stream error: " + message);
                 if (e != null) {
                     callbacks.printError(e.toString());

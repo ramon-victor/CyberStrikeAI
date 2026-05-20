@@ -2052,6 +2052,9 @@
                                 <div class="settings-nav-item" data-section="security" onclick="switchSettingsSection('security')">
                                     <span data-i18n="settings.nav.security">安全设置</span>
                                 </div>
+                                <div class="settings-nav-item" data-section="audit" onclick="switchSettingsSection('audit')">
+                                    <span data-i18n="settings.nav.audit">日志审计</span>
+                                </div>
                             </nav>
                         </aside>
                         
@@ -2152,12 +2155,15 @@
                                             <small class="form-hint" data-i18n="settingsBasic.multiAgentPeLoopHint">仅 orchestration=plan_execute 时有效；execute 与 replan 之间的最大轮次。</small>
                                         </div>
                                         <div class="form-group">
-                                            <label class="checkbox-label">
-                                                <input type="checkbox" id="multi-agent-robot-use" class="modern-checkbox" />
-                                                <span class="checkbox-custom"></span>
-                                                <span class="checkbox-text" data-i18n="settingsBasic.multiAgentRobotUse">企业微信 / 钉钉 / 飞书机器人也使用多代理</span>
-                                            </label>
-                                            <small class="form-hint" data-i18n="settingsBasic.multiAgentRobotUseHint">需同时勾选「启用多代理」；调用量与成本更高。</small>
+                                            <label for="multi-agent-robot-mode" data-i18n="settingsBasic.multiAgentRobotMode">机器人默认对话模式</label>
+                                            <select id="multi-agent-robot-mode" class="form-select">
+                                                <option value="react" data-i18n="chat.agentModeReactNative">原生 ReAct</option>
+                                                <option value="eino_single" data-i18n="chat.agentModeEinoSingle">Eino 单代理（ADK）</option>
+                                                <option value="deep" data-i18n="chat.agentModeDeep">Deep（DeepAgent）</option>
+                                                <option value="plan_execute" data-i18n="chat.agentModePlanExecuteLabel">Plan-Execute</option>
+                                                <option value="supervisor" data-i18n="chat.agentModeSupervisorLabel">Supervisor</option>
+                                            </select>
+                                            <small class="form-hint" data-i18n="settingsBasic.multiAgentRobotModeHint">企业微信 / 钉钉 / 飞书机器人每条消息使用的执行模式；Deep / Plan-Execute / Supervisor 需启用多代理。</small>
                                         </div>
                                     </div>
                                 </div>
@@ -2390,6 +2396,73 @@
                                     <p class="settings-description" data-i18n="settings.robots.description">配置企业微信、钉钉、飞书等机器人，在手机端直接与 CyberStrikeAI 对话，无需在服务器上打开网页。</p>
                                 </div>
 
+                                <!-- 微信 / iLink -->
+                                <div class="settings-subsection robot-wechat-card" id="robot-wechat-subsection">
+                                    <div class="robot-wechat-header">
+                                        <div class="robot-wechat-header-text">
+                                            <h4 data-i18n="settings.robots.wechat.title">微信 / iLink</h4>
+                                            <p class="robot-wechat-subtitle" data-i18n="settings.robots.wechat.subtitle">扫码绑定个人微信，在手机端直接与 CyberStrikeAI 对话</p>
+                                        </div>
+                                        <span id="robot-wechat-status-badge" class="robot-wechat-badge robot-wechat-badge--idle" data-i18n="settings.robots.wechat.statusIdle">未绑定</span>
+                                    </div>
+                                    <div class="settings-form robot-wechat-form">
+                                        <div class="robot-wechat-toolbar">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="robot-wechat-enabled" class="modern-checkbox" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settings.robots.wechat.enabled">启用微信机器人</span>
+                                            </label>
+                                        </div>
+                                        <div class="robot-wechat-action-row">
+                                            <button type="button" class="btn-primary" id="robot-wechat-bind-btn" onclick="startWechatRobotBind()" data-i18n="settings.robots.wechat.bindButton">生成二维码并绑定</button>
+                                            <p class="robot-wechat-hint" id="robot-wechat-bind-hint" data-i18n="settings.robots.wechat.bindHint">用微信扫码确认后会自动保存并启用。</p>
+                                        </div>
+                                        <div id="robot-wechat-qr-wrap" class="robot-wechat-panel" hidden>
+                                            <div id="robot-wechat-bound-panel" class="robot-wechat-bound-panel" hidden>
+                                                <div class="robot-wechat-bound-icon" aria-hidden="true">
+                                                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                                                </div>
+                                                <p class="robot-wechat-bound-msg" data-i18n="settings.robots.wechat.boundSuccess">绑定成功，微信机器人已启用</p>
+                                                <p id="robot-wechat-bound-id" class="robot-wechat-bound-id" hidden></p>
+                                            </div>
+                                            <div id="robot-wechat-scan-panel" class="robot-wechat-scan-panel" hidden>
+                                            <div id="robot-wechat-qr-loading" class="robot-wechat-qr-loading" hidden data-i18n="settings.robots.wechat.qrLoading">正在生成二维码…</div>
+                                            <img id="robot-wechat-qr-img" class="robot-wechat-qr-img" alt="" width="220" height="220" hidden />
+                                            <p class="robot-wechat-qr-fallback">
+                                                <a id="robot-wechat-qr-link" href="#" target="_blank" rel="noopener noreferrer" hidden data-i18n="settings.robots.wechat.openLink">无法显示二维码？点击用手机微信打开链接</a>
+                                            </p>
+                                            <p id="robot-wechat-qr-status" class="robot-wechat-qr-status"></p>
+                                            <div id="robot-wechat-verify-wrap" class="robot-wechat-verify-wrap" hidden>
+                                                <label for="robot-wechat-verify-code" data-i18n="settings.robots.wechat.verifyCodeLabel">手机显示的数字（仅部分账号需要）</label>
+                                                <div class="robot-wechat-verify-row">
+                                                    <input type="text" id="robot-wechat-verify-code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="000000" />
+                                                    <button type="button" class="btn-primary btn-sm" onclick="submitWechatVerifyCode()" data-i18n="settings.robots.wechat.verifyCodeSubmit">提交</button>
+                                                </div>
+                                            </div>
+                                            </div>
+                                        </div>
+                                        <details class="settings-collapsible robot-wechat-advanced" id="robot-wechat-advanced">
+                                            <summary data-i18n="settings.robots.wechat.advanced">高级设置</summary>
+                                            <div class="form-group">
+                                                <label for="robot-wechat-base-url" data-i18n="settings.robots.wechat.baseUrl">API Base URL</label>
+                                                <input type="text" id="robot-wechat-base-url" placeholder="https://ilinkai.weixin.qq.com" autocomplete="off" />
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="robot-wechat-bot-type" data-i18n="settings.robots.wechat.botType">Bot Type</label>
+                                                <input type="text" id="robot-wechat-bot-type" placeholder="3" autocomplete="off" />
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="robot-wechat-bot-agent" data-i18n="settings.robots.wechat.botAgent">Bot Agent</label>
+                                                <input type="text" id="robot-wechat-bot-agent" placeholder="CyberStrikeAI/1.0" autocomplete="off" />
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="robot-wechat-ilink-bot-id" data-i18n="settings.robots.wechat.ilinkBotId">iLink Bot ID（绑定后自动填充）</label>
+                                                <input type="text" id="robot-wechat-ilink-bot-id" readonly autocomplete="off" />
+                                            </div>
+                                        </details>
+                                    </div>
+                                </div>
+
                                 <!-- 企业微信 -->
                                 <div class="settings-subsection">
                                     <h4 data-i18n="settings.robots.wecom.title">企业微信</h4>
@@ -2514,6 +2587,88 @@
                                         </div>
                                     </div>
                                 </div>
+                            </div>
+
+                            <!-- 日志审计 -->
+                            <div id="settings-section-audit" class="settings-section-content">
+                                <div class="settings-section-header">
+                                    <h3 data-i18n="settingsAudit.title">日志审计</h3>
+                                    <p class="settings-description" data-i18n="settingsAudit.description">记录平台管理类操作（登录、配置、删除等），不记录对话正文、终端/WebShell 每次命令与工具调用明细。</p>
+                                    <p id="audit-retention-hint" class="settings-description audit-retention-hint" hidden></p>
+                                </div>
+                                <div id="audit-summary-stats" class="audit-summary-stats" hidden>
+                                    <div class="audit-stat-card"><span class="audit-stat-label" data-i18n="settingsAudit.statTotal">当前筛选</span><strong id="audit-stat-total">0</strong></div>
+                                    <div class="audit-stat-card"><span class="audit-stat-label" data-i18n="settingsAudit.statFailures">失败</span><strong id="audit-stat-failures">0</strong></div>
+                                    <div class="audit-stat-card"><span class="audit-stat-label" data-i18n="settingsAudit.statRecent7d">近 7 天</span><strong id="audit-stat-recent">0</strong></div>
+                                </div>
+                                <div class="audit-logs-toolbar">
+                                    <div class="audit-logs-filters">
+                                        <label class="audit-filter-cascade-group">
+                                            <span data-i18n="settingsAudit.filterEvent">事件类型</span>
+                                            <div class="audit-filter-cascade">
+                                                <select id="audit-filter-category" onchange="onAuditCategoryFilterChange()" aria-label="类别">
+                                                    <option value="" data-i18n="settingsAudit.filterAllCategories">全部类别</option>
+                                                    <option value="auth" data-i18n="settingsAudit.cat.auth">认证</option>
+                                                    <option value="config" data-i18n="settingsAudit.cat.config">配置</option>
+                                                    <option value="c2" data-i18n="settingsAudit.cat.c2">C2</option>
+                                                    <option value="webshell" data-i18n="settingsAudit.cat.webshell">WebShell</option>
+                                                    <option value="knowledge" data-i18n="settingsAudit.cat.knowledge">知识库</option>
+                                                    <option value="conversation" data-i18n="settingsAudit.cat.conversation">对话</option>
+                                                    <option value="vulnerability" data-i18n="settingsAudit.cat.vulnerability">漏洞</option>
+                                                    <option value="external_mcp" data-i18n="settingsAudit.cat.externalMcp">外部 MCP</option>
+                                                    <option value="task" data-i18n="settingsAudit.cat.task">任务</option>
+                                                    <option value="tool" data-i18n="settingsAudit.cat.tool">工具</option>
+                                                    <option value="file" data-i18n="settingsAudit.cat.file">文件</option>
+                                                    <option value="hitl" data-i18n="settingsAudit.cat.hitl">人机协同</option>
+                                                    <option value="role" data-i18n="settingsAudit.cat.role">角色</option>
+                                                    <option value="skill" data-i18n="settingsAudit.cat.skill">Skill</option>
+                                                    <option value="agent" data-i18n="settingsAudit.cat.agent">子代理</option>
+                                                </select>
+                                                <span class="audit-filter-cascade-arrow" aria-hidden="true">→</span>
+                                                <select id="audit-filter-action" disabled aria-label="操作">
+                                                    <option value="" data-i18n="settingsAudit.filterAllActions">全部操作</option>
+                                                </select>
+                                            </div>
+                                        </label>
+                                        <label>
+                                            <span data-i18n="settingsAudit.filterResult">结果</span>
+                                            <select id="audit-filter-result">
+                                                <option value="" data-i18n="settingsAudit.filterAll">全部</option>
+                                                <option value="success">success</option>
+                                                <option value="failure">failure</option>
+                                            </select>
+                                        </label>
+                                        <label>
+                                            <span data-i18n="settingsAudit.filterSince">开始时间</span>
+                                            <input type="datetime-local" id="audit-filter-since" />
+                                        </label>
+                                        <label>
+                                            <span data-i18n="settingsAudit.filterUntil">结束时间</span>
+                                            <input type="datetime-local" id="audit-filter-until" />
+                                        </label>
+                                        <label>
+                                            <span data-i18n="settingsAudit.filterQuery">关键词</span>
+                                            <input type="text" id="audit-filter-q" data-i18n="settingsAudit.filterQueryPlaceholder" data-i18n-attr="placeholder" placeholder="消息 / 资源 ID / 操作名" />
+                                        </label>
+                                        <button type="button" class="btn-secondary" onclick="filterAuditLogs()" data-i18n="settingsAudit.filterBtn">筛选</button>
+                                        <button type="button" class="btn-secondary" onclick="resetAuditLogFilters()" data-i18n="settingsAudit.resetBtn">重置</button>
+                                    </div>
+                                    <div class="audit-logs-actions">
+                                        <button type="button" class="btn-secondary" onclick="refreshAuditLogs()" data-i18n="common.refresh">刷新</button>
+                                        <div class="audit-export-dropdown">
+                                            <button type="button" class="btn-secondary audit-export-trigger" id="audit-export-trigger" onclick="toggleAuditExportMenu(event)" aria-haspopup="true" aria-expanded="false">
+                                                <span data-i18n="settingsAudit.exportBtn">导出</span>
+                                                <span class="audit-export-caret" aria-hidden="true">▾</span>
+                                            </button>
+                                            <div id="audit-export-menu" class="audit-export-menu" role="menu" hidden>
+                                                <button type="button" class="audit-export-menu-item" role="menuitem" onclick="runAuditExport('json')" data-i18n="settingsAudit.exportJson">导出 JSON</button>
+                                                <button type="button" class="audit-export-menu-item" role="menuitem" onclick="runAuditExport('csv')" data-i18n="settingsAudit.exportCsv">导出 CSV</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div id="audit-log-list" class="audit-log-list c2-event-list"></div>
+                                <div id="audit-logs-pagination" class="pagination-container audit-logs-pagination"></div>
                             </div>
 
                             <!-- 安全设置 -->
@@ -3559,6 +3714,8 @@
     <script src="/static/js/chat.js"></script>
     <script src="/static/js/hitl.js"></script>
     <script src="/static/js/settings.js"></script>
+    <script src="/static/js/audit.js"></script>
+    <script src="/static/js/wechat-robot.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm@4.19.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.5.0/lib/xterm-addon-fit.js"></script>
     <script src="/static/js/terminal.js"></script>

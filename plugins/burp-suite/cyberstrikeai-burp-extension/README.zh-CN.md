@@ -81,7 +81,8 @@ cd plugins/burp-suite/cyberstrikeai-burp-extension
 2) 填写：
    - **Host**：例如 `127.0.0.1`
    - **Port**：例如 `8080`
-   - **Password**：你的 CyberStrikeAI 登录密码（对应服务端 `config.yaml` 的 `auth.password`）
+   - **HTTPS**：默认勾选（对接 `config.yaml` 中 `tls_enabled` / 自签证书）；插件会自动信任本地自签证书，无需导入
+   - **Password**：你的 CyberStrikeAI 登录密码（对应服务端 `auth.password`）
    - **Agent mode**：选择 `Single Agent` 或 `Multi Agent`
 3) 点击 **Validate**
    - 成功：状态显示 `OK (token saved)`
@@ -94,8 +95,9 @@ cd plugins/burp-suite/cyberstrikeai-burp-extension
 
 - **Validate 失败 / 401**
   - 确认密码是否正确（服务端 `auth.password`）
-  - 确认 IP/端口是否能访问（例如浏览器能打开 `http://IP:PORT/`）
-  - 若服务器启用了反向代理/HTTPS，需要把插件里 baseUrl 改成对应协议与端口（当前插件默认使用 `http://`）
+  - 确认 IP/端口是否能访问（例如浏览器能打开 `https://IP:PORT/`）
+  - 服务端启用 TLS 时勾选 **HTTPS**（默认已勾选）；自签证书无需手动导入
+  - 若仍为纯 HTTP 部署，取消勾选 **HTTPS**
 
 - **选择 Multi Agent 后提示“多代理未启用”**
   - 服务端需要开启：`config.yaml` 中 `multi_agent.enabled: true`

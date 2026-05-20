@@ -14,6 +14,7 @@ final class CyberStrikeAITab implements ITab {
 
     private final JTextField hostField = new JTextField("127.0.0.1");
     private final JTextField portField = new JTextField("8080");
+    private final JCheckBox useHttpsBox = new JCheckBox("HTTPS", true);
     private final JPasswordField passwordField = new JPasswordField();
     private final JComboBox<String> agentModeBox = new JComboBox<>(new String[]{
             "Native ReAct", "Eino Single (ADK)", "Deep (DeepAgent)", "Plan-Execute", "Supervisor"
@@ -29,6 +30,10 @@ final class CyberStrikeAITab implements ITab {
 
     private final JTextArea progressArea = new JTextArea();
     private final JTextArea finalRawArea = new JTextArea(); // raw final stream / final response
+    private JScrollPane progressScrollPane;
+    private JScrollPane finalRawScrollPane;
+    /** 距底部在此像素内视为「跟随滚动」，否则用户上拉阅读时不抢滚动条 */
+    private static final int SCROLL_FOLLOW_THRESHOLD_PX = 48;
     private final JEditorPane markdownPane = new JEditorPane("text/html", "");
     private final CardLayout outputCardsLayout = new CardLayout();
     private final JPanel outputCards = new JPanel(outputCardsLayout);
@@ -41,6 +46,7 @@ final class CyberStrikeAITab implements ITab {
 
     private final CyberStrikeAIClient client = new CyberStrikeAIClient();
     private final AtomicReference<String> tokenRef = new AtomicReference<>("");
+    private final AtomicReference<Thread> validateThreadRef = new AtomicReference<>();
 
     private final DefaultListModel<TestRun> testListModel = new DefaultListModel<>();
     private final JList<TestRun> testList = new JList<>(testListModel);
@@ -107,6 +113,8 @@ final class CyberStrikeAITab implements ITab {
         row1.add(hostField);
         row1.add(new JLabel("Port"));
         row1.add(portField);
+        useHttpsBox.setToolTipText("Use https:// for CyberStrikeAI (self-signed certs are trusted automatically)");
+        row1.add(useHttpsBox);
         row1.add(new JLabel("Password"));
         row1.add(passwordField);
         row1.add(validateButton);
@@ -186,15 +194,22 @@ final class CyberStrikeAITab implements ITab {
         configureTextArea(requestArea, false);
         configureTextArea(responseArea, false);
 
-        outputCards.add(new JScrollPane(finalRawArea), "raw");
+        finalRawScrollPane = new JScrollPane(finalRawArea);
+        finalRawScrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        finalRawScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        outputCards.add(finalRawScrollPane, "raw");
         outputCards.add(new JScrollPane(markdownPane), "md");
 
         outputRoot.add(buildOutputHeader(), BorderLayout.NORTH);
         outputRoot.add(buildOutputBody(), BorderLayout.CENTER);
 
         rightTabs.addTab("Output", outputRoot);
-        rightTabs.addTab("Request", new JScrollPane(requestArea));
-        rightTabs.addTab("Response", new JScrollPane(responseArea));
+        JScrollPane requestScroll = new JScrollPane(requestArea);
+        requestScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        rightTabs.addTab("Request", requestScroll);
+        JScrollPane responseScroll = new JScrollPane(responseArea);
+        responseScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        rightTabs.addTab("Response", responseScroll);
         return rightTabs;
     }
 
@@ -210,12 +225,13 @@ final class CyberStrikeAITab implements ITab {
     }
 
     private JComponent buildOutputBody() {
-        JScrollPane progressScroll = new JScrollPane(progressArea);
-        progressScroll.setBorder(BorderFactory.createTitledBorder("Progress"));
-        progressScroll.getVerticalScrollBar().setUnitIncrement(16);
+        progressScrollPane = new JScrollPane(progressArea);
+        progressScrollPane.setBorder(BorderFactory.createTitledBorder("Progress"));
+        progressScrollPane.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        progressScrollPane.getVerticalScrollBar().setUnitIncrement(16);
 
         JPanel empty = new JPanel();
-        progressContainer.add(progressScroll, "show");
+        progressContainer.add(progressScrollPane, "show");
         progressContainer.add(empty, "hide");
         ((CardLayout) progressContainer.getLayout()).show(progressContainer, "show");
 
@@ -259,10 +275,27 @@ final class CyberStrikeAITab implements ITab {
         return split;
     }
 
+    private static boolean isScrollNearBottom(JScrollPane scrollPane) {
+        if (scrollPane == null) {
+            return true;
+        }
+        JScrollBar bar = scrollPane.getVerticalScrollBar();
+        int max = Math.max(0, bar.getMaximum() - bar.getVisibleAmount());
+        return bar.getValue() >= max - SCROLL_FOLLOW_THRESHOLD_PX;
+    }
+
+    private static void scrollPaneToBottom(JScrollPane scrollPane) {
+        if (scrollPane == null) {
+            return;
+        }
+        JScrollBar bar = scrollPane.getVerticalScrollBar();
+        bar.setValue(bar.getMaximum());
+    }
+
     private static void configureTextArea(JTextArea area, boolean monospaced) {
         area.setEditable(false);
-        area.setLineWrap(false);
-        area.setWrapStyleWord(false);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
         if (monospaced) {
             area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
         } else {
@@ -381,24 +414,44 @@ final class CyberStrikeAITab implements ITab {
 
     private void wireActions() {
         validateButton.addActionListener(e -> {
-            validateButton.setEnabled(false);
+            if ("Cancel".equals(validateButton.getText())) {
+                cancelValidateInProgress();
+                return;
+            }
+            validateButton.setText("Cancel");
+            validateButton.setEnabled(true);
+            stopButton.setEnabled(true);
             statusLabel.setText("Validating...");
-            log("Validating connection...");
-            new Thread(() -> {
+            log("Validating connection... (max ~10s; click Cancel or Stop to abort)");
+            Thread worker = new Thread(() -> {
                 try {
                     CyberStrikeAIClient.Config cfg = currentConfig();
                     String token = client.loginAndValidate(cfg);
+                    if (Thread.currentThread().isInterrupted()) {
+                        return;
+                    }
                     tokenRef.set(token);
                     SwingUtilities.invokeLater(() -> statusLabel.setText("OK (token saved)"));
                     log("Validation OK.");
                 } catch (Exception ex) {
                     tokenRef.set("");
-                    SwingUtilities.invokeLater(() -> statusLabel.setText("Failed: " + ex.getMessage()));
-                    log("Validation failed: " + ex.getMessage());
+                    if (Thread.currentThread().isInterrupted()) {
+                        SwingUtilities.invokeLater(() -> statusLabel.setText("Cancelled"));
+                        log("Validation cancelled.");
+                    } else {
+                        SwingUtilities.invokeLater(() -> statusLabel.setText("Failed: " + ex.getMessage()));
+                        log("Validation failed: " + ex.getMessage());
+                    }
                 } finally {
-                    SwingUtilities.invokeLater(() -> validateButton.setEnabled(true));
+                    validateThreadRef.set(null);
+                    SwingUtilities.invokeLater(() -> {
+                        validateButton.setText("Validate");
+                        validateButton.setEnabled(true);
+                    });
                 }
-            }, "CyberStrikeAI-Validate").start();
+            }, "CyberStrikeAI-Validate");
+            validateThreadRef.set(worker);
+            worker.start();
         });
 
         clearButton.addActionListener(e -> {
@@ -435,10 +488,23 @@ final class CyberStrikeAITab implements ITab {
         });
 
         stopButton.addActionListener(e -> {
+            if ("Cancel".equals(validateButton.getText())) {
+                cancelValidateInProgress();
+                return;
+            }
+
             String runId = selectedRunId;
+            if (runId != null && client.hasActiveRequest()) {
+                client.cancelActiveRequest();
+                appendProgressToRun(runId, "\n[info] Stream stopped.\n");
+                setRunStatus(runId, "cancelled");
+                return;
+            }
+
             if (runId == null) return;
             TestRun run = runs.get(runId);
             if (run == null) return;
+
             String token = getToken();
             if (token == null || token.trim().isEmpty()) {
                 appendProgressToRun(runId, "\n[error] Not validated.\n");
@@ -483,7 +549,8 @@ final class CyberStrikeAITab implements ITab {
         String host = hostField.getText().trim();
         String port = portField.getText().trim();
         String password = new String(passwordField.getPassword());
-        String baseUrl = "http://" + host + ":" + port;
+        String scheme = useHttpsBox.isSelected() ? "https" : "http";
+        String baseUrl = scheme + "://" + host + ":" + port;
         int idx = agentModeBox.getSelectedIndex();
         CyberStrikeAIClient.AgentMode mode = (idx >= 0 && idx < AGENT_MODES.length)
                 ? AGENT_MODES[idx]
@@ -567,10 +634,31 @@ final class CyberStrikeAITab implements ITab {
             run.progressBuffer.append(s);
         }
         if (runId.equals(selectedRunId)) {
-            SwingUtilities.invokeLater(() -> {
-                progressArea.append(s);
-                progressArea.setCaretPosition(progressArea.getDocument().getLength());
-            });
+            SwingUtilities.invokeLater(() -> appendProgressUi(s, false));
+        }
+    }
+
+    private void appendProgressUi(String s, boolean forceFollow) {
+        JScrollBar bar = progressScrollPane != null ? progressScrollPane.getVerticalScrollBar() : null;
+        int scrollBefore = bar != null ? bar.getValue() : 0;
+        boolean follow = forceFollow || isScrollNearBottom(progressScrollPane);
+        progressArea.append(s);
+        if (follow) {
+            scrollPaneToBottom(progressScrollPane);
+        } else if (bar != null) {
+            bar.setValue(scrollBefore);
+        }
+    }
+
+    private void appendFinalUi(String s, boolean forceFollow) {
+        JScrollBar bar = finalRawScrollPane != null ? finalRawScrollPane.getVerticalScrollBar() : null;
+        int scrollBefore = bar != null ? bar.getValue() : 0;
+        boolean follow = forceFollow || isScrollNearBottom(finalRawScrollPane);
+        finalRawArea.append(s);
+        if (follow) {
+            scrollPaneToBottom(finalRawScrollPane);
+        } else if (bar != null) {
+            bar.setValue(scrollBefore);
         }
     }
 
@@ -620,10 +708,7 @@ final class CyberStrikeAITab implements ITab {
             run.finalBuffer.append(s);
         }
         if (runId.equals(selectedRunId)) {
-            SwingUtilities.invokeLater(() -> {
-                finalRawArea.append(s);
-                finalRawArea.setCaretPosition(finalRawArea.getDocument().getLength());
-            });
+            SwingUtilities.invokeLater(() -> appendFinalUi(s, false));
         }
     }
 
@@ -656,9 +741,9 @@ final class CyberStrikeAITab implements ITab {
         }
         SwingUtilities.invokeLater(() -> {
             progressArea.setText(progress);
-            progressArea.setCaretPosition(progressArea.getDocument().getLength());
+            scrollPaneToBottom(progressScrollPane);
             finalRawArea.setText(fin);
-            finalRawArea.setCaretPosition(finalRawArea.getDocument().getLength());
+            scrollPaneToBottom(finalRawScrollPane);
             requestArea.setText(run.requestRaw == null ? "" : run.requestRaw);
             responseArea.setText(run.responseRaw == null ? "" : run.responseRaw);
             refreshOutputView();
@@ -682,23 +767,34 @@ final class CyberStrikeAITab implements ITab {
 
     void clearAndShowStreamHeader(String title) {
         SwingUtilities.invokeLater(() -> {
-            progressArea.setText("");
-            finalRawArea.setText(title + "\n\n");
+            progressArea.setText("[*] " + title + "\n\n");
+            finalRawArea.setText("");
+            markdownPane.setText("");
         });
     }
 
     // Legacy helpers kept for Validate logging
     void appendStreamLine(String s) {
         if (s == null) return;
-        SwingUtilities.invokeLater(() -> {
-            progressArea.append(s);
-            progressArea.append("\n");
-            progressArea.setCaretPosition(progressArea.getDocument().getLength());
-        });
+        SwingUtilities.invokeLater(() -> appendProgressUi(s + "\n", false));
     }
 
     private void log(String s) {
         appendStreamLine("[*] " + s);
+    }
+
+    private void cancelValidateInProgress() {
+        client.cancelActiveRequest();
+        Thread t = validateThreadRef.getAndSet(null);
+        if (t != null) {
+            t.interrupt();
+        }
+        SwingUtilities.invokeLater(() -> {
+            statusLabel.setText("Cancelled");
+            validateButton.setText("Validate");
+            validateButton.setEnabled(true);
+        });
+        log("Validation cancelled.");
     }
 
     private void applyFilter() {

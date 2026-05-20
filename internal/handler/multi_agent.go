@@ -107,7 +107,7 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 		zap.String("conversationId", req.ConversationID),
 	)
 
-	prep, err := h.prepareMultiAgentSession(&req)
+	prep, err := h.prepareMultiAgentSession(&req, c, "multi_agent_stream")
 	if err != nil {
 		sendEvent("error", err.Error(), nil)
 		sendEvent("done", "", nil)
@@ -347,7 +347,7 @@ func (h *AgentHandler) MultiAgentLoop(c *gin.Context) {
 
 	h.logger.Info("Received Eino DeepAgent non-stream request", zap.String("conversationId", req.ConversationID))
 
-	prep, err := h.prepareMultiAgentSession(&req)
+	prep, err := h.prepareMultiAgentSession(&req, c, "multi_agent")
 	if err != nil {
 		status, msg := multiAgentHTTPErrorStatus(err)
 		c.JSON(status, gin.H{"error": msg})

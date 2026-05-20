@@ -410,6 +410,34 @@ if (typeof window !== 'undefined') {
     window.normalizeStreamingDeltaJs = normalizeStreamingDeltaJs;
 }
 
+/**
+ * SSE data.accumulated：服务端权威流式全文。有则直接用作 buffer，避免双端 normalize 叠字。
+ * @param {object|null|undefined} data
+ * @returns {string|null} 有快照时返回全文；否则 null（回退 delta 归一化）
+ */
+function streamBufferFromAccumulated(data) {
+    if (!data || data.accumulated == null) {
+        return null;
+    }
+    return String(data.accumulated);
+}
+
+/**
+ * @returns {string} 合并后的 buffer
+ */
+function mergeStreamBuffer(current, delta, data) {
+    const acc = streamBufferFromAccumulated(data);
+    if (acc !== null) {
+        return acc;
+    }
+    return normalizeStreamingDeltaJs(current, delta)[0];
+}
+
+if (typeof window !== 'undefined') {
+    window.streamBufferFromAccumulated = streamBufferFromAccumulated;
+    window.mergeStreamBuffer = mergeStreamBuffer;
+}
+
 /** 流式 delta：纯文本，避免每条全量 marked + DOMPurify */
 function setTimelineItemContentStreamPlain(contentEl, text) {
     if (!contentEl) return;
@@ -1417,8 +1445,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const s = state.get(streamId);
 
             const delta = event.message || '';
-            const merged = normalizeStreamingDeltaJs(s.buffer, delta);
-            s.buffer = merged[0];
+            s.buffer = mergeStreamBuffer(s.buffer, delta, d);
 
             const item = document.getElementById(s.itemId);
             if (item) {
@@ -1571,7 +1598,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const index = toolInfo.index || 0;
             const total = toolInfo.total || 0;
             const toolCallId = toolInfo.toolCallId || null;
-            const toolCallTitle = typeof window.t === 'function' ? window.t('chat.callTool', { name: escapeHtml(toolName), index: index, total: total }) : '调用工具: ' + escapeHtml(toolName) + ' (' + index + '/' + total + ')';
+            const toolCallTitle = formatToolCallTimelineTitle(toolName, index, total);
             const toolCallItemId = addTimelineItem(timeline, 'tool_call', {
                 title: timelineAgentBracketPrefix(toolInfo) + '🔧 ' + toolCallTitle,
                 message: event.message,
@@ -1599,44 +1626,33 @@ function handleStreamEvent(event, progressElement, progressId,
 
             const key = toolResultStreamKey(progressId, toolCallId);
             let state = toolResultStreamStateByKey.get(key);
-            const toolNameDelta = deltaInfo.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : '未知工具');
             const deltaText = event.message || '';
             if (!deltaText) break;
 
             if (!state) {
-                // 首次增量：创建一个 tool_result 占位条目，后续不断更新 pre 内容
-                const runningLabel = typeof window.t === 'function' ? window.t('timeline.running') : '执行中...';
-                const title = timelineAgentBracketPrefix(deltaInfo) + '⏳ ' + (typeof window.t === 'function'
-                    ? window.t('timeline.running')
-                    : runningLabel) + ' ' + (typeof window.t === 'function' ? window.t('chat.callTool', { name: escapeHtmlLocal(toolNameDelta), index: deltaInfo.index || 0, total: deltaInfo.total || 0 }) : toolNameDelta);
-
-                const itemId = addTimelineItem(timeline, 'tool_result', {
-                    title: title,
-                    message: '',
-                    data: {
-                        toolName: toolNameDelta,
-                        success: true,
-                        isError: false,
-                        result: deltaText,
-                        toolCallId: toolCallId,
-                        index: deltaInfo.index,
-                        total: deltaInfo.total,
-                        iteration: deltaInfo.iteration,
-                        einoAgent: deltaInfo.einoAgent,
-                        source: deltaInfo.source
-                    },
-                    expanded: false
-                });
-
-                state = { itemId, buffer: '' };
+                const mapping = toolCallStatusMap.get(toolCallId);
+                let callItemId = mapping && mapping.itemId ? mapping.itemId : null;
+                if (callItemId) {
+                    const callItem = document.getElementById(callItemId);
+                    if (callItem) {
+                        ensureToolCallResultSlot(callItem);
+                        const section = callItem.querySelector('.tool-result-section');
+                        if (section) {
+                            section.classList.remove('pending');
+                            section.className = 'tool-result-section success';
+                        }
+                    }
+                }
+                state = { itemId: callItemId, buffer: '', onCallItem: !!callItemId };
                 toolResultStreamStateByKey.set(key, state);
             }
 
             state.buffer += deltaText;
-            const item = document.getElementById(state.itemId);
+            const item = state.itemId ? document.getElementById(state.itemId) : null;
             if (item) {
                 const pre = item.querySelector('pre.tool-result');
                 if (pre) {
+                    pre.classList.remove('tool-result-pending');
                     pre.textContent = state.buffer;
                 }
             }
@@ -1651,34 +1667,23 @@ function handleStreamEvent(event, progressElement, progressId,
             const resultToolCallId = resultInfo.toolCallId || null;
             const resultExecText = success ? (typeof window.t === 'function' ? window.t('chat.toolExecComplete', { name: escapeHtml(resultToolName) }) : '工具 ' + escapeHtml(resultToolName) + ' 执行完成') : (typeof window.t === 'function' ? window.t('chat.toolExecFailed', { name: escapeHtml(resultToolName) }) : '工具 ' + escapeHtml(resultToolName) + ' 执行失败');
 
-            // 若此 tool 已经流式推送过增量，则复用占位条目并更新最终结果，避免重复添加一条
             if (resultToolCallId) {
                 const key = toolResultStreamKey(progressId, resultToolCallId);
-                const state = toolResultStreamStateByKey.get(key);
-                if (state && state.itemId) {
-                    const item = document.getElementById(state.itemId);
-                    if (item) {
-                        const pre = item.querySelector('pre.tool-result');
-                        const resultVal = resultInfo.result || resultInfo.error || '';
-                        if (pre) pre.textContent = typeof resultVal === 'string' ? resultVal : JSON.stringify(resultVal);
-
-                        const section = item.querySelector('.tool-result-section');
-                        if (section) {
-                            section.className = 'tool-result-section ' + (success ? 'success' : 'error');
-                        }
-
-                        const titleEl = item.querySelector('.timeline-item-title');
-                        if (titleEl) {
-                            if (resultInfo.einoAgent != null && String(resultInfo.einoAgent).trim() !== '') {
-                                item.dataset.einoAgent = String(resultInfo.einoAgent).trim();
-                            }
-                            titleEl.textContent = timelineAgentBracketPrefix(resultInfo) + statusIcon + ' ' + resultExecText;
-                        }
+                const streamState = toolResultStreamStateByKey.get(key);
+                if (streamState && streamState.itemId) {
+                    const streamCallItem = document.getElementById(streamState.itemId);
+                    if (streamCallItem) {
+                        mergeToolResultIntoCallItem(streamCallItem, resultInfo);
                     }
                     toolResultStreamStateByKey.delete(key);
-
-                    // 同时更新 tool_call 的状态
-                    if (resultToolCallId && toolCallStatusMap.has(resultToolCallId)) {
+                    if (toolCallStatusMap.has(resultToolCallId)) {
+                        updateToolCallStatus(resultToolCallId, success ? 'completed' : 'failed');
+                        toolCallStatusMap.delete(resultToolCallId);
+                    }
+                    break;
+                }
+                if (attachToolResultToCall(resultToolCallId, resultInfo)) {
+                    if (toolCallStatusMap.has(resultToolCallId)) {
                         updateToolCallStatus(resultToolCallId, success ? 'completed' : 'failed');
                         toolCallStatusMap.delete(resultToolCallId);
                     }
@@ -1736,12 +1741,11 @@ function handleStreamEvent(event, progressElement, progressId,
             const streamId = d.streamId || null;
             if (!streamId) break;
             const delta = event.message || '';
-            if (!delta) break;
+            if (!delta && streamBufferFromAccumulated(d) === null) break;
             const stateMap = einoAgentReplyStreamStateByProgressId.get(progressId);
             if (!stateMap || !stateMap.has(streamId)) break;
             const s = stateMap.get(streamId);
-            const merged = normalizeStreamingDeltaJs(s.buffer, delta);
-            s.buffer = merged[0];
+            s.buffer = mergeStreamBuffer(s.buffer, delta, d);
             const item = document.getElementById(s.itemId);
             if (item) {
                 let contentEl = item.querySelector('.timeline-item-content');
@@ -1927,8 +1931,8 @@ function handleStreamEvent(event, progressElement, progressId,
             }
 
             const deltaContent = event.message || '';
-            const mergedResp = normalizeStreamingDeltaJs(state.buffer, deltaContent);
-            state.buffer = mergedResp[0];
+            if (!deltaContent && streamBufferFromAccumulated(responseData) === null) break;
+            state.buffer = mergeStreamBuffer(state.buffer, deltaContent, responseData);
 
             // 更新时间线条目内容
             if (state.itemId) {
@@ -2513,6 +2517,212 @@ async function attachRunningTaskEventStream(conversationId) {
 
 window.attachRunningTaskEventStream = attachRunningTaskEventStream;
 window.taskReplayProgressId = taskReplayProgressId;
+window.expandProcessDetailsTimeline = expandProcessDetailsTimeline;
+
+/** 从工具参数提取短摘要（URL/命令等），便于同名工具批量调用时区分 */
+function parseToolCallArgsFromData(data) {
+    if (!data) return {};
+    let args = data.argumentsObj;
+    if (args == null && data.arguments != null && String(data.arguments).trim() !== '') {
+        try {
+            args = JSON.parse(String(data.arguments));
+        } catch (e) {
+            args = { _raw: String(data.arguments) };
+        }
+    }
+    if (args == null || typeof args !== 'object') {
+        return {};
+    }
+    return args;
+}
+
+function formatToolCallTimelineTitle(toolName, index, total) {
+    const name = toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : '未知工具');
+    const idx = index || 0;
+    const tot = total || 0;
+    if (typeof window.t === 'function') {
+        return window.t('chat.callTool', { name: name, index: idx, total: tot });
+    }
+    return '调用工具: ' + name + (tot ? ' (' + idx + '/' + tot + ')' : '');
+}
+
+function buildToolResultSectionHtml(data, opts) {
+    opts = opts || {};
+    const _t = function (k, o) {
+        return typeof window.t === 'function' ? window.t(k, o) : k;
+    };
+    const execResultLabel = _t('timeline.executionResult');
+    const execIdLabel = _t('timeline.executionId');
+    const waitingLabel = _t('timeline.running');
+    if (opts.pending) {
+        return (
+            '<div class="tool-result-section pending">' +
+            '<strong data-i18n="timeline.executionResult">' + escapeHtml(execResultLabel) + '</strong>' +
+            '<pre class="tool-result tool-result-pending">' + escapeHtml(waitingLabel) + '</pre>' +
+            '</div>'
+        );
+    }
+    const isError = data.isError || data.success === false;
+    const noResultText = _t('timeline.noResult');
+    const result = data.result != null ? data.result : (data.error != null ? data.error : noResultText);
+    const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+    const rawText = opts.rawText != null ? String(opts.rawText) : resultStr;
+    return (
+        '<div class="tool-result-section ' + (isError ? 'error' : 'success') + '">' +
+        '<strong data-i18n="timeline.executionResult">' + escapeHtml(execResultLabel) + '</strong>' +
+        '<pre class="tool-result">' + escapeHtml(rawText) + '</pre>' +
+        (data.executionId ? '<div class="tool-execution-id"><span data-i18n="timeline.executionId">' +
+            escapeHtml(execIdLabel) + '</span> <code>' + escapeHtml(String(data.executionId)) + '</code></div>' : '') +
+        '</div>'
+    );
+}
+
+function ensureToolCallResultSlot(item) {
+    if (!item) return null;
+    let section = item.querySelector('.tool-result-section');
+    if (section) return section;
+    const content = item.querySelector('.timeline-item-content');
+    if (!content) return null;
+    const wrap = document.createElement('div');
+    wrap.className = 'tool-details tool-result-slot';
+    wrap.innerHTML = buildToolResultSectionHtml({}, { pending: true });
+    content.appendChild(wrap);
+    return wrap.querySelector('.tool-result-section');
+}
+
+function mergeToolResultIntoCallItem(item, data, options) {
+    if (!item || !data) return false;
+    options = options || {};
+    const isError = data.isError || data.success === false;
+    const noResultText = typeof window.t === 'function' ? window.t('timeline.noResult') : '无结果';
+    const result = data.result != null ? data.result : (data.error != null ? data.error : noResultText);
+    const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+    const text = options.rawText != null ? String(options.rawText) : resultStr;
+
+    let section = item.querySelector('.tool-result-section');
+    if (!section) {
+        ensureToolCallResultSlot(item);
+        section = item.querySelector('.tool-result-section');
+    }
+    if (!section) return false;
+
+    section.classList.remove('pending');
+    section.className = 'tool-result-section ' + (isError ? 'error' : 'success');
+    const pre = section.querySelector('pre.tool-result');
+    if (pre) {
+        pre.classList.remove('tool-result-pending');
+        pre.textContent = text;
+    }
+
+    if (data.executionId) {
+        let execIdEl = section.querySelector('.tool-execution-id');
+        if (!execIdEl) {
+            const execIdLabel = typeof window.t === 'function' ? window.t('timeline.executionId') : '执行ID:';
+            execIdEl = document.createElement('div');
+            execIdEl.className = 'tool-execution-id';
+            execIdEl.innerHTML = '<span data-i18n="timeline.executionId">' + escapeHtml(execIdLabel) +
+                '</span> <code></code>';
+            section.appendChild(execIdEl);
+        }
+        const code = execIdEl.querySelector('code');
+        if (code) code.textContent = String(data.executionId);
+    }
+
+    item.dataset.toolResultMerged = '1';
+    item.dataset.toolSuccess = data.success !== false ? '1' : '0';
+    item.classList.remove('tool-call-running');
+    item.classList.add(data.success !== false ? 'tool-call-completed' : 'tool-call-failed');
+    return true;
+}
+
+function findToolCallItemById(root, toolCallId) {
+    if (!root || !toolCallId) return null;
+    const id = String(toolCallId).trim();
+    if (!id) return null;
+    try {
+        return root.querySelector('[data-tool-call-id="' + CSS.escape(id) + '"]');
+    } catch (e) {
+        return root.querySelector('[data-tool-call-id="' + id.replace(/"/g, '\\"') + '"]');
+    }
+}
+
+function attachToolResultToCall(toolCallId, data, options) {
+    if (!toolCallId || !data) return false;
+    const mapping = toolCallStatusMap.get(toolCallId);
+    let item = null;
+    if (mapping && mapping.itemId) {
+        item = document.getElementById(mapping.itemId);
+    }
+    if (!item && mapping && mapping.timeline) {
+        item = findToolCallItemById(mapping.timeline, toolCallId);
+    }
+    if (!item) return false;
+    mergeToolResultIntoCallItem(item, data, options);
+    return true;
+}
+
+function coalesceProcessDetailsToolPairs(details) {
+    if (!Array.isArray(details) || details.length === 0) return details;
+    const callsById = new Map();
+    const fifoCalls = [];
+    const out = [];
+
+    function absorbResult(targetDetail, resultDetail) {
+        const rd = resultDetail.data || {};
+        targetDetail.data = targetDetail.data || {};
+        targetDetail.data._mergedResult = Object.assign({}, rd);
+        if (resultDetail.createdAt) {
+            targetDetail.data._mergedResultAt = resultDetail.createdAt;
+        }
+    }
+
+    for (let i = 0; i < details.length; i++) {
+        const detail = details[i];
+        const et = detail.eventType || '';
+        const data = detail.data || {};
+        const id = data.toolCallId != null ? String(data.toolCallId).trim() : '';
+
+        if (et === 'tool_call') {
+            const copy = {
+                eventType: detail.eventType,
+                message: detail.message,
+                createdAt: detail.createdAt,
+                data: Object.assign({}, data)
+            };
+            if (id) callsById.set(id, copy);
+            fifoCalls.push(copy);
+            out.push(copy);
+        } else if (et === 'tool_result') {
+            let target = null;
+            if (id && callsById.has(id)) {
+                target = callsById.get(id);
+            } else {
+                for (let j = 0; j < fifoCalls.length; j++) {
+                    const c = fifoCalls[j];
+                    if (c && c.data && !c.data._mergedResult) {
+                        target = c;
+                        break;
+                    }
+                }
+            }
+            if (target) {
+                absorbResult(target, detail);
+                continue;
+            }
+            out.push(detail);
+        } else {
+            out.push(detail);
+        }
+    }
+    return out;
+}
+
+window.coalesceProcessDetailsToolPairs = coalesceProcessDetailsToolPairs;
+window.attachToolResultToCall = attachToolResultToCall;
+window.mergeToolResultIntoCallItem = mergeToolResultIntoCallItem;
+window.formatToolCallTimelineTitle = formatToolCallTimelineTitle;
+window.parseToolCallArgsFromData = parseToolCallArgsFromData;
+window.buildToolResultSectionHtml = buildToolResultSectionHtml;
 
 // 更新工具调用状态
 function updateToolCallStatus(toolCallId, status) {
@@ -2580,6 +2790,11 @@ function addTimelineItem(timeline, type, options) {
         if (d.toolCallId != null && String(d.toolCallId).trim() !== '') {
             item.dataset.toolCallId = String(d.toolCallId).trim();
         }
+        const merged = options.mergedResult || d._mergedResult;
+        if (merged) {
+            item.dataset.toolResultMerged = '1';
+            item.dataset.toolSuccess = merged.success !== false ? '1' : '0';
+        }
     }
     if (type === 'hitl_interrupt' && options.data && options.data.interruptId != null && String(options.data.interruptId).trim() !== '') {
         item.dataset.hitlInterruptId = String(options.data.interruptId).trim();
@@ -2641,18 +2856,20 @@ function addTimelineItem(timeline, type, options) {
         content += `<div class="timeline-item-content">${formatMarkdown(streamBody)}</div>`;
     } else if (type === 'tool_call' && options.data) {
         const data = options.data;
-        let args = data.argumentsObj;
-        if (args == null && data.arguments != null && String(data.arguments).trim() !== '') {
-            try {
-                args = JSON.parse(String(data.arguments));
-            } catch (e) {
-                args = { _raw: String(data.arguments) };
-            }
-        }
-        if (args == null || typeof args !== 'object') {
-            args = {};
-        }
+        const args = parseToolCallArgsFromData(data);
+        const merged = options.mergedResult || data._mergedResult;
         const paramsLabel = typeof window.t === 'function' ? window.t('timeline.params') : '参数:';
+        let resultBlock = '';
+        if (merged) {
+            resultBlock = '<div class="tool-details tool-result-slot">' + buildToolResultSectionHtml(merged) + '</div>';
+            if (merged.success !== false) {
+                item.classList.add('tool-call-completed');
+            } else {
+                item.classList.add('tool-call-failed');
+            }
+        } else if (!options.skipPendingResult) {
+            resultBlock = '<div class="tool-details tool-result-slot">' + buildToolResultSectionHtml({}, { pending: true }) + '</div>';
+        }
         content += `
             <div class="timeline-item-content">
                 <div class="tool-details">
@@ -2660,6 +2877,7 @@ function addTimelineItem(timeline, type, options) {
                         <strong data-i18n="timeline.params">${escapeHtml(paramsLabel)}</strong>
                         <pre class="tool-args">${escapeHtml(JSON.stringify(args, null, 2))}</pre>
                     </div>
+                    ${resultBlock}
                 </div>
             </div>
         `;
@@ -4077,7 +4295,10 @@ function refreshProgressAndTimelineI18n() {
             const name = (item.dataset.toolName != null && item.dataset.toolName !== '') ? item.dataset.toolName : _t('chat.unknownTool');
             const index = parseInt(item.dataset.toolIndex, 10) || 0;
             const total = parseInt(item.dataset.toolTotal, 10) || 0;
-            titleSpan.textContent = ap + '\uD83D\uDD27 ' + _t('chat.callTool', { name: name, index: index, total: total });
+            const callTitle = typeof formatToolCallTimelineTitle === 'function'
+                ? formatToolCallTimelineTitle(name, index, total)
+                : _t('chat.callTool', { name: name, index: index, total: total });
+            titleSpan.textContent = ap + '\uD83D\uDD27 ' + callTitle;
         } else if (type === 'tool_result' && (item.dataset.toolName !== undefined || item.dataset.toolSuccess !== undefined)) {
             const name = (item.dataset.toolName != null && item.dataset.toolName !== '') ? item.dataset.toolName : _t('chat.unknownTool');
             const success = item.dataset.toolSuccess === '1';

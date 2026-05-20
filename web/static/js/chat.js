@@ -2398,6 +2398,9 @@ function renderProcessDetails(messageId, processDetails) {
     detailsContainer.dataset.lazyNotLoaded = '0';
     detailsContainer.dataset.loaded = '1';
     processDetails = dedupeConsecutiveProcessDetailRows(processDetails);
+    if (typeof window.coalesceProcessDetailsToolPairs === 'function') {
+        processDetails = window.coalesceProcessDetailsToolPairs(processDetails);
+    }
     // 如果没有processDetails或为空，显示空状态
     if (!processDetails || processDetails.length === 0) {
         // 显示空状态提示
@@ -2462,7 +2465,10 @@ function renderProcessDetails(messageId, processDetails) {
             const toolName = data.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : '未知工具');
             const index = data.index || 0;
             const total = data.total || 0;
-            itemTitle = agPx + '🔧 ' + (typeof window.t === 'function' ? window.t('chat.callTool', { name: escapeHtml(toolName), index: index, total: total }) : '调用工具: ' + escapeHtml(toolName) + ' (' + index + '/' + total + ')');
+            const callTitle = typeof window.formatToolCallTimelineTitle === 'function'
+                ? window.formatToolCallTimelineTitle(toolName, index, total)
+                : (typeof window.t === 'function' ? window.t('chat.callTool', { name: escapeHtml(toolName), index: index, total: total }) : '调用工具: ' + escapeHtml(toolName) + ' (' + index + '/' + total + ')');
+            itemTitle = agPx + '🔧 ' + callTitle;
         } else if (eventType === 'tool_result') {
             const toolName = data.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : '未知工具');
             const success = data.success !== false;
@@ -2492,12 +2498,16 @@ function renderProcessDetails(messageId, processDetails) {
                 : '⏸️ 用户中断并继续';
         }
         
-        addTimelineItem(timeline, eventType, {
+        const timelineOpts = {
             title: itemTitle,
             message: detail.message || '',
             data: data,
             createdAt: detail.createdAt // 传递实际的事件创建时间
-        });
+        };
+        if (eventType === 'tool_call' && data._mergedResult) {
+            timelineOpts.mergedResult = data._mergedResult;
+        }
+        addTimelineItem(timeline, eventType, timelineOpts);
     });
     
     // 检查是否有错误或取消事件，如果有，确保详情默认折叠（但仍有待审批 HITL 时保持展开，由 restoreHitlInlineForConversation 处理）
@@ -3094,6 +3104,27 @@ function getConversationGroup(dateObj, todayStart, sevenDaysCutoff, yesterdaySta
 }
 
 // 加载对话
+/** 轻量加载会话后，拉取最后一条助手消息的 process_details（机器人等无 SSE 场景） */
+async function prefetchLastAssistantProcessDetails() {
+    const nodes = document.querySelectorAll('#chat-messages .message.assistant');
+    if (!nodes.length) return;
+    const last = nodes[nodes.length - 1];
+    if (!last || !last.id) return;
+    const container = document.getElementById('process-details-' + last.id);
+    if (!container || container.dataset.lazyNotLoaded !== '1') return;
+    const backendId = last.dataset && last.dataset.backendMessageId;
+    if (!backendId || typeof apiFetch !== 'function') return;
+    const res = await apiFetch('/api/messages/' + encodeURIComponent(String(backendId)) + '/process-details');
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || !Array.isArray(j.processDetails) || j.processDetails.length === 0) return;
+    if (typeof renderProcessDetails === 'function') {
+        renderProcessDetails(last.id, j.processDetails);
+    }
+    if (typeof window.expandProcessDetailsTimeline === 'function') {
+        window.expandProcessDetailsTimeline(last.id);
+    }
+}
+
 async function loadConversation(conversationId) {
     const seq = ++loadConversationRequestSeq;
     try {
@@ -3313,6 +3344,11 @@ async function loadConversation(conversationId) {
                 .catch((e) => {
                     console.warn('attachRunningTaskEventStream on loadConversation failed', e);
                 });
+        } else if (seq === loadConversationRequestSeq && currentConversationId === conversationId) {
+            // 机器人等非 Web 流式来源：会话已结束或未注册任务时，按需拉取最后一条助手消息的过程详情
+            prefetchLastAssistantProcessDetails().catch((e) => {
+                console.warn('prefetchLastAssistantProcessDetails failed', e);
+            });
         }
     } catch (error) {
         console.error('Failed to load conversation:', error);

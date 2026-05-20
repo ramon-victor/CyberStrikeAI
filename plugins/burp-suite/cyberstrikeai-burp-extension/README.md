@@ -4,7 +4,7 @@
 
 ### What it does
 
-- Configure **Host / Port / Password** and choose **Single-Agent** or **Multi-Agent**
+- Configure **Host / Port / HTTPS / Password** and choose an agent mode
 - Click **Validate** to login (`POST /api/auth/login`) and verify token (`GET /api/auth/validate`)
 - Right-click any HTTP message in Burp and send it to CyberStrikeAI for **streaming web pentest**
 - Keep a **test history sidebar** (searchable) so you can revisit previous runs
@@ -63,6 +63,7 @@ If you already have Gradle available, you can still use `build.gradle` to build.
 
 ### Notes
 
-- This extension connects to your CyberStrikeAI server (default is `http://127.0.0.1:8080`).
+- Default connection is `https://127.0.0.1:8080` (**HTTPS** checked). Self-signed / local certs are trusted automatically (no import).
+- Uncheck **HTTPS** only if your server runs plain HTTP.
 - It uses **Bearer Token** authentication obtained from the configured password.
 

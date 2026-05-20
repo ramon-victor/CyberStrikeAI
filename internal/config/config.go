@@ -26,6 +26,7 @@ type Config struct {
 	Security    SecurityConfig        `yaml:"security"`
 	Database    DatabaseConfig        `yaml:"database"`
 	Auth        AuthConfig            `yaml:"auth"`
+	Audit       AuditConfig           `yaml:"audit,omitempty" json:"audit,omitempty"`
 	ExternalMCP ExternalMCPConfig     `yaml:"external_mcp,omitempty"`
 	Knowledge   KnowledgeConfig       `yaml:"knowledge,omitempty"`
 	C2          C2Config              `yaml:"c2,omitempty" json:"c2,omitempty"` // 内置 C2 总开关；未配置时默认启用
@@ -39,9 +40,9 @@ type Config struct {
 
 // MultiAgentConfig 基于 CloudWeGo Eino adk/prebuilt 的多代理编排（deep | plan_execute | supervisor，与单 Agent /agent-loop 并存）。
 type MultiAgentConfig struct {
-	Enabled            bool `yaml:"enabled" json:"enabled"`
-	RobotUseMultiAgent bool `yaml:"robot_use_multi_agent" json:"robot_use_multi_agent"` // 为 true 时钉钉/飞书/企微机器人走 Eino 多代理
-	BatchUseMultiAgent bool `yaml:"batch_use_multi_agent" json:"batch_use_multi_agent"` // 为 true 时批量任务队列中每子任务走 Eino 多代理
+	Enabled               bool   `yaml:"enabled" json:"enabled"`
+	RobotDefaultAgentMode string `yaml:"robot_default_agent_mode,omitempty" json:"robot_default_agent_mode,omitempty"` // react | eino_single | deep | plan_execute | supervisor
+	BatchUseMultiAgent     bool   `yaml:"batch_use_multi_agent" json:"batch_use_multi_agent"` // 为 true 时批量任务队列中每子任务走 Eino 多代理
 	// Orchestration 已弃用：保留仅兼容旧版 config.yaml；编排由聊天/WebShell 请求体 orchestration 决定，未传时按 deep。
 	Orchestration string `yaml:"orchestration,omitempty" json:"orchestration,omitempty"`
 	MaxIteration  int    `yaml:"max_iteration" json:"max_iteration"` // 主代理 / 执行器最大推理轮次（Deep、Supervisor、plan_execute 的 Executor）
@@ -362,14 +363,26 @@ type MultiAgentSubConfig struct {
 
 // MultiAgentPublic 返回给前端的精简信息（不含子代理指令全文）。
 type MultiAgentPublic struct {
-	Enabled                      bool   `json:"enabled"`
-	RobotUseMultiAgent           bool   `json:"robot_use_multi_agent"`
-	BatchUseMultiAgent           bool   `json:"batch_use_multi_agent"`
+	Enabled               bool   `json:"enabled"`
+	RobotDefaultAgentMode string `json:"robot_default_agent_mode,omitempty"`
+	BatchUseMultiAgent    bool   `json:"batch_use_multi_agent"`
 	SubAgentCount                int    `json:"sub_agent_count"`
 	Orchestration                string `json:"orchestration,omitempty"`
 	PlanExecuteLoopMaxIterations int    `json:"plan_execute_loop_max_iterations"`
 	ToolSearchAlwaysVisibleTools []string `json:"tool_search_always_visible_tools,omitempty"`
 	ToolSearchAlwaysVisibleEffectiveTools []string `json:"tool_search_always_visible_effective_tools,omitempty"`
+}
+
+// NormalizeRobotAgentMode 解析机器人默认对话模式（react | eino_single | deep | plan_execute | supervisor）；空值视为 react。
+func NormalizeRobotAgentMode(ma MultiAgentConfig) string {
+	s := strings.TrimSpace(strings.ToLower(ma.RobotDefaultAgentMode))
+	if s == "" || s == "single" || s == "react" {
+		return "react"
+	}
+	if s == "eino_single" {
+		return "eino_single"
+	}
+	return NormalizeMultiAgentOrchestration(s)
 }
 
 // NormalizeMultiAgentOrchestration 返回 deep、plan_execute 或 supervisor。
@@ -387,20 +400,33 @@ func NormalizeMultiAgentOrchestration(s string) string {
 
 // MultiAgentAPIUpdate 设置页/API 仅更新多代理标量字段；写入 YAML 时不覆盖 sub_agents 等块。
 type MultiAgentAPIUpdate struct {
-	Enabled                      bool `json:"enabled"`
-	RobotUseMultiAgent           bool `json:"robot_use_multi_agent"`
-	BatchUseMultiAgent           bool `json:"batch_use_multi_agent"`
+	Enabled               bool   `json:"enabled"`
+	RobotDefaultAgentMode string `json:"robot_default_agent_mode,omitempty"`
+	BatchUseMultiAgent    bool   `json:"batch_use_multi_agent"`
 	PlanExecuteLoopMaxIterations *int `json:"plan_execute_loop_max_iterations,omitempty"`
 	// 指针区分「JSON 未传该字段」与「传空数组要清空」；省略时不应覆盖 YAML 中的常驻工具白名单。
 	ToolSearchAlwaysVisibleTools *[]string `json:"tool_search_always_visible_tools,omitempty"`
 }
 
-// RobotsConfig 机器人配置（企业微信、钉钉、飞书等）
+// RobotsConfig 机器人配置（企业微信、钉钉、飞书、微信 iLink 等）
 type RobotsConfig struct {
 	Session  RobotSessionConfig  `yaml:"session,omitempty" json:"session,omitempty"`   // 机器人会话隔离策略
+	Wechat   RobotWechatConfig   `yaml:"wechat,omitempty" json:"wechat,omitempty"`     // 微信（iLink 扫码绑定）
 	Wecom    RobotWecomConfig    `yaml:"wecom,omitempty" json:"wecom,omitempty"`       // 企业微信
 	Dingtalk RobotDingtalkConfig `yaml:"dingtalk,omitempty" json:"dingtalk,omitempty"` // 钉钉
 	Lark     RobotLarkConfig     `yaml:"lark,omitempty" json:"lark,omitempty"`         // 飞书
+}
+
+// RobotWechatConfig 微信 iLink 机器人配置（个人微信 ClawBot / iLink 协议）
+type RobotWechatConfig struct {
+	Enabled        bool   `yaml:"enabled" json:"enabled"`
+	BotToken       string `yaml:"bot_token,omitempty" json:"bot_token,omitempty"`
+	ILinkBotID     string `yaml:"ilink_bot_id,omitempty" json:"ilink_bot_id,omitempty"`
+	ILinkUserID    string `yaml:"ilink_user_id,omitempty" json:"ilink_user_id,omitempty"`
+	BaseURL        string `yaml:"base_url,omitempty" json:"base_url,omitempty"`               // 默认 https://ilinkai.weixin.qq.com
+	BotType        string `yaml:"bot_type,omitempty" json:"bot_type,omitempty"`               // get_bot_qrcode 参数，默认 3
+	BotAgent       string `yaml:"bot_agent,omitempty" json:"bot_agent,omitempty"`             // base_info.bot_agent
+	GetUpdatesBuf  string `yaml:"get_updates_buf,omitempty" json:"get_updates_buf,omitempty"` // 长轮询游标（运行时）
 }
 
 // RobotSessionConfig 机器人会话隔离策略
@@ -562,6 +588,51 @@ type AuthConfig struct {
 	GeneratedPasswordPersistErr string `yaml:"-" json:"-"`
 }
 
+// AuditConfig platform operation audit log settings (not chat/tool execution bodies).
+type AuditConfig struct {
+	// Enabled nil or true enables persistence; explicit false disables.
+	Enabled             *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	RetentionDays  int `yaml:"retention_days,omitempty" json:"retention_days,omitempty"`
+	MaxDetailBytes int `yaml:"max_detail_bytes,omitempty" json:"max_detail_bytes,omitempty"`
+	// AuthFailureCooldownSeconds: per-IP cooldown for auth login/change_password failure audit rows; -1 disables; 0 uses default 60.
+	AuthFailureCooldownSeconds int `yaml:"auth_failure_cooldown_seconds,omitempty" json:"auth_failure_cooldown_seconds,omitempty"`
+}
+
+// EnabledEffective returns true unless audit.enabled is explicitly false.
+func (a AuditConfig) EnabledEffective() bool {
+	if a.Enabled == nil {
+		return true
+	}
+	return *a.Enabled
+}
+
+// RetentionDaysEffective returns retention; 0 means keep forever.
+func (a AuditConfig) RetentionDaysEffective() int {
+	if a.RetentionDays < 0 {
+		return 0
+	}
+	return a.RetentionDays
+}
+
+// MaxDetailBytesEffective caps serialized detail JSON size.
+func (a AuditConfig) MaxDetailBytesEffective() int {
+	if a.MaxDetailBytes <= 0 {
+		return 8192
+	}
+	return a.MaxDetailBytes
+}
+
+// AuthFailureCooldownEffective returns seconds between duplicate auth-failure audit rows per IP (default 60; -1 disables).
+func (a AuditConfig) AuthFailureCooldownEffective() int {
+	if a.AuthFailureCooldownSeconds < 0 {
+		return 0
+	}
+	if a.AuthFailureCooldownSeconds == 0 {
+		return 60
+	}
+	return a.AuthFailureCooldownSeconds
+}
+
 // ExternalMCPConfig 外部MCP配置
 type ExternalMCPConfig struct {
 	Servers map[string]ExternalMCPServerConfig `yaml:"servers,omitempty" json:"servers,omitempty"`
@@ -653,6 +724,9 @@ func Load(path string) (*Config, error) {
 
 	if cfg.Auth.SessionDurationHours <= 0 {
 		cfg.Auth.SessionDurationHours = 12
+	}
+	if cfg.Audit.MaxDetailBytes <= 0 {
+		cfg.Audit.MaxDetailBytes = 8192
 	}
 	if strings.TrimSpace(cfg.Auth.Password) == "" {
 		password, err := generateStrongPassword(24)
@@ -1157,6 +1231,14 @@ func Default() *Config {
 		Auth: AuthConfig{
 			SessionDurationHours: 12,
 		},
+		Audit: func() AuditConfig {
+			on := true
+			return AuditConfig{
+				RetentionDays:  90,
+				MaxDetailBytes: 8192,
+				Enabled:        &on,
+			}
+		}(),
 		Robots: RobotsConfig{
 			Session: RobotSessionConfig{
 				StrictUserIdentity: &strictRobotIdentity,

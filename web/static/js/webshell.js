@@ -1669,7 +1669,10 @@ function buildWebshellTimelineItemFromDetail(detail) {
         var tn = data.toolName || ((typeof window.t === 'function') ? window.t('chat.unknownTool') : '未知工具');
         var idx = data.index || 0;
         var total = data.total || 0;
-        title = ap + '🔧 ' + ((typeof window.t === 'function') ? window.t('chat.callTool', { name: tn, index: idx, total: total }) : ('调用: ' + tn + (total ? ' (' + idx + '/' + total + ')' : '')));
+        var wsCallTitle = typeof window.formatToolCallTimelineTitle === 'function'
+            ? window.formatToolCallTimelineTitle(tn, idx, total)
+            : ((typeof window.t === 'function') ? window.t('chat.callTool', { name: tn, index: idx, total: total }) : ('调用: ' + tn + (total ? ' (' + idx + '/' + total + ')' : '')));
+        title = ap + '🔧 ' + wsCallTitle;
     } else if (eventType === 'tool_result') {
         var success = data.success !== false;
         var tname = data.toolName || '工具';
@@ -1698,6 +1701,9 @@ function buildWebshellTimelineItemFromDetail(detail) {
                 html += '<div class="webshell-ai-timeline-msg"><div class="tool-arg-section"><strong>' + escapeHtml(paramsLabel) + '</strong><pre class="tool-args">' + escapeHtml(JSON.stringify(args, null, 2)) + '</pre></div></div>';
             }
         } catch (e) {}
+    }
+    if (eventType === 'tool_call' && data && data._mergedResult && typeof window.buildToolResultSectionHtml === 'function') {
+        html += '<div class="webshell-ai-timeline-msg tool-result-slot">' + window.buildToolResultSectionHtml(data._mergedResult) + '</div>';
     } else if (eventType === 'tool_result' && data) {
         var isError = data.isError || data.success === false;
         var noResultText = (typeof window.t === 'function') ? window.t('timeline.noResult') : '无结果';
@@ -1715,6 +1721,9 @@ function buildWebshellTimelineItemFromDetail(detail) {
 // 渲染「执行过程及调用工具」折叠块（默认折叠，刷新后加载历史时保留并可展开）
 function renderWebshellProcessDetailsBlock(processDetails, defaultCollapsed) {
     if (!processDetails || processDetails.length === 0) return null;
+    if (typeof window.coalesceProcessDetailsToolPairs === 'function') {
+        processDetails = window.coalesceProcessDetailsToolPairs(processDetails);
+    }
     var expandLabel = (typeof window.t === 'function') ? window.t('chat.expandDetail') : '展开详情';
     var collapseLabel = (typeof window.t === 'function') ? window.t('tasks.collapseDetail') : '收起详情';
     var headerLabel = (typeof window.t === 'function') ? (window.t('chat.penetrationTestDetail') || '执行过程及调用工具') : '执行过程及调用工具';
@@ -2775,7 +2784,7 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
 
         var html = '<span class="webshell-ai-timeline-title">' + escapeHtml(title || message || '') + '</span>';
 
-        // 工具调用入参
+        // 工具调用入参 + 结果同卡
         if (type === 'tool_call' && data) {
             try {
                 var args = data.argumentsObj;
@@ -2786,14 +2795,20 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                         args = { _raw: String(data.arguments) };
                     }
                 }
-                if (args && typeof args === 'object') {
-                    var paramsLabel = (typeof window.t === 'function') ? window.t('timeline.params') : '参数:';
-                    html += '<div class="webshell-ai-timeline-msg"><div class="tool-arg-section"><strong>' +
-                        escapeHtml(paramsLabel) +
-                        '</strong><pre class="tool-args">' +
-                        escapeHtml(JSON.stringify(args, null, 2)) +
-                        '</pre></div></div>';
+                if (args == null || typeof args !== 'object') {
+                    args = {};
                 }
+                var paramsLabel = (typeof window.t === 'function') ? window.t('timeline.params') : '参数:';
+                var pendingResult = (typeof window.buildToolResultSectionHtml === 'function')
+                    ? window.buildToolResultSectionHtml({}, { pending: true })
+                    : '';
+                html += '<div class="webshell-ai-timeline-msg"><div class="tool-arg-section"><strong>' +
+                    escapeHtml(paramsLabel) +
+                    '</strong><pre class="tool-args">' +
+                    escapeHtml(JSON.stringify(args, null, 2)) +
+                    '</pre></div>' +
+                    (pendingResult ? '<div class="tool-result-slot">' + pendingResult + '</div>' : '') +
+                    '</div>';
             } catch (e) {
                 // JSON 解析失败时忽略参数详情，避免打断主流程
             }
@@ -2832,6 +2847,7 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
     var einoSubReplyStreams = new Map();
     var wsThinkingStreams = new Map();        // streamId → { el, buf }
     var wsToolResultStreams = new Map();      // toolCallId → { el, buf }
+    var wsToolCallItems = new Map();          // toolCallId → DOM item（参数+结果同卡）
 
     if (inputEl) inputEl.value = '';
 
@@ -2908,11 +2924,16 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                         messagesContainer.scrollTop = messagesContainer.scrollHeight;
                     } else if (_et === 'response_delta') {
                         var deltaText = (_em != null && _em !== '') ? String(_em) : '';
-                        if (deltaText) {
-                            var normR = (typeof window.normalizeStreamingDeltaJs === 'function')
-                                ? window.normalizeStreamingDeltaJs(streamingTarget, deltaText)
-                                : [streamingTarget + deltaText, deltaText];
-                            streamingTarget = normR[0];
+                        var mergeBuf = (typeof window.mergeStreamBuffer === 'function')
+                            ? window.mergeStreamBuffer
+                            : function (cur, dlt) {
+                                var normR = (typeof window.normalizeStreamingDeltaJs === 'function')
+                                    ? window.normalizeStreamingDeltaJs(cur, dlt)
+                                    : [cur + dlt, dlt];
+                                return normR[0];
+                            };
+                        if (deltaText || (_ed && _ed.accumulated != null)) {
+                            streamingTarget = mergeBuf(streamingTarget, deltaText, _ed);
                             webshellStreamingTypingId += 1;
                             streamingTypingId = webshellStreamingTypingId;
                             runWebshellAiStreamingTyping(assistantDiv, streamingTarget, streamingTypingId, messagesContainer);
@@ -2985,12 +3006,17 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                         wsThinkingStreams.set(_ed.streamId, { el: thinkSItem, body: thinkSPre, buf: '' });
                         }
                         if (!streamingTarget) assistantDiv.textContent = '…';
-                    } else if ((_et === 'thinking_stream_delta' || _et === 'reasoning_chain_stream_delta') && _ed.streamId) {
+                    } else if ((_et === 'thinking_stream_delta' || _et === 'reasoning_chain_stream_delta') && _ed && _ed.streamId) {
                         var tsD = wsThinkingStreams.get(_ed.streamId);
                         if (tsD) {
-                            var normT = (typeof window.normalizeStreamingDeltaJs === 'function')
-                                ? window.normalizeStreamingDeltaJs(tsD.buf, _em || '') : [tsD.buf + (_em || ''), _em || ''];
-                            tsD.buf = normT[0];
+                            var mergeThink = (typeof window.mergeStreamBuffer === 'function')
+                                ? window.mergeStreamBuffer
+                                : function (cur, dlt) {
+                                    var normT = (typeof window.normalizeStreamingDeltaJs === 'function')
+                                        ? window.normalizeStreamingDeltaJs(cur, dlt) : [cur + dlt, dlt];
+                                    return normT[0];
+                                };
+                            tsD.buf = mergeThink(tsD.buf, _em || '', _ed);
                             if (typeof formatMarkdown === 'function') {
                                 tsD.body.innerHTML = formatMarkdown(tsD.buf);
                             } else {
@@ -3038,11 +3064,13 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                         var tn = _ed.toolName || '未知工具';
                         var idx = _ed.index || 0;
                         var total = _ed.total || 0;
-                        var callTitle = wsTOr('chat.callTool', '') || ('调用工具: ' + tn + (total ? ' (' + idx + '/' + total + ')' : ''));
-                        if (typeof window.t === 'function') {
-                            try { callTitle = window.t('chat.callTool', { name: tn, index: idx, total: total }); } catch (e) { /* */ }
+                        var callTitle = typeof window.formatToolCallTimelineTitle === 'function'
+                            ? window.formatToolCallTimelineTitle(tn, idx, total)
+                            : (wsTOr('chat.callTool', '') || ('调用工具: ' + tn + (total ? ' (' + idx + '/' + total + ')' : '')));
+                        var callItem = appendTimelineItem('tool_call', webshellAgentPx(_ed) + '🔧 ' + callTitle, _em || '', _ed);
+                        if (_ed.toolCallId && callItem) {
+                            wsToolCallItems.set(_ed.toolCallId, callItem);
                         }
-                        appendTimelineItem('tool_call', webshellAgentPx(_ed) + '🔧 ' + callTitle, _em || '', _ed);
                         if (!streamingTarget) assistantDiv.textContent = '…';
 
                     // ─── Tool result delta (streaming output) ───
@@ -3052,22 +3080,18 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                         if (trdDelta) {
                             var trdState = wsToolResultStreams.get(trdKey);
                             if (!trdState) {
-                                var trdName = _ed.toolName || '工具';
-                                var runLabel = wsTOr('timeline.running', '执行中...');
-                                var trdItem = document.createElement('div');
-                                trdItem.className = 'webshell-ai-timeline-item webshell-ai-timeline-tool_result';
-                                trdItem.innerHTML = '<span class="webshell-ai-timeline-title">' +
-                                    escapeHtml(webshellAgentPx(_ed) + '⏳ ' + runLabel + ' ' + trdName) +
-                                    '</span><div class="webshell-ai-timeline-msg"><div class="tool-result-section success">' +
-                                    '<pre class="tool-result"></pre></div></div>';
-                                timelineContainer.appendChild(trdItem);
-                                timelineContainer.classList.add('has-items');
-                                trdState = { el: trdItem, buf: '' };
+                                var callEl = wsToolCallItems.get(trdKey);
+                                trdState = { el: callEl || null, buf: '', onCall: !!callEl };
                                 wsToolResultStreams.set(trdKey, trdState);
                             }
                             trdState.buf += trdDelta;
-                            var trdPre = trdState.el.querySelector('pre.tool-result');
-                            if (trdPre) trdPre.textContent = trdState.buf;
+                            if (trdState.el) {
+                                var trdPre = trdState.el.querySelector('pre.tool-result');
+                                if (trdPre) {
+                                    trdPre.classList.remove('tool-result-pending');
+                                    trdPre.textContent = trdState.buf;
+                                }
+                            }
                         }
                         if (!streamingTarget) assistantDiv.textContent = '…';
 
@@ -3075,25 +3099,23 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                     } else if (_et === 'tool_result' && _ed) {
                         var success = _ed.success !== false;
                         var tname = _ed.toolName || '工具';
-                        var titleText = wsTOr(success ? 'chat.toolExecComplete' : 'chat.toolExecFailed', '') ||
-                            (tname + (success ? ' 执行完成' : ' 执行失败'));
-                        if (typeof window.t === 'function') {
-                            try { titleText = window.t(success ? 'chat.toolExecComplete' : 'chat.toolExecFailed', { name: tname }); } catch (e) { /* */ }
+                        var merged = false;
+                        if (_ed.toolCallId) {
+                            var streamSt = wsToolResultStreams.get(_ed.toolCallId);
+                            var callElRes = wsToolCallItems.get(_ed.toolCallId) || (streamSt && streamSt.el);
+                            if (callElRes && typeof window.mergeToolResultIntoCallItem === 'function') {
+                                window.mergeToolResultIntoCallItem(callElRes, _ed);
+                                merged = true;
+                                wsToolResultStreams.delete(_ed.toolCallId);
+                                wsToolCallItems.delete(_ed.toolCallId);
+                            }
                         }
-                        // 如果有流式占位条目，更新标题
-                        var trdExist = _ed.toolCallId ? wsToolResultStreams.get(_ed.toolCallId) : null;
-                        if (trdExist) {
-                            var trdTitleEl = trdExist.el.querySelector('.webshell-ai-timeline-title');
-                            if (trdTitleEl) trdTitleEl.textContent = webshellAgentPx(_ed) + (success ? '✅ ' : '❌ ') + titleText;
-                            // 更新结果内容
-                            var resultText = _ed.result ? String(_ed.result) : (_em || '');
-                            var trdPreEl = trdExist.el.querySelector('pre.tool-result');
-                            if (trdPreEl && resultText) trdPreEl.textContent = resultText;
-                            // 更新 section class
-                            var trdSection = trdExist.el.querySelector('.tool-result-section');
-                            if (trdSection) { trdSection.className = 'tool-result-section ' + (success ? 'success' : 'error'); }
-                            wsToolResultStreams.delete(_ed.toolCallId);
-                        } else {
+                        if (!merged) {
+                            var titleText = wsTOr(success ? 'chat.toolExecComplete' : 'chat.toolExecFailed', '') ||
+                                (tname + (success ? ' 执行完成' : ' 执行失败'));
+                            if (typeof window.t === 'function') {
+                                try { titleText = window.t(success ? 'chat.toolExecComplete' : 'chat.toolExecFailed', { name: tname }); } catch (e) { /* */ }
+                            }
                             var title = webshellAgentPx(_ed) + (success ? '✅ ' : '❌ ') + titleText;
                             var sub = _em || (_ed.result ? String(_ed.result).slice(0, 300) : '');
                             appendTimelineItem('tool_result', title, sub, _ed);
@@ -3121,9 +3143,14 @@ function runWebshellAiSend(conn, inputEl, sendBtn, messagesContainer) {
                     } else if (_et === 'eino_agent_reply_stream_delta' && _ed.streamId) {
                         var stD = einoSubReplyStreams.get(_ed.streamId);
                         if (stD) {
-                            var normS = (typeof window.normalizeStreamingDeltaJs === 'function')
-                                ? window.normalizeStreamingDeltaJs(stD.buf, _em || '') : [stD.buf + (_em || ''), _em || ''];
-                            stD.buf = normS[0];
+                            var mergeSub = (typeof window.mergeStreamBuffer === 'function')
+                                ? window.mergeStreamBuffer
+                                : function (cur, dlt) {
+                                    var normS = (typeof window.normalizeStreamingDeltaJs === 'function')
+                                        ? window.normalizeStreamingDeltaJs(cur, dlt) : [cur + dlt, dlt];
+                                    return normS[0];
+                                };
+                            stD.buf = mergeSub(stD.buf, _em || '', _ed);
                             var preD = stD.el.querySelector('.webshell-eino-reply-stream-body');
                             if (!preD) {
                                 preD = document.createElement('pre');

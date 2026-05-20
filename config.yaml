@@ -10,7 +10,7 @@
 # ============================================
 
 # 前端显示的版本号（可选，不填则显示默认版本）
-version: "v1.6.15"
+version: "v1.6.19"
 # 服务器配置
 server:
   host: 0.0.0.0 # 监听地址，0.0.0.0 表示监听所有网络接口
@@ -34,6 +34,12 @@ auth:
 log:
   level: info # 日志级别: debug(调试), info(信息), warn(警告), error(错误)
   output: stdout # 日志输出位置: stdout(标准输出), stderr(标准错误), 或文件路径
+# 平台操作审计（系统设置 -> 日志审计；不记录对话正文与每次工具调用）
+audit:
+  enabled: true
+  retention_days: 15 # 0 表示不自动清理
+  max_detail_bytes: 8192
+  auth_failure_cooldown_seconds: 60 # 同一 IP 登录/改密失败审计最短间隔（秒）；未配置时默认 60；-1 关闭节流
 # ============================================
 # 对话相关配置
 # ============================================
@@ -55,7 +61,7 @@ openai:
   # Eino 路径模型推理：DeepSeek/OpenAI 为 thinking / reasoning_effort 等；provider 为 claude 时合并为 Anthropic 顶层 thinking（extended thinking），mode: off 关闭
   reasoning:
     mode: on # auto | on | off；off 时不附加任何推理扩展字段
-    effort: max # low | medium | high | max；空表示不指定（openai_compat 下 auto 且无强度时不发请求扩展）
+    effort: high # low | medium | high | max；空表示不指定（openai_compat 下 auto 且无强度时不发请求扩展）
     allow_client_reasoning: true # false 时忽略对话请求体 reasoning，仅以下方为准
     profile: openai_compat # auto | deepseek_compat | openai_compat | output_config_effort
     # extra_request_fields: {} # 可选：管理员自定义根级 JSON 片段（高级）
@@ -76,16 +82,18 @@ agent:
   result_storage_dir: tmp # 结果存储目录，大结果会保存在此目录下
   tool_timeout_minutes: 60 # 单次工具执行最大时长（分钟），超时自动终止；0 表示不限制（不推荐，易出现长时间挂起）
   # system_prompt_path: prompts/single-react.md # 可选：单代理系统提示文件（相对本配置文件所在目录）；非空且可读时替换内置提示
+
+  system_prompt_path: ""
 # 人机协同（HITL）全局白名单：此处列出的工具始终免审批，与对话页「白名单工具（免审批，逗号分隔）」合并为并集；侧栏「应用」可合并写入本列表并立即生效。
 hitl:
   # 按你环境里的真实工具名增删（与侧栏一致、小写不敏感）；不需要全局免审批可改为 []
   tool_whitelist: [read_file, list_dir, glob, grep]
 # 多代理（CloudWeGo Eino DeepAgent，与上方单 Agent /api/agent-loop 并存）
 # 依赖在 go.mod 中拉取；若下载失败可设置: go env -w GOPROXY=https://goproxy.cn,direct
-# 启用后需重启服务才会注册 /api/multi-agent 与 /api/multi-agent/stream；Deep / Plan-Execute / Supervisor 由对话页与 WebShell 所选模式在请求体中传入；机器人/批量无请求体时固定按 deep
+# 启用后需重启服务才会注册 /api/multi-agent 与 /api/multi-agent/stream；Deep / Plan-Execute / Supervisor 由对话页与 WebShell 所选模式在请求体中传入；机器人按 robot_default_agent_mode
 multi_agent:
   enabled: true
-  robot_use_multi_agent: true # true 时企业微信/钉钉/飞书机器人也走 Eino 多代理（成本更高）
+  robot_default_agent_mode: eino_single # 企微/钉钉/飞书机器人默认对话模式：react | eino_single | deep | plan_execute | supervisor
   batch_use_multi_agent: false # true 时「批量任务」队列中每个子任务也走 Eino 多代理（成本更高）
   max_iteration: 0 # 主代理 / plan_execute 执行器最大轮次，0 表示沿用 agent.max_iterations
   # plan_execute 专用：execute↔replan 外层循环上限，0 表示 Eino 默认 10。当前实现下 Executor 会挂载 patch/reduction/tool_search 等前置中间件。
@@ -235,6 +243,14 @@ knowledge:
 # 用于在手机端通过企业微信/钉钉/飞书与 CyberStrikeAI 对话，无需部署在服务器上也可使用
 # 在系统设置 -> 机器人设置 中可配置
 robots:
+  wechat: # 微信 iLink（个人微信 ClawBot，扫码绑定）
+    enabled: false
+    bot_token: ""
+    ilink_bot_id: ""
+    ilink_user_id: ""
+    base_url: https://ilinkai.weixin.qq.com
+    bot_type: "3"
+    bot_agent: CyberStrikeAI/1.0
   wecom: # 企业微信
     enabled: false
     token: ""
@@ -246,11 +262,13 @@ robots:
     enabled: false
     client_id: ""
     client_secret: ""
+    allow_conversation_id_fallback: false
   lark: # 飞书
     enabled: false
     app_id: ""
     app_secret: ""
     verify_token: ""
+    allow_chat_id_fallback: false
 # ============================================
 # Skills 相关配置
 # ============================================

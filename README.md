@@ -304,7 +304,7 @@ Requirements / tips:
   - **Supervisor orchestrator**: fixed name **`orchestrator-supervisor.md`** (plus optional `orchestrator_instruction_supervisor`); requires at least one sub-agent.
   - **Sub-agents** (for **deep** / **supervisor**): other `*.md` files (YAML front matter + body). Not used as **`task`** targets if marked orchestrator-only.
 - **Management** – Web UI: **Agents → Agent management**; API `/api/multi-agent/markdown-agents`.
-- **Config** – `multi_agent` in `config.yaml`: `enabled`, `default_mode`, `robot_use_multi_agent`, `batch_use_multi_agent`, `max_iteration`, `plan_execute_loop_max_iterations`, per-mode orchestrator instruction fields, optional YAML `sub_agents` merged with disk (`id` clash → Markdown wins), **`eino_skills`**, **`eino_middleware`** (optional ADK middleware and Deep/Supervisor tuning).
+- **Config** – `multi_agent` in `config.yaml`: `enabled`, `robot_default_agent_mode`, `batch_use_multi_agent`, `max_iteration`, `plan_execute_loop_max_iterations`, per-mode orchestrator instruction fields, optional YAML `sub_agents` merged with disk (`id` clash → Markdown wins), **`eino_skills`**, **`eino_middleware`** (optional ADK middleware and Deep/Supervisor tuning).
 - **Details** – **[docs/MULTI_AGENT_EINO.md](docs/MULTI_AGENT_EINO.md)** (streaming, robots, batch, middleware caveats).
 
 ### Skills System (Agent Skills + Eino)
@@ -555,7 +555,7 @@ agents_dir: "agents"  # Multi-agent Markdown definitions (orchestrator + sub-age
 multi_agent:
   enabled: false
   default_mode: "single"   # single | multi (UI default when multi-agent is enabled)
-  robot_use_multi_agent: false
+  robot_default_agent_mode: react
   batch_use_multi_agent: false
   orchestrator_instruction: ""  # Deep; used when orchestrator.md body is empty
   # orchestrator_instruction_plan_execute / orchestrator_instruction_supervisor optional

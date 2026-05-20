@@ -2,16 +2,28 @@ package burp;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 final class CyberStrikeAIClient {
+
+    private static final int AUTH_CONNECT_TIMEOUT_MS = 4_000;
+    private static final int AUTH_READ_TIMEOUT_MS = 5_000;
+    /** login + validate 整段上限，避免两次读超时叠加拖到半分钟 */
+    private static final int AUTH_OVERALL_TIMEOUT_MS = 10_000;
+    private static final int DEFAULT_READ_TIMEOUT_MS = 15_000;
+
+    private final AtomicReference<HttpURLConnection> activeConnection = new AtomicReference<>();
+    private final AtomicReference<Thread> activeThread = new AtomicReference<>();
 
     static final class Config {
         final String baseUrl; // e.g. http://127.0.0.1:8080
@@ -49,15 +61,97 @@ final class CyberStrikeAIClient {
         void onDone();
     }
 
+    boolean hasActiveRequest() {
+        return activeConnection.get() != null;
+    }
+
+    void cancelActiveRequest() {
+        HttpURLConnection conn = activeConnection.getAndSet(null);
+        if (conn != null) {
+            try {
+                conn.disconnect();
+            } catch (Exception ignored) {
+            }
+        }
+        Thread t = activeThread.getAndSet(null);
+        if (t != null) {
+            t.interrupt();
+        }
+    }
+
     String loginAndValidate(Config cfg) throws IOException {
-        String token = login(cfg.baseUrl, cfg.password);
-        validate(cfg.baseUrl, token);
-        return token;
+        Thread worker = Thread.currentThread();
+        java.util.Timer deadline = new java.util.Timer("CyberStrikeAI-AuthDeadline", true);
+        deadline.schedule(new java.util.TimerTask() {
+            @Override
+            public void run() {
+                worker.interrupt();
+                cancelActiveRequest();
+            }
+        }, AUTH_OVERALL_TIMEOUT_MS);
+        try {
+            String token = login(cfg.baseUrl, cfg.password);
+            if (Thread.interrupted()) {
+                throw timeoutIOException();
+            }
+            validate(cfg.baseUrl, token);
+            if (Thread.interrupted()) {
+                throw timeoutIOException();
+            }
+            return token;
+        } catch (SocketTimeoutException e) {
+            throw timeoutIOException();
+        } finally {
+            deadline.cancel();
+        }
+    }
+
+    private static IOException timeoutIOException() {
+        return new IOException("Connection timed out (~" + (AUTH_OVERALL_TIMEOUT_MS / 1000)
+                + "s). Check host/port and HTTPS checkbox.");
+    }
+
+    private void trackConnection(HttpURLConnection conn) {
+        activeThread.set(Thread.currentThread());
+        activeConnection.set(conn);
+    }
+
+    private void releaseConnection(HttpURLConnection conn) {
+        if (activeConnection.compareAndSet(conn, null)) {
+            activeThread.set(null);
+        }
+    }
+
+    private static boolean isCancelled(Throwable e) {
+        if (e == null) {
+            return Thread.currentThread().isInterrupted();
+        }
+        if (Thread.currentThread().isInterrupted()) {
+            return true;
+        }
+        if (e instanceof InterruptedIOException) {
+            return true;
+        }
+        if (e instanceof SocketTimeoutException) {
+            return false;
+        }
+        Throwable cause = e.getCause();
+        if (cause != null && cause != e) {
+            return isCancelled(cause);
+        }
+        String msg = e.getMessage();
+        return msg != null && (
+                msg.toLowerCase().contains("cancel")
+                        || msg.toLowerCase().contains("abort")
+                        || msg.toLowerCase().contains("closed")
+        );
     }
 
     private String login(String baseUrl, String password) throws IOException {
         URL url = new URL(baseUrl + "/api/auth/login");
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        HttpURLConnection conn = SslTrustAll.open(url, AUTH_CONNECT_TIMEOUT_MS, AUTH_READ_TIMEOUT_MS);
+        trackConnection(conn);
+        try {
         conn.setRequestMethod("POST");
         conn.setDoOutput(true);
         conn.setRequestProperty("Content-Type", "application/json");
@@ -92,17 +186,25 @@ final class CyberStrikeAIClient {
             throw new IOException("Login response missing token. Check backend address and credentials.");
         }
         return token;
+        } finally {
+            releaseConnection(conn);
+        }
     }
 
     private void validate(String baseUrl, String token) throws IOException {
         URL url = new URL(baseUrl + "/api/auth/validate");
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        HttpURLConnection conn = SslTrustAll.open(url, AUTH_CONNECT_TIMEOUT_MS, AUTH_READ_TIMEOUT_MS);
+        trackConnection(conn);
+        try {
         conn.setRequestMethod("GET");
         conn.setRequestProperty("Authorization", "Bearer " + token);
         int code = conn.getResponseCode();
         String resp = readAll(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
         if (code < 200 || code >= 300) {
             throw new IOException("Validate failed (" + code + "): " + resp);
+        }
+        } finally {
+            releaseConnection(conn);
         }
     }
 
@@ -117,11 +219,12 @@ final class CyberStrikeAIClient {
             payload.put("orchestration", cfg.agentMode.orchestration);
         }
 
-        new Thread(() -> {
+        Thread worker = new Thread(() -> {
             HttpURLConnection conn = null;
             try {
                 URL url = new URL(urlStr);
-                conn = (HttpURLConnection) url.openConnection();
+                conn = SslTrustAll.open(url, AUTH_CONNECT_TIMEOUT_MS, 0);
+                trackConnection(conn);
                 conn.setRequestMethod("POST");
                 conn.setDoOutput(true);
                 conn.setRequestProperty("Content-Type", "application/json");
@@ -142,6 +245,9 @@ final class CyberStrikeAIClient {
                 try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = br.readLine()) != null) {
+                        if (Thread.currentThread().isInterrupted()) {
+                            break;
+                        }
                         // SSE format: "data: {json}"
                         if (line.startsWith("data:")) {
                             String json = line.substring("data:".length()).trim();
@@ -156,15 +262,25 @@ final class CyberStrikeAIClient {
                         }
                     }
                 }
-                listener.onDone();
+                if (Thread.currentThread().isInterrupted()) {
+                    listener.onError("Cancelled.", null);
+                } else {
+                    listener.onDone();
+                }
             } catch (Exception e) {
-                listener.onError(e.getMessage(), e);
+                if (isCancelled(e)) {
+                    listener.onError("Cancelled.", e);
+                } else {
+                    listener.onError(e.getMessage(), e);
+                }
             } finally {
                 if (conn != null) {
+                    releaseConnection(conn);
                     conn.disconnect();
                 }
             }
-        }, "CyberStrikeAI-Stream").start();
+        }, "CyberStrikeAI-Stream");
+        worker.start();
     }
 
     void cancelByConversationId(String baseUrl, String token, String conversationId) throws IOException {
@@ -172,7 +288,7 @@ final class CyberStrikeAIClient {
             throw new IOException("Missing conversationId.");
         }
         URL url = new URL(baseUrl + "/api/agent-loop/cancel");
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        HttpURLConnection conn = SslTrustAll.open(url, AUTH_CONNECT_TIMEOUT_MS, AUTH_READ_TIMEOUT_MS);
         conn.setRequestMethod("POST");
         conn.setDoOutput(true);
         conn.setRequestProperty("Content-Type", "application/json");

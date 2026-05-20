@@ -37,12 +37,12 @@ type Message struct {
 }
 
 // CreateConversation 创建新对话
-func (db *DB) CreateConversation(title string) (*Conversation, error) {
-	return db.CreateConversationWithWebshell("", title)
+func (db *DB) CreateConversation(title string, meta ConversationCreateMeta) (*Conversation, error) {
+	return db.CreateConversationWithWebshell("", title, meta)
 }
 
 // CreateConversationWithWebshell 创建新对话，可选绑定 WebShell 连接 ID（为空则普通对话）
-func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string) (*Conversation, error) {
+func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string, meta ConversationCreateMeta) (*Conversation, error) {
 	id := uuid.New().String()
 	now := time.Now()
 
@@ -62,12 +62,17 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string)
 		return nil, fmt.Errorf("failed to create conversation: %w", err)
 	}
 
-	return &Conversation{
+	conv := &Conversation{
 		ID:        id,
 		Title:     title,
 		CreatedAt: now,
 		UpdatedAt: now,
-	}, nil
+	}
+	if webshellConnectionID != "" {
+		meta.WebShellConnectionID = webshellConnectionID
+	}
+	notifyConversationCreated(conv, meta)
+	return conv, nil
 }
 
 // GetConversationByWebshellConnectionID 根据 WebShell 连接 ID 获取该连接下最近一条对话（用于 AI 助手持久化）
@@ -180,6 +185,23 @@ func (db *DB) ListConversationsByWebshellConnectionID(connectionID string) ([]We
 		list = append(list, item)
 	}
 	return list, rows.Err()
+}
+
+// ConversationExists reports whether a conversation row exists (lightweight check for audit links).
+func (db *DB) ConversationExists(id string) (bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, nil
+	}
+	var one int
+	err := db.QueryRow("SELECT 1 FROM conversations WHERE id = ? LIMIT 1", id).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GetConversation 获取对话

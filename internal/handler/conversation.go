@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/database"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -14,6 +15,12 @@ import (
 type ConversationHandler struct {
 	db     *database.DB
 	logger *zap.Logger
+	audit  *audit.Service
+}
+
+// SetAudit wires platform audit logging.
+func (h *ConversationHandler) SetAudit(s *audit.Service) {
+	h.audit = s
 }
 
 // NewConversationHandler 创建新的对话处理器
@@ -42,7 +49,7 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		title = "New conversation"
 	}
 
-	conv, err := h.db.CreateConversation(title)
+	conv, err := h.db.CreateConversation(title, audit.ConversationCreateMetaFromGin(c, "api"))
 	if err != nil {
 		h.logger.Error("Failed to create conversation", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -189,6 +196,17 @@ func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
 		return
 	}
 
+	if h.audit != nil {
+		h.audit.Record(c, audit.Entry{
+			Category:     "conversation",
+			Action:       "delete",
+			Result:       "success",
+			ResourceType: "conversation",
+			ResourceID:   id,
+			Message:      "Deleted conversation",
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Deleted successfully"})
 }
 
@@ -227,6 +245,12 @@ func (h *ConversationHandler) DeleteConversationTurn(c *gin.Context) {
 		return
 	}
 
+	if h.audit != nil {
+		h.audit.RecordOK(c, "conversation", "delete_turn", "删除对话轮次", "conversation", conversationID, map[string]interface{}{
+			"message_id": req.MessageID,
+			"deleted":    len(deletedIDs),
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"deletedMessageIds": deletedIDs,
 		"message":           "ok",

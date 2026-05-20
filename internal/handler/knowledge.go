@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/knowledge"
 
@@ -20,6 +21,12 @@ type KnowledgeHandler struct {
 	indexer   *knowledge.Indexer
 	db        *database.DB
 	logger    *zap.Logger
+	audit     *audit.Service
+}
+
+// SetAudit wires platform audit logging.
+func (h *KnowledgeHandler) SetAudit(s *audit.Service) {
+	h.audit = s
 }
 
 // NewKnowledgeHandler 创建新的知识库处理器
@@ -303,6 +310,9 @@ func (h *KnowledgeHandler) DeleteItem(c *gin.Context) {
 		return
 	}
 
+	if h.audit != nil {
+		h.audit.RecordOK(c, "knowledge", "item_delete", "Deleted knowledge item", "knowledge_item", id, nil)
+	}
 	c.JSON(http.StatusOK, gin.H{"message": "Deleted successfully"})
 }
 
@@ -316,6 +326,9 @@ func (h *KnowledgeHandler) RebuildIndex(c *gin.Context) {
 		}
 	}()
 
+	if h.audit != nil {
+		h.audit.RecordOK(c, "knowledge", "index_rebuild", "Rebuilt knowledge base index", "knowledge", "", nil)
+	}
 	c.JSON(http.StatusOK, gin.H{"message": "Index rebuild started, running in background"})
 }
 

@@ -253,5 +253,5 @@ func (h *TerminalHandler) RunCommandStream(c *gin.Context) {
 		flusher.Flush()
 	}
 
-	runCommandStreamImpl(cmd, sendEvent, ctx)
+	_ = runCommandStreamImpl(cmd, sendEvent, ctx)
 }

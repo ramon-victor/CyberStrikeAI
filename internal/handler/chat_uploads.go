@@ -12,6 +12,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"cyberstrike-ai/internal/audit"
+
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -24,6 +26,12 @@ const (
 // ChatUploadsHandler 对话中上传附件（chat_uploads 目录）的管理 API
 type ChatUploadsHandler struct {
 	logger *zap.Logger
+	audit  *audit.Service
+}
+
+// SetAudit wires platform audit logging.
+func (h *ChatUploadsHandler) SetAudit(s *audit.Service) {
+	h.audit = s
 }
 
 // NewChatUploadsHandler 创建处理器
@@ -229,6 +237,9 @@ func (h *ChatUploadsHandler) Delete(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "file", "delete", "删除对话附件", "chat_upload", body.Path, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -503,6 +514,11 @@ func (h *ChatUploadsHandler) Upload(c *gin.Context) {
 	}
 	rel, _ := filepath.Rel(root, fullPath)
 	absSaved, _ := filepath.Abs(fullPath)
+	if h.audit != nil {
+		h.audit.RecordOK(c, "file", "upload", "上传对话附件", "chat_upload", filepath.ToSlash(rel), map[string]interface{}{
+			"name": unique,
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"ok":           true,
 		"relativePath": filepath.ToSlash(rel),

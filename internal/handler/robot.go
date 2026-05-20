@@ -133,7 +133,7 @@ func (h *RobotHandler) getOrCreateConversation(platform, userID, title string) (
 	} else {
 		t = safeTruncateString(t, 50)
 	}
-	conv, err := h.db.CreateConversation(t)
+	conv, err := h.db.CreateConversation(t, database.ConversationCreateMeta{Source: "robot:" + platform})
 	if err != nil {
 		h.logger.Warn("创建机器人会话失败", zap.Error(err))
 		return "", false
@@ -188,7 +188,7 @@ func (h *RobotHandler) setRole(platform, userID, roleName string) {
 // clearConversation 清空当前会话（切换到新对话）
 func (h *RobotHandler) clearConversation(platform, userID string) (newConvID string) {
 	title := "新对话 " + time.Now().Format("01-02 15:04")
-	conv, err := h.db.CreateConversation(title)
+	conv, err := h.db.CreateConversation(title, database.ConversationCreateMeta{Source: "robot:" + platform + ":new"})
 	if err != nil {
 		h.logger.Warn("创建新对话失败", zap.Error(err))
 		return ""
@@ -242,7 +242,7 @@ func (h *RobotHandler) HandleMessage(platform, userID, text string) (reply strin
 		h.cancelMu.Unlock()
 	}()
 	role := h.getRole(platform, userID)
-	resp, newConvID, err := h.agentHandler.ProcessMessageForRobot(ctx, convID, text, role)
+	resp, newConvID, err := h.agentHandler.ProcessMessageForRobot(ctx, platform, convID, text, role)
 	if err != nil {
 		h.logger.Warn("机器人 Agent 执行失败", zap.String("platform", platform), zap.String("userID", userID), zap.Error(err))
 		if errors.Is(err, context.Canceled) {

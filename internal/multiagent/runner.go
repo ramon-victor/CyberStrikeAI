@@ -737,12 +737,23 @@ func toolCallsRichSignature(msg *schema.Message) string {
 	return base + "|" + strings.Join(parts, ";")
 }
 
+func einoMainIterationKey(agentName, orchestratorName string) string {
+	key := strings.TrimSpace(agentName)
+	if key == "" {
+		key = strings.TrimSpace(orchestratorName)
+	}
+	if key == "" {
+		return "_main"
+	}
+	return key
+}
+
 func tryEmitToolCallsOnce(
 	msg *schema.Message,
-	agentName, orchestratorName, conversationID string,
+	agentName, orchestratorName, conversationID, orchMode string,
 	progress func(string, string, interface{}),
 	seen map[string]struct{},
-	subAgentToolStep map[string]int,
+	subAgentToolStep, mainAgentToolStep map[string]int,
 	markPending func(toolCallPendingInfo),
 ) {
 	if msg == nil || len(msg.ToolCalls) == 0 || progress == nil || seen == nil {
@@ -756,14 +767,14 @@ func tryEmitToolCallsOnce(
 		return
 	}
 	seen[sig] = struct{}{}
-	emitToolCallsFromMessage(msg, agentName, orchestratorName, conversationID, progress, subAgentToolStep, markPending)
+	emitToolCallsFromMessage(msg, agentName, orchestratorName, conversationID, orchMode, progress, subAgentToolStep, mainAgentToolStep, markPending)
 }
 
 func emitToolCallsFromMessage(
 	msg *schema.Message,
-	agentName, orchestratorName, conversationID string,
+	agentName, orchestratorName, conversationID, orchMode string,
 	progress func(string, string, interface{}),
-	subAgentToolStep map[string]int,
+	subAgentToolStep, mainAgentToolStep map[string]int,
 	markPending func(toolCallPendingInfo),
 ) {
 	if msg == nil || len(msg.ToolCalls) == 0 || progress == nil {
@@ -784,6 +795,22 @@ func emitToolCallsFromMessage(
 			"conversationId": conversationID,
 			"source":         "eino",
 		})
+	} else if mainAgentToolStep != nil {
+		key := einoMainIterationKey(agentName, orchestratorName)
+		mainAgentToolStep[key]++
+		n := mainAgentToolStep[key]
+		// 第 1 轮已在主代理进入时发出；此后每次工具批次对应新一轮 ReAct（与子代理按工具计步一致）。
+		if n > 1 {
+			progress("iteration", "", map[string]interface{}{
+				"iteration":      n,
+				"einoScope":      "main",
+				"einoRole":       "orchestrator",
+				"einoAgent":      agentName,
+				"orchestration":  orchMode,
+				"conversationId": conversationID,
+				"source":         "eino",
+			})
+		}
 	}
 	role := "orchestrator"
 	if isSubToolRound {

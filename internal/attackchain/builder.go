@@ -82,7 +82,7 @@ func NewBuilder(db *database.DB, openAIConfig *config.OpenAIConfig, logger *zap.
 	}
 }
 
-// BuildChainFromConversation 从对话构建攻击链（简化版本：用户输入+最后一轮ReAct输入+大模型输出）
+// BuildChainFromConversation 从对话构建攻击链（单次 LLM 调用；输入为当前任务轮次的 last_react 轨迹，与继续对话续跑范围一致）。
 func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID string) (*Chain, error) {
 	b.logger.Info("Starting attack chain construction (simplified version)", zap.String("conversationId", conversationID))
 
@@ -157,33 +157,34 @@ func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID
 	var reactInputFinal string
 	var dataSource string // 记录数据来源
 
-	// 如果成功获取到保存的ReAct数据，直接使用
-	if reactInputJSON != "" && modelOutput != "" {
-		// 计算 ReAct 输入的哈希值，用于追踪
-		hash := sha256.Sum256([]byte(reactInputJSON))
-		reactInputHash := hex.EncodeToString(hash[:])[:16] // 使用前16字符作为短标识
+	// 优先使用落库的代理轨迹（与继续对话 loadHistoryFromAgentTrace 同源），并裁剪为「当前任务轮次」
+	if reactInputJSON != "" {
+		trimmedJSON := agent.ExtractLastUserTurnTraceJSON(reactInputJSON)
+		hash := sha256.Sum256([]byte(trimmedJSON))
+		reactInputHash := hex.EncodeToString(hash[:])[:16]
 
-		// 统计消息数量
 		var messageCount int
-		var tempMessages []interface{}
-		if json.Unmarshal([]byte(reactInputJSON), &tempMessages) == nil {
-			messageCount = len(tempMessages)
+		if msgs, parseErr := agent.ParseTraceMessages(trimmedJSON); parseErr == nil {
+			messageCount = len(msgs)
+			msgs = agent.MergeAssistantTraceOutput(msgs, modelOutput)
+			reactInputFinal = b.formatAgentTraceFromChatMessages(msgs)
+		} else {
+			b.logger.Warn("解析代理轨迹失败，回退原始 JSON 格式化", zap.Error(parseErr))
+			reactInputFinal = b.formatAgentTraceInputFromJSON(trimmedJSON)
+			if strings.TrimSpace(modelOutput) != "" {
+				reactInputFinal += "\n\n## 助手结论（last_react_output）\n\n" + modelOutput
+			}
 		}
 
-		dataSource = "database_last_agent_trace"
-		b.logger.Info("使用保存的ReAct数据构建攻击链",
+		dataSource = "last_user_turn_agent_trace"
+		b.logger.Info("使用当前任务轮次代理轨迹构建攻击链（与续跑上下文范围一致）",
 			zap.String("conversationId", conversationID),
 			zap.String("dataSource", dataSource),
-			zap.Int("reactInputSize", len(reactInputJSON)),
+			zap.Int("traceInputSizeBeforeTrim", len(reactInputJSON)),
+			zap.Int("traceInputSizeAfterTrim", len(trimmedJSON)),
 			zap.Int("messageCount", messageCount),
 			zap.String("reactInputHash", reactInputHash),
 			zap.Int("modelOutputSize", len(modelOutput)))
-
-		// 从保存的ReAct输入（JSON格式）中提取用户输入
-		// userInput = b.extractUserInputFromReActInput(reactInputJSON)
-
-		// 将JSON格式的messages转换为可读格式
-		reactInputFinal = b.formatAgentTraceInputFromJSON(reactInputJSON)
 	} else {
 		// 2. 如果没有保存的ReAct数据，从对话消息构建
 		dataSource = "messages_table"
@@ -243,8 +244,15 @@ func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID
 		}
 	}
 
-	// 3. 构建简化的prompt，一次性传递给大模型
-	prompt := b.buildSimplePrompt(reactInputFinal, modelOutput)
+	// 3. 按 token 预算压缩输入，再构建 prompt（避免超出模型上下文）
+	reactInputFinal, modelOutput, _ = b.fitAttackChainPayload(reactInputFinal, modelOutput)
+
+	// 4. 构建 prompt 并单次调用大模型（助手结论已并入轨迹时不再重复传入）
+	promptAssistantOut := modelOutput
+	if reactInputJSON != "" {
+		promptAssistantOut = ""
+	}
+	prompt := b.buildSimplePrompt(reactInputFinal, promptAssistantOut)
 	// fmt.Println(prompt)
 	// 6. 调用AI生成攻击链（一次性，不做任何处理）
 	chainJSON, err := b.callAIForChainGeneration(ctx, prompt)
@@ -366,10 +374,17 @@ func (b *Builder) formatProcessDetailsForAttackChain(details []database.ProcessD
 	return strings.TrimSpace(sb.String())
 }
 
-// buildAgentTraceInput 构建最后一轮ReAct的输入（历史消息+当前用户输入）
+// buildAgentTraceInput 构建最后一轮 ReAct 的输入（从最后一条 user 消息起，不含更早轮次）。
 func (b *Builder) buildAgentTraceInput(messages []database.Message) string {
+	start := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		if strings.EqualFold(messages[i].Role, "user") {
+			start = i
+			break
+		}
+	}
 	var builder strings.Builder
-	for _, msg := range messages {
+	for _, msg := range messages[start:] {
 		builder.WriteString(fmt.Sprintf("[%s]: %s\n\n", msg.Role, msg.Content))
 	}
 	return builder.String()
@@ -396,67 +411,66 @@ func (b *Builder) buildAgentTraceInput(messages []database.Message) string {
 // 	return ""
 // }
 
-// formatAgentTraceInputFromJSON 将JSON格式的messages数组转换为可读的字符串格式
+// formatAgentTraceInputFromJSON 将 JSON 轨迹转为可读文本（会先按当前任务轮次裁剪）。
 func (b *Builder) formatAgentTraceInputFromJSON(reactInputJSON string) string {
-	var messages []map[string]interface{}
-	if err := json.Unmarshal([]byte(reactInputJSON), &messages); err != nil {
+	trimmed := agent.ExtractLastUserTurnTraceJSON(reactInputJSON)
+	msgs, err := agent.ParseTraceMessages(trimmed)
+	if err != nil {
 		b.logger.Warn("解析ReAct输入JSON失败", zap.Error(err))
-		return reactInputJSON // 如果解析失败，返回原始JSON
+		return trimmed
 	}
+	return b.formatAgentTraceFromChatMessages(msgs)
+}
 
+// formatAgentTraceFromChatMessages 将代理消息带格式化为攻击链分析输入（与续跑轨迹字段一致）。
+func (b *Builder) formatAgentTraceFromChatMessages(msgs []agent.ChatMessage) string {
 	var builder strings.Builder
-	for _, msg := range messages {
-		role, _ := msg["role"].(string)
-		content, _ := msg["content"].(string)
+	for _, msg := range msgs {
+		role := msg.Role
+		content := msg.Content
 
-		// 处理assistant消息：提取tool_calls信息
-		if role == "assistant" {
-			if toolCalls, ok := msg["tool_calls"].([]interface{}); ok && len(toolCalls) > 0 {
-				// 如果有文本内容，先显示
-				if content != "" {
-					builder.WriteString(fmt.Sprintf("[%s]: %s\n", role, content))
-				}
-				// 详细显示每个工具调用
-				builder.WriteString(fmt.Sprintf("[%s] 工具调用 (%d个):\n", role, len(toolCalls)))
-				for i, toolCall := range toolCalls {
-					if tc, ok := toolCall.(map[string]interface{}); ok {
-						toolCallID, _ := tc["id"].(string)
-						if funcData, ok := tc["function"].(map[string]interface{}); ok {
-							toolName, _ := funcData["name"].(string)
-							arguments, _ := funcData["arguments"].(string)
-							builder.WriteString(fmt.Sprintf("  [工具调用 %d]\n", i+1))
-							builder.WriteString(fmt.Sprintf("    ID: %s\n", toolCallID))
-							builder.WriteString(fmt.Sprintf("    工具名称: %s\n", toolName))
-							builder.WriteString(fmt.Sprintf("    参数: %s\n", arguments))
-						}
+		if strings.EqualFold(role, "assistant") && len(msg.ToolCalls) > 0 {
+			if content != "" {
+				builder.WriteString(fmt.Sprintf("[%s]: %s\n", role, content))
+			}
+			builder.WriteString(fmt.Sprintf("[%s] 工具调用 (%d个):\n", role, len(msg.ToolCalls)))
+			for i, tc := range msg.ToolCalls {
+				args := ""
+				if tc.Function.Arguments != nil {
+					if b, err := json.Marshal(tc.Function.Arguments); err == nil {
+						args = string(b)
 					}
 				}
-				builder.WriteString("\n")
-				continue
+				builder.WriteString(fmt.Sprintf("  [工具调用 %d]\n", i+1))
+				builder.WriteString(fmt.Sprintf("    ID: %s\n", tc.ID))
+				builder.WriteString(fmt.Sprintf("    工具名称: %s\n", tc.Function.Name))
+				builder.WriteString(fmt.Sprintf("    参数: %s\n", args))
 			}
+			builder.WriteString("\n")
+			continue
 		}
 
-		// 处理tool消息：显示tool_call_id和完整内容
-		if role == "tool" {
-			toolCallID, _ := msg["tool_call_id"].(string)
-			if toolCallID != "" {
-				builder.WriteString(fmt.Sprintf("[%s] (tool_call_id: %s):\n%s\n\n", role, toolCallID, content))
+		if strings.EqualFold(role, "tool") {
+			if msg.ToolCallID != "" {
+				builder.WriteString(fmt.Sprintf("[%s] (tool_call_id: %s):\n%s\n\n", role, msg.ToolCallID, content))
 			} else {
 				builder.WriteString(fmt.Sprintf("[%s]: %s\n\n", role, content))
 			}
 			continue
 		}
 
-		// 其他消息类型（system, user等）正常显示
 		builder.WriteString(fmt.Sprintf("[%s]: %s\n\n", role, content))
 	}
-
 	return builder.String()
 }
 
 // buildSimplePrompt 构建简化的prompt
 func (b *Builder) buildSimplePrompt(reactInput, modelOutput string) string {
-	return fmt.Sprintf(`你是专业的安全测试分析师和攻击链构建专家。你的任务是根据对话记录和工具执行结果，构建一个逻辑清晰、有教育意义的攻击链图，完整展现渗透测试的思维过程和执行路径。
+	return fmt.Sprintf(`你是专业的安全测试分析师和攻击链构建专家。你的任务是根据**当前任务轮次**的对话记录和工具执行结果，一次性输出攻击链 JSON（不要分多轮追问）。
+
+## 输入范围（与「继续对话」续跑一致）
+- 下方「ReAct 轨迹」仅包含**最后一次用户提问之后**的消息与工具结果（last_react 当前任务轮次），不含更早的用户提问轮次。
+- 「助手结论」为同轮任务的最终输出摘要（last_react_output）；节点须与轨迹中的实际工具执行一致，严禁编造。
 
 ## 核心目标
 
@@ -618,12 +632,9 @@ func (b *Builder) buildSimplePrompt(reactInput, modelOutput string) string {
 5. **漏洞确认**：如何确认漏洞存在？（action→vulnerability）
 6. **攻击路径**：完整的攻击路径是什么？（从target到vulnerability的路径）
 
-## 最后一轮ReAct输入
+## 当前任务 ReAct 轨迹（含工具执行；助手结论见轨迹末尾 assistant）
 
 %s
-
-## 大模型输出
-
 %s
 
 ## 输出格式
@@ -752,7 +763,15 @@ func (b *Builder) buildSimplePrompt(reactInput, modelOutput string) string {
 9. **不要过度精简**：如果实际执行步骤较多，可以适当增加节点数量（最多20个），确保不遗漏关键步骤。
 10. **输出前验证**：在输出JSON前，必须验证所有边都满足source < target的条件，确保DAG结构正确。
 
-现在开始分析并构建攻击链：`, reactInput, modelOutput)
+现在开始分析并构建攻击链：`, reactInput, assistantOutSection(modelOutput))
+}
+
+func assistantOutSection(modelOutput string) string {
+	modelOutput = strings.TrimSpace(modelOutput)
+	if modelOutput == "" {
+		return ""
+	}
+	return "\n## 助手结论（补充）\n\n" + modelOutput + "\n"
 }
 
 // saveChain 保存攻击链到数据库
@@ -812,7 +831,7 @@ func (b *Builder) callAIForChainGeneration(ctx context.Context, prompt string) (
 			},
 		},
 		"temperature":           0.3,
-		"max_completion_tokens": 80000,
+		"max_completion_tokens": attackChainMaxCompletionTokens(b.maxTokens),
 	}
 
 	var apiResponse struct {

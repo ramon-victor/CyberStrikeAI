@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/skillpackage"
@@ -23,6 +24,12 @@ type SkillsHandler struct {
 	configPath string
 	logger     *zap.Logger
 	db         *database.DB // 数据库连接（遗留统计；MCP list/read 已移除）
+	audit      *audit.Service
+}
+
+// SetAudit wires platform audit logging.
+func (h *SkillsHandler) SetAudit(s *audit.Service) {
+	h.audit = s
 }
 
 // NewSkillsHandler 创建新的Skills处理器
@@ -365,6 +372,9 @@ func (h *SkillsHandler) CreateSkill(c *gin.Context) {
 	}
 
 	h.logger.Info("Skill created successfully", zap.String("skill", req.Name))
+	if h.audit != nil {
+		h.audit.RecordOK(c, "skill", "create", "Created Skill", "skill", req.Name, nil)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"message": "skillCreated",
 		"skill": map[string]interface{}{
@@ -425,6 +435,9 @@ func (h *SkillsHandler) UpdateSkill(c *gin.Context) {
 	}
 
 	h.logger.Info("Skill updated successfully", zap.String("skill", skillName))
+	if h.audit != nil {
+		h.audit.RecordOK(c, "skill", "update", "Updated Skill", "skill", skillName, nil)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Skill updated",
 	})
@@ -459,6 +472,11 @@ func (h *SkillsHandler) DeleteSkill(c *gin.Context) {
 	}
 
 	h.logger.Info("删除skill成功", zap.String("skill", skillName))
+	if h.audit != nil {
+		h.audit.RecordOK(c, "skill", "delete", "删除 Skill", "skill", skillName, map[string]interface{}{
+			"affected_roles": affectedRoles,
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"message":        responseMsg,
 		"affected_roles": affectedRoles,

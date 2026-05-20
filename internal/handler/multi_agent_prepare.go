@@ -5,9 +5,11 @@ import (
 	"strings"
 
 	"cyberstrike-ai/internal/agent"
+	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/mcp/builtin"
 
+	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
@@ -22,7 +24,7 @@ type multiAgentPrepared struct {
 	UserMessageID      string
 }
 
-func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest) (*multiAgentPrepared, error) {
+func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context, source string) (*multiAgentPrepared, error) {
 	if len(req.Attachments) > maxAttachments {
 		return nil, fmt.Errorf("Maximum %d attachment(s)", maxAttachments)
 	}
@@ -33,10 +35,13 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest) (*multiAgentPr
 		title := safeTruncateString(req.Message, 50)
 		var conv *database.Conversation
 		var err error
+		meta := audit.ConversationCreateMetaFromGin(c, source)
 		if strings.TrimSpace(req.WebShellConnectionID) != "" {
-			conv, err = h.db.CreateConversationWithWebshell(strings.TrimSpace(req.WebShellConnectionID), title)
+			meta.Source = source + "_webshell"
+			meta.WebShellConnectionID = strings.TrimSpace(req.WebShellConnectionID)
+			conv, err = h.db.CreateConversationWithWebshell(meta.WebShellConnectionID, title, meta)
 		} else {
-			conv, err = h.db.CreateConversation(title)
+			conv, err = h.db.CreateConversation(title, meta)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("Failed to create conversation: %w", err)

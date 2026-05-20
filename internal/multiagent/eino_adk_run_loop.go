@@ -177,6 +177,8 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 	var einoMainRound int
 	var einoLastAgent string
 	subAgentToolStep := make(map[string]int)
+	// mainAgentToolStep：主代理每次工具调用批次递增，供 UI 显示「第 N 轮」（单代理无子代理切换时原先会一直停在第 1 轮）。
+	mainAgentToolStep := make(map[string]int)
 	pendingByID := make(map[string]toolCallPendingInfo)
 	pendingQueueByAgent := make(map[string][]string)
 	markPending := func(tc toolCallPendingInfo) {
@@ -529,8 +531,10 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 				}
 			}
 			if streamsMainAssistant(ev.AgentName) {
+				mainIterKey := einoMainIterationKey(iterEinoAgent, orchestratorName)
 				if einoMainRound == 0 {
 					einoMainRound = 1
+					mainAgentToolStep[mainIterKey] = 1
 					progress("iteration", "", map[string]interface{}{
 						"iteration":      1,
 						"einoScope":      "main",
@@ -540,17 +544,26 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 						"conversationId": conversationID,
 						"source":         "eino",
 					})
-				} else if einoLastAgent != "" && !streamsMainAssistant(einoLastAgent) {
-					einoMainRound++
-					progress("iteration", "", map[string]interface{}{
-						"iteration":      einoMainRound,
-						"einoScope":      "main",
-						"einoRole":       "orchestrator",
-						"einoAgent":      iterEinoAgent,
-						"orchestration":  orchMode,
-						"conversationId": conversationID,
-						"source":         "eino",
-					})
+				} else if einoLastAgent != "" {
+					needBump := false
+					if !streamsMainAssistant(einoLastAgent) {
+						needBump = true // 子代理 → 主代理
+					} else if einoLastAgent != ev.AgentName {
+						needBump = true // plan_execute：planner ↔ executor 等主代理切换
+					}
+					if needBump {
+						einoMainRound++
+						mainAgentToolStep[mainIterKey] = einoMainRound
+						progress("iteration", "", map[string]interface{}{
+							"iteration":      einoMainRound,
+							"einoScope":      "main",
+							"einoRole":       "orchestrator",
+							"einoAgent":      iterEinoAgent,
+							"orchestration":  orchMode,
+							"conversationId": conversationID,
+							"source":         "eino",
+						})
+					}
 				}
 			}
 			einoLastAgent = ev.AgentName
@@ -644,9 +657,9 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 										"orchestration": orchMode,
 									})
 								}
-								progress("reasoning_chain_stream_delta", displayDelta, map[string]interface{}{
+								progress("reasoning_chain_stream_delta", displayDelta, openai.WithSSEAccumulated(map[string]interface{}{
 									"streamId": reasoningStreamID,
-								})
+								}, fullDisplay))
 							}
 						}
 					}
@@ -676,13 +689,13 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 										})
 										streamHeaderSent = true
 									}
-									progress("response_delta", contentDelta, map[string]interface{}{
+									progress("response_delta", contentDelta, openai.WithSSEAccumulated(map[string]interface{}{
 										"conversationId":  conversationID,
 										"mcpExecutionIds": snapshotMCPIDs(),
 										"einoRole":        "orchestrator",
 										"einoAgent":       ev.AgentName,
 										"orchestration":   orchMode,
-									})
+									}, mainAssistantBuf))
 									mainAssistWireAccum, _ = normalizeStreamingDelta(mainAssistWireAccum, contentDelta)
 								}
 							}
@@ -701,10 +714,10 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 											"source":         "eino",
 										})
 									}
-									progress("eino_agent_reply_stream_delta", subDelta, map[string]interface{}{
+									progress("eino_agent_reply_stream_delta", subDelta, openai.WithSSEAccumulated(map[string]interface{}{
 										"streamId":       subReplyStreamID,
 										"conversationId": conversationID,
-									})
+									}, subAssistantBuf))
 								}
 							}
 						}
@@ -743,13 +756,13 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 										"orchestration":      orchMode,
 									})
 								}
-								progress("response_delta", eofTail, map[string]interface{}{
+								progress("response_delta", eofTail, openai.WithSSEAccumulated(map[string]interface{}{
 									"conversationId":  conversationID,
 									"mcpExecutionIds": snapshotMCPIDs(),
 									"einoRole":        "orchestrator",
 									"einoAgent":       ev.AgentName,
 									"orchestration":   orchMode,
-								})
+								}, mainAssistantBuf))
 								mainAssistWireAccum, _ = normalizeStreamingDelta(mainAssistWireAccum, eofTail)
 							}
 						}
@@ -791,7 +804,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 			if merged := mergeStreamingToolCallFragments(toolStreamFragments); len(merged) > 0 {
 				lastToolChunk = mergeMessageToolCalls(&schema.Message{ToolCalls: merged})
 			}
-			tryEmitToolCallsOnce(lastToolChunk, ev.AgentName, orchestratorName, conversationID, progress, toolEmitSeen, subAgentToolStep, markPending)
+			tryEmitToolCallsOnce(lastToolChunk, ev.AgentName, orchestratorName, conversationID, orchMode, progress, toolEmitSeen, subAgentToolStep, mainAgentToolStep, markPending)
 			// 流式路径此前只把 tool_calls 推给进度 UI，未写入 runAccumulatedMsgs；落库后 loadHistory→RepairOrphan 会删掉全部 tool 结果，表现为「续跑/下轮失忆」。
 			if lastToolChunk != nil && len(lastToolChunk.ToolCalls) > 0 {
 				runAccumulatedMsgs = append(runAccumulatedMsgs, schema.AssistantMessage("", lastToolChunk.ToolCalls))
@@ -820,7 +833,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 			continue
 		}
 		runAccumulatedMsgs = append(runAccumulatedMsgs, msg)
-		tryEmitToolCallsOnce(mergeMessageToolCalls(msg), ev.AgentName, orchestratorName, conversationID, progress, toolEmitSeen, subAgentToolStep, markPending)
+		tryEmitToolCallsOnce(mergeMessageToolCalls(msg), ev.AgentName, orchestratorName, conversationID, orchMode, progress, toolEmitSeen, subAgentToolStep, mainAgentToolStep, markPending)
 
 		if mv.Role == schema.Assistant {
 			if progress != nil && strings.TrimSpace(msg.ReasoningContent) != "" {
@@ -859,13 +872,13 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 								"einoAgent":          ev.AgentName,
 								"orchestration":      orchMode,
 							})
-							progress("response_delta", body, map[string]interface{}{
+							progress("response_delta", body, openai.WithSSEAccumulated(map[string]interface{}{
 								"conversationId":  conversationID,
 								"mcpExecutionIds": snapshotMCPIDs(),
 								"einoRole":        "orchestrator",
 								"einoAgent":       ev.AgentName,
 								"orchestration":   orchMode,
-							})
+							}, body))
 						}
 						lastAssistant = body
 						if orchMode == "plan_execute" && strings.EqualFold(strings.TrimSpace(ev.AgentName), "executor") {

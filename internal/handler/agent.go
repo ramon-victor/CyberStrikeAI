@@ -17,12 +17,14 @@ import (
 	"unicode/utf8"
 
 	"cyberstrike-ai/internal/agent"
+	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/reasoning"
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/mcp/builtin"
 	"cyberstrike-ai/internal/multiagent"
+	"cyberstrike-ai/internal/openai"
 
 	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron/v3"
@@ -130,6 +132,12 @@ type AgentHandler struct {
 	batchRunning      map[string]struct{}
 	// hitlWhitelistSaver 侧栏「应用」HITL 时将会话增量白名单合并写入 config.yaml（可选）
 	hitlWhitelistSaver HitlToolWhitelistSaver
+	audit              *audit.Service
+}
+
+// SetAudit wires platform audit logging.
+func (h *AgentHandler) SetAudit(s *audit.Service) {
+	h.audit = s
 }
 
 // HitlToolWhitelistSaver 合并 HITL 免审批工具到全局配置并落盘
@@ -552,7 +560,7 @@ func (h *AgentHandler) AgentLoop(c *gin.Context) {
 	conversationID := req.ConversationID
 	if conversationID == "" {
 		title := safeTruncateString(req.Message, 50)
-		conv, err := h.db.CreateConversation(title)
+		conv, err := h.db.CreateConversation(title, audit.ConversationCreateMetaFromGin(c, "agent_loop"))
 		if err != nil {
 			h.logger.Error("Failed to create conversation", zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -716,11 +724,43 @@ func (h *AgentHandler) AgentLoop(c *gin.Context) {
 	})
 }
 
+func (h *AgentHandler) finalizeRobotAgentError(ctx context.Context, assistantMessageID, conversationID string, resultMA *multiagent.RunResult, errMA error) (string, string, error) {
+	if shouldPersistEinoAgentTraceAfterRunError(ctx) {
+		h.persistEinoAgentTraceForResume(conversationID, resultMA)
+	}
+	errMsg := "执行失败: " + errMA.Error()
+	if assistantMessageID != "" {
+		_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
+		_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errMsg, nil)
+	}
+	return "", conversationID, errMA
+}
+
+func (h *AgentHandler) finalizeRobotAgentSuccess(assistantMessageID, conversationID string, resultMA *multiagent.RunResult) (string, string, error) {
+	if assistantMessageID != "" {
+		if errU := h.db.UpdateAssistantMessageFinalize(assistantMessageID, resultMA.Response, resultMA.MCPExecutionIDs, multiagent.AggregatedReasoningFromTraceJSON(resultMA.LastAgentTraceInput)); errU != nil {
+			h.logger.Warn("机器人：更新助手消息失败", zap.Error(errU))
+		}
+	} else {
+		if _, err := h.db.AddMessage(conversationID, "assistant", resultMA.Response, resultMA.MCPExecutionIDs); err != nil {
+			h.logger.Warn("机器人：保存助手消息失败", zap.Error(err))
+		}
+	}
+	if resultMA.LastAgentTraceInput != "" || resultMA.LastAgentTraceOutput != "" {
+		_ = h.db.SaveAgentTrace(conversationID, resultMA.LastAgentTraceInput, resultMA.LastAgentTraceOutput)
+	}
+	return resultMA.Response, conversationID, nil
+}
+
 // ProcessMessageForRobot 供机器人（企业微信/钉钉/飞书）调用：与 /api/agent-loop/stream 相同执行路径（含 progressCallback、过程详情），仅不发送 SSE，最后返回完整回复
-func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, conversationID, message, role string) (response string, convID string, err error) {
+func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, conversationID, message, role string) (response string, convID string, err error) {
 	if conversationID == "" {
 		title := safeTruncateString(message, 50)
-		conv, createErr := h.db.CreateConversation(title)
+		src := "robot"
+		if strings.TrimSpace(platform) != "" {
+			src = "robot:" + strings.TrimSpace(platform)
+		}
+		conv, createErr := h.db.CreateConversation(title, audit.ConversationCreateMeta(src))
 		if createErr != nil {
 			return "", "", fmt.Errorf("Failed to create conversation: %w", createErr)
 		}
@@ -768,24 +808,31 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, conversationI
 	if assistantMsg != nil {
 		assistantMessageID = assistantMsg.ID
 	}
-	progressCallback := h.createProgressCallback(ctx, nil, conversationID, assistantMessageID, nil)
 
-	useRobotMulti := h.config != nil && h.config.MultiAgent.Enabled && h.config.MultiAgent.RobotUseMultiAgent
-	if useRobotMulti {
-		resultMA, errMA := multiagent.RunDeepAgent(
-			ctx,
-			h.config,
-			&h.config.MultiAgent,
-			h.agent,
-			h.logger,
-			conversationID,
-			finalMessage,
-			agentHistoryMessages,
-			roleTools,
-			progressCallback,
-			h.agentsMarkdownDir,
-			"deep",
-			nil,
+	// 注册运行中任务并向 taskEventBus 镜像进度事件，供 Web 端 task-events 补流（与 agent-loop/stream 一致）。
+	taskCtx, cancelWithCause := context.WithCancelCause(ctx)
+	defer cancelWithCause(nil)
+	taskStatus := "completed"
+	defer func() {
+		h.tasks.FinishTask(conversationID, taskStatus)
+	}()
+	if _, err := h.tasks.StartTask(conversationID, message, cancelWithCause); err != nil {
+		if errors.Is(err, ErrTaskAlreadyRunning) {
+			return "", conversationID, fmt.Errorf("当前会话已有任务正在执行中，请稍后再试")
+		}
+		return "", conversationID, fmt.Errorf("无法启动任务: %w", err)
+	}
+	progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, nil)
+
+	robotMode := "react"
+	if h.config != nil {
+		robotMode = config.NormalizeRobotAgentMode(h.config.MultiAgent)
+	}
+	switch robotMode {
+	case "eino_single":
+		resultMA, errMA := multiagent.RunEinoSingleChatModelAgent(
+			taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger,
+			conversationID, finalMessage, agentHistoryMessages, roleTools, progressCallback, nil,
 		)
 		if errMA != nil {
 			if shouldPersistEinoAgentTraceAfterRunError(ctx) {
@@ -798,23 +845,28 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, conversationI
 			}
 			return "", conversationID, errMA
 		}
-		if assistantMessageID != "" {
-			if errU := h.db.UpdateAssistantMessageFinalize(assistantMessageID, resultMA.Response, resultMA.MCPExecutionIDs, multiagent.AggregatedReasoningFromTraceJSON(resultMA.LastAgentTraceInput)); errU != nil {
-				h.logger.Warn("机器人：更新助手消息失败", zap.Error(errU))
-			}
-		} else {
-			if _, err = h.db.AddMessage(conversationID, "assistant", resultMA.Response, resultMA.MCPExecutionIDs); err != nil {
-				h.logger.Warn("机器人：保存助手消息失败", zap.Error(err))
-			}
+		return h.finalizeRobotAgentSuccess(assistantMessageID, conversationID, resultMA)
+	case "deep", "plan_execute", "supervisor":
+		if h.config == nil || !h.config.MultiAgent.Enabled {
+			h.logger.Warn("机器人配置为多代理模式但未启用 multi_agent，回退原生 ReAct",
+				zap.String("robot_mode", robotMode))
+			break
 		}
-		if resultMA.LastAgentTraceInput != "" || resultMA.LastAgentTraceOutput != "" {
-			_ = h.db.SaveAgentTrace(conversationID, resultMA.LastAgentTraceInput, resultMA.LastAgentTraceOutput)
+		resultMA, errMA := multiagent.RunDeepAgent(
+			taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger,
+			conversationID, finalMessage, agentHistoryMessages, roleTools, progressCallback,
+			h.agentsMarkdownDir, robotMode, nil,
+		)
+		if errMA != nil {
+			taskStatus = "failed"
+			return h.finalizeRobotAgentError(taskCtx, assistantMessageID, conversationID, resultMA, errMA)
 		}
-		return resultMA.Response, conversationID, nil
+		return h.finalizeRobotAgentSuccess(assistantMessageID, conversationID, resultMA)
 	}
 
-	result, err := h.agent.AgentLoopWithProgress(ctx, finalMessage, agentHistoryMessages, conversationID, progressCallback, roleTools)
+	result, err := h.agent.AgentLoopWithProgress(taskCtx, finalMessage, agentHistoryMessages, conversationID, progressCallback, roleTools)
 	if err != nil {
+		taskStatus = "failed"
 		errMsg := "Execution failed: " + err.Error()
 		if assistantMessageID != "" {
 			_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
@@ -844,6 +896,23 @@ type StreamEvent struct {
 	Type    string      `json:"type"`    // conversation, progress, tool_call, tool_result, response, error, cancelled, done
 	Message string      `json:"message"` // 显示消息
 	Data    interface{} `json:"data,omitempty"`
+}
+
+// publishProgressToTaskEventBus 将进度事件镜像到 taskEventBus（机器人/无 HTTP SSE 客户端时供 Web task-events 订阅）。
+func (h *AgentHandler) publishProgressToTaskEventBus(conversationID, eventType, message string, data interface{}) {
+	if h == nil || h.taskEventBus == nil || strings.TrimSpace(conversationID) == "" {
+		return
+	}
+	event := StreamEvent{Type: eventType, Message: message, Data: data}
+	eventJSON, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	sseLine := make([]byte, 0, len(eventJSON)+8)
+	sseLine = append(sseLine, []byte("data: ")...)
+	sseLine = append(sseLine, eventJSON...)
+	sseLine = append(sseLine, '\n', '\n')
+	h.taskEventBus.Publish(conversationID, sseLine)
 }
 
 // createProgressCallback 创建进度回调函数，用于保存processDetails
@@ -955,9 +1024,11 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 	}
 
 	return func(eventType, message string, data interface{}) {
-		// 如果提供了sendEventFunc，发送流式事件
+		// 流式：写 HTTP SSE；非流式（机器人等）：镜像到 taskEventBus 供 Web 订阅
 		if sendEventFunc != nil {
 			sendEventFunc(eventType, message, data)
+		} else {
+			h.publishProgressToTaskEventBus(conversationID, eventType, message, data)
 		}
 
 		// 保存tool_call事件中的参数
@@ -1158,7 +1229,16 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 			return
 		}
 		if eventType == "response_delta" {
-			respPlan.b.WriteString(message)
+			if dataMap, ok := data.(map[string]interface{}); ok {
+				if acc, okAcc := dataMap[openai.SSEAccumulatedKey].(string); okAcc {
+					respPlan.b.Reset()
+					respPlan.b.WriteString(acc)
+				} else {
+					respPlan.b.WriteString(message)
+				}
+			} else {
+				respPlan.b.WriteString(message)
+			}
 			if dataMap, ok := data.(map[string]interface{}); ok && respPlan.meta == nil {
 				respPlan.meta = make(map[string]interface{}, len(dataMap))
 				for k, v := range dataMap {
@@ -1213,8 +1293,12 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 					} else if tb.persistAs == "" {
 						tb.persistAs = persistAs
 					}
-					// delta 片段直接拼接
-					tb.b.WriteString(message)
+					if acc, okAcc := dataMap[openai.SSEAccumulatedKey].(string); okAcc {
+						tb.b.Reset()
+						tb.b.WriteString(acc)
+					} else {
+						tb.b.WriteString(message)
+					}
 					// 有时 delta 先到 start 未到，补充元信息
 					for k, v := range dataMap {
 						tb.meta[k] = v
@@ -1406,10 +1490,12 @@ func (h *AgentHandler) AgentLoopStream(c *gin.Context) {
 		title := safeTruncateString(req.Message, 50)
 		var conv *database.Conversation
 		var err error
+		meta := audit.ConversationCreateMetaFromGin(c, "agent_loop_stream")
 		if req.WebShellConnectionID != "" {
-			conv, err = h.db.CreateConversationWithWebshell(strings.TrimSpace(req.WebShellConnectionID), title)
+			meta.Source = "webshell_chat"
+			conv, err = h.db.CreateConversationWithWebshell(strings.TrimSpace(req.WebShellConnectionID), title, meta)
 		} else {
-			conv, err = h.db.CreateConversation(title)
+			conv, err = h.db.CreateConversation(title, meta)
 		}
 		if err != nil {
 			h.logger.Error("Failed to create conversation", zap.Error(err))
@@ -2025,6 +2111,11 @@ func (h *AgentHandler) CreateBatchQueue(c *gin.Context) {
 			queue = refreshed
 		}
 	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "task", "create_queue", "创建批量任务队列", "batch_queue", queue.ID, map[string]interface{}{
+			"task_count": len(validTasks), "started": started,
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"queueId": queue.ID,
 		"queue":   queue,
@@ -2132,6 +2223,9 @@ func (h *AgentHandler) StartBatchQueue(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "task", "start_queue", "启动批量任务队列", "batch_queue", queueID, nil)
+	}
 	c.JSON(http.StatusOK, gin.H{"message": "批量任务已开始执行", "queueId": queueID})
 }
 
@@ -2160,6 +2254,9 @@ func (h *AgentHandler) RerunBatchQueue(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "启动失败"})
 		return
 	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "task", "rerun_queue", "重跑批量任务队列", "batch_queue", queueID, nil)
+	}
 	c.JSON(http.StatusOK, gin.H{"message": "批量任务已重新开始执行", "queueId": queueID})
 }
 
@@ -2170,6 +2267,9 @@ func (h *AgentHandler) PauseBatchQueue(c *gin.Context) {
 	if !success {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found或None法暂停"})
 		return
+	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "task", "pause_queue", "暂停批量任务队列", "batch_queue", queueID, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "批量任务已暂停"})
 }
@@ -2266,7 +2366,17 @@ func (h *AgentHandler) DeleteBatchQueue(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "批量任务队列Deleted"})
+	if h.audit != nil {
+		h.audit.Record(c, audit.Entry{
+			Category:     "task",
+			Action:       "delete_queue",
+			Result:       "success",
+			ResourceType: "batch_queue",
+			ResourceID:   queueID,
+			Message:      "Deleted batch task queue",
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Batch task queue deleted"})
 }
 
 // UpdateBatchTask 更新批量任务消息
@@ -2351,7 +2461,12 @@ func (h *AgentHandler) DeleteBatchTask(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "任务Deleted", "queue": queue})
+	if h.audit != nil {
+		h.audit.RecordOK(c, "task", "delete_batch_task", "Deleted batch sub-task", "batch_task", taskID, map[string]interface{}{
+			"batch_queue_id": queueID,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Task deleted", "queue": queue})
 }
 
 func (h *AgentHandler) markBatchQueueRunning(queueID string) bool {
@@ -2509,7 +2624,7 @@ func (h *AgentHandler) executeBatchQueue(queueID string) {
 
 		// 创建新对话
 		title := safeTruncateString(task.Message, 50)
-		conv, err := h.db.CreateConversation(title)
+		conv, err := h.db.CreateConversation(title, audit.ConversationCreateMeta("batch_task"))
 		var conversationID string
 		if err != nil {
 			h.logger.Error("Failed to create conversation", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.Error(err))

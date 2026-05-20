@@ -15,11 +15,11 @@ const ptyCols = 256
 const ptyRows = 40
 
 // runCommandStreamImpl 在 Unix 下用 PTY 执行，使 ping 等命令按终端宽度排版（isatty 为真）
-func runCommandStreamImpl(cmd *exec.Cmd, sendEvent func(streamEvent), ctx context.Context) {
+func runCommandStreamImpl(cmd *exec.Cmd, sendEvent func(streamEvent), ctx context.Context) int {
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: ptyCols, Rows: ptyRows})
 	if err != nil {
 		sendEvent(streamEvent{T: "exit", C: -1})
-		return
+		return -1
 	}
 	defer ptmx.Close()
 
@@ -43,4 +43,5 @@ func runCommandStreamImpl(cmd *exec.Cmd, sendEvent func(streamEvent), ctx contex
 		exitCode = -1
 	}
 	sendEvent(streamEvent{T: "exit", C: exitCode})
+	return exitCode
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/agents"
+	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/knowledge"
 	"cyberstrike-ai/internal/mcp"
@@ -87,6 +88,7 @@ type ConfigHandler struct {
 	knowledgeInitializer       KnowledgeInitializer       // 知识库初始化器（可选）
 	appUpdater                 AppUpdater                 // App更新器（可选）
 	robotRestarter             RobotRestarter             // 机器人连接重启器（可选），ApplyConfig 时重启钉钉/飞书
+	audit                      *audit.Service
 	logger                     *zap.Logger
 	mu                         sync.RWMutex
 	lastEmbeddingConfig        *config.EmbeddingConfig // 上一次的嵌入模型配置（用于检测变更）
@@ -206,6 +208,32 @@ func (h *ConfigHandler) SetRobotRestarter(restarter RobotRestarter) {
 	h.robotRestarter = restarter
 }
 
+// SetAudit wires platform audit logging.
+func (h *ConfigHandler) SetAudit(s *audit.Service) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.audit = s
+}
+
+// ApplyWechatRobotBinding 微信 iLink 扫码绑定成功后写入配置并重启机器人连接
+func (h *ConfigHandler) ApplyWechatRobotBinding(wc config.RobotWechatConfig) error {
+	h.mu.Lock()
+	wc.Enabled = true
+	h.config.Robots.Wechat = wc
+	h.mu.Unlock()
+	if err := h.saveConfig(); err != nil {
+		return err
+	}
+	if h.robotRestarter != nil {
+		h.robotRestarter.RestartRobotConnections()
+	}
+	h.logger.Info("微信机器人绑定已保存",
+		zap.String("ilink_bot_id", wc.ILinkBotID),
+		zap.Bool("enabled", wc.Enabled),
+	)
+	return nil
+}
+
 // GetConfigResponse 获取配置响应
 type GetConfigResponse struct {
 	OpenAI     config.OpenAIConfig     `json:"openai"`
@@ -291,7 +319,7 @@ func (h *ConfigHandler) GetConfig(c *gin.Context) {
 	}
 	multiPub := config.MultiAgentPublic{
 		Enabled:                      h.config.MultiAgent.Enabled,
-		RobotUseMultiAgent:           h.config.MultiAgent.RobotUseMultiAgent,
+		RobotDefaultAgentMode: config.NormalizeRobotAgentMode(h.config.MultiAgent),
 		BatchUseMultiAgent:           h.config.MultiAgent.BatchUseMultiAgent,
 		SubAgentCount:                subAgentCount,
 		Orchestration:                config.NormalizeMultiAgentOrchestration(h.config.MultiAgent.Orchestration),
@@ -750,8 +778,12 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 	// 多代理标量（sub_agents 等仍由 config.yaml 维护）
 	if req.MultiAgent != nil {
 		h.config.MultiAgent.Enabled = req.MultiAgent.Enabled
-		h.config.MultiAgent.RobotUseMultiAgent = req.MultiAgent.RobotUseMultiAgent
 		h.config.MultiAgent.BatchUseMultiAgent = req.MultiAgent.BatchUseMultiAgent
+		if mode := strings.TrimSpace(req.MultiAgent.RobotDefaultAgentMode); mode != "" {
+			h.config.MultiAgent.RobotDefaultAgentMode = mode
+		} else {
+			h.config.MultiAgent.RobotDefaultAgentMode = "react"
+		}
 		if req.MultiAgent.PlanExecuteLoopMaxIterations != nil {
 			h.config.MultiAgent.PlanExecuteLoopMaxIterations = *req.MultiAgent.PlanExecuteLoopMaxIterations
 		}
@@ -760,7 +792,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 		}
 		h.logger.Info("Updating multi-agent config",
 			zap.Bool("enabled", h.config.MultiAgent.Enabled),
-			zap.Bool("robot_use_multi_agent", h.config.MultiAgent.RobotUseMultiAgent),
+			zap.String("robot_default_agent_mode", config.NormalizeRobotAgentMode(h.config.MultiAgent)),
 			zap.Bool("batch_use_multi_agent", h.config.MultiAgent.BatchUseMultiAgent),
 			zap.Int("plan_execute_loop_max_iterations", h.config.MultiAgent.PlanExecuteLoopMaxIterations),
 			zap.Int("tool_search_always_visible_tools", len(h.config.MultiAgent.EinoMiddleware.ToolSearchAlwaysVisibleTools)),
@@ -884,6 +916,9 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Config updated"})
+	if h.audit != nil {
+		h.audit.RecordOK(c, "config", "update", "Updated in-memory config", "config", "", nil)
+	}
 }
 
 // TestOpenAIRequest 测试OpenAI连接请求
@@ -1013,6 +1048,9 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 		h.logger.Info("检测到知识库从禁用变为启用，开始动态初始化知识库组件")
 		if _, err := knowledgeInitializer(); err != nil {
 			h.logger.Error("动态初始化知识库失败", zap.Error(err))
+			if h.audit != nil {
+				h.audit.RecordFail(c, "config", "apply", "Config apply failed: initialize knowledge base", map[string]interface{}{"error": err.Error()})
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initialize knowledge base: " + err.Error()})
 			return
 		}
@@ -1047,7 +1085,10 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 		h.logger.Info("开始重新初始化知识库组件（嵌入模型配置已变更）")
 		if _, err := reinitKnowledgeInitializer(); err != nil {
 			h.logger.Error("重新初始化知识库失败", zap.Error(err))
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "重新Failed to initialize knowledge base: " + err.Error()})
+			if h.audit != nil {
+				h.audit.RecordFail(c, "config", "apply", "Config apply failed: re-initialize knowledge base", map[string]interface{}{"error": err.Error()})
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to re-initialize knowledge base: " + err.Error()})
 			return
 		}
 		h.logger.Info("Knowledge base components reinitialized")
@@ -1060,6 +1101,9 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 	if c2Rt != nil {
 		if err := c2Rt.ReconcileC2AfterConfigApply(); err != nil {
 			h.logger.Error("C2 config apply failed", zap.Error(err))
+			if h.audit != nil {
+				h.audit.RecordFail(c, "config", "apply", "Config apply failed: C2", map[string]interface{}{"error": err.Error()})
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "C2 start failed: " + err.Error()})
 			return
 		}
@@ -1200,6 +1244,20 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 	h.logger.Info("配置已应用",
 		zap.Int("tools_count", len(h.config.Security.Tools)),
 	)
+
+	if h.audit != nil {
+		h.audit.Record(c, audit.Entry{
+			Category: "config",
+			Action:   "apply",
+			Result:   "success",
+			Message:  "配置已应用",
+			Detail: map[string]interface{}{
+				"tools_count":      len(h.config.Security.Tools),
+				"knowledge_enabled": h.config.Knowledge.Enabled,
+				"c2_enabled":        h.config.C2.EnabledEffective(),
+			},
+		})
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":     "配置已应用",
@@ -1481,6 +1539,15 @@ func updateRobotsConfig(doc *yaml.Node, cfg config.RobotsConfig) {
 		setBoolInMap(sessionNode, "strict_user_identity", *cfg.Session.StrictUserIdentity)
 	}
 
+	wechatNode := ensureMap(robotsNode, "wechat")
+	setBoolInMap(wechatNode, "enabled", cfg.Wechat.Enabled)
+	setStringInMap(wechatNode, "bot_token", cfg.Wechat.BotToken)
+	setStringInMap(wechatNode, "ilink_bot_id", cfg.Wechat.ILinkBotID)
+	setStringInMap(wechatNode, "ilink_user_id", cfg.Wechat.ILinkUserID)
+	setStringInMap(wechatNode, "base_url", cfg.Wechat.BaseURL)
+	setStringInMap(wechatNode, "bot_type", cfg.Wechat.BotType)
+	setStringInMap(wechatNode, "bot_agent", cfg.Wechat.BotAgent)
+
 	wecomNode := ensureMap(robotsNode, "wecom")
 	setBoolInMap(wecomNode, "enabled", cfg.Wecom.Enabled)
 	setStringInMap(wecomNode, "token", cfg.Wecom.Token)
@@ -1507,7 +1574,7 @@ func updateMultiAgentConfig(doc *yaml.Node, cfg config.MultiAgentConfig) {
 	root := doc.Content[0]
 	maNode := ensureMap(root, "multi_agent")
 	setBoolInMap(maNode, "enabled", cfg.Enabled)
-	setBoolInMap(maNode, "robot_use_multi_agent", cfg.RobotUseMultiAgent)
+	setStringInMap(maNode, "robot_default_agent_mode", config.NormalizeRobotAgentMode(cfg))
 	setBoolInMap(maNode, "batch_use_multi_agent", cfg.BatchUseMultiAgent)
 	setIntInMap(maNode, "plan_execute_loop_max_iterations", cfg.PlanExecuteLoopMaxIterations)
 	mwNode := ensureMap(maNode, "eino_middleware")

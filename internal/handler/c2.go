@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/c2"
 	"cyberstrike-ai/internal/database"
 
@@ -25,6 +26,12 @@ import (
 type C2Handler struct {
 	mgrPtr atomic.Pointer[c2.Manager]
 	logger *zap.Logger
+	audit  *audit.Service
+}
+
+// SetAudit wires platform audit logging.
+func (h *C2Handler) SetAudit(s *audit.Service) {
+	h.audit = s
 }
 
 // NewC2Handler 创建 C2 处理器；manager 可为 nil（功能关闭时）
@@ -104,6 +111,11 @@ func (h *C2Handler) CreateListener(c *gin.Context) {
 	implantToken := listener.ImplantToken
 	listener.EncryptionKey = ""
 	listener.ImplantToken = ""
+	if h.audit != nil {
+		h.audit.RecordOK(c, "c2", "listener_create", "创建 C2 监听器", "c2_listener", listener.ID, map[string]interface{}{
+			"name": listener.Name, "bind": listener.BindHost, "port": listener.BindPort,
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{"listener": listener, "implant_token": implantToken})
 }
 
@@ -205,6 +217,9 @@ func (h *C2Handler) DeleteListener(c *gin.Context) {
 		c.JSON(code, gin.H{"error": err.Error()})
 		return
 	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "c2", "listener_delete", "删除 C2 监听器", "c2_listener", id, nil)
+	}
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
 
@@ -222,6 +237,9 @@ func (h *C2Handler) StartListener(c *gin.Context) {
 	}
 	listener.EncryptionKey = ""
 	listener.ImplantToken = ""
+	if h.audit != nil {
+		h.audit.RecordOK(c, "c2", "listener_start", "启动 C2 监听器", "c2_listener", id, nil)
+	}
 	c.JSON(http.StatusOK, gin.H{"listener": listener})
 }
 
@@ -235,6 +253,9 @@ func (h *C2Handler) StopListener(c *gin.Context) {
 		}
 		c.JSON(code, gin.H{"error": err.Error()})
 		return
+	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "c2", "listener_stop", "停止 C2 监听器", "c2_listener", id, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"stopped": true})
 }
@@ -296,6 +317,9 @@ func (h *C2Handler) DeleteSession(c *gin.Context) {
 	if err := h.mgr().DB().DeleteC2Session(id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "c2", "session_delete", "删除 C2 会话", "c2_session", id, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
@@ -407,6 +431,11 @@ func (h *C2Handler) DeleteTasks(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "c2", "task_delete", "批量删除 C2 任务", "c2_task", "", map[string]interface{}{
+			"count": n, "ids": req.IDs,
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{"deleted": n})
 }
 
@@ -457,6 +486,11 @@ func (h *C2Handler) CreateTask(c *gin.Context) {
 		c.JSON(code, gin.H{"error": err.Error()})
 		return
 	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "c2", "task_create", "创建 C2 任务", "c2_task", task.ID, map[string]interface{}{
+			"session_id": req.SessionID, "task_type": req.TaskType,
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{"task": task})
 }
 
@@ -470,6 +504,9 @@ func (h *C2Handler) CancelTask(c *gin.Context) {
 		}
 		c.JSON(code, gin.H{"error": err.Error()})
 		return
+	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "c2", "task_cancel", "取消 C2 任务", "c2_task", id, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"cancelled": true})
 }

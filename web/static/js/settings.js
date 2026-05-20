@@ -31,6 +31,19 @@ let toolsPagination = {
 
 let c2NavSyncedOnce = false;
 
+/** 根据是否启用多代理，禁用/启用机器人模式中的 Eino 编排选项 */
+function syncRobotAgentModeSelectOptions(multiEnabled) {
+    const sel = document.getElementById('multi-agent-robot-mode');
+    if (!sel) return;
+    ['deep', 'plan_execute', 'supervisor'].forEach(function (v) {
+        const opt = sel.querySelector('option[value="' + v + '"]');
+        if (opt) opt.disabled = !multiEnabled;
+    });
+    if (!multiEnabled && ['deep', 'plan_execute', 'supervisor'].indexOf(sel.value) >= 0) {
+        sel.value = 'react';
+    }
+}
+
 /** 首次进入仪表盘等页面前拉一次配置，隐藏侧栏 C2（避免禁用后仍显示） */
 window.syncC2NavOnceFromServer = async function syncC2NavOnceFromServer() {
     if (c2NavSyncedOnce || typeof apiFetch === 'undefined') {
@@ -86,6 +99,9 @@ function switchSettingsSection(section) {
     }
     if (section === 'terminal' && typeof initTerminal === 'function') {
         setTimeout(initTerminal, 0);
+    }
+    if (section === 'audit' && typeof initAuditLogsSection === 'function') {
+        setTimeout(initAuditLogsSection, 0);
     }
 }
 
@@ -195,14 +211,27 @@ async function loadConfig(loadTools = true) {
 
         const ma = currentConfig.multi_agent || {};
         const maEn = document.getElementById('multi-agent-enabled');
-        if (maEn) maEn.checked = ma.enabled === true;
+        if (maEn) {
+            maEn.checked = ma.enabled === true;
+            if (!maEn.dataset.robotModeBound) {
+                maEn.dataset.robotModeBound = '1';
+                maEn.addEventListener('change', function () {
+                    syncRobotAgentModeSelectOptions(maEn.checked);
+                });
+            }
+        }
         const maPeLoop = document.getElementById('multi-agent-pe-loop');
         if (maPeLoop) {
             const v = ma.plan_execute_loop_max_iterations;
             maPeLoop.value = (v !== undefined && v !== null && !Number.isNaN(Number(v))) ? String(Number(v)) : '0';
         }
-        const maRobot = document.getElementById('multi-agent-robot-use');
-        if (maRobot) maRobot.checked = ma.robot_use_multi_agent === true;
+        const maRobotMode = document.getElementById('multi-agent-robot-mode');
+        if (maRobotMode) {
+            let mode = (ma.robot_default_agent_mode || 'react').trim().toLowerCase();
+            if (mode === 'single') mode = 'react';
+            maRobotMode.value = mode;
+            syncRobotAgentModeSelectOptions(ma.enabled === true);
+        }
         
         // 填充知识库配置
         const knowledgeEnabledCheckbox = document.getElementById('knowledge-enabled');
@@ -339,9 +368,23 @@ async function loadConfig(loadTools = true) {
 
         // 填充机器人配置
         const robots = currentConfig.robots || {};
+        const wechat = robots.wechat || {};
         const wecom = robots.wecom || {};
         const dingtalk = robots.dingtalk || {};
         const lark = robots.lark || {};
+        const wechatEnabled = document.getElementById('robot-wechat-enabled');
+        if (wechatEnabled) wechatEnabled.checked = wechat.enabled === true;
+        const wechatBase = document.getElementById('robot-wechat-base-url');
+        if (wechatBase) wechatBase.value = wechat.base_url || 'https://ilinkai.weixin.qq.com';
+        const wechatBotType = document.getElementById('robot-wechat-bot-type');
+        if (wechatBotType) wechatBotType.value = wechat.bot_type || '3';
+        const wechatBotAgent = document.getElementById('robot-wechat-bot-agent');
+        if (wechatBotAgent) wechatBotAgent.value = wechat.bot_agent || 'CyberStrikeAI/1.0';
+        const wechatBotId = document.getElementById('robot-wechat-ilink-bot-id');
+        if (wechatBotId) wechatBotId.value = wechat.ilink_bot_id || '';
+        if (typeof refreshWechatRobotBoundUI === 'function') {
+            refreshWechatRobotBoundUI({ ...wechat, bound: !!(wechat.bot_token && wechat.ilink_bot_id) });
+        }
         const wecomEnabled = document.getElementById('robot-wecom-enabled');
         if (wecomEnabled) wecomEnabled.checked = wecom.enabled === true;
         const wecomToken = document.getElementById('robot-wecom-token');
@@ -1116,9 +1159,14 @@ async function applySettings() {
                 const peRaw = document.getElementById('multi-agent-pe-loop')?.value;
                 const peParsed = parseInt(peRaw, 10);
                 const peLoop = Number.isNaN(peParsed) ? 0 : Math.max(0, peParsed);
+                const maEnabled = document.getElementById('multi-agent-enabled')?.checked === true;
+                let robotMode = document.getElementById('multi-agent-robot-mode')?.value || 'react';
+                if (!maEnabled && ['deep', 'plan_execute', 'supervisor'].indexOf(robotMode) >= 0) {
+                    robotMode = 'react';
+                }
                 return {
-                    enabled: document.getElementById('multi-agent-enabled')?.checked === true,
-                    robot_use_multi_agent: document.getElementById('multi-agent-robot-use')?.checked === true,
+                    enabled: maEnabled,
+                    robot_default_agent_mode: robotMode,
                     batch_use_multi_agent: currentConfig?.multi_agent?.batch_use_multi_agent === true,
                     plan_execute_loop_max_iterations: peLoop
                 };
@@ -1129,6 +1177,18 @@ async function applySettings() {
             },
             robots: {
                 ...(prevRobots.session && typeof prevRobots.session === 'object' ? { session: prevRobots.session } : {}),
+                wechat: {
+                    enabled: document.getElementById('robot-wechat-enabled')?.checked === true,
+                    base_url: document.getElementById('robot-wechat-base-url')?.value.trim() || 'https://ilinkai.weixin.qq.com',
+                    bot_type: document.getElementById('robot-wechat-bot-type')?.value.trim() || '3',
+                    bot_agent: document.getElementById('robot-wechat-bot-agent')?.value.trim() || 'CyberStrikeAI/1.0',
+                    ilink_bot_id: document.getElementById('robot-wechat-ilink-bot-id')?.value.trim() || (prevRobots.wechat && prevRobots.wechat.ilink_bot_id) || '',
+                    ...(prevRobots.wechat && typeof prevRobots.wechat === 'object' ? {
+                        bot_token: prevRobots.wechat.bot_token || '',
+                        ilink_user_id: prevRobots.wechat.ilink_user_id || '',
+                        get_updates_buf: prevRobots.wechat.get_updates_buf || ''
+                    } : {})
+                },
                 wecom: {
                     enabled: document.getElementById('robot-wecom-enabled')?.checked === true,
                     token: document.getElementById('robot-wecom-token')?.value.trim() || '',
@@ -1355,7 +1415,7 @@ async function saveToolsConfig() {
             agent: currentConfig.agent || {},
             multi_agent: {
                 enabled: currentConfig?.multi_agent?.enabled === true,
-                robot_use_multi_agent: currentConfig?.multi_agent?.robot_use_multi_agent === true,
+                robot_default_agent_mode: currentConfig?.multi_agent?.robot_default_agent_mode || 'react',
                 batch_use_multi_agent: currentConfig?.multi_agent?.batch_use_multi_agent === true,
                 plan_execute_loop_max_iterations: Number(currentConfig?.multi_agent?.plan_execute_loop_max_iterations || 0),
                 tool_search_always_visible_tools: Array.from(alwaysVisibleToolNames).filter(name => !alwaysVisibleBuiltinToolNames.has(name))

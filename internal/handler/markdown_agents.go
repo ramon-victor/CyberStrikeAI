@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"cyberstrike-ai/internal/agents"
+	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/config"
 
 	"github.com/gin-gonic/gin"
@@ -18,12 +19,18 @@ var markdownAgentFilenameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.m
 
 // MarkdownAgentsHandler 管理 agents 目录下子代理 Markdown（增删改查）。
 type MarkdownAgentsHandler struct {
-	dir string
+	dir   string
+	audit *audit.Service
 }
 
 // NewMarkdownAgentsHandler dir 须为已解析的绝对路径。
 func NewMarkdownAgentsHandler(dir string) *MarkdownAgentsHandler {
 	return &MarkdownAgentsHandler{dir: strings.TrimSpace(dir)}
+}
+
+// SetAudit wires platform audit logging.
+func (h *MarkdownAgentsHandler) SetAudit(s *audit.Service) {
+	h.audit = s
 }
 
 func (h *MarkdownAgentsHandler) safeJoin(filename string) (string, error) {
@@ -227,6 +234,9 @@ func (h *MarkdownAgentsHandler) CreateMarkdownAgent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "agent", "markdown_create", "Created Markdown sub-agent", "markdown_agent", filepath.Base(path), nil)
+	}
 	c.JSON(http.StatusOK, gin.H{"filename": filepath.Base(path), "message": "Created"})
 }
 
@@ -294,6 +304,9 @@ func (h *MarkdownAgentsHandler) UpdateMarkdownAgent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "agent", "markdown_update", "Updated Markdown sub-agent", "markdown_agent", filename, nil)
+	}
 	c.JSON(http.StatusOK, gin.H{"message": "Saved"})
 }
 
@@ -312,6 +325,9 @@ func (h *MarkdownAgentsHandler) DeleteMarkdownAgent(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "agent", "markdown_delete", "Deleted Markdown sub-agent", "markdown_agent", filename, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Deleted"})
 }
