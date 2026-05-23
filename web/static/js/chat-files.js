@@ -1052,15 +1052,26 @@ async function saveChatFilesEdit() {
 function openChatFilesRename(relativePath, currentName) {
     chatFilesRenameRelativePath = relativePath;
     const input = document.getElementById('chat-files-rename-input');
+    const hint = document.getElementById('chat-files-rename-path-hint');
     const modal = document.getElementById('chat-files-rename-modal');
-    if (input) input.value = currentName || '';
-    if (modal) modal.style.display = 'block';
-    setTimeout(() => { if (input) input.focus(); }, 100);
+    const pathText = relativePath ? ('chat_uploads/' + String(relativePath).replace(/\\/g, '/')) : 'chat_uploads';
+    if (hint) hint.textContent = pathText;
+    if (input) {
+        input.value = currentName || '';
+        input.select();
+    }
+    if (modal) modal.style.display = 'flex';
+    if (modal && typeof window.applyTranslations === 'function') {
+        window.applyTranslations(modal);
+    }
+    setTimeout(() => { if (input) { input.focus(); input.select(); } }, 100);
 }
 
 function closeChatFilesRenameModal() {
     const modal = document.getElementById('chat-files-rename-modal');
     if (modal) modal.style.display = 'none';
+    const hint = document.getElementById('chat-files-rename-path-hint');
+    if (hint) hint.textContent = '';
     chatFilesRenameRelativePath = '';
 }
 
@@ -1095,7 +1106,7 @@ function openChatFilesMkdirModal() {
     const p = chatFilesBrowsePath.join('/');
     if (hint) hint.textContent = p ? ('chat_uploads/' + p) : 'chat_uploads';
     if (input) input.value = '';
-    if (modal) modal.style.display = 'block';
+    if (modal) modal.style.display = 'flex';
     if (modal && typeof window.applyTranslations === 'function') {
         window.applyTranslations(modal);
     }

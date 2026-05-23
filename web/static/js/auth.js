@@ -282,6 +282,13 @@ async function submitLogin(event) {
 }
 
 async function refreshAppData(showTaskErrors = false) {
+    if (typeof initChatAgentModeFromConfig === 'function') {
+        try {
+            await initChatAgentModeFromConfig();
+        } catch (error) {
+            console.warn('刷新对话模式配置失败:', error);
+        }
+    }
     await Promise.allSettled([
         loadConversations(),
         loadActiveTasks(showTaskErrors),

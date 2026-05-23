@@ -149,11 +149,16 @@ func effectiveEffort(sr *config.OpenAIReasoningConfig, client *ClientIntent, all
 func normalizeEffort(s string) string {
 	e := strings.ToLower(strings.TrimSpace(s))
 	switch e {
-	case "low", "medium", "high", "max":
+	case "low", "medium", "high", "max", "xhigh":
 		return e
 	default:
 		return ""
 	}
+}
+
+// usesExtraFieldsReasoningEffort 为 Eino 无枚举的最高档 effort，经 ExtraFields 原样下发（max / xhigh 由网关自行识别，不做互转）。
+func usesExtraFieldsReasoningEffort(e string) bool {
+	return e == "max" || e == "xhigh"
 }
 
 func resolveWireProfile(oa *config.OpenAIConfig, sr *config.OpenAIReasoningConfig) wireProfile {
@@ -210,11 +215,11 @@ func applyOpenAICompat(cfg *einoopenai.ChatModelConfig, mode, effort string) {
 	if e == "" {
 		return
 	}
-	if e == "max" {
+	if usesExtraFieldsReasoningEffort(e) {
 		if cfg.ExtraFields == nil {
 			cfg.ExtraFields = make(map[string]any)
 		}
-		cfg.ExtraFields["reasoning_effort"] = "max"
+		cfg.ExtraFields["reasoning_effort"] = effortStringForAPI(e)
 		return
 	}
 	switch e {
@@ -245,6 +250,6 @@ func applyOutputConfigEffort(cfg *einoopenai.ChatModelConfig, mode, effort strin
 }
 
 func effortStringForAPI(e string) string {
-	// Gateways expect lowercase strings; "max" kept as max.
+	// 原样透传：OpenAI 官方多为 xhigh，部分兼容网关为 max，由配置/对话 effort 选择。
 	return strings.ToLower(strings.TrimSpace(e))
 }

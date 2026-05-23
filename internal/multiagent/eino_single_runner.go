@@ -18,7 +18,6 @@ import (
 	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
 )
 
@@ -213,7 +212,7 @@ func RunEinoSingleChatModelAgent(
 	}
 
 	baseMsgs := historyToMessages(history, appCfg, &ma.EinoMiddleware)
-	baseMsgs = append(baseMsgs, schema.UserMessage(userMessage))
+	baseMsgs = appendUserMessageIfNeeded(baseMsgs, userMessage)
 
 	streamsMainAssistant := func(agent string) bool {
 		return agent == "" || agent == einoSingleAgentName
@@ -233,6 +232,8 @@ func RunEinoSingleChatModelAgent(
 		StreamsMainAssistant:    streamsMainAssistant,
 		EinoRoleTag:             einoRoleTag,
 		CheckpointDir:           ma.EinoMiddleware.CheckpointDir,
+		RunRetryMaxAttempts:     ma.EinoMiddleware.RunRetryMaxAttempts,
+		RunRetryMaxBackoffSec:   ma.EinoMiddleware.RunRetryMaxBackoffSec,
 		McpIDsMu:                &mcpIDsMu,
 		McpIDs:                  &mcpIDs,
 		FilesystemMonitorAgent:  ag,

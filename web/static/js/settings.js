@@ -184,7 +184,7 @@ async function loadConfig(loadTools = true) {
         const orEffEl = document.getElementById('openai-reasoning-effort');
         if (orEffEl) {
             const ev = (orm.effort || '').toString().trim().toLowerCase();
-            orEffEl.value = ['', 'low', 'medium', 'high', 'max'].includes(ev) ? ev : '';
+            orEffEl.value = ['', 'low', 'medium', 'high', 'max', 'xhigh'].includes(ev) ? ev : '';
         }
         const orProfEl = document.getElementById('openai-reasoning-profile');
         if (orProfEl) {

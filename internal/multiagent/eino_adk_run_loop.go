@@ -77,6 +77,9 @@ type einoADKRunLoopArgs struct {
 	StreamsMainAssistant func(agent string) bool
 	EinoRoleTag          func(agent string) string
 	CheckpointDir        string
+	// RunRetryMaxAttempts / RunRetryMaxBackoffSec：429、5xx、网络抖动时的指数退避续跑（0=默认 10 次 / 30s 上限）。
+	RunRetryMaxAttempts  int
+	RunRetryMaxBackoffSec int
 
 	McpIDsMu *sync.Mutex
 	McpIDs   *[]string
@@ -437,6 +440,28 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 		return runErr
 	}
 
+	// maybeRetryTransientRun：不在此层 runner.Run/Resume；由 handler 落库 + loadHistoryFromAgentTrace 分段续跑（同中断并继续）。
+	maybeRetryTransientRun := func(runErr error) (retry bool, fatal error) {
+		if runErr == nil || !isEinoTransientRunError(runErr) {
+			return false, handleRunErr(runErr)
+		}
+		if logger != nil {
+			logger.Warn("eino transient error, ending run segment for handler resume",
+				zap.Error(runErr),
+				zap.String("orchestration", orchMode))
+		}
+		if progress != nil {
+			progress("eino_run_retry", "遇到临时错误（限流或网络波动），将保存上下文并重试…", map[string]interface{}{
+				"conversationId": conversationID,
+				"source":         "eino",
+				"orchestration":  orchMode,
+				"error":          runErr.Error(),
+				"resumeKind":     "trace_segment",
+			})
+		}
+		return false, ErrTransientRetryContinue
+	}
+
 	takePartial := func(runErr error) (*RunResult, error) {
 		if len(runAccumulatedMsgs) <= baseAccumulatedCount {
 			return nil, runErr
@@ -519,7 +544,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 			continue
 		}
 		if ev.Err != nil {
-			if retErr := handleRunErr(ev.Err); retErr != nil {
+			if _, retErr := maybeRetryTransientRun(ev.Err); retErr != nil {
 				return takePartial(retErr)
 			}
 		}
@@ -821,7 +846,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 						"einoRole":       einoRoleTag(ev.AgentName),
 					})
 				}
-				if retErr := handleRunErr(streamRecvErr); retErr != nil {
+				if _, retErr := maybeRetryTransientRun(streamRecvErr); retErr != nil {
 					return takePartial(retErr)
 				}
 			}

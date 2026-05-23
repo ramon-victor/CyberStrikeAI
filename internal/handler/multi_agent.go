@@ -136,6 +136,7 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 
 	var cancelWithCause context.CancelCauseFunc
 	curFinalMessage := prep.FinalMessage
+	segmentUserMessage := prep.FinalMessage // 本请求原始用户句，临时重试时不得丢失
 	curHistory := prep.History
 	roleTools := prep.RoleTools
 	orch := strings.TrimSpace(req.Orchestration)
@@ -186,9 +187,41 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 
 	// 同一 HTTP 流内多段 Run（如中断并继续）合并 MCP execution id，供最终 response / 库表与工具芯片展示完整列表
 	var cumulativeMCPExecutionIDs []string
+	var transientRunAttempts int
+	// 同一请求内分段续跑时，主代理 iteration 事件按偏移累计，避免 UI 出现「第3轮 → 第1轮」回跳。
+	var mainIterationOffset int
 
 	for {
-		progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
+		segmentMainIterationMax := 0
+		rawProgressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
+		progressCallback := func(eventType, message string, data interface{}) {
+			if eventType == "iteration" {
+				if m, ok := data.(map[string]interface{}); ok {
+					if scope, _ := m["einoScope"].(string); scope == "main" {
+						raw := 0
+						switch v := m["iteration"].(type) {
+						case int:
+							raw = v
+						case int32:
+							raw = int(v)
+						case int64:
+							raw = int(v)
+						case float64:
+							raw = int(v)
+						case float32:
+							raw = int(v)
+						}
+						if raw > 0 {
+							if raw > segmentMainIterationMax {
+								segmentMainIterationMax = raw
+							}
+							m["iteration"] = raw + mainIterationOffset
+						}
+					}
+				}
+			}
+			rawProgressCallback(eventType, message, data)
+		}
 		taskCtxLoop := mcp.WithMCPConversationID(taskCtx, conversationID)
 		taskCtxLoop = mcp.WithToolRunRegistry(taskCtxLoop, h.tasks)
 		taskCtxLoop = multiagent.WithHITLToolInterceptor(taskCtxLoop, func(ctx context.Context, toolName, arguments string) (string, error) {
@@ -210,14 +243,34 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 			orch,
 			chatReasoningToClientIntent(req.Reasoning),
 		)
-		timeoutCancel()
 
 		if result != nil && len(result.MCPExecutionIDs) > 0 {
 			cumulativeMCPExecutionIDs = mergeMCPExecutionIDLists(cumulativeMCPExecutionIDs, result.MCPExecutionIDs)
 		}
 
 		if runErr == nil {
+			// 任一段成功完成后，重置临时错误重试窗口（次数/退避从头开始）。
+			transientRunAttempts = 0
+			timeoutCancel()
 			break
+		}
+
+		handled, fatalErr := h.handleEinoTransientRetryContinue(
+			baseCtx, conversationID, result, runErr, &transientRunAttempts,
+			&curHistory, &curFinalMessage, segmentUserMessage, progressCallback,
+			func(msg string, extra map[string]interface{}) { sendEvent("progress", msg, extra) },
+		)
+		if handled {
+			mainIterationOffset += segmentMainIterationMax
+			timeoutCancel()
+			baseCtx, cancelWithCause = context.WithCancelCause(context.Background())
+			h.tasks.BindTaskCancel(conversationID, cancelWithCause)
+			taskCtx, timeoutCancel = context.WithTimeout(baseCtx, 600*time.Minute)
+			h.tasks.UpdateTaskStatus(conversationID, "running")
+			continue
+		}
+		if fatalErr != nil {
+			runErr = fatalErr
 		}
 
 		cause := context.Cause(baseCtx)
@@ -243,10 +296,14 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 				"conversationId": conversationID,
 				"source":         "interrupt_continue",
 			})
-			h.tasks.UpdateTaskStatus(conversationID, "running")
+			mainIterationOffset += segmentMainIterationMax
+			// 非临时错误分段续跑（用户中断并继续）时，清空 transient 计数，避免跨分段累加。
+			transientRunAttempts = 0
+			timeoutCancel()
 			baseCtx, cancelWithCause = context.WithCancelCause(context.Background())
 			h.tasks.BindTaskCancel(conversationID, cancelWithCause)
 			taskCtx, timeoutCancel = context.WithTimeout(baseCtx, 600*time.Minute)
+			h.tasks.UpdateTaskStatus(conversationID, "running")
 			continue
 		}
 
@@ -273,6 +330,7 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 				"messageId":      assistantMessageID,
 			})
 			sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
+			timeoutCancel()
 			return
 		}
 
@@ -290,6 +348,7 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 				"errorType":      "timeout",
 			})
 			sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
+			timeoutCancel()
 			return
 		}
 
@@ -306,8 +365,11 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 			"messageId":      assistantMessageID,
 		})
 		sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
+		timeoutCancel()
 		return
 	}
+
+	timeoutCancel()
 
 	if assistantMessageID != "" {
 		_ = h.db.UpdateAssistantMessageFinalize(assistantMessageID, result.Response, cumulativeMCPExecutionIDs, multiagent.AggregatedReasoningFromTraceJSON(result.LastAgentTraceInput))

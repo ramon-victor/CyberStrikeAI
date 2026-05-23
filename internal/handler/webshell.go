@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -318,8 +319,12 @@ func NewWebShellHandler(logger *zap.Logger, db *database.DB) *WebShellHandler {
 	return &WebShellHandler{
 		logger: logger,
 		client: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: &http.Transport{DisableKeepAlives: false},
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				DisableKeepAlives: false,
+				// WebShell 场景常见自签证书或 IP 访问（证书无 IP SAN）；默认跳过校验，与蚁剑等客户端一致。
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // intentional for webshell proxy
+			},
 		},
 		db: db,
 	}
