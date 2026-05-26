@@ -56,10 +56,10 @@ func (c ProjectConfig) FactIndexMaxRunesEffective() int {
 	return c.FactIndexMaxRunes
 }
 
-// FactSummaryMaxRunesEffective upsert 时 summary 最大 rune 数。
+// FactSummaryMaxRunesEffective upsert 时 summary 最大 rune 数（索引一行，宜含验证要点）。
 func (c ProjectConfig) FactSummaryMaxRunesEffective() int {
 	if c.FactSummaryMaxRunes <= 0 {
-		return 120
+		return 200
 	}
 	return c.FactSummaryMaxRunes
 }

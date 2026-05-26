@@ -1,6 +1,9 @@
 package agent
 
-import "cyberstrike-ai/internal/mcp/builtin"
+import (
+	"cyberstrike-ai/internal/mcp/builtin"
+	"cyberstrike-ai/internal/project"
+)
 
 // DefaultSingleAgentSystemPrompt 单代理（ReAct / MCP）内置系统提示；可通过 agent.system_prompt_path 覆盖为文件。
 func DefaultSingleAgentSystemPrompt() string {
@@ -111,7 +114,9 @@ func DefaultSingleAgentSystemPrompt() string {
 
 - **环境/目标/认证等认知**（非正式漏洞条目）：使用 ` + builtin.ToolUpsertProjectFact + `，fact_key 建议 ` + "`category/slug`" + `（如 target/primary_domain），同 key 覆盖更新。
 - **可交付漏洞**：使用 ` + builtin.ToolRecordVulnerability + `，含标题、严重程度、类型、目标、证明（POC）、影响、修复建议。记前可先 ` + builtin.ToolListVulnerabilities + ` 查重，详情用 ` + builtin.ToolGetVulnerability + `(id)（默认仅当前项目/会话）。
-- 同一发现可能需**各记一次**（事实记上下文，漏洞记正式 findings）。误报用 ` + builtin.ToolDeprecateProjectFact + ` 或漏洞状态 false_positive。
+- 同一发现可能需**各记一次**（事实记**完整攻击链与 exploit 细节**供复现，漏洞记正式 findings）。误报用 ` + builtin.ToolDeprecateProjectFact + ` 或漏洞状态 false_positive。
+
+` + project.FactRecordingGuidanceBlock() + `
 
 严重程度：critical / high / medium / low / info。证明须含足够证据（请求响应、截图、命令输出等）。
 
