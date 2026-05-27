@@ -87,6 +87,23 @@ func normalizeProcessDetailText(s string) string {
 // discardPlanningIfEchoesToolResult drops buffered planning text when it only repeats the
 // upcoming tool_result body. Streaming models often echo tool stdout in chunk.Content; flushing
 // that into "planning" before persisting tool_result duplicates the output after page refresh.
+// sameResponseStreamMeta 判断是否为同一段主通道流（Eino ADK 可能对同一 MessageStream 重复发 response_start）。
+func sameResponseStreamMeta(a, b map[string]interface{}) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	agentA, _ := a["einoAgent"].(string)
+	agentB, _ := b["einoAgent"].(string)
+	agentA = strings.TrimSpace(agentA)
+	agentB = strings.TrimSpace(agentB)
+	if agentA == "" || !strings.EqualFold(agentA, agentB) {
+		return false
+	}
+	orchA, _ := a["orchestration"].(string)
+	orchB, _ := b["orchestration"].(string)
+	return strings.TrimSpace(orchA) == strings.TrimSpace(orchB)
+}
+
 func discardPlanningIfEchoesToolResult(respPlan *responsePlanAgg, toolData interface{}) {
 	if respPlan == nil {
 		return
@@ -1251,6 +1268,17 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 
 		// 多代理主代理「规划中」：response_start / response_delta 仅用于 SSE，聚合落一条 planning
 		if eventType == "response_start" {
+			if dataMap, ok := data.(map[string]interface{}); ok {
+				if sameResponseStreamMeta(respPlan.meta, dataMap) {
+					if respPlan.meta == nil {
+						respPlan.meta = make(map[string]interface{}, len(dataMap))
+					}
+					for k, v := range dataMap {
+						respPlan.meta[k] = v
+					}
+					return
+				}
+			}
 			flushResponsePlan()
 			respPlan.meta = nil
 			if dataMap, ok := data.(map[string]interface{}); ok {
