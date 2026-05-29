@@ -40,7 +40,7 @@ function rolePlainDescription(role) {
     return raw;
 }
 let currentRole = localStorage.getItem('currentRole') || '';
-const DEFAULT_ROLE_NAME = '\u9ed8\u8ba4';
+const DEFAULT_ROLE_NAME = 'Default';
 let roles = [];
 let rolesSearchKeyword = ''; // role search keyword
 let rolesSearchTimeout = null; // search debounce timer

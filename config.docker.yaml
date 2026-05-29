@@ -73,7 +73,7 @@ fofa:
 agent:
   max_iterations: 120 # Maximum iteration count; the maximum number of tool-call rounds the AI agent can run
   large_result_threshold: 102400 # Large-result threshold in bytes; default 50 KB; larger results are automatically saved to storage
-  result_storage_dir: tmp # Result storage directory; large results are saved here
+  result_storage_dir: ../tmp # Result storage directory; large results are saved here
   tool_timeout_minutes: 30 # Maximum duration in minutes for one tool execution; timed-out tools are terminated automatically; 0 means unlimited (not recommended because long hangs are likely)
   # system_prompt_path: prompts/single-react.md # Optional: single-agent system prompt file, relative to this configuration file directory; when non-empty and readable, it replaces the built-in prompt
 # Human-in-the-loop (HITL) global whitelist: tools listed here always bypass approval and are unioned with the conversation page whitelist; the sidebar Apply action can merge entries into this list immediately.
@@ -160,7 +160,7 @@ database:
 # The system loads all .yaml tool configuration files from this directory
 # Recommended: create a separate configuration file for each tool under tools/
 security:
-  tools_dir: tools # Tool configuration file directory, relative to this configuration file directory
+  tools_dir: ../tools # Tool configuration file directory, relative to this configuration file directory
   # Tool description mode: source of descriptions exposed to AI/API when loading tools under tools
   #   short - prefer short_description (brief description, saves tokens); use description when empty
   #   full  - use description (detailed description)
@@ -257,18 +257,18 @@ robots:
 
 # Skill package directory: each subdirectory contains only standard SKILL.md (Agent Skills front matter only name and description) plus optional supporting files; no SKILL.yaml
 # Example: skills/cyberstrike-eino-demo/
-skills_dir: skills # Skills configuration file directory, relative to this configuration file directory
+skills_dir: ../skills # Skills configuration file directory, relative to this configuration file directory
 # ============================================
 # Multi-agent sub-agents (Markdown, the single source of maintenance)
 # ============================================
 # Each .md: YAML front matter (name / id / description / tools / bind_role / max_iterations / optional kind: orchestrator) plus body as the system prompt
 # Main agent: fixed filename orchestrator.md, or any filename with front matter kind: orchestrator (only one allowed in the directory); main agent is not included in the task sub-agent list
 # Advanced use: sub_agents can still be written in the multi_agent block; they are merged with this directory, and .md overrides YAML for the same id
-agents_dir: agents
+agents_dir: ../agents
 # ============================================
 # Role settings
 # ============================================
 
 # The system loads all .yaml role configuration files from this directory
 # Create a separate configuration file for each role, such as roles/CTF.yaml or roles/default.yaml
-roles_dir: roles # Role configuration file directory, relative to this configuration file directory
+roles_dir: ../roles # Role configuration file directory, relative to this configuration file directory
