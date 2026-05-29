@@ -1,0 +1,288 @@
+name: "fscan"
+command: "fscan"
+enabled: false
+short_description: "Comprehensive internal network scanner supporting host discovery, port scanning, service identification, brute forcing, and POC checks"
+description: |
+  Fscan is a comprehensive internal network scanner that supports host discovery, port scanning, service identification,
+
+  password brute forcing, web fingerprinting, and vulnerability POC checks.
+
+  **Main features:**
+  - Host liveness detection (ICMP/TCP/Ping)
+  - Port scanning (default 1000 common ports)
+  - Service version identification and fingerprint matching
+  - Weak-password brute forcing (SSH/SMB/MySQL/Redis, etc.)
+  - Web application vulnerability POC scanning
+  - DNS probing and domain enumeration
+  - Redis unauthorized-access exploitation (write/WebShell/reverse shell)
+  - Persistent backdoor generation (Linux ELF / Windows PE)
+
+  **Use cases:**
+  - Rapid internal asset inventory
+  - Bulk weak-password detection
+  - Common service vulnerability validation
+  - Penetration testing reconnaissance
+  - Red-team internal lateral movement
+parameters:
+  - name: "target"
+    type: "string"
+    description: "Target host: IP address, CIDR range (for example 192.168.1.0/24), IP file, or domain"
+    required: true
+    flag: "-h"
+    format: "flag"
+  - name: "ports"
+    type: "string"
+    description: |
+      Port list to scan, comma-separated. By default, covers 1000 common ports.
+      Example: "22,80,443,3306,6379" or "1-1000"
+    required: false
+    flag: "-p"
+    format: "flag"
+    default: "21,22,23,25,53,80,81,88,110,111,135,139,143,161,389,443,445,465,502,512,513,514,515,548,554,587,623,636,873,902,993,995,1080,1099,1194,1433,1434,1521,1522,1525,1723,1883,2049,2121,2181,2200,2222,2375,2376,2379,2380,3000,3128,3268,3269,3306,3389,3690,4369,4444,4848,5000,5005,5044,5060,5432,5601,5631,5632,5671,5672,5900,5984,5985,5986,6000,6379,6380,6443,6666,6667,7001,7002,7474,7687,8000,8005,8008,8009,8080,8081,8086,8088,8089,8090,8161,8180,8443,8500,8834,8848,8880,8888,9000,9001,9042,9080,9090,9092,9093,9160,9200,9300,9418,9443,9999,10000,10051,10250,10255,11211,15672,22222,26379,27017,27018,50000,50070,50075,61613,61614,61616"
+  - name: "mode"
+    type: "string"
+    description: |
+      Scan mode:
+      - all: full scan (default)
+      - icmp: liveness detection only
+      - or specify plugin names (for example ssh, smb, mysql, redis, etc.)
+    required: false
+    flag: "-m"
+    format: "flag"
+    default: "all"
+  - name: "output_file"
+    type: "string"
+    description: "Result output file path (default result.txt)"
+    required: false
+    flag: "-o"
+    format: "flag"
+    default: "result.txt"
+  - name: "output_format"
+    type: "string"
+    description: "Output format: txt (default), json, csv"
+    required: false
+    flag: "-f"
+    format: "flag"
+    default: "txt"
+  - name: "threads"
+    type: "int"
+    description: "Port-scan thread count"
+    required: false
+    flag: "-t"
+    format: "flag"
+    default: 600
+  - name: "module_threads"
+    type: "int"
+    description: "Module concurrency thread count"
+    required: false
+    flag: "-mt"
+    format: "flag"
+    default: 20
+  - name: "poc_num"
+    type: "int"
+    description: "POC scan concurrency"
+    required: false
+    flag: "-num"
+    format: "flag"
+    default: 20
+  - name: "timeout"
+    type: "int"
+    description: "Port-scan timeout in seconds"
+    required: false
+    flag: "-time"
+    format: "flag"
+    default: 3
+  - name: "web_timeout"
+    type: "int"
+    description: "Web request timeout in seconds"
+    required: false
+    flag: "-wt"
+    format: "flag"
+    default: 5
+  - name: "global_timeout"
+    type: "int"
+    description: "Global timeout in seconds"
+    required: false
+    flag: "-gt"
+    format: "flag"
+    default: 180
+  - name: "url"
+    type: "string"
+    description: "Target URL for web scan mode"
+    required: false
+    flag: "-u"
+    format: "flag"
+  - name: "proxy"
+    type: "string"
+    description: "HTTP proxy address (for example: http://127.0.0.1:8080)"
+    required: false
+    flag: "-proxy"
+    format: "flag"
+  - name: "socks5"
+    type: "string"
+    description: "SOCKS5 proxy address (for example: 127.0.0.1:1080)"
+    required: false
+    flag: "-socks5"
+    format: "flag"
+  - name: "cookie"
+    type: "string"
+    description: "HTTP Cookie value"
+    required: false
+    flag: "-cookie"
+    format: "flag"
+  - name: "domain"
+    type: "string"
+    description: "Target domain"
+    required: false
+    flag: "-domain"
+    format: "flag"
+  - name: "username"
+    type: "string"
+    description: "Brute-force username"
+    required: false
+    flag: "-user"
+    format: "flag"
+  - name: "password"
+    type: "string"
+    description: "Brute-force password"
+    required: false
+    flag: "-pwd"
+    format: "flag"
+  - name: "user_file"
+    type: "string"
+    description: "Username dictionary file path"
+    required: false
+    flag: "-userf"
+    format: "flag"
+  - name: "pass_file"
+    type: "string"
+    description: "Password dictionary file path"
+    required: false
+    flag: "-pwdf"
+    format: "flag"
+  - name: "host_file"
+    type: "string"
+    description: "Target host file path (one IP per line)"
+    required: false
+    flag: "-hf"
+    format: "flag"
+  - name: "port_file"
+    type: "string"
+    description: "Custom port file path"
+    required: false
+    flag: "-pf"
+    format: "flag"
+  - name: "url_file"
+    type: "string"
+    description: "Target URL file path"
+    required: false
+    flag: "-uf"
+    format: "flag"
+  - name: "pocname"
+    type: "string"
+    description: "Specify a POC name for a single-target scan"
+    required: false
+    flag: "-pocname"
+    format: "flag"
+  - name: "pocpath"
+    type: "string"
+    description: "Custom POC script path"
+    required: false
+    flag: "-pocpath"
+    format: "flag"
+  - name: "iface"
+    type: "string"
+    description: "Specify local network interface IP address (for VPN scenarios)"
+    required: false
+    flag: "-iface"
+    format: "flag"
+  - name: "exclude_host"
+    type: "string"
+    description: "Excluded host IP"
+    required: false
+    flag: "-eh"
+    format: "flag"
+  - name: "exclude_port"
+    type: "string"
+    description: "Excluded ports"
+    required: false
+    flag: "-ep"
+    format: "flag"
+  - name: "retry"
+    type: "int"
+    description: "Maximum retry count"
+    required: false
+    flag: "-retry"
+    format: "flag"
+    default: 3
+  - name: "rate_limit"
+    type: "int"
+    description: "Maximum packets per minute (0 means unlimited)"
+    required: false
+    flag: "-rate"
+    format: "flag"
+  - name: "max_redirect"
+    type: "int"
+    description: "Maximum HTTP redirects"
+    required: false
+    flag: "-max-redirect"
+    format: "flag"
+    default: 10
+  - name: "lang"
+    type: "string"
+    description: "Output language: zh (default Chinese), en (English)"
+    required: false
+    flag: "-lang"
+    format: "flag"
+    default: "zh"
+  - name: "log_level"
+    type: "string"
+    description: "Log level (default base,info,success)"
+    required: false
+    flag: "-log"
+    format: "flag"
+    default: "base,info,success"
+  - name: "reverse_shell"
+    type: "string"
+    description: "Reverse-shell target address:port (for example: 192.168.1.100:4444)"
+    required: false
+    flag: "-rsh"
+    format: "flag"
+  - name: "sshkey_file"
+    type: "string"
+    description: "SSH private key file path"
+    required: false
+    flag: "-sshkey"
+    format: "flag"
+  - name: "download_url"
+    type: "string"
+    description: "File URL to download"
+    required: false
+    flag: "-download-url"
+    format: "flag"
+  - name: "download_path"
+    type: "string"
+    description: "Download save path"
+    required: false
+    flag: "-download-path"
+    format: "flag"
+  - name: "additional_args"
+    type: "string"
+    description: |
+      Extra fscan parameters. Use this to pass fscan options not defined in the parameter list.
+
+      **Example values:**
+      - "-nobr -nopoc" (disable brute forcing and POC checks; only perform port scanning)
+      - "-ao" (only perform liveness detection)
+      - "-silent -nocolor" (silent output with no color)
+      - "-debug" (enable debug mode)
+      - "-full" (full POC scan)
+      - "-no" (disable result saving)
+      - "-dns" (enable DNS logging)
+
+      **Notes:**
+      - Separate multiple parameters with spaces
+      - Ensure parameter format is correct to avoid command injection
+      - This parameter is appended directly to the end of the command
+    required: false
+    format: "positional"

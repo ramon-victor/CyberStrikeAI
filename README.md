@@ -5,7 +5,7 @@
 # CyberStrikeAI
 
 
-[中文](README_CN.md) | [English](README.md)
+[Chinese](README_CN.md) | [English](README.md)
 
 **Community**: [Join us on Discord](https://discord.gg/8PjVCMu8Zw)
 
@@ -113,6 +113,7 @@ CyberStrikeAI is an **AI-native security testing platform** built in Go. It inte
 - 🔒 Password-protected web UI, audit logs, and SQLite persistence
 - 📚 Knowledge base (RAG) with embedding-based vector retrieval (cosine similarity), optional **Eino Compose** indexing pipeline, and configurable post-retrieval budgets / reranking hooks
 - 📁 Conversation grouping with pinning, rename, and batch management
+- 📂 **Project management**: group conversations and vulnerabilities by project; **shared facts** (project blackboard) persist cross-session context (targets, env, auth notes) with auto-injection for agents and MCP tools (`upsert_project_fact`, `get_project_fact`, …)
 - 🛡️ Vulnerability management with CRUD operations, severity tracking, status workflow, and statistics
 - 📋 Batch task management: create task queues, add multiple tasks, and execute them sequentially
 - 🎭 Role-based testing: predefined security testing roles (Penetration Testing, CTF, Web App Scanning, etc.) with custom prompts and tool restrictions

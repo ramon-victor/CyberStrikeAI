@@ -4,6 +4,7 @@ package database
 type ConversationCreateMeta struct {
 	Source               string
 	WebShellConnectionID string
+	ProjectID            string
 	ClientIP             string
 	SessionHint          string
 }

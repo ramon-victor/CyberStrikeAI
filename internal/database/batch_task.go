@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// BatchTaskQueueRow 批量任务队列数据库行
+// BatchTaskQueueRow batch task queue database row
 type BatchTaskQueueRow struct {
 	ID                    string
 	Title                 sql.NullString
@@ -22,6 +22,7 @@ type BatchTaskQueueRow struct {
 	LastScheduleTriggerAt sql.NullTime
 	LastScheduleError     sql.NullString
 	LastRunError          sql.NullString
+	ProjectID             sql.NullString
 	Status                string
 	CreatedAt             time.Time
 	StartedAt             sql.NullTime
@@ -29,7 +30,7 @@ type BatchTaskQueueRow struct {
 	CurrentIndex          int
 }
 
-// BatchTaskRow 批量任务数据库行
+// BatchTaskRow batch task database row
 type BatchTaskRow struct {
 	ID             string
 	QueueID        string
@@ -42,7 +43,7 @@ type BatchTaskRow struct {
 	Result         sql.NullString
 }
 
-// CreateBatchQueue 创建批量任务队列
+// CreateBatchQueue creates a batch task queue
 func (db *DB) CreateBatchQueue(
 	queueID string,
 	title string,
@@ -51,6 +52,7 @@ func (db *DB) CreateBatchQueue(
 	scheduleMode string,
 	cronExpr string,
 	nextRunAt *time.Time,
+	projectID string,
 	tasks []map[string]interface{},
 ) error {
 	tx, err := db.Begin()
@@ -65,15 +67,19 @@ func (db *DB) CreateBatchQueue(
 		nextRunAtValue = *nextRunAt
 	}
 
+	var projectIDVal interface{}
+	if strings.TrimSpace(projectID) != "" {
+		projectIDVal = strings.TrimSpace(projectID)
+	}
 	_, err = tx.Exec(
-		"INSERT INTO batch_task_queues (id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, status, created_at, current_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		queueID, title, role, agentMode, scheduleMode, cronExpr, nextRunAtValue, 1, "pending", now, 0,
+		"INSERT INTO batch_task_queues (id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, project_id, status, created_at, current_index) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		queueID, title, role, agentMode, scheduleMode, cronExpr, nextRunAtValue, 1, projectIDVal, "pending", now, 0,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create batch task queue: %w", err)
 	}
 
-	// 插入任务
+	// Insert tasks
 	for _, task := range tasks {
 		taskID, ok := task["id"].(string)
 		if !ok {
@@ -96,14 +102,14 @@ func (db *DB) CreateBatchQueue(
 	return tx.Commit()
 }
 
-// GetBatchQueue 获取批量任务队列
+// GetBatchQueue gets a batch task queue
 func (db *DB) GetBatchQueue(queueID string) (*BatchTaskQueueRow, error) {
 	var row BatchTaskQueueRow
 	var createdAt string
 	err := db.QueryRow(
-		"SELECT id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, last_schedule_trigger_at, last_schedule_error, last_run_error, status, created_at, started_at, completed_at, current_index FROM batch_task_queues WHERE id = ?",
+		"SELECT id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, last_schedule_trigger_at, last_schedule_error, last_run_error, project_id, status, created_at, started_at, completed_at, current_index FROM batch_task_queues WHERE id = ?",
 		queueID,
-	).Scan(&row.ID, &row.Title, &row.Role, &row.AgentMode, &row.ScheduleMode, &row.CronExpr, &row.NextRunAt, &row.ScheduleEnabled, &row.LastScheduleTriggerAt, &row.LastScheduleError, &row.LastRunError, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex)
+	).Scan(&row.ID, &row.Title, &row.Role, &row.AgentMode, &row.ScheduleMode, &row.CronExpr, &row.NextRunAt, &row.ScheduleEnabled, &row.LastScheduleTriggerAt, &row.LastScheduleError, &row.LastRunError, &row.ProjectID, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -113,10 +119,10 @@ func (db *DB) GetBatchQueue(queueID string) (*BatchTaskQueueRow, error) {
 
 	parsedTime, parseErr := time.Parse("2006-01-02 15:04:05", createdAt)
 	if parseErr != nil {
-		// 尝试其他时间格式
+		// Try other time formats.
 		parsedTime, parseErr = time.Parse(time.RFC3339, createdAt)
 		if parseErr != nil {
-			db.logger.Warn("Failed to parse creation time", zap.String("createdAt", createdAt), zap.Error(parseErr))
+			db.logger.Warn("failed to parse created time", zap.String("createdAt", createdAt), zap.Error(parseErr))
 			parsedTime = time.Now()
 		}
 	}
@@ -124,10 +130,10 @@ func (db *DB) GetBatchQueue(queueID string) (*BatchTaskQueueRow, error) {
 	return &row, nil
 }
 
-// GetAllBatchQueues 获取所有批量任务队列
+// GetAllBatchQueues gets all batch task queues
 func (db *DB) GetAllBatchQueues() ([]*BatchTaskQueueRow, error) {
 	rows, err := db.Query(
-		"SELECT id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, last_schedule_trigger_at, last_schedule_error, last_run_error, status, created_at, started_at, completed_at, current_index FROM batch_task_queues ORDER BY created_at DESC",
+		"SELECT id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, last_schedule_trigger_at, last_schedule_error, last_run_error, project_id, status, created_at, started_at, completed_at, current_index FROM batch_task_queues ORDER BY created_at DESC",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query batch task queue list: %w", err)
@@ -138,14 +144,14 @@ func (db *DB) GetAllBatchQueues() ([]*BatchTaskQueueRow, error) {
 	for rows.Next() {
 		var row BatchTaskQueueRow
 		var createdAt string
-		if err := rows.Scan(&row.ID, &row.Title, &row.Role, &row.AgentMode, &row.ScheduleMode, &row.CronExpr, &row.NextRunAt, &row.ScheduleEnabled, &row.LastScheduleTriggerAt, &row.LastScheduleError, &row.LastRunError, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex); err != nil {
+		if err := rows.Scan(&row.ID, &row.Title, &row.Role, &row.AgentMode, &row.ScheduleMode, &row.CronExpr, &row.NextRunAt, &row.ScheduleEnabled, &row.LastScheduleTriggerAt, &row.LastScheduleError, &row.LastRunError, &row.ProjectID, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex); err != nil {
 			return nil, fmt.Errorf("failed to scan batch task queue: %w", err)
 		}
 		parsedTime, parseErr := time.Parse("2006-01-02 15:04:05", createdAt)
 		if parseErr != nil {
 			parsedTime, parseErr = time.Parse(time.RFC3339, createdAt)
 			if parseErr != nil {
-				db.logger.Warn("Failed to parse creation time", zap.String("createdAt", createdAt), zap.Error(parseErr))
+				db.logger.Warn("failed to parse created time", zap.String("createdAt", createdAt), zap.Error(parseErr))
 				parsedTime = time.Now()
 			}
 		}
@@ -156,18 +162,18 @@ func (db *DB) GetAllBatchQueues() ([]*BatchTaskQueueRow, error) {
 	return queues, nil
 }
 
-// ListBatchQueues 列出批量任务队列（支持筛选和分页）
+// ListBatchQueues lists batch task queues with filtering and pagination
 func (db *DB) ListBatchQueues(limit, offset int, status, keyword string) ([]*BatchTaskQueueRow, error) {
-	query := "SELECT id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, last_schedule_trigger_at, last_schedule_error, last_run_error, status, created_at, started_at, completed_at, current_index FROM batch_task_queues WHERE 1=1"
+	query := "SELECT id, title, role, agent_mode, schedule_mode, cron_expr, next_run_at, schedule_enabled, last_schedule_trigger_at, last_schedule_error, last_run_error, project_id, status, created_at, started_at, completed_at, current_index FROM batch_task_queues WHERE 1=1"
 	args := []interface{}{}
 
-	// 状态筛选
+	// Status filter
 	if status != "" && status != "all" {
 		query += " AND status = ?"
 		args = append(args, status)
 	}
 
-	// 关键字搜索（搜索队列ID和标题）
+	// Keyword search over queue ID and title
 	if keyword != "" {
 		query += " AND (id LIKE ? OR title LIKE ?)"
 		args = append(args, "%"+keyword+"%", "%"+keyword+"%")
@@ -186,14 +192,14 @@ func (db *DB) ListBatchQueues(limit, offset int, status, keyword string) ([]*Bat
 	for rows.Next() {
 		var row BatchTaskQueueRow
 		var createdAt string
-		if err := rows.Scan(&row.ID, &row.Title, &row.Role, &row.AgentMode, &row.ScheduleMode, &row.CronExpr, &row.NextRunAt, &row.ScheduleEnabled, &row.LastScheduleTriggerAt, &row.LastScheduleError, &row.LastRunError, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex); err != nil {
+		if err := rows.Scan(&row.ID, &row.Title, &row.Role, &row.AgentMode, &row.ScheduleMode, &row.CronExpr, &row.NextRunAt, &row.ScheduleEnabled, &row.LastScheduleTriggerAt, &row.LastScheduleError, &row.LastRunError, &row.ProjectID, &row.Status, &createdAt, &row.StartedAt, &row.CompletedAt, &row.CurrentIndex); err != nil {
 			return nil, fmt.Errorf("failed to scan batch task queue: %w", err)
 		}
 		parsedTime, parseErr := time.Parse("2006-01-02 15:04:05", createdAt)
 		if parseErr != nil {
 			parsedTime, parseErr = time.Parse(time.RFC3339, createdAt)
 			if parseErr != nil {
-				db.logger.Warn("Failed to parse creation time", zap.String("createdAt", createdAt), zap.Error(parseErr))
+				db.logger.Warn("failed to parse created time", zap.String("createdAt", createdAt), zap.Error(parseErr))
 				parsedTime = time.Now()
 			}
 		}
@@ -204,18 +210,18 @@ func (db *DB) ListBatchQueues(limit, offset int, status, keyword string) ([]*Bat
 	return queues, nil
 }
 
-// CountBatchQueues 统计批量任务队列总数（支持筛选条件）
+// CountBatchQueues counts batch task queues with optional filters
 func (db *DB) CountBatchQueues(status, keyword string) (int, error) {
 	query := "SELECT COUNT(*) FROM batch_task_queues WHERE 1=1"
 	args := []interface{}{}
 
-	// 状态筛选
+	// Status filter
 	if status != "" && status != "all" {
 		query += " AND status = ?"
 		args = append(args, status)
 	}
 
-	// 关键字搜索（搜索队列ID和标题）
+	// Keyword search over queue ID and title
 	if keyword != "" {
 		query += " AND (id LIKE ? OR title LIKE ?)"
 		args = append(args, "%"+keyword+"%", "%"+keyword+"%")
@@ -230,7 +236,7 @@ func (db *DB) CountBatchQueues(status, keyword string) (int, error) {
 	return count, nil
 }
 
-// GetBatchTasks 获取批量任务队列的所有任务
+// GetBatchTasks gets all tasks for a batch task queue
 func (db *DB) GetBatchTasks(queueID string) ([]*BatchTaskRow, error) {
 	rows, err := db.Query(
 		"SELECT id, queue_id, message, conversation_id, status, started_at, completed_at, error, result FROM batch_tasks WHERE queue_id = ? ORDER BY id",
@@ -256,7 +262,7 @@ func (db *DB) GetBatchTasks(queueID string) ([]*BatchTaskRow, error) {
 	return tasks, nil
 }
 
-// UpdateBatchQueueStatus 更新批量任务队列状态
+// UpdateBatchQueueStatus updates batch task queue status
 func (db *DB) UpdateBatchQueueStatus(queueID, status string) error {
 	var err error
 	now := time.Now()
@@ -284,12 +290,12 @@ func (db *DB) UpdateBatchQueueStatus(queueID, status string) error {
 	return nil
 }
 
-// UpdateBatchTaskStatus 更新批量任务状态
+// UpdateBatchTaskStatus updates batch task status
 func (db *DB) UpdateBatchTaskStatus(queueID, taskID, status string, conversationID, result, errorMsg string) error {
 	var err error
 	now := time.Now()
 
-	// 构建更新语句
+	// Build update clauses
 	var updates []string
 	var args []interface{}
 
@@ -323,7 +329,7 @@ func (db *DB) UpdateBatchTaskStatus(queueID, taskID, status string, conversation
 
 	args = append(args, queueID, taskID)
 
-	// 构建SQL语句
+	// Build the SQL statement
 	sql := "UPDATE batch_tasks SET "
 	for i, update := range updates {
 		if i > 0 {
@@ -340,7 +346,7 @@ func (db *DB) UpdateBatchTaskStatus(queueID, taskID, status string, conversation
 	return nil
 }
 
-// UpdateBatchQueueCurrentIndex 更新批量任务队列的当前索引
+// UpdateBatchQueueCurrentIndex updates the current index of a batch task queue
 func (db *DB) UpdateBatchQueueCurrentIndex(queueID string, currentIndex int) error {
 	_, err := db.Exec(
 		"UPDATE batch_task_queues SET current_index = ? WHERE id = ?",
@@ -352,7 +358,7 @@ func (db *DB) UpdateBatchQueueCurrentIndex(queueID string, currentIndex int) err
 	return nil
 }
 
-// UpdateBatchQueueMetadata 更新批量任务队列标题、角色和代理模式
+// UpdateBatchQueueMetadata updates batch task queue title, role, and agent mode
 func (db *DB) UpdateBatchQueueMetadata(queueID, title, role, agentMode string) error {
 	_, err := db.Exec(
 		"UPDATE batch_task_queues SET title = ?, role = ?, agent_mode = ? WHERE id = ?",
@@ -364,7 +370,7 @@ func (db *DB) UpdateBatchQueueMetadata(queueID, title, role, agentMode string) e
 	return nil
 }
 
-// UpdateBatchQueueSchedule 更新批量任务队列调度相关信息
+// UpdateBatchQueueSchedule updates batch task queue scheduling information
 func (db *DB) UpdateBatchQueueSchedule(queueID, scheduleMode, cronExpr string, nextRunAt *time.Time) error {
 	var nextRunAtValue interface{}
 	if nextRunAt != nil {
@@ -375,12 +381,12 @@ func (db *DB) UpdateBatchQueueSchedule(queueID, scheduleMode, cronExpr string, n
 		scheduleMode, cronExpr, nextRunAtValue, queueID,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to update batch task schedule config: %w", err)
+		return fmt.Errorf("failed to update batch task schedule configuration: %w", err)
 	}
 	return nil
 }
 
-// UpdateBatchQueueScheduleEnabled 是否允许 Cron 自动触发（手工「开始执行」不受影响）
+// UpdateBatchQueueScheduleEnabled sets whether Cron may trigger automatically; manual start is unaffected
 func (db *DB) UpdateBatchQueueScheduleEnabled(queueID string, enabled bool) error {
 	v := 0
 	if enabled {
@@ -391,24 +397,24 @@ func (db *DB) UpdateBatchQueueScheduleEnabled(queueID string, enabled bool) erro
 		v, queueID,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to update batch task schedule switch: %w", err)
+		return fmt.Errorf("failed to update batch task schedule toggle: %w", err)
 	}
 	return nil
 }
 
-// RecordBatchQueueScheduledTriggerStart 记录一次由调度触发的开始时间并清空调度层错误
+// RecordBatchQueueScheduledTriggerStart records a scheduler-triggered start time and clears scheduler-level errors
 func (db *DB) RecordBatchQueueScheduledTriggerStart(queueID string, at time.Time) error {
 	_, err := db.Exec(
 		"UPDATE batch_task_queues SET last_schedule_trigger_at = ?, last_schedule_error = NULL WHERE id = ?",
 		at, queueID,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to record scheduled trigger time: %w", err)
+		return fmt.Errorf("failed to record schedule trigger time: %w", err)
 	}
 	return nil
 }
 
-// SetBatchQueueLastScheduleError 调度启动失败等原因（如状态不允许、重置失败）
+// SetBatchQueueLastScheduleError records scheduler start failure reasons, such as disallowed status or reset failure
 func (db *DB) SetBatchQueueLastScheduleError(queueID, msg string) error {
 	_, err := db.Exec(
 		"UPDATE batch_task_queues SET last_schedule_error = ? WHERE id = ?",
@@ -420,7 +426,7 @@ func (db *DB) SetBatchQueueLastScheduleError(queueID, msg string) error {
 	return nil
 }
 
-// SetBatchQueueLastRunError 最近一轮执行中出现的子任务失败摘要（空串表示清空）
+// SetBatchQueueLastRunError stores the failed subtask summary from the most recent run; an empty string clears it
 func (db *DB) SetBatchQueueLastRunError(queueID, msg string) error {
 	var v interface{}
 	if strings.TrimSpace(msg) == "" {
@@ -438,7 +444,7 @@ func (db *DB) SetBatchQueueLastRunError(queueID, msg string) error {
 	return nil
 }
 
-// ResetBatchQueueForRerun 重置队列和任务状态用于下一轮调度执行
+// ResetBatchQueueForRerun resets queue and task state for the next scheduled run
 func (db *DB) ResetBatchQueueForRerun(queueID string) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -465,7 +471,7 @@ func (db *DB) ResetBatchQueueForRerun(queueID string) error {
 	return tx.Commit()
 }
 
-// UpdateBatchTaskMessage 更新批量任务消息
+// UpdateBatchTaskMessage updates a batch task message
 func (db *DB) UpdateBatchTaskMessage(queueID, taskID, message string) error {
 	_, err := db.Exec(
 		"UPDATE batch_tasks SET message = ? WHERE queue_id = ? AND id = ?",
@@ -477,7 +483,7 @@ func (db *DB) UpdateBatchTaskMessage(queueID, taskID, message string) error {
 	return nil
 }
 
-// AddBatchTask 添加任务到批量任务队列
+// AddBatchTask adds a task to a batch task queue
 func (db *DB) AddBatchTask(queueID, taskID, message string) error {
 	_, err := db.Exec(
 		"INSERT INTO batch_tasks (id, queue_id, message, status) VALUES (?, ?, ?, ?)",
@@ -489,19 +495,19 @@ func (db *DB) AddBatchTask(queueID, taskID, message string) error {
 	return nil
 }
 
-// CancelPendingBatchTasks 批量取消队列中所有 pending 状态的任务（单条 SQL）
+// CancelPendingBatchTasks cancels all pending tasks in a queue with one SQL statement
 func (db *DB) CancelPendingBatchTasks(queueID string, completedAt time.Time) error {
 	_, err := db.Exec(
 		"UPDATE batch_tasks SET status = ?, completed_at = ? WHERE queue_id = ? AND status = ?",
 		"cancelled", completedAt, queueID, "pending",
 	)
 	if err != nil {
-		return fmt.Errorf("failed to cancel pending tasks: %w", err)
+		return fmt.Errorf("failed to cancel pending tasks in batch: %w", err)
 	}
 	return nil
 }
 
-// DeleteBatchTask 删除批量任务
+// DeleteBatchTask deletes a batch task
 func (db *DB) DeleteBatchTask(queueID, taskID string) error {
 	_, err := db.Exec(
 		"DELETE FROM batch_tasks WHERE queue_id = ? AND id = ?",
@@ -513,7 +519,7 @@ func (db *DB) DeleteBatchTask(queueID, taskID string) error {
 	return nil
 }
 
-// DeleteBatchQueue 删除批量任务队列
+// DeleteBatchQueue deletes a batch task queue
 func (db *DB) DeleteBatchQueue(queueID string) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -521,13 +527,13 @@ func (db *DB) DeleteBatchQueue(queueID string) error {
 	}
 	defer tx.Rollback()
 
-	// 删除任务（外键会自动级联删除）
+	// Delete tasks; foreign keys cascade automatically.
 	_, err = tx.Exec("DELETE FROM batch_tasks WHERE queue_id = ?", queueID)
 	if err != nil {
 		return fmt.Errorf("failed to delete batch task: %w", err)
 	}
 
-	// 删除队列
+	// Delete the queue
 	_, err = tx.Exec("DELETE FROM batch_task_queues WHERE id = ?", queueID)
 	if err != nil {
 		return fmt.Errorf("failed to delete batch task queue: %w", err)

@@ -20,7 +20,7 @@ import (
 
 // MultiAgentLoopStream Eino DeepAgent 流式对话（需 config.multi_agent.enabled）。
 func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
-	c.Header("Content-Type", "text/event-stream")
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 	if h.config == nil || !h.config.MultiAgent.Enabled {
@@ -242,6 +242,7 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 			h.agentsMarkdownDir,
 			orch,
 			chatReasoningToClientIntent(req.Reasoning),
+			h.projectBlackboardBlock(conversationID),
 		)
 
 		if result != nil && len(result.MCPExecutionIDs) > 0 {
@@ -443,6 +444,7 @@ func (h *AgentHandler) MultiAgentLoop(c *gin.Context) {
 		h.agentsMarkdownDir,
 		strings.TrimSpace(req.Orchestration),
 		chatReasoningToClientIntent(req.Reasoning),
+		h.projectBlackboardBlock(prep.ConversationID),
 	)
 	if runErr != nil {
 		if shouldPersistEinoAgentTraceAfterRunError(baseCtx) {

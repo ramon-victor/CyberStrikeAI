@@ -3,6 +3,7 @@ package multiagent
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -17,10 +18,14 @@ const (
 	defaultEinoRunRetryMaxBackoff  = 30 * time.Second
 )
 
-// isEinoTransientRunError 判断 ADK 运行期错误是否适合指数退避续跑（429、5xx、网络抖动等）。
-// 用户取消、超时、迭代上限等由 run loop 单独处理，不在此列。
+// isEinoTransientRunError reports whether an ADK runtime error is suitable for exponential-backoff resume, such as 429, 5xx, or network jitter.
+// User cancellation, timeouts, and iteration limits are handled separately by the run loop and are excluded here.
 func isEinoTransientRunError(err error) bool {
 	if err == nil {
+		return false
+	}
+	// io.EOF commonly appears when streaming ends normally and should not trigger segmented retry.
+	if errors.Is(err, io.EOF) {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -55,7 +60,6 @@ func isEinoTransientRunError(err error) bool {
 		"no such host",
 		"network is unreachable",
 		"broken pipe",
-		"eof",
 		"read tcp",
 		"write tcp",
 		"dial tcp",
@@ -85,7 +89,7 @@ func einoRunRetryMaxAttempts(args *einoADKRunLoopArgs) int {
 	return defaultEinoRunRetryMaxAttempts
 }
 
-// RunRetryMaxAttemptsFromConfig 供 handler 分段续跑计数（与 eino_middleware.run_retry_max_attempts 一致）。
+// RunRetryMaxAttemptsFromConfig provides the retry count for handler segmented resume, consistent with eino_middleware.run_retry_max_attempts.
 func RunRetryMaxAttemptsFromConfig(mw *config.MultiAgentEinoMiddlewareConfig) int {
 	if mw != nil && mw.RunRetryMaxAttempts > 0 {
 		return mw.RunRetryMaxAttempts
@@ -93,7 +97,7 @@ func RunRetryMaxAttemptsFromConfig(mw *config.MultiAgentEinoMiddlewareConfig) in
 	return defaultEinoRunRetryMaxAttempts
 }
 
-// TransientRetryBackoff 供 handler 在分段续跑前退避。
+// TransientRetryBackoff provides the handler backoff before segmented resume.
 func TransientRetryBackoff(attempt int, maxBackoffSec int) time.Duration {
 	max := defaultEinoRunRetryMaxBackoff
 	if maxBackoffSec > 0 {
@@ -109,7 +113,7 @@ func einoRunRetryMaxBackoff(args *einoADKRunLoopArgs) time.Duration {
 	return defaultEinoRunRetryMaxBackoff
 }
 
-// einoRunRestartContextSource 描述无 checkpoint Resume 时 Run 使用的消息来源（日志/SSE）。
+// einoRunRestartContextSource describes the message source used by Run when resuming without a checkpoint; used in logs/SSE.
 type einoRunRestartContextSource string
 
 const (
@@ -118,8 +122,8 @@ const (
 	einoRestartContextModelTrace  einoRunRestartContextSource = "model_trace"
 )
 
-// einoMessagesForRunRestart 在退避后重新 Run 时选用最完整的上下文：
-// 1) ModelFacingTrace（与模型实际入参一致） 2) 事件流累积的 runAccumulatedMsgs 3) 初始 msgs。
+// einoMessagesForRunRestart chooses the most complete context when re-running after backoff:
+// 1) ModelFacingTrace, matching actual model input; 2) event-stream accumulated runAccumulatedMsgs; 3) initial msgs.
 func einoMessagesForRunRestart(args *einoADKRunLoopArgs, baseMsgs, accumulated []adk.Message, baseCount int) ([]adk.Message, einoRunRestartContextSource) {
 	if trace := persistTraceSource(args, nil); len(trace) > 0 {
 		return append([]adk.Message(nil), trace...), einoRestartContextModelTrace
@@ -130,7 +134,7 @@ func einoMessagesForRunRestart(args *einoADKRunLoopArgs, baseMsgs, accumulated [
 	return append([]adk.Message(nil), baseMsgs...), einoRestartContextInitial
 }
 
-// adkMessagesHasUserContent 从尾部向前查找，是否已有与 want 相同的 user 消息（避免重复 append）。
+// adkMessagesHasUserContent scans backward to determine whether a user message matching want is already present, avoiding duplicate append.
 func adkMessagesHasUserContent(msgs []adk.Message, want string) bool {
 	want = strings.TrimSpace(want)
 	if want == "" {
@@ -152,7 +156,7 @@ func adkMessagesHasUserContent(msgs []adk.Message, want string) bool {
 	return false
 }
 
-// appendUserMessageIfNeeded 在 history 轨迹之后追加本轮 user 消息（仅当轨迹中尚未包含该句）。
+// appendUserMessageIfNeeded appends this turn's user message after the history trace only when the trace does not already contain it.
 func appendUserMessageIfNeeded(msgs []adk.Message, userMessage string) []adk.Message {
 	if strings.TrimSpace(userMessage) == "" || adkMessagesHasUserContent(msgs, userMessage) {
 		return msgs
@@ -160,7 +164,7 @@ func appendUserMessageIfNeeded(msgs []adk.Message, userMessage string) []adk.Mes
 	return append(msgs, schema.UserMessage(userMessage))
 }
 
-// einoTransientRetryBackoff 指数退避：2s, 4s, 8s… capped by maxBackoff。
+// einoTransientRetryBackoff uses exponential backoff: 2s, 4s, 8s... capped by maxBackoff.
 func einoTransientRetryBackoff(attempt int, maxBackoff time.Duration) time.Duration {
 	if attempt < 0 {
 		attempt = 0

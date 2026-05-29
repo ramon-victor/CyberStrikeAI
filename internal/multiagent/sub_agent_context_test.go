@@ -105,6 +105,7 @@ func TestTaskContextEnrichMiddleware_EnrichesTaskDescription(t *testing.T) {
 		"继续测试",
 		[]agent.ChatMessage{{Role: "user", Content: "http://8.163.32.73:8081 pikachu靶场"}},
 		0,
+		"",
 	)
 	if mw == nil {
 		t.Fatal("expected non-nil middleware")
@@ -149,7 +150,7 @@ func TestTaskContextEnrichMiddleware_EnrichesTaskDescription(t *testing.T) {
 }
 
 func TestTaskContextEnrichMiddleware_IgnoresNonTaskTools(t *testing.T) {
-	mw := newTaskContextEnrichMiddleware("test", nil, 0)
+	mw := newTaskContextEnrichMiddleware("test", nil, 0, "")
 	if mw == nil {
 		t.Fatal("expected non-nil middleware")
 	}
@@ -175,7 +176,7 @@ func TestTaskContextEnrichMiddleware_IgnoresNonTaskTools(t *testing.T) {
 }
 
 func TestTaskContextEnrichMiddleware_NilWhenDisabled(t *testing.T) {
-	mw := newTaskContextEnrichMiddleware("test", nil, -1)
+	mw := newTaskContextEnrichMiddleware("test", nil, -1, "")
 	if mw != nil {
 		t.Error("middleware should be nil when disabled")
 	}

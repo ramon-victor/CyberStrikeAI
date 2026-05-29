@@ -3,6 +3,7 @@ package multiagent
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -18,9 +19,12 @@ func TestIsEinoTransientRunError(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
+		{"io eof", io.EOF, false},
+		{"plain eof text", errors.New("EOF"), false},
 		{"429", errors.New("HTTP 429 Too Many Requests"), true},
 		{"rate limit", errors.New(`{"error":"rate limit exceeded"}`), true},
 		{"connection reset", errors.New("read tcp: connection reset by peer"), true},
+		{"unexpected eof", errors.New("unexpected EOF"), true},
 		{"503", errors.New("upstream returned 503"), true},
 		{"iteration limit", errors.New("max iteration reached"), false},
 		{"canceled", context.Canceled, false},

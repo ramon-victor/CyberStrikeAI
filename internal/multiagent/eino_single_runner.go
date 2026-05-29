@@ -13,6 +13,7 @@ import (
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/einomcp"
 	"cyberstrike-ai/internal/openai"
+	"cyberstrike-ai/internal/project"
 	"cyberstrike-ai/internal/reasoning"
 
 	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
@@ -21,11 +22,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// einoSingleAgentName 与 ChatModelAgent.Name 一致，供流式事件映射主对话区。
+// einoSingleAgentName matches ChatModelAgent.Name and maps streaming events to the main conversation area.
 const einoSingleAgentName = "cyberstrike-eino-single"
 
-// RunEinoSingleChatModelAgent 使用 Eino adk.NewChatModelAgent + adk.NewRunner.Run（官方 Quick Start 的 Query 同属 Runner API；此处用历史 + 用户消息切片等价于多轮 Query）。
-// 不替代既有原生 ReAct；与 RunDeepAgent 共享 runEinoADKAgentLoop 的 SSE 映射与 MCP 桥。
+// RunEinoSingleChatModelAgent uses Eino adk.NewChatModelAgent + adk.NewRunner.Run. The official Quick Start Query also uses the Runner API;
+// using history plus a user-message slice here is equivalent to multi-turn Query. It does not replace the existing native ReAct path; it shares runEinoADKAgentLoop SSE mapping and the MCP bridge with RunDeepAgent.
 func RunEinoSingleChatModelAgent(
 	ctx context.Context,
 	appCfg *config.Config,
@@ -38,12 +39,13 @@ func RunEinoSingleChatModelAgent(
 	roleTools []string,
 	progress func(eventType, message string, data interface{}),
 	reasoningClient *reasoning.ClientIntent,
+	systemPromptExtra string,
 ) (*RunResult, error) {
 	if appCfg == nil || ag == nil {
-		return nil, fmt.Errorf("eino single: 配置或 Agent 为空")
+		return nil, fmt.Errorf("eino single: config or Agent is nil")
 	}
 	if ma == nil {
-		return nil, fmt.Errorf("eino single: multi_agent 配置为空")
+		return nil, fmt.Errorf("eino single: multi_agent config is nil")
 	}
 
 	einoLoc, einoSkillMW, einoFSTools, skillsRoot, einoErr := prepareEinoSkills(ctx, appCfg.SkillsDir, ma, logger)
@@ -97,7 +99,7 @@ func RunEinoSingleChatModelAgent(
 
 	mainToolsForCfg, mainOrchestratorPre, singleToolSearchActive, err := prependEinoMiddlewares(ctx, &ma.EinoMiddleware, einoMWMain, mainTools, einoLoc, skillsRoot, conversationID, logger)
 	if err != nil {
-		return nil, fmt.Errorf("eino single eino 中间件: %w", err)
+		return nil, fmt.Errorf("eino single eino middleware: %w", err)
 	}
 
 	httpClient := &http.Client{
@@ -126,7 +128,7 @@ func RunEinoSingleChatModelAgent(
 
 	mainModel, err := einoopenai.NewChatModel(ctx, baseModelCfg)
 	if err != nil {
-		return nil, fmt.Errorf("eino single 模型: %w", err)
+		return nil, fmt.Errorf("eino single model: %w", err)
 	}
 
 	mainSumMw, err := newEinoSummarizationMiddleware(ctx, mainModel, appCfg, &ma.EinoMiddleware, conversationID, logger)
@@ -144,7 +146,7 @@ func RunEinoSingleChatModelAgent(
 		if einoFSTools && einoLoc != nil {
 			fsMw, fsErr := subAgentFilesystemMiddleware(ctx, einoLoc, toolInvokeNotify, einoSingleAgentName, einoExecMonitor, agentToolTimeoutMinutes(appCfg), toolOutputChunk)
 			if fsErr != nil {
-				return nil, fmt.Errorf("eino single filesystem 中间件: %w", fsErr)
+				return nil, fmt.Errorf("eino single filesystem middleware: %w", fsErr)
 			}
 			handlers = append(handlers, fsMw)
 		}
@@ -177,7 +179,8 @@ func RunEinoSingleChatModelAgent(
 		},
 		EmitInternalEvents: true,
 	}
-	ins := injectToolNamesOnlyInstruction(ctx, ag.EinoSingleAgentSystemInstruction(), mainTools, singleToolSearchActive)
+	ins := project.AppendSystemPromptBlock(ag.EinoSingleAgentSystemInstruction(), systemPromptExtra)
+	ins = injectToolNamesOnlyInstruction(ctx, ins, mainTools, singleToolSearchActive)
 	if logger != nil {
 		names := collectToolNames(ctx, mainTools)
 		mountedNames := collectToolNames(ctx, mainToolsForCfg)
@@ -242,7 +245,6 @@ func RunEinoSingleChatModelAgent(
 		DA:                      chatAgent,
 		ModelFacingTrace:        modelFacingTrace,
 		EinoCallbacks:           &ma.EinoCallbacks,
-		EmptyResponseMessage: "(Eino ADK single-agent session completed but no assistant text was captured. Check process details or logs.) " +
-			"（Eino ADK 单代理会话已完成，但未捕获到助手文本输出。请查看过程详情或日志。）",
+		EmptyResponseMessage:    "(Eino ADK single-agent session completed but no assistant text was captured. Check process details or logs.)",
 	}, baseMsgs)
 }

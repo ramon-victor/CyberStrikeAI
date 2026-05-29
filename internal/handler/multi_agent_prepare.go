@@ -36,6 +36,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		var conv *database.Conversation
 		var err error
 		meta := audit.ConversationCreateMetaFromGin(c, source)
+		meta.ProjectID = effectiveProjectID(h.config, req.ProjectID)
 		if strings.TrimSpace(req.WebShellConnectionID) != "" {
 			meta.Source = source + "_webshell"
 			meta.WebShellConnectionID = strings.TrimSpace(req.WebShellConnectionID)
@@ -90,6 +91,14 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 			builtin.ToolWebshellFileRead,
 			builtin.ToolWebshellFileWrite,
 			builtin.ToolRecordVulnerability,
+			builtin.ToolListVulnerabilities,
+			builtin.ToolGetVulnerability,
+			builtin.ToolUpsertProjectFact,
+			builtin.ToolGetProjectFact,
+			builtin.ToolListProjectFacts,
+			builtin.ToolSearchProjectFacts,
+			builtin.ToolDeprecateProjectFact,
+			builtin.ToolRestoreProjectFact,
 			builtin.ToolListKnowledgeRiskTypes,
 			builtin.ToolSearchKnowledgeBase,
 		}

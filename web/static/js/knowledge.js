@@ -1,9 +1,9 @@
-// 知识库管理相关功能
+// Knowledge base management functions
 function _t(key, opts) {
     return typeof window.t === 'function' ? window.t(key, opts) : key;
 }
 
-// 返回「知识库未启用」提示区块的 HTML（使用 data-i18n 以便语言切换时自动更新）
+// Return"knowledge base disabled"notice block HTML (use data-i18n so language changes update it automatically)
 function getKnowledgeNotEnabledHTML() {
     return `
         <div class="empty-state" style="text-align: center; padding: 40px 20px;">
@@ -23,7 +23,7 @@ function getKnowledgeNotEnabledHTML() {
     `;
 }
 
-// 渲染「知识库未启用」状态到容器，并应用当前语言
+// Render"knowledge base disabled"state into the container,and apply the current language
 function renderKnowledgeNotEnabledState(container) {
     if (!container) return;
     container.innerHTML = getKnowledgeNotEnabledHTML();
@@ -35,20 +35,20 @@ function renderKnowledgeNotEnabledState(container) {
 let knowledgeCategories = [];
 let knowledgeItems = [];
 let currentEditingItemId = null;
-let isSavingKnowledgeItem = false; // 防止重复提交
-let retrievalLogsData = []; // 存储检索日志数据，用于详情查看
+let isSavingKnowledgeItem = false; // Prevent duplicate submissions
+let retrievalLogsData = []; // Store retrieval log data for detail views
 let knowledgePagination = {
     currentPage: 1,
-    pageSize: 10, // 每页分类数（改为按分类分页）
+    pageSize: 10, // categories per page (changed to category pagination)
     total: 0,
     currentCategory: ''
 };
-let knowledgeSearchTimeout = null; // 搜索防抖定时器
+let knowledgeSearchTimeout = null; // search debounce timer
 
-// 加载知识分类
+// Load knowledge categories
 async function loadKnowledgeCategories() {
     try {
-        // 添加时间戳参数避免缓存
+        // Add a timestamp parameter to avoid caching
         const timestamp = Date.now();
         const response = await apiFetch(`/api/knowledge/categories?_t=${timestamp}`, {
             method: 'GET',
@@ -59,20 +59,20 @@ async function loadKnowledgeCategories() {
             }
         });
         if (!response.ok) {
-            throw new Error('获取分类失败');
+            throw new Error('Failed to get categories');
         }
         const data = await response.json();
         
-        // 检查知识库功能是否启用
+        // Check whether the knowledge base feature is enabled
         if (data.enabled === false) {
-            // 功能未启用，显示友好提示（使用 data-i18n，切换语言时会自动更新）
+            // Feature is disabled,show a friendly notice (use data-i18n,language changes update it automatically)
             renderKnowledgeNotEnabledState(document.getElementById('knowledge-items-list'));
             return [];
         }
         
         knowledgeCategories = data.categories || [];
         
-        // 更新分类筛选下拉框
+        // Update the category filter dropdown
         const filterDropdown = document.getElementById('knowledge-category-filter-dropdown');
         if (filterDropdown) {
             filterDropdown.innerHTML = '<div class="custom-select-option" data-value="" onclick="selectKnowledgeCategory(\'\')">All</div>';
@@ -91,23 +91,23 @@ async function loadKnowledgeCategories() {
         return knowledgeCategories;
     } catch (error) {
         console.error('Failed to load categories:', error);
-        // 只在非功能未启用的情况下显示错误
-        if (!error.message.includes('知识库功能未启用')) {
-            showNotification('加载分类失败: ' + error.message, 'error');
+        // Show errors only when the feature is not disabled
+        if (!error.message.includes('\u77e5\u8bc6\u5e93\u529f\u80fd\u672a\u542f\u7528')) {
+            showNotification('Failed to load categories: ' + error.message, 'error');
         }
         return [];
     }
 }
 
-// 加载知识项列表（支持按分类分页，默认不加载完整内容）
+// Load knowledge item list (supports category pagination,does not load full content by default)
 async function loadKnowledgeItems(category = '', page = 1, pageSize = 10) {
     try {
-        // 更新分页状态
+        // Update pagination state
         knowledgePagination.currentCategory = category;
         knowledgePagination.currentPage = page;
         knowledgePagination.pageSize = pageSize;
         
-        // 构建URL（按分类分页模式，不包含完整内容）
+        // Build URL (category pagination mode,without full content)
         const timestamp = Date.now();
         const offset = (page - 1) * pageSize;
         let url = `/api/knowledge/items?categoryPage=true&limit=${pageSize}&offset=${offset}&_t=${timestamp}`;
@@ -125,13 +125,13 @@ async function loadKnowledgeItems(category = '', page = 1, pageSize = 10) {
         });
         
         if (!response.ok) {
-            throw new Error('获取知识项失败');
+            throw new Error('Failed to get knowledge items');
         }
         const data = await response.json();
         
-        // 检查知识库功能是否启用
+        // Check whether the knowledge base feature is enabled
         if (data.enabled === false) {
-            // 功能未启用，显示友好提示（如果还没有显示的话；使用 data-i18n，切换语言时会自动更新）
+            // Feature is disabled,show a friendly notice (if it is not already shown;use data-i18n,language changes update it automatically)
             const container = document.getElementById('knowledge-items-list');
             if (container && !container.querySelector('.empty-state')) {
                 renderKnowledgeNotEnabledState(container);
@@ -142,13 +142,13 @@ async function loadKnowledgeItems(category = '', page = 1, pageSize = 10) {
             return [];
         }
         
-        // 处理按分类分页的响应数据
+        // Process category-paginated response data
         const categoriesWithItems = data.categories || [];
-        knowledgePagination.total = data.total || 0; // 总分类数
+        knowledgePagination.total = data.total || 0; // total category count
         
         renderKnowledgeItemsByCategories(categoriesWithItems);
         
-        // 如果选择了单个分类，不显示分页（因为只显示一个分类）
+        // If a single category is selected,hide pagination (becauseonly one category is shown)
         if (category) {
             const paginationContainer = document.getElementById('knowledge-pagination');
             if (paginationContainer) {
@@ -159,16 +159,16 @@ async function loadKnowledgeItems(category = '', page = 1, pageSize = 10) {
         }
         return categoriesWithItems;
     } catch (error) {
-        console.error('加载知识项失败:', error);
-        // 只在非功能未启用的情况下显示错误
-        if (!error.message.includes('知识库功能未启用')) {
-            showNotification('加载知识项失败: ' + error.message, 'error');
+        console.error('Failed to load knowledge items:', error);
+        // Show errors only when the feature is not disabled
+        if (!error.message.includes('\u77e5\u8bc6\u5e93\u529f\u80fd\u672a\u542f\u7528')) {
+            showNotification('Failed to load knowledge items: ' + error.message, 'error');
         }
         return [];
     }
 }
 
-// 渲染知识项列表（按分类分页的数据结构）
+// Render knowledge item list (category-paginated data structure)
 function renderKnowledgeItemsByCategories(categoriesWithItems) {
     const container = document.getElementById('knowledge-items-list');
     if (!container) return;
@@ -178,14 +178,14 @@ function renderKnowledgeItemsByCategories(categoriesWithItems) {
         return;
     }
     
-    // 计算总项数和分类数
+    // Calculate total item and category counts
     const totalItems = categoriesWithItems.reduce((sum, cat) => sum + (cat.items?.length || 0), 0);
     const categoryCount = categoriesWithItems.length;
     
-    // 更新统计信息
+    // Update statistics
     updateKnowledgeStats(categoriesWithItems, categoryCount);
     
-    // 渲染分类及知识项
+    // Render categories and knowledge items
     let html = '<div class="knowledge-categories-container">';
     
     categoriesWithItems.forEach(categoryData => {
@@ -212,7 +212,7 @@ function renderKnowledgeItemsByCategories(categoriesWithItems) {
     container.innerHTML = html;
 }
 
-// 渲染知识项列表（向后兼容，用于按项分页的旧代码）
+// Render knowledge item list (backward-compatible, for legacy item pagination code)
 function renderKnowledgeItems(items) {
     const container = document.getElementById('knowledge-items-list');
     if (!container) return;
@@ -222,7 +222,7 @@ function renderKnowledgeItems(items) {
         return;
     }
     
-    // 按分类分组
+    // Group by category
     const groupedByCategory = {};
     items.forEach(item => {
         const category = item.category || 'Uncategorized';
@@ -232,10 +232,10 @@ function renderKnowledgeItems(items) {
         groupedByCategory[category].push(item);
     });
     
-    // 更新统计信息
+    // Update statistics
     updateKnowledgeStats(items, Object.keys(groupedByCategory).length);
     
-    // 渲染分组后的内容
+    // Render grouped content
     const categories = Object.keys(groupedByCategory).sort();
     let html = '<div class="knowledge-categories-container">';
     
@@ -262,13 +262,13 @@ function renderKnowledgeItems(items) {
     container.innerHTML = html;
 }
 
-// 渲染分页控件（按分类分页）
+// Render pagination controls (category pagination)
 function renderKnowledgePagination() {
     const container = document.getElementById('knowledge-pagination');
     if (!container) return;
     
     const { currentPage, pageSize, total } = knowledgePagination;
-    const totalPages = Math.ceil(total / pageSize); // total是总分类数
+    const totalPages = Math.ceil(total / pageSize); // totalis the total category count
     
     if (totalPages <= 1) {
         container.innerHTML = '';
@@ -277,20 +277,20 @@ function renderKnowledgePagination() {
     
     let html = '<div class="knowledge-pagination" style="display: flex; justify-content: center; align-items: center; gap: 8px; padding: 20px; flex-wrap: wrap;">';
     
-    // 上一页按钮
+    // Previous-page button
     html += `<button class="pagination-btn" onclick="loadKnowledgePage(${currentPage - 1})" ${currentPage <= 1 ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''}>Previous</button>`;
     
-    // 页码显示（显示分类数）
+    // Page number display (show category count)
     html += `<span style="padding: 0 12px;">Page ${currentPage} of ${totalPages} (${total} categories)</span>`;
     
-    // 下一页按钮
+    // Next-page button
     html += `<button class="pagination-btn" onclick="loadKnowledgePage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled style="opacity: 0.5; cursor: not-allowed;"' : ''}>Next</button>`;
     
     html += '</div>';
     container.innerHTML = html;
 }
 
-// 加载指定页码的知识项
+// Load knowledge items for the specified page
 function loadKnowledgePage(page) {
     const { currentCategory, pageSize, total } = knowledgePagination;
     const totalPages = Math.ceil(total / pageSize);
@@ -302,40 +302,40 @@ function loadKnowledgePage(page) {
     loadKnowledgeItems(currentCategory, page, pageSize);
 }
 
-// 渲染单个知识项卡片
+// Render a single knowledge item card
 function renderKnowledgeItemCard(item) {
-    // 提取内容预览（如果item没有content字段，说明是摘要，不显示预览）
+    // Extract content preview (if item has no content field,it is a summary,do not show a preview)
     let previewText = '';
     if (item.content) {
-        // 去除markdown格式，取前150字符
+        // Remove markdown formatting,take the first 150 characters
         let preview = item.content;
-        // 移除markdown标题标记
+        // Remove markdown heading markers
         preview = preview.replace(/^#+\s+/gm, '');
-        // 移除代码块
+        // Remove code blocks
         preview = preview.replace(/```[\s\S]*?```/g, '');
-        // 移除行内代码
+        // Remove inline code
         preview = preview.replace(/`[^`]+`/g, '');
-        // 移除链接
+        // Remove links
         preview = preview.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
-        // 清理多余空白
+        // Clean extra whitespace
         preview = preview.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
         
         previewText = preview.length > 150 ? preview.substring(0, 150) + '...' : preview;
     }
     
-    // 提取文件路径显示
+    // Extract file path display
     const filePath = item.filePath || '';
-    const relativePath = filePath.split(/[/\\]/).slice(-2).join('/'); // 显示最后两级路径
+    const relativePath = filePath.split(/[/\\]/).slice(-2).join('/'); // show the last two path segments
     
-    // 格式化时间
+    // Format time
     const createdTime = formatTime(item.createdAt);
     const updatedTime = formatTime(item.updatedAt);
     
-    // 优先显示更新时间，如果没有更新时间则显示创建时间
+    // Prefer showing the updated time,show created time when updated time is unavailable
     const displayTime = updatedTime || createdTime;
     const timeLabel = updatedTime ? 'Updated' : 'Created';
     
-    // 判断是否为最近更新（7天内）
+    // Determine whether this is recently updated (within 7 days)
     let isRecent = false;
     if (item.updatedAt && updatedTime) {
         const updateDate = new Date(item.updatedAt);
@@ -380,25 +380,25 @@ function renderKnowledgeItemCard(item) {
     `;
 }
 
-// 更新统计信息（支持按分类分页的数据结构）
+// Update statistics (supportscategory-paginated data structure)
 function updateKnowledgeStats(data, categoryCount) {
     const statsContainer = document.getElementById('knowledge-stats');
     if (!statsContainer) return;
     
-    // 计算当前页的知识项数
+    // Calculate knowledge item count on the current page
     let currentPageItemCount = 0;
     if (Array.isArray(data) && data.length > 0) {
-        // 判断是categoriesWithItems还是items数组
+        // Determine whether this is a categoriesWithItems or items array
         if (data[0].category !== undefined && data[0].items !== undefined) {
-            // 是按分类分页的数据结构
+            // This is category-paginated data
             currentPageItemCount = data.reduce((sum, cat) => sum + (cat.items?.length || 0), 0);
         } else {
-            // 是按项分页的数据结构（向后兼容）
+            // This is item-paginated data (backward compatible)
             currentPageItemCount = data.length;
         }
     }
     
-    // 总分类数（来自分页信息，只有在未定义时才使用当前页分类数作为后备值）
+    // total category count (from pagination information,use the current page category count as fallback only when undefined)
     const totalCategories = (knowledgePagination.total != null) ? knowledgePagination.total : categoryCount;
     
     statsContainer.innerHTML = `
@@ -416,11 +416,11 @@ function updateKnowledgeStats(data, categoryCount) {
         </div>
     `;
     
-    // 更新索引进度
+    // Update index progress
     updateIndexProgress();
 }
 
-// 更新索引进度
+// Update index progress
 let indexProgressInterval = null;
 
 async function updateIndexProgress() {
@@ -435,16 +435,16 @@ async function updateIndexProgress() {
         });
         
         if (!response.ok) {
-            return; // 静默失败，不影响主界面
+            return; // Fail silently,do not affect the main UI
         }
         
         const status = await response.json();
         const progressContainer = document.getElementById('knowledge-index-progress');
         if (!progressContainer) return;
         
-        // 检查知识库功能是否启用
+        // Check whether the knowledge base feature is enabled
         if (status.enabled === false) {
-            // 功能未启用，隐藏进度条
+            // Feature is disabled,hide the progress bar
             progressContainer.style.display = 'none';
             if (indexProgressInterval) {
                 clearInterval(indexProgressInterval);
@@ -459,11 +459,11 @@ async function updateIndexProgress() {
         const isComplete = status.is_complete || false;
         const lastError = status.last_error || '';
         
-        // 检查是否正在重建索引（优先使用重建状态）
+        // Check whether the index is being rebuilt (prefer rebuild status)
         const isRebuilding = status.is_rebuilding || false;
         
         if (totalItems === 0) {
-            // 没有知识项，隐藏进度条
+            // No knowledge items,hide the progress bar
             progressContainer.style.display = 'none';
             if (indexProgressInterval) {
                 clearInterval(indexProgressInterval);
@@ -472,10 +472,10 @@ async function updateIndexProgress() {
             return;
         }
         
-        // 显示进度条
+        // Show progress bar
         progressContainer.style.display = 'block';
         
-        // 如果有错误信息，显示错误
+        // If there is an error message,show the error
         if (lastError) {
             progressContainer.innerHTML = `
                 <div class="knowledge-index-progress-error" style="
@@ -517,18 +517,18 @@ async function updateIndexProgress() {
                     </div>
                 </div>
             `;
-            // 停止轮询
+            // Stop polling
             if (indexProgressInterval) {
                 clearInterval(indexProgressInterval);
                 indexProgressInterval = null;
             }
-            // 显示错误通知
+            // Show error notification
             showNotification('Index build failed: ' + lastError.substring(0, 100), 'error');
             return;
         }
         
 
-        // 优先处理重建状态
+        // Handle rebuild status first
         if (isRebuilding) {
             const rebuildTotal = status.rebuild_total || totalItems;
             const rebuildCurrent = status.rebuild_current || 0;
@@ -537,7 +537,7 @@ async function updateIndexProgress() {
             const rebuildLastChunks = status.rebuild_last_chunks || 0;
             const rebuildStartTime = status.rebuild_start_time || '';
 
-            // 计算进度百分比（使用重建进度）
+            // Calculate progress percentage (using rebuild progress)
             let rebuildProgress = progressPercent;
             if (rebuildTotal > 0) {
                 rebuildProgress = (rebuildCurrent / rebuildTotal) * 100;
@@ -559,7 +559,7 @@ async function updateIndexProgress() {
                 </div>
             `;
 
-            // 重建中时继续轮询
+            // Continue polling while rebuilding
             if (!indexProgressInterval) {
                 indexProgressInterval = setInterval(updateIndexProgress, 2000);
             }
@@ -573,7 +573,7 @@ async function updateIndexProgress() {
                     <span class="progress-text">Index build complete (${indexedItems}/${totalItems})</span>
                 </div>
             `;
-            // 完成后停止轮询
+            // Stop polling after completion
             if (indexProgressInterval) {
                 clearInterval(indexProgressInterval);
                 indexProgressInterval = null;
@@ -592,14 +592,14 @@ async function updateIndexProgress() {
                 </div>
             `;
             
-            // 如果还没有开始轮询，开始轮询
+            // If polling has not started yet,start polling
             if (!indexProgressInterval) {
-                indexProgressInterval = setInterval(updateIndexProgress, 3000); // 每3秒刷新一次
+                indexProgressInterval = setInterval(updateIndexProgress, 3000); // refresh every 3 seconds
             }
         }
     } catch (error) {
-        // 显示错误信息
-        console.error('获取索引状态失败:', error);
+        // Show error information
+        console.error('Failed to get index status:', error);
         const progressContainer = document.getElementById('knowledge-index-progress');
         if (progressContainer) {
             progressContainer.style.display = 'block';
@@ -621,7 +621,7 @@ async function updateIndexProgress() {
                 </div>
             `;
         }
-        // 停止轮询
+        // Stop polling
         if (indexProgressInterval) {
             clearInterval(indexProgressInterval);
             indexProgressInterval = null;
@@ -629,7 +629,7 @@ async function updateIndexProgress() {
     }
 }
 
-// 停止索引进度轮询
+// Stop index progress polling
 function stopIndexProgressPolling() {
     if (indexProgressInterval) {
         clearInterval(indexProgressInterval);
@@ -641,7 +641,7 @@ function stopIndexProgressPolling() {
     }
 }
 
-// 选择知识分类
+// Select knowledge category
 function selectKnowledgeCategory(category) {
     const trigger = document.getElementById('knowledge-category-filter-trigger');
     const wrapper = document.getElementById('knowledge-category-filter-wrapper');
@@ -652,7 +652,7 @@ function selectKnowledgeCategory(category) {
         trigger.querySelector('span').textContent = displayText;
         wrapper.classList.remove('open');
         
-        // 更新选中状态
+        // Update selected state
         dropdown.querySelectorAll('.custom-select-option').forEach(opt => {
             opt.classList.remove('selected');
             if (opt.getAttribute('data-value') === category) {
@@ -660,32 +660,32 @@ function selectKnowledgeCategory(category) {
             }
         });
     }
-    // 切换分类时重置到第一页（如果选择了分类，API会返回该分类的所有项）
+    // Reset to the first page when changing category (if a category is selected,the API returns all items in that category)
     loadKnowledgeItems(category, 1, knowledgePagination.pageSize);
 }
 
-// 筛选知识项
+// Filter knowledge items
 function filterKnowledgeItems() {
     const wrapper = document.getElementById('knowledge-category-filter-wrapper');
     if (wrapper) {
         const selectedOption = wrapper.querySelector('.custom-select-option.selected');
         const category = selectedOption ? selectedOption.getAttribute('data-value') : '';
-        // 重置到第一页
+        // Reset to the first page
         loadKnowledgeItems(category, 1, knowledgePagination.pageSize);
     }
 }
 
-// 处理搜索输入（带防抖）
+// Handle search input (with debounce)
 function handleKnowledgeSearchInput() {
     const searchInput = document.getElementById('knowledge-search');
     const searchTerm = searchInput?.value.trim() || '';
     
-    // 清除之前的定时器
+    // Clear the previous timer
     if (knowledgeSearchTimeout) {
         clearTimeout(knowledgeSearchTimeout);
     }
     
-    // 如果搜索框为空，立即恢复列表
+    // If the search box is empty,restore the list immediately
     if (!searchTerm) {
         const wrapper = document.getElementById('knowledge-category-filter-wrapper');
         let category = '';
@@ -697,19 +697,19 @@ function handleKnowledgeSearchInput() {
         return;
     }
     
-    // 有搜索词时，延迟500ms后执行搜索（防抖）
+    // When there is a search term,run the search after a 500 ms delay (debounce)
     knowledgeSearchTimeout = setTimeout(() => {
         searchKnowledgeItems();
     }, 500);
 }
 
-// 搜索知识项（后端关键字匹配，在所有数据中搜索）
+// Search knowledge items (backend keyword matching,search across all data)
 async function searchKnowledgeItems() {
     const searchInput = document.getElementById('knowledge-search');
     const searchTerm = searchInput?.value.trim() || '';
     
     if (!searchTerm) {
-        // 恢复原始列表（重置到第一页）
+        // Restore the original list (Reset to the first page)
         const wrapper = document.getElementById('knowledge-category-filter-wrapper');
         let category = '';
         if (wrapper) {
@@ -721,7 +721,7 @@ async function searchKnowledgeItems() {
     }
     
     try {
-        // 获取当前选择的分类
+        // Get the currently selected category
         const wrapper = document.getElementById('knowledge-category-filter-wrapper');
         let category = '';
         if (wrapper) {
@@ -729,7 +729,7 @@ async function searchKnowledgeItems() {
             category = selectedOption ? selectedOption.getAttribute('data-value') : '';
         }
         
-        // 调用后端API进行全量搜索
+        // Call the backend API for a full search
         const timestamp = Date.now();
         let url = `/api/knowledge/items?search=${encodeURIComponent(searchTerm)}&_t=${timestamp}`;
         if (category) {
@@ -746,21 +746,21 @@ async function searchKnowledgeItems() {
         });
         
         if (!response.ok) {
-            throw new Error('搜索失败');
+            throw new Error('Search failed');
         }
         
         const data = await response.json();
         
-        // 检查知识库功能是否启用
+        // Check whether the knowledge base feature is enabled
         if (data.enabled === false) {
             renderKnowledgeNotEnabledState(document.getElementById('knowledge-items-list'));
             return;
         }
         
-        // 处理搜索结果
+        // Process search results
         const categoriesWithItems = data.categories || [];
         
-        // 渲染搜索结果
+        // Render search results
         const container = document.getElementById('knowledge-items-list');
         if (!container) return;
         
@@ -774,30 +774,30 @@ async function searchKnowledgeItems() {
                 </div>
             `;
         } else {
-            // 计算总项数和分类数
+            // Calculate total item and category counts
             const totalItems = categoriesWithItems.reduce((sum, cat) => sum + (cat.items?.length || 0), 0);
             const categoryCount = categoriesWithItems.length;
             
-            // 更新统计信息
+            // Update statistics
             updateKnowledgeStats(categoriesWithItems, categoryCount);
             
-            // 渲染搜索结果
+            // Render search results
             renderKnowledgeItemsByCategories(categoriesWithItems);
         }
         
-        // 搜索时隐藏分页（因为搜索结果显示所有匹配结果）
+        // Hide pagination while searching (becausesearch results show all matches)
         const paginationContainer = document.getElementById('knowledge-pagination');
         if (paginationContainer) {
             paginationContainer.innerHTML = '';
         }
         
     } catch (error) {
-        console.error('搜索知识项失败:', error);
-        showNotification('搜索失败: ' + error.message, 'error');
+        console.error('Search knowledge itemsfailed:', error);
+        showNotification('Search failed: ' + error.message, 'error');
     }
 }
 
-// 刷新知识库
+// Refresh knowledge base
 async function refreshKnowledgeBase() {
     try {
         showNotification('Scanning knowledge base...', 'info');
@@ -808,41 +808,41 @@ async function refreshKnowledgeBase() {
             throw new Error('Failed to scan knowledge base');
         }
         const data = await response.json();
-        // 根据返回的消息显示不同的提示
+        // Show different notices based on the returned message
         if (data.items_to_index && data.items_to_index > 0) {
             showNotification(`Scan complete. Starting to index ${data.items_to_index} new or updated knowledge items`, 'success');
         } else {
             showNotification(data.message || 'Scan complete. No new or updated items to index.', 'success');
         }
-        // 重新加载知识项（重置到第一页）
+        // Reload knowledge items (Reset to the first page)
         await loadKnowledgeCategories();
         await loadKnowledgeItems(knowledgePagination.currentCategory, 1, knowledgePagination.pageSize);
         
-        // 停止现有的轮询
+        // Stop existing polling
         if (indexProgressInterval) {
             clearInterval(indexProgressInterval);
             indexProgressInterval = null;
         }
         
-        // 如果有需要索引的项，等待一小段时间后立即更新进度
+        // If there are items that need indexing,wait briefly and update progress immediately
         if (data.items_to_index && data.items_to_index > 0) {
             await new Promise(resolve => setTimeout(resolve, 500));
             updateIndexProgress();
-            // 开始轮询进度（每2秒刷新一次）
+            // start pollingprogress (refresh every 2 seconds)
             if (!indexProgressInterval) {
                 indexProgressInterval = setInterval(updateIndexProgress, 2000);
             }
         } else {
-            // 没有需要索引的项，也更新一次以显示当前状态
+            // No items need indexing,also update once to show current status
             updateIndexProgress();
         }
     } catch (error) {
-        console.error('刷新知识库失败:', error);
+        console.error('Failed to refresh knowledge base:', error);
         showNotification('Failed to refresh knowledge base: ' + error.message, 'error');
     }
 }
 
-// 重建索引
+// Rebuild index
 async function rebuildKnowledgeIndex() {
     try {
         if (!confirm('Are you sure you want to rebuild the index? This may take some time.')) {
@@ -850,13 +850,13 @@ async function rebuildKnowledgeIndex() {
         }
         showNotification('Rebuilding index...', 'info');
         
-        // 先停止现有的轮询
+        // Stop existing polling first
         if (indexProgressInterval) {
             clearInterval(indexProgressInterval);
             indexProgressInterval = null;
         }
         
-        // 立即显示"正在重建"状态，因为重建开始时会清空旧索引
+        // Show immediately"rebuilding"status,becauserebuilding clears the old index at start
         const progressContainer = document.getElementById('knowledge-index-progress');
         if (progressContainer) {
             progressContainer.style.display = 'block';
@@ -882,23 +882,23 @@ async function rebuildKnowledgeIndex() {
         }
         showNotification('Index rebuild started. It will continue in the background.', 'success');
         
-        // 等待一小段时间，确保后端已经开始处理并清空了旧索引
+        // Wait briefly,ensure the backend has started processing and cleared the old index
         await new Promise(resolve => setTimeout(resolve, 500));
         
-        // 立即更新一次进度
+        // Update progress once immediately
         updateIndexProgress();
         
-        // 开始轮询进度（每2秒刷新一次，比默认的3秒更频繁）
+        // start pollingprogress (refresh every 2 seconds,more frequently than the default 3 seconds)
         if (!indexProgressInterval) {
             indexProgressInterval = setInterval(updateIndexProgress, 2000);
         }
     } catch (error) {
-        console.error('重建索引失败:', error);
+        console.error('Failed to rebuild index:', error);
         showNotification('Failed to rebuild index: ' + error.message, 'error');
     }
 }
 
-// 显示添加知识项模态框
+// Show add knowledge item modal
 function showAddKnowledgeItemModal() {
     currentEditingItemId = null;
     document.getElementById('knowledge-item-modal-title').textContent = 'Add Knowledge';
@@ -908,7 +908,7 @@ function showAddKnowledgeItemModal() {
     document.getElementById('knowledge-item-modal').style.display = 'block';
 }
 
-// 编辑知识项
+// Edit knowledge item
 async function editKnowledgeItem(id) {
     try {
         const response = await apiFetch(`/api/knowledge/items/${id}`);
@@ -924,14 +924,14 @@ async function editKnowledgeItem(id) {
         document.getElementById('knowledge-item-content').value = item.content;
         document.getElementById('knowledge-item-modal').style.display = 'block';
     } catch (error) {
-        console.error('编辑知识项失败:', error);
+        console.error('Edit knowledge itemfailed:', error);
         showNotification('Failed to edit knowledge item: ' + error.message, 'error');
     }
 }
 
-// 保存知识项
+// Save knowledge item
 async function saveKnowledgeItem() {
-    // 防止重复提交
+    // Prevent duplicate submissions
     if (isSavingKnowledgeItem) {
         showNotification('Saving in progress, please do not click again...', 'warning');
         return;
@@ -946,10 +946,10 @@ async function saveKnowledgeItem() {
         return;
     }
     
-    // 设置保存中标志
+    // Set saving flag
     isSavingKnowledgeItem = true;
     
-    // 获取保存按钮和取消按钮
+    // Get save and cancel buttons
     const saveButton = document.querySelector('#knowledge-item-modal .modal-footer .btn-primary');
     const cancelButton = document.querySelector('#knowledge-item-modal .modal-footer .btn-secondary');
     const modal = document.getElementById('knowledge-item-modal');
@@ -957,7 +957,7 @@ async function saveKnowledgeItem() {
     const originalButtonText = saveButton ? saveButton.textContent : 'Save';
     const originalButtonDisabled = saveButton ? saveButton.disabled : false;
     
-    // 禁用所有输入字段和按钮
+    // Disable all input fields and buttons
     const categoryInput = document.getElementById('knowledge-item-category');
     const titleInput = document.getElementById('knowledge-item-title');
     const contentInput = document.getElementById('knowledge-item-content');
@@ -967,7 +967,7 @@ async function saveKnowledgeItem() {
     if (contentInput) contentInput.disabled = true;
     if (cancelButton) cancelButton.disabled = true;
     
-    // 设置保存按钮加载状态
+    // Set save button loading state
     if (saveButton) {
         saveButton.disabled = true;
         saveButton.style.opacity = '0.6';
@@ -1000,9 +1000,9 @@ async function saveKnowledgeItem() {
         
         const item = await response.json();
         const action = currentEditingItemId ? 'Updated' : 'Created';
-        const newItemCategory = item.category || category; // 保存新添加的知识项分类
+        const newItemCategory = item.category || category; // Save the newly added knowledge item category
         
-        // 获取当前筛选状态，以便刷新后保持
+        // Get current filter state,to preserve it after refresh
         const currentCategory = document.getElementById('knowledge-category-filter-wrapper');
         let selectedCategory = '';
         if (currentCategory) {
@@ -1012,10 +1012,10 @@ async function saveKnowledgeItem() {
             }
         }
         
-        // 立即关闭模态框，给用户明确的反馈
+        // Close the modal immediately,give clear feedback to the user
         closeKnowledgeItemModal();
         
-        // 显示加载状态并刷新数据（等待完成以确保数据同步）
+        // Show loading state and refresh data (wait for completion to ensure data sync)
         const itemsListContainer = document.getElementById('knowledge-items-list');
         const originalContent = itemsListContainer ? itemsListContainer.innerHTML : '';
         
@@ -1024,17 +1024,17 @@ async function saveKnowledgeItem() {
         }
         
         try {
-            // 先刷新分类，再刷新知识项
-            console.log('开始刷新知识库数据...');
+            // Refresh categories first, then refresh knowledge items
+            console.log('Starting knowledge base data refresh...');
             await loadKnowledgeCategories();
-            console.log('分类刷新完成，开始刷新知识项...');
+            console.log('Category refresh complete; starting knowledge item refresh...');
             
-            // 如果新添加的知识项不在当前筛选的分类中，切换到该分类显示
+            // If the newly added knowledge item is not in the currently filtered category,switch to that category for display
             let categoryToShow = selectedCategory;
             if (!currentEditingItemId && selectedCategory && selectedCategory !== '' && newItemCategory !== selectedCategory) {
-                // 新添加的知识项，如果当前筛选的不是该分类，切换到新知识项的分类
+                // If the newly added knowledge item is outside the current filter, switch to the new item category.
                 categoryToShow = newItemCategory;
-                // 更新筛选器显示（不触发加载，因为我们下面会手动加载）
+                // Update filter display (without triggering a load, because we load manually below)
                 const trigger = document.getElementById('knowledge-category-filter-trigger');
                 const wrapper = document.getElementById('knowledge-category-filter-wrapper');
                 const dropdown = document.getElementById('knowledge-category-filter-dropdown');
@@ -1050,12 +1050,12 @@ async function saveKnowledgeItem() {
                 showNotification(`\u2705 ${action} successful! Switched to category "${newItemCategory}" to view the new knowledge item.`, 'success');
             }
             
-            // 刷新知识项列表（重置到第一页）
+            // Refresh knowledge item list (Reset to the first page)
             await loadKnowledgeItems(categoryToShow, 1, knowledgePagination.pageSize);
-            console.log('知识项刷新完成');
+            console.log('Knowledge item refresh complete');
         } catch (err) {
-            console.error('刷新数据失败:', err);
-            // 如果刷新失败，恢复原内容
+            console.error('Failed to refresh data:', err);
+            // If refresh fails,restore original content
             if (itemsListContainer && originalContent) {
                 itemsListContainer.innerHTML = originalContent;
             }
@@ -1063,15 +1063,15 @@ async function saveKnowledgeItem() {
         }
         
     } catch (error) {
-        console.error('保存知识项失败:', error);
+        console.error('Failed to save knowledge item:', error);
         showNotification('\u274c Failed to save knowledge item: ' + error.message, 'error');
         
-        // 如果通知系统不可用，使用alert
+        // If the notification system is unavailable,use alert
         if (typeof window.showNotification !== 'function') {
             alert('\u274c Failed to save knowledge item: ' + error.message);
         }
         
-        // 恢复输入字段和按钮状态（错误时不关闭模态框，让用户修改后重试）
+        // Restore input field and button states (do not close the modal on error,let the user modify and retry)
         if (categoryInput) categoryInput.disabled = false;
         if (titleInput) titleInput.disabled = false;
         if (contentInput) contentInput.disabled = false;
@@ -1083,18 +1083,18 @@ async function saveKnowledgeItem() {
             saveButton.textContent = originalButtonText;
         }
     } finally {
-        // 清除保存中标志
+        // Clear saving flag
         isSavingKnowledgeItem = false;
     }
 }
 
-// 删除知识项
+// Delete knowledge item
 async function deleteKnowledgeItem(id) {
     if (!confirm('Are you sure you want to delete this knowledge item?')) {
         return;
     }
     
-    // 找到要删除的知识项卡片和删除按钮
+    // Find the knowledge item card and delete button to delete
     const itemCard = document.querySelector(`.knowledge-item-card[data-id="${id}"]`);
     const deleteButton = itemCard ? itemCard.querySelector('.knowledge-item-delete-btn') : null;
     const categorySection = itemCard ? itemCard.closest('.knowledge-category-section') : null;
@@ -1102,21 +1102,21 @@ async function deleteKnowledgeItem(id) {
     let originalOpacity = '';
     let originalButtonOpacity = '';
     
-    // 设置删除按钮的加载状态
+    // Set delete button loading state
     if (deleteButton) {
         originalButtonOpacity = deleteButton.style.opacity;
         deleteButton.style.opacity = '0.5';
         deleteButton.style.cursor = 'not-allowed';
         deleteButton.disabled = true;
         
-        // 添加加载动画
+        // Add loading animation
         const svg = deleteButton.querySelector('svg');
         if (svg) {
             svg.style.animation = 'spin 1s linear infinite';
         }
     }
     
-    // 立即从UI中移除该项（乐观更新）
+    // Remove the item from the UI immediately (optimistic update)
     if (itemCard) {
         originalDisplay = itemCard.style.display;
         originalOpacity = itemCard.style.opacity;
@@ -1124,12 +1124,12 @@ async function deleteKnowledgeItem(id) {
         itemCard.style.opacity = '0';
         itemCard.style.transform = 'translateX(-20px)';
         
-        // 等待动画完成后移除
+        // Remove after the animation completes
         setTimeout(() => {
             if (itemCard.parentElement) {
                 itemCard.remove();
                 
-                // 检查分类是否还有项目，如果没有则隐藏分类标题
+                // Check whether the category still has items,hide the category title if none remain
                 if (categorySection) {
                     const remainingItems = categorySection.querySelectorAll('.knowledge-item-card');
                     if (remainingItems.length === 0) {
@@ -1141,7 +1141,7 @@ async function deleteKnowledgeItem(id) {
                             }
                         }, 300);
                     } else {
-                        // 更新分类计数
+                        // Update category count
                         const categoryCount = categorySection.querySelector('.knowledge-category-count');
                         if (categoryCount) {
                             const newCount = remainingItems.length;
@@ -1150,7 +1150,7 @@ async function deleteKnowledgeItem(id) {
                     }
                 }
                 
-                // 不在这里更新统计信息，等待重新加载数据后由正确的逻辑更新
+                // Do not update statistics here,wait for reload so the correct logic updates them
             }
         }, 300);
     }
@@ -1165,31 +1165,31 @@ async function deleteKnowledgeItem(id) {
             throw new Error(errorData.error || 'Failed to delete knowledge item');
         }
         
-        // 显示成功通知
+        // Show success notification
         showNotification('\u2705 Deleted successfully! Knowledge item removed from system.', 'success');
         
-        // 重新加载数据以确保数据同步（保持当前页码）
+        // Reload data to ensure synchronization (keep the current page)
         await loadKnowledgeCategories();
         await loadKnowledgeItems(knowledgePagination.currentCategory, knowledgePagination.currentPage, knowledgePagination.pageSize);
         
     } catch (error) {
-        console.error('删除知识项失败:', error);
+        console.error('Failed to delete knowledge item:', error);
         
-        // 如果删除失败，恢复该项显示
+        // If deletion fails,restore the item display
         if (itemCard && originalDisplay !== 'none') {
             itemCard.style.display = originalDisplay || '';
             itemCard.style.opacity = originalOpacity || '1';
             itemCard.style.transform = '';
             itemCard.style.transition = '';
             
-            // 如果分类被移除了，需要恢复
+            // If the category was removed,needs to be restored
             if (categorySection && !categorySection.parentElement) {
-                // 需要重新加载来恢复（保持当前分页状态）
+                // reload to restore it (keep the current pagination state)
                 await loadKnowledgeItems(knowledgePagination.currentCategory, knowledgePagination.currentPage, knowledgePagination.pageSize);
             }
         }
         
-        // 恢复删除按钮状态
+        // Restore delete button state
         if (deleteButton) {
             deleteButton.style.opacity = originalButtonOpacity || '';
             deleteButton.style.cursor = '';
@@ -1204,7 +1204,7 @@ async function deleteKnowledgeItem(id) {
     }
 }
 
-// 临时更新统计信息（删除后）
+// Temporarily update statistics (after delete)
 function updateKnowledgeStatsAfterDelete() {
     const statsContainer = document.getElementById('knowledge-stats');
     if (!statsContainer) return;
@@ -1215,7 +1215,7 @@ function updateKnowledgeStatsAfterDelete() {
     const totalItems = allItems.length;
     const categoryCount = allCategories.length;
     
-    // 计算总内容大小（这里简化处理，实际应该从服务器获取）
+    // Calculate total content size (simplified here,should actually be fetched from the server)
     const statsItems = statsContainer.querySelectorAll('.knowledge-stat-item');
     if (statsItems.length >= 2) {
         const totalItemsSpan = statsItems[0].querySelector('.knowledge-stat-value');
@@ -1230,18 +1230,18 @@ function updateKnowledgeStatsAfterDelete() {
     }
 }
 
-// 关闭知识项模态框
+// Close knowledge item modal
 function closeKnowledgeItemModal() {
     const modal = document.getElementById('knowledge-item-modal');
     if (modal) {
         modal.style.display = 'none';
     }
     
-    // 重置编辑状态
+    // Reset editing state
     currentEditingItemId = null;
     isSavingKnowledgeItem = false;
     
-    // 恢复所有输入字段和按钮状态
+    // Restore all input fields and button states
     const categoryInput = document.getElementById('knowledge-item-category');
     const titleInput = document.getElementById('knowledge-item-title');
     const contentInput = document.getElementById('knowledge-item-content');
@@ -1271,7 +1271,7 @@ function closeKnowledgeItemModal() {
     }
 }
 
-// 加载检索日志
+// Load retrieval logs
 async function loadRetrievalLogs(conversationId = '', messageId = '') {
     try {
         let url = '/api/knowledge/retrieval-logs?limit=100';
@@ -1284,27 +1284,27 @@ async function loadRetrievalLogs(conversationId = '', messageId = '') {
         
         const response = await apiFetch(url);
         if (!response.ok) {
-            throw new Error('获取检索日志失败');
+            throw new Error('Failed to get retrieval logs');
         }
         const data = await response.json();
         renderRetrievalLogs(data.logs || []);
     } catch (error) {
-        console.error('加载检索日志失败:', error);
-        // 即使加载失败，也显示空状态而不是一直显示"加载中..."
+        console.error('Load retrieval logsfailed:', error);
+        // Even if loading fails,show empty state instead of always showing"Loading..."
         renderRetrievalLogs([]);
-        // 只在非空筛选条件下才显示错误通知（避免在没有数据时显示错误）
+        // Show error notifications only for non-empty filters (avoid showing errors when there is no data)
         if (conversationId || messageId) {
             showNotification(_t('retrievalLogs.loadError') + ': ' + error.message, 'error');
         }
     }
 }
 
-// 渲染检索日志
+// Render retrieval logs
 function renderRetrievalLogs(logs) {
     const container = document.getElementById('retrieval-logs-list');
     if (!container) return;
     
-    // 更新统计信息（即使为空数组也要更新）
+    // Update statistics (update even for an empty array)
     updateRetrievalStats(logs);
     
     if (logs.length === 0) {
@@ -1313,31 +1313,31 @@ function renderRetrievalLogs(logs) {
         return;
     }
     
-    // 保存日志数据供详情查看使用
+    // Save log data for detail views
     retrievalLogsData = logs;
     
     container.innerHTML = logs.map((log, index) => {
-        // 处理retrievedItems：可能是数组、字符串数组，或者特殊标记
+        // Process retrievedItems:may be an array,string array,or special marker
         let itemCount = 0;
         let hasResults = false;
         
         if (log.retrievedItems) {
             if (Array.isArray(log.retrievedItems)) {
-                // 过滤掉特殊标记
+                // Filter out special markers
                 const realItems = log.retrievedItems.filter(id => id !== '_has_results');
                 itemCount = realItems.length;
-                // 如果有特殊标记，表示有结果但ID未知，显示为"有结果"
+                // If a special marker exists,it means results exist but IDs are unknown,display as"Has results"
                 if (log.retrievedItems.includes('_has_results')) {
                     hasResults = true;
-                    // 如果有真实ID，使用真实数量；否则显示为"有结果"（不显示具体数量）
+                    // If there are real IDs,use the real count;otherwisedisplay as"Has results" (do not show a specific count)
                     if (itemCount === 0) {
-                        itemCount = -1; // -1 表示有结果但数量未知
+                        itemCount = -1; // -1 means results exist but count is unknown
                     }
                 } else {
                     hasResults = itemCount > 0;
                 }
             } else if (typeof log.retrievedItems === 'string') {
-                // 如果是字符串，尝试解析JSON
+                // If it is a string,try to parse JSON
                 try {
                     const parsed = JSON.parse(log.retrievedItems);
                     if (Array.isArray(parsed)) {
@@ -1353,7 +1353,7 @@ function renderRetrievalLogs(logs) {
                         }
                     }
                 } catch (e) {
-                    // 解析失败，忽略
+                    // Parsing failed,ignore
                 }
             }
         }
@@ -1434,13 +1434,13 @@ function renderRetrievalLogs(logs) {
     }).join('');
 }
 
-// 更新检索统计信息
+// Update retrieval statistics
 function updateRetrievalStats(logs) {
     const statsContainer = document.getElementById('retrieval-stats');
     if (!statsContainer) return;
     
     const totalLogs = logs.length;
-    // 判断是否有结果：检查retrievedItems数组，过滤掉特殊标记后长度>0，或者包含特殊标记
+    // Determine whether there are results:check the retrievedItems array,length after filtering special markers>0,or contains a special marker
     const successfulLogs = logs.filter(log => {
         if (!log.retrievedItems) return false;
         if (Array.isArray(log.retrievedItems)) {
@@ -1449,7 +1449,7 @@ function updateRetrievalStats(logs) {
         }
         return false;
     }).length;
-    // 计算总知识项数（只计算真实ID，不包括特殊标记）
+    // Calculate total knowledge item count (count only real IDs,exclude special markers)
     const totalItems = logs.reduce((sum, log) => {
         if (!log.retrievedItems) return sum;
         if (Array.isArray(log.retrievedItems)) {
@@ -1462,19 +1462,19 @@ function updateRetrievalStats(logs) {
     
     statsContainer.innerHTML = `
         <div class="retrieval-stat-item">
-            <span class="retrieval-stat-label" data-i18n="retrievalLogs.totalRetrievals">总检索次数</span>
+            <span class="retrieval-stat-label" data-i18n="retrievalLogs.totalRetrievals">Total retrievals</span>
             <span class="retrieval-stat-value">${totalLogs}</span>
         </div>
         <div class="retrieval-stat-item">
-            <span class="retrieval-stat-label" data-i18n="retrievalLogs.successRetrievals">成功检索</span>
+            <span class="retrieval-stat-label" data-i18n="retrievalLogs.successRetrievals">Successful retrievals</span>
             <span class="retrieval-stat-value text-success">${successfulLogs}</span>
         </div>
         <div class="retrieval-stat-item">
-            <span class="retrieval-stat-label" data-i18n="retrievalLogs.successRate">成功率</span>
+            <span class="retrieval-stat-label" data-i18n="retrievalLogs.successRate">Success rate</span>
             <span class="retrieval-stat-value">${successRate}%</span>
         </div>
         <div class="retrieval-stat-item">
-            <span class="retrieval-stat-label" data-i18n="retrievalLogs.retrievedItems">检索到知识项</span>
+            <span class="retrieval-stat-label" data-i18n="retrievalLogs.retrievedItems">Retrieved knowledge items</span>
             <span class="retrieval-stat-value">${totalItems}</span>
         </div>
     `;
@@ -1483,23 +1483,23 @@ function updateRetrievalStats(logs) {
     }
 }
 
-// 获取相对时间
+// Get relative time
 function getTimeAgo(timeStr) {
     if (!timeStr) return '';
     
-    // 处理时间字符串，支持多种格式
+    // Process time string,supports multiple formats
     let date;
     if (typeof timeStr === 'string') {
-        // 首先尝试直接解析（支持RFC3339/ISO8601格式）
+        // First try direct parsing (supports RFC3339/ISO8601 formats)
         date = new Date(timeStr);
         
-        // 如果解析失败，尝试其他格式
+        // If parsing fails,try other formats
         if (isNaN(date.getTime())) {
-            // SQLite格式: "2006-01-02 15:04:05" 或带时区
+            // SQLiteformat: "2006-01-02 15:04:05" or with a timezone
             const sqliteMatch = timeStr.match(/(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?)/);
             if (sqliteMatch) {
                 let timeStr2 = sqliteMatch[1].replace(' ', 'T');
-                // 如果没有时区信息，添加Z表示UTC
+                // If there is no timezone information,add Z to indicate UTC
                 if (!timeStr2.includes('Z') && !timeStr2.match(/[+-]\d{2}:\d{2}$/)) {
                     timeStr2 += 'Z';
                 }
@@ -1507,9 +1507,9 @@ function getTimeAgo(timeStr) {
             }
         }
         
-        // 如果还是失败，尝试更宽松的格式
+        // If it still fails,try a more permissive format
         if (isNaN(date.getTime())) {
-            // 尝试匹配 "YYYY-MM-DD HH:MM:SS" 格式
+            // Try to match "YYYY-MM-DD HH:MM:SS" format
             const match = timeStr.match(/(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2}):(\d{2})/);
             if (match) {
                 date = new Date(
@@ -1526,12 +1526,12 @@ function getTimeAgo(timeStr) {
         date = new Date(timeStr);
     }
     
-    // 检查日期是否有效
+    // Check whether the date is valid
     if (isNaN(date.getTime())) {
         return formatTime(timeStr);
     }
     
-    // 检查日期是否合理（不在1970年之前，不在未来太远）
+    // Check whether the date is reasonable (not before 1970,not too far in the future)
     const year = date.getFullYear();
     if (year < 1970 || year > 2100) {
         return formatTime(timeStr);
@@ -1540,8 +1540,8 @@ function getTimeAgo(timeStr) {
     const now = new Date();
     const diff = now - date;
     
-    // 如果时间差为负数或过大（可能是解析错误），返回格式化时间
-    if (diff < 0 || diff > 365 * 24 * 60 * 60 * 1000 * 10) { // 超过10年认为是错误
+    // If the time difference is negative or too large (may be a parse error),return formatted time
+    if (diff < 0 || diff > 365 * 24 * 60 * 60 * 1000 * 10) { // treat more than 10 years as an error
         return formatTime(timeStr);
     }
     
@@ -1550,43 +1550,43 @@ function getTimeAgo(timeStr) {
     const hours = Math.floor(minutes / 60);
     const days = Math.floor(hours / 24);
     
-    if (days > 0) return `${days}天前`;
-    if (hours > 0) return `${hours}小时前`;
-    if (minutes > 0) return `${minutes}分钟前`;
-    return '刚刚';
+    if (days > 0) return `${days} days ago`;
+    if (hours > 0) return `${hours} hours ago`;
+    if (minutes > 0) return `${minutes} minutes ago`;
+    return 'just now';
 }
 
-// 截断ID显示
+// Truncate ID display
 function truncateId(id) {
     if (!id || id.length <= 16) return id;
     return id.substring(0, 8) + '...' + id.substring(id.length - 8);
 }
 
-// 筛选检索日志
+// Filter retrieval logs
 function filterRetrievalLogs() {
     const conversationId = document.getElementById('retrieval-logs-conversation-id').value.trim();
     const messageId = document.getElementById('retrieval-logs-message-id').value.trim();
     loadRetrievalLogs(conversationId, messageId);
 }
 
-// 刷新检索日志
+// Refresh retrieval logs
 function refreshRetrievalLogs() {
     filterRetrievalLogs();
 }
 
-// 删除检索日志
+// Delete retrieval log
 async function deleteRetrievalLog(id, index) {
     if (!confirm(_t('retrievalLogs.deleteConfirm'))) {
         return;
     }
     
-    // 找到要删除的日志卡片和删除按钮
+    // Find the log card and delete button to delete
     const logCard = document.querySelector(`.retrieval-log-card[data-index="${index}"]`);
     const deleteButton = logCard ? logCard.querySelector('.retrieval-log-delete-btn') : null;
     let originalButtonOpacity = '';
     let originalButtonDisabled = false;
     
-    // 设置删除按钮的加载状态
+    // Set delete button loading state
     if (deleteButton) {
         originalButtonOpacity = deleteButton.style.opacity;
         originalButtonDisabled = deleteButton.disabled;
@@ -1594,25 +1594,25 @@ async function deleteRetrievalLog(id, index) {
         deleteButton.style.cursor = 'not-allowed';
         deleteButton.disabled = true;
         
-        // 添加加载动画
+        // Add loading animation
         const svg = deleteButton.querySelector('svg');
         if (svg) {
             svg.style.animation = 'spin 1s linear infinite';
         }
     }
     
-    // 立即从UI中移除该项（乐观更新）
+    // Remove the item from the UI immediately (optimistic update)
     if (logCard) {
         logCard.style.transition = 'opacity 0.3s ease-out, transform 0.3s ease-out';
         logCard.style.opacity = '0';
         logCard.style.transform = 'translateX(-20px)';
         
-        // 等待动画完成后移除
+        // Remove after the animation completes
         setTimeout(() => {
             if (logCard.parentElement) {
                 logCard.remove();
                 
-                // 更新统计信息（临时更新，稍后会重新加载）
+                // Update statistics (temporary update; data reloads shortly)
                 updateRetrievalStatsAfterDelete();
             }
         }, 300);
@@ -1625,33 +1625,33 @@ async function deleteRetrievalLog(id, index) {
         
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || '删除检索日志失败');
+            throw new Error(errorData.error || 'Failed to delete retrieval log');
         }
         
-        // 显示成功通知
-        showNotification('✅ 删除成功！检索记录已从系统中移除。', 'success');
+        // Show success notification
+        showNotification('✅ Deleted successfully! The retrieval record was removed from the system.', 'success');
         
-        // 从内存中移除该项
+        // Remove the item from memory
         if (retrievalLogsData && index >= 0 && index < retrievalLogsData.length) {
             retrievalLogsData.splice(index, 1);
         }
         
-        // 重新加载数据以确保数据同步
+        // Reload data to ensure synchronization
         const conversationId = document.getElementById('retrieval-logs-conversation-id')?.value.trim() || '';
         const messageId = document.getElementById('retrieval-logs-message-id')?.value.trim() || '';
         await loadRetrievalLogs(conversationId, messageId);
         
     } catch (error) {
-        console.error('删除检索日志失败:', error);
+        console.error('Failed to delete retrieval log:', error);
         
-        // 如果删除失败，恢复该项显示
+        // If deletion fails,restore the item display
         if (logCard) {
             logCard.style.opacity = '1';
             logCard.style.transform = '';
             logCard.style.transition = '';
         }
         
-        // 恢复删除按钮状态
+        // Restore delete button state
         if (deleteButton) {
             deleteButton.style.opacity = originalButtonOpacity || '';
             deleteButton.style.cursor = '';
@@ -1666,7 +1666,7 @@ async function deleteRetrievalLog(id, index) {
     }
 }
 
-// 临时更新统计信息（删除后）
+// Temporarily update statistics (after delete)
 function updateRetrievalStatsAfterDelete() {
     const statsContainer = document.getElementById('retrieval-stats');
     if (!statsContainer) return;
@@ -1674,12 +1674,12 @@ function updateRetrievalStatsAfterDelete() {
     const allLogs = document.querySelectorAll('.retrieval-log-card');
     const totalLogs = allLogs.length;
     
-    // 计算成功检索数
+    // Calculate successful retrieval count
     const successfulLogs = Array.from(allLogs).filter(card => {
         return card.classList.contains('has-results');
     }).length;
     
-    // 计算总知识项数（简化处理，实际应该从服务器获取）
+    // Calculate total knowledge item count (simplified here,should actually be fetched from the server)
     const totalItems = Array.from(allLogs).reduce((sum, card) => {
         const badge = card.querySelector('.retrieval-log-result-badge');
         if (badge && badge.classList.contains('success')) {
@@ -1688,7 +1688,7 @@ function updateRetrievalStatsAfterDelete() {
             if (match) {
                 return sum + parseInt(match[1], 10);
             }
-            return sum + 1; // 有结果但数量未知（如 "Has results" / "有结果"）
+            return sum + 1; // Results exist but count is unknown (such as "Has results" / "Has results")
         }
         return sum;
     }, 0);
@@ -1697,19 +1697,19 @@ function updateRetrievalStatsAfterDelete() {
     
     statsContainer.innerHTML = `
         <div class="retrieval-stat-item">
-            <span class="retrieval-stat-label" data-i18n="retrievalLogs.totalRetrievals">总检索次数</span>
+            <span class="retrieval-stat-label" data-i18n="retrievalLogs.totalRetrievals">Total retrievals</span>
             <span class="retrieval-stat-value">${totalLogs}</span>
         </div>
         <div class="retrieval-stat-item">
-            <span class="retrieval-stat-label" data-i18n="retrievalLogs.successRetrievals">成功检索</span>
+            <span class="retrieval-stat-label" data-i18n="retrievalLogs.successRetrievals">Successful retrievals</span>
             <span class="retrieval-stat-value text-success">${successfulLogs}</span>
         </div>
         <div class="retrieval-stat-item">
-            <span class="retrieval-stat-label" data-i18n="retrievalLogs.successRate">成功率</span>
+            <span class="retrieval-stat-label" data-i18n="retrievalLogs.successRate">Success rate</span>
             <span class="retrieval-stat-value">${successRate}%</span>
         </div>
         <div class="retrieval-stat-item">
-            <span class="retrieval-stat-label" data-i18n="retrievalLogs.retrievedItems">检索到知识项</span>
+            <span class="retrieval-stat-label" data-i18n="retrievalLogs.retrievedItems">Retrieved knowledge items</span>
             <span class="retrieval-stat-value">${totalItems}</span>
         </div>
     `;
@@ -1718,7 +1718,7 @@ function updateRetrievalStatsAfterDelete() {
     }
 }
 
-// 显示检索日志详情
+// Show retrieval log details
 async function showRetrievalLogDetails(index) {
     if (!retrievalLogsData || index < 0 || index >= retrievalLogsData.length) {
         showNotification(_t('retrievalLogs.detailError'), 'error');
@@ -1727,13 +1727,13 @@ async function showRetrievalLogDetails(index) {
     
     const log = retrievalLogsData[index];
     
-    // 获取检索到的知识项详情
+    // Get retrieved knowledge item details
     let retrievedItemsDetails = [];
     if (log.retrievedItems && Array.isArray(log.retrievedItems)) {
         const realItemIds = log.retrievedItems.filter(id => id !== '_has_results');
         if (realItemIds.length > 0) {
             try {
-                // 批量获取知识项详情
+                // Batch get knowledge item details
                 const itemPromises = realItemIds.map(async (itemId) => {
                     try {
                         const response = await apiFetch(`/api/knowledge/items/${itemId}`);
@@ -1742,7 +1742,7 @@ async function showRetrievalLogDetails(index) {
                         }
                         return null;
                     } catch (err) {
-                        console.error(`获取知识项 ${itemId} 失败:`, err);
+                        console.error(`Get knowledge item ${itemId} failed:`, err);
                         return null;
                     }
                 });
@@ -1750,18 +1750,18 @@ async function showRetrievalLogDetails(index) {
                 const items = await Promise.all(itemPromises);
                 retrievedItemsDetails = items.filter(item => item !== null);
             } catch (err) {
-                console.error('批量获取知识项详情失败:', err);
+                console.error('Failed to batch get knowledge item details:', err);
             }
         }
     }
     
-    // 显示详情模态框
+    // Show details modal
     showRetrievalLogDetailsModal(log, retrievedItemsDetails);
 }
 
-// 显示检索日志详情模态框
+// Show retrieval log detailsmodal
 function showRetrievalLogDetailsModal(log, retrievedItems) {
-    // 创建或获取模态框
+    // Create or get modal
     let modal = document.getElementById('retrieval-log-details-modal');
     if (!modal) {
         modal = document.createElement('div');
@@ -1770,13 +1770,13 @@ function showRetrievalLogDetailsModal(log, retrievedItems) {
         modal.innerHTML = `
             <div class="modal-content" style="max-width: 900px; max-height: 90vh; overflow-y: auto;">
                 <div class="modal-header">
-                    <h2 data-i18n="retrievalLogs.detailsTitle">检索详情</h2>
+                    <h2 data-i18n="retrievalLogs.detailsTitle">Retrieval details</h2>
                     <span class="modal-close" onclick="closeRetrievalLogDetailsModal()">&times;</span>
                 </div>
                 <div class="modal-body" id="retrieval-log-details-content">
                 </div>
                 <div class="modal-footer">
-                    <button class="btn-secondary" onclick="closeRetrievalLogDetailsModal()" data-i18n="common.close">关闭</button>
+                    <button class="btn-secondary" onclick="closeRetrievalLogDetailsModal()" data-i18n="common.close">close</button>
                 </div>
             </div>
         `;
@@ -1786,7 +1786,7 @@ function showRetrievalLogDetailsModal(log, retrievedItems) {
         document.body.appendChild(modal);
     }
     
-    // 填充内容
+    // Fill content
     const content = document.getElementById('retrieval-log-details-content');
     const timeAgo = getTimeAgo(log.createdAt);
     const fullTime = formatTime(log.createdAt);
@@ -1794,7 +1794,7 @@ function showRetrievalLogDetailsModal(log, retrievedItems) {
     let itemsHtml = '';
     if (retrievedItems.length > 0) {
         itemsHtml = retrievedItems.map((item, idx) => {
-            // 提取内容预览
+            // Extract content preview
             let preview = item.content || '';
             preview = preview.replace(/^#+\s+/gm, '');
             preview = preview.replace(/```[\s\S]*?```/g, '');
@@ -1857,17 +1857,17 @@ function showRetrievalLogDetailsModal(log, retrievedItems) {
                         ${log.conversationId ? `
                             <div style="padding: 12px; background: var(--bg-secondary); border-radius: 6px;">
                                 <div style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 4px;">${_t('retrievalLogs.conversationId')}</div>
-                                <code style="font-size: 0.8125rem; color: var(--text-primary); word-break: break-all; cursor: pointer;" 
-                                      onclick="navigator.clipboard.writeText('${escapeHtml(log.conversationId)}'); this.title='已复制!'; setTimeout(() => this.title='点击复制', 2000);" 
-                                      title="点击复制">${escapeHtml(log.conversationId)}</code>
+                                <code style="font-size: 0.8125rem; color: var(--text-primary); word-break: break-all; cursor: pointer;"
+                                      onclick="navigator.clipboard.writeText('${escapeHtml(log.conversationId)}'); this.title='Copied!'; setTimeout(() => this.title='Click to copy', 2000);"
+                                      title="Click to copy">${escapeHtml(log.conversationId)}</code>
                             </div>
                         ` : ''}
                         ${log.messageId ? `
                             <div style="padding: 12px; background: var(--bg-secondary); border-radius: 6px;">
                                 <div style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 4px;">${_t('retrievalLogs.messageId')}</div>
-                                <code style="font-size: 0.8125rem; color: var(--text-primary); word-break: break-all; cursor: pointer;" 
-                                      onclick="navigator.clipboard.writeText('${escapeHtml(log.messageId)}'); this.title='已复制!'; setTimeout(() => this.title='点击复制', 2000);" 
-                                      title="点击复制">${escapeHtml(log.messageId)}</code>
+                                <code style="font-size: 0.8125rem; color: var(--text-primary); word-break: break-all; cursor: pointer;"
+                                      onclick="navigator.clipboard.writeText('${escapeHtml(log.messageId)}'); this.title='Copied!'; setTimeout(() => this.title='Click to copy', 2000);"
+                                      title="Click to copy">${escapeHtml(log.messageId)}</code>
                             </div>
                         ` : ''}
                     </div>
@@ -1875,7 +1875,7 @@ function showRetrievalLogDetailsModal(log, retrievedItems) {
             ` : ''}
             
             <div class="retrieval-detail-section">
-                <h3 style="margin: 0 0 12px 0; font-size: 1.125rem; color: var(--text-primary);">检索到的知识项 (${retrievedItems.length})</h3>
+                <h3 style="margin: 0 0 12px 0; font-size: 1.125rem; color: var(--text-primary);">Retrieved knowledge items (${retrievedItems.length})</h3>
                 ${itemsHtml}
             </div>
         </div>
@@ -1884,7 +1884,7 @@ function showRetrievalLogDetailsModal(log, retrievedItems) {
     modal.style.display = 'block';
 }
 
-// 关闭检索日志详情模态框
+// Close retrieval log details modal
 function closeRetrievalLogDetailsModal() {
     const modal = document.getElementById('retrieval-log-details-modal');
     if (modal) {
@@ -1892,7 +1892,7 @@ function closeRetrievalLogDetailsModal() {
     }
 }
 
-// 点击模态框外部关闭
+// Click outside the modal to close
 window.addEventListener('click', function(event) {
     const modal = document.getElementById('retrieval-log-details-modal');
     if (event.target === modal) {
@@ -1900,7 +1900,7 @@ window.addEventListener('click', function(event) {
     }
 });
 
-// 语言切换时重新渲染检索历史列表与统计，使动态内容随语言更新；知识管理页的「未启用」区块已使用 data-i18n，会由 applyTranslations(document) 自动更新
+// Re-render retrieval history and statistics when language changes,so dynamic content updates with the language;The knowledge management page"disabled"block already uses data-i18n,will be updated by applyTranslations(document) automatically
 document.addEventListener('languagechange', function () {
     var cur = typeof window.currentPage === 'function' ? window.currentPage() : (window.currentPage || '');
     if (cur === 'knowledge-retrieval-logs') {
@@ -1908,7 +1908,7 @@ document.addEventListener('languagechange', function () {
             renderRetrievalLogs(retrievalLogsData);
         }
     } else if (cur === 'knowledge-management') {
-        // 仅对「知识库未启用」状态：已有 data-i18n，applyTranslations 已处理；此处可选地重新应用一次以兼容旧 DOM
+        // Only for"knowledge base disabled"status:already has data-i18n,applyTranslations has already handled it;reapply here optionally for old DOM compatibility
         var listEl = document.getElementById('knowledge-items-list');
         if (listEl && typeof window.applyTranslations === 'function') {
             window.applyTranslations(listEl);
@@ -1916,7 +1916,7 @@ document.addEventListener('languagechange', function () {
     }
 });
 
-// 页面切换时加载数据
+// Load data when switching pages
 if (typeof switchPage === 'function') {
     const originalSwitchPage = switchPage;
     window.switchPage = function(page) {
@@ -1925,16 +1925,16 @@ if (typeof switchPage === 'function') {
         if (page === 'knowledge-management') {
             loadKnowledgeCategories();
             loadKnowledgeItems(knowledgePagination.currentCategory, 1, knowledgePagination.pageSize);
-            updateIndexProgress(); // 更新索引进度
+            updateIndexProgress(); // Update index progress
         } else if (page === 'knowledge-retrieval-logs') {
             loadRetrievalLogs();
-            // 切换到其他页面时停止轮询
+            // Stop polling when switching to another page
             if (indexProgressInterval) {
                 clearInterval(indexProgressInterval);
                 indexProgressInterval = null;
             }
         } else {
-            // 切换到其他页面时停止轮询
+            // Stop polling when switching to another page
             if (indexProgressInterval) {
                 clearInterval(indexProgressInterval);
                 indexProgressInterval = null;
@@ -1943,7 +1943,7 @@ if (typeof switchPage === 'function') {
     };
 }
 
-// 页面卸载时清理定时器
+// Clean up timers on page unload
 window.addEventListener('beforeunload', function() {
     if (indexProgressInterval) {
         clearInterval(indexProgressInterval);
@@ -1951,7 +1951,7 @@ window.addEventListener('beforeunload', function() {
     }
 });
 
-// 工具函数
+// Utility functions
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -1961,19 +1961,19 @@ function escapeHtml(text) {
 function formatTime(timeStr) {
     if (!timeStr) return '';
     
-    // 处理时间字符串，支持多种格式
+    // Process time string,supports multiple formats
     let date;
     if (typeof timeStr === 'string') {
-        // 首先尝试直接解析（支持RFC3339/ISO8601格式）
+        // First try direct parsing (supports RFC3339/ISO8601 formats)
         date = new Date(timeStr);
         
-        // 如果解析失败，尝试其他格式
+        // If parsing fails,try other formats
         if (isNaN(date.getTime())) {
-            // SQLite格式: "2006-01-02 15:04:05" 或带时区
+            // SQLiteformat: "2006-01-02 15:04:05" or with a timezone
             const sqliteMatch = timeStr.match(/(\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?)/);
             if (sqliteMatch) {
                 let timeStr2 = sqliteMatch[1].replace(' ', 'T');
-                // 如果没有时区信息，添加Z表示UTC
+                // If there is no timezone information,add Z to indicate UTC
                 if (!timeStr2.includes('Z') && !timeStr2.match(/[+-]\d{2}:\d{2}$/)) {
                     timeStr2 += 'Z';
                 }
@@ -1981,9 +1981,9 @@ function formatTime(timeStr) {
             }
         }
         
-        // 如果还是失败，尝试更宽松的格式
+        // If it still fails,try a more permissive format
         if (isNaN(date.getTime())) {
-            // 尝试匹配 "YYYY-MM-DD HH:MM:SS" 格式
+            // Try to match "YYYY-MM-DD HH:MM:SS" format
             const match = timeStr.match(/(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2}):(\d{2})/);
             if (match) {
                 date = new Date(
@@ -2000,24 +2000,24 @@ function formatTime(timeStr) {
         date = new Date(timeStr);
     }
     
-    // 如果日期无效，检查是否是零值时间
+    // ifdate is invalid,check whether it is a zero time
     if (isNaN(date.getTime())) {
-        // 检查是否是零值时间的字符串形式
+        // Check whether this is the string form of zero time
         if (typeof timeStr === 'string' && (timeStr.includes('0001-01-01') || timeStr.startsWith('0001'))) {
             return '';
         }
-        console.warn('无法解析时间:', timeStr);
+        console.warn('Unable to parse time:', timeStr);
         return '';
     }
     
-    // 检查日期是否合理（不在1970年之前，不在未来太远）
+    // Check whether the date is reasonable (not before 1970,not too far in the future)
     const year = date.getFullYear();
     if (year < 1970 || year > 2100) {
-        // 如果是零值时间（0001-01-01），返回空字符串，不显示
+        // If this is zero time (0001-01-01),return an empty string,do not display
         if (year === 1) {
             return '';
         }
-        console.warn('时间值不合理:', timeStr, '解析为:', date);
+        console.warn('Time value is unreasonable:', timeStr, 'parsed as:', date);
         return '';
     }
     
@@ -2032,21 +2032,21 @@ function formatTime(timeStr) {
     });
 }
 
-// 显示通知
+// Show notification
 function showNotification(message, type = 'info') {
-    // 如果存在全局通知系统（且不是当前函数），使用它
+    // if presentglobal notification system (and is not the current function),use it
     if (typeof window.showNotification === 'function' && window.showNotification !== showNotification) {
         window.showNotification(message, type);
         return;
     }
     
-    // 否则使用自定义的toast通知
+    // otherwiseusecustom toast notification
     showToastNotification(message, type);
 }
 
-// 显示Toast通知
+// Show toast notification
 function showToastNotification(message, type = 'info') {
-    // 创建通知容器（如果不存在）
+    // Create notification container (ifdoes not exist)
     let container = document.getElementById('toast-notification-container');
     if (!container) {
         container = document.createElement('div');
@@ -2064,78 +2064,87 @@ function showToastNotification(message, type = 'info') {
         document.body.appendChild(container);
     }
     
-    // 创建通知元素
+    // Create notification element
     const toast = document.createElement('div');
     toast.className = `toast-notification toast-${type}`;
     
-    // 根据类型设置颜色
     const typeStyles = {
         success: {
-            background: '#28a745',
-            color: '#fff',
-            icon: '✅'
+            background: '#f4fbf6',
+            border: '1px solid #cce8d4',
+            color: '#3d6654',
+            iconColor: '#52a06a',
+            icon: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.2"/><path d="M5 8l2 2 4-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>'
         },
         error: {
-            background: '#dc3545',
-            color: '#fff',
-            icon: '❌'
+            background: '#fef7f7',
+            border: '1px solid #f3d0d0',
+            color: '#8b4444',
+            iconColor: '#c96a6a',
+            icon: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.2"/><path d="M6 6l4 4M10 6l-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>'
         },
         info: {
-            background: '#17a2b8',
-            color: '#fff',
-            icon: 'ℹ️'
+            background: '#f5f9ff',
+            border: '1px solid #cfe0f5',
+            color: '#4a6078',
+            iconColor: '#6b8fbf',
+            icon: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.2"/><path d="M8 7v4M8 5.5v.01" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>'
         },
         warning: {
-            background: '#ffc107',
-            color: '#000',
-            icon: '⚠️'
+            background: '#fffbf3',
+            border: '1px solid #f0dfc0',
+            color: '#7a6535',
+            iconColor: '#c4a04a',
+            icon: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2.5l6 10.5H2L8 2.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 7v2.5M8 11v.01" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>'
         }
     };
-    
+
     const style = typeStyles[type] || typeStyles.info;
-    
+
     toast.style.cssText = `
         background: ${style.background};
+        border: ${style.border};
         color: ${style.color};
-        padding: 14px 20px;
-        border-radius: 8px;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-        min-width: 300px;
-        max-width: 500px;
+        padding: 10px 14px;
+        border-radius: 10px;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+        min-width: 220px;
+        max-width: 420px;
         pointer-events: auto;
-        animation: slideInRight 0.3s ease-out;
+        animation: slideInRight 0.25s ease-out;
         display: flex;
         align-items: center;
-        gap: 12px;
-        font-size: 0.9375rem;
-        line-height: 1.5;
+        gap: 10px;
+        font-size: 0.875rem;
+        line-height: 1.45;
         word-wrap: break-word;
+        backdrop-filter: blur(8px);
     `;
-    
+
     toast.innerHTML = `
-        <span style="font-size: 1.2em; flex-shrink: 0;">${style.icon}</span>
+        <span style="color: ${style.iconColor}; flex-shrink: 0; display: flex; align-items: center;">${style.icon}</span>
         <span style="flex: 1;">${escapeHtml(message)}</span>
         <button onclick="this.parentElement.remove()" style="
             background: transparent;
             border: none;
             color: ${style.color};
             cursor: pointer;
-            font-size: 1.2em;
+            font-size: 1rem;
             padding: 0;
-            margin-left: 8px;
-            opacity: 0.7;
+            margin-left: 4px;
+            opacity: 0.45;
             flex-shrink: 0;
-            width: 24px;
-            height: 24px;
+            width: 20px;
+            height: 20px;
             display: flex;
             align-items: center;
             justify-content: center;
-        " onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">×</button>
+        " onmouseover="this.style.opacity='0.75'" onmouseout="this.style.opacity='0.45'">×</button>
     `;
     
     container.appendChild(toast);
     
-    // 自动移除（成功消息显示5秒，错误消息显示7秒，其他显示4秒）
+    // Automatically remove (success messages show for 5 seconds,error messages show for 7 seconds,others show for 4 seconds)
     const duration = type === 'success' ? 5000 : type === 'error' ? 7000 : 4000;
     setTimeout(() => {
         if (toast.parentElement) {
@@ -2149,14 +2158,14 @@ function showToastNotification(message, type = 'info') {
     }, duration);
 }
 
-// 添加CSS动画（如果不存在）
+// Add CSS animation (ifdoes not exist)
 if (!document.getElementById('toast-notification-styles')) {
     const style = document.createElement('style');
     style.id = 'toast-notification-styles';
     style.textContent = `
         @keyframes slideInRight {
             from {
-                transform: translateX(100%);
+                transform: translateX(16px);
                 opacity: 0;
             }
             to {
@@ -2170,7 +2179,7 @@ if (!document.getElementById('toast-notification-styles')) {
                 opacity: 1;
             }
             to {
-                transform: translateX(100%);
+                transform: translateX(16px);
                 opacity: 0;
             }
         }
@@ -2178,7 +2187,7 @@ if (!document.getElementById('toast-notification-styles')) {
     document.head.appendChild(style);
 }
 
-// 点击模态框外部关闭
+// Click outside the modal to close
 window.addEventListener('click', function(event) {
     const modal = document.getElementById('knowledge-item-modal');
     if (event.target === modal) {
@@ -2186,26 +2195,26 @@ window.addEventListener('click', function(event) {
     }
 });
 
-// 切换到设置页面（用于功能未启用时的提示）
+// Switch to settings page (Used for feature-disabled notices)
 function switchToSettings() {
     if (typeof switchPage === 'function') {
         switchPage('settings');
-        // 等待设置页面加载后，切换到知识库配置部分
+        // After settings page loads,switch to knowledge base config section
         setTimeout(() => {
             if (typeof switchSettingsSection === 'function') {
-                // 查找知识库配置部分（通常在基本设置中）
+                // Find knowledge base config section (usually in basic settings)
                 const knowledgeSection = document.querySelector('[data-section="knowledge"]');
                 if (knowledgeSection) {
                     switchSettingsSection('knowledge');
                 } else {
-                    // 如果没有独立的知识库部分，切换到基本设置
+                    // ifthere is no standalone knowledge base section,switch to basic settings
                     switchSettingsSection('basic');
-                    // 滚动到知识库配置区域
+                    // Scroll to knowledge base config area
                     setTimeout(() => {
                         const knowledgeEnabledCheckbox = document.getElementById('knowledge-enabled');
                         if (knowledgeEnabledCheckbox) {
                             knowledgeEnabledCheckbox.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            // 高亮显示
+                            // Highlight
                             knowledgeEnabledCheckbox.parentElement.style.transition = 'background-color 0.3s';
                             knowledgeEnabledCheckbox.parentElement.style.backgroundColor = '#e3f2fd';
                             setTimeout(() => {
@@ -2219,29 +2228,29 @@ function switchToSettings() {
     }
 }
 
-// 自定义下拉组件交互
+// Custom dropdown component interactions
 document.addEventListener('DOMContentLoaded', function() {
     const wrapper = document.getElementById('knowledge-category-filter-wrapper');
     const trigger = document.getElementById('knowledge-category-filter-trigger');
     
     if (wrapper && trigger) {
-        // 点击触发器打开/关闭下拉菜单
+        // Click trigger to open/closedropdown menu
         trigger.addEventListener('click', function(e) {
             e.stopPropagation();
             wrapper.classList.toggle('open');
         });
         
-        // 点击外部关闭下拉菜单
+        // Click outsideclosedropdown menu
         document.addEventListener('click', function(e) {
             if (!wrapper.contains(e.target)) {
                 wrapper.classList.remove('open');
             }
         });
         
-        // 选择选项时更新选中状态
+        // Update selected state when choosing an option
         const dropdown = document.getElementById('knowledge-category-filter-dropdown');
         if (dropdown) {
-            // 默认选中"全部"选项
+            // Defaultselected"all"option
             const defaultOption = dropdown.querySelector('.custom-select-option[data-value=""]');
             if (defaultOption) {
                 defaultOption.classList.add('selected');
@@ -2250,11 +2259,11 @@ document.addEventListener('DOMContentLoaded', function() {
             dropdown.addEventListener('click', function(e) {
                 const option = e.target.closest('.custom-select-option');
                 if (option) {
-                    // 移除之前的选中状态
+                    // Remove previous selected state
                     dropdown.querySelectorAll('.custom-select-option').forEach(opt => {
                         opt.classList.remove('selected');
                     });
-                    // 添加选中状态
+                    // Add selected state
                     option.classList.add('selected');
                 }
             });

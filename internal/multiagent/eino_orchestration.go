@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// PlanExecuteRootArgs 构建 Eino adk/prebuilt/planexecute 根 Agent 所需参数。
+// PlanExecuteRootArgs contains the parameters required to build the Eino adk/prebuilt/planexecute root Agent.
 type PlanExecuteRootArgs struct {
 	MainToolCallingModel *openai.ChatModel
 	ExecModel            *openai.ChatModel
@@ -24,41 +24,42 @@ type PlanExecuteRootArgs struct {
 	ToolsCfg             adk.ToolsConfig
 	ExecMaxIter          int
 	LoopMaxIter          int
-	// AppCfg / Logger 非空时为 Executor 挂载与 Deep/Supervisor 一致的 Eino summarization 中间件。
+	// AppCfg / Logger attach the same Eino summarization middleware used by Deep/Supervisor to the Executor when non-nil.
 	AppCfg *config.Config
 	MwCfg  *config.MultiAgentEinoMiddlewareConfig
 	// ConversationID is used for transcript/isolation paths in middleware.
 	ConversationID string
-	Logger *zap.Logger
+	Logger         *zap.Logger
 	// ModelName is used for model input token estimation logs.
 	ModelName string
-	// ExecPreMiddlewares 是由 prependEinoMiddlewares 构建的前置中间件（patchtoolcalls, reduction, toolsearch, plantask），
-	// 与 Deep/Supervisor 主代理的 mainOrchestratorPre 一致。
+	// ExecPreMiddlewares are prepended middlewares built by prependEinoMiddlewares (patchtoolcalls, reduction, toolsearch, plantask),
+	// consistent with mainOrchestratorPre for the Deep/Supervisor main agent.
 	ExecPreMiddlewares []adk.ChatModelAgentMiddleware
-	// SkillMiddleware 是 Eino 官方 skill 渐进式披露中间件（可选）。
+	// SkillMiddleware is the official Eino skill progressive-disclosure middleware; optional.
 	SkillMiddleware adk.ChatModelAgentMiddleware
-	// FilesystemMiddleware 是 Eino filesystem 中间件，当 eino_skills.filesystem_tools 启用时提供本机文件读写与 Shell 能力（可选）。
+	// FilesystemMiddleware is the Eino filesystem middleware, providing local file read/write and shell capabilities when eino_skills.filesystem_tools is enabled; optional.
 	FilesystemMiddleware adk.ChatModelAgentMiddleware
 	// PlannerReplannerRewriteHandlers applies BeforeModelRewriteState pipeline for planner/replanner input.
 	PlannerReplannerRewriteHandlers []adk.ChatModelAgentMiddleware
-	// ModelFacingTrace 可选：由 Executor Handlers 链末尾写入，供 last_react 与 summarization 后上下文对齐。
+	// ModelFacingTrace is optional: the end of the Executor Handlers chain writes to it so last_react aligns with context after summarization.
 	ModelFacingTrace *modelFacingTraceHolder
 }
 
-// NewPlanExecuteRoot 返回 plan → execute → replan 预置编排根节点（与 Deep / Supervisor 并列）。
+// NewPlanExecuteRoot returns the preset plan -> execute -> replan orchestration root node, alongside Deep / Supervisor.
 func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.ResumableAgent, error) {
 	if a == nil {
-		return nil, fmt.Errorf("plan_execute: args 为空")
+		return nil, fmt.Errorf("plan_execute: args is nil")
 	}
 	if a.MainToolCallingModel == nil || a.ExecModel == nil {
-		return nil, fmt.Errorf("plan_execute: 模型为空")
+		return nil, fmt.Errorf("plan_execute: model is nil")
 	}
 	tcm, ok := interface{}(a.MainToolCallingModel).(model.ToolCallingChatModel)
 	if !ok {
-		return nil, fmt.Errorf("plan_execute: 主模型需实现 ToolCallingChatModel")
+		return nil, fmt.Errorf("plan_execute: main model must implement ToolCallingChatModel")
 	}
 	plannerCfg := &planexecute.PlannerConfig{
 		ToolCallingChatModel: tcm,
+		NewPlan:              newLenientPlan,
 	}
 	if fn := planExecutePlannerGenInput(a.OrchInstruction, a.AppCfg, a.MwCfg, a.Logger, a.ModelName, a.ConversationID, a.PlannerReplannerRewriteHandlers); fn != nil {
 		plannerCfg.GenInputFn = fn
@@ -70,26 +71,27 @@ func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.Resuma
 	replanner, err := planexecute.NewReplanner(ctx, &planexecute.ReplannerConfig{
 		ChatModel:  tcm,
 		GenInputFn: planExecuteReplannerGenInput(a.OrchInstruction, a.AppCfg, a.MwCfg, a.Logger, a.ModelName, a.ConversationID, a.PlannerReplannerRewriteHandlers),
+		NewPlan:    newLenientPlan,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("plan_execute replanner: %w", err)
 	}
 
-	// 组装 executor handler 栈，顺序与 Deep/Supervisor 主代理一致（outermost first）。
+	// Assemble the executor handler stack in the same order as the Deep/Supervisor main agent (outermost first).
 	var execHandlers []adk.ChatModelAgentMiddleware
-	// 1. patchtoolcalls, reduction, toolsearch, plantask（来自 prependEinoMiddlewares）
+	// 1. patchtoolcalls, reduction, toolsearch, plantask from prependEinoMiddlewares.
 	if len(a.ExecPreMiddlewares) > 0 {
 		execHandlers = append(execHandlers, a.ExecPreMiddlewares...)
 	}
-	// 2. filesystem 中间件（可选）
+	// 2. filesystem middleware; optional.
 	if a.FilesystemMiddleware != nil {
 		execHandlers = append(execHandlers, a.FilesystemMiddleware)
 	}
-	// 3. skill 中间件（可选）
+	// 3. skill middleware; optional.
 	if a.SkillMiddleware != nil {
 		execHandlers = append(execHandlers, a.SkillMiddleware)
 	}
-	// 4. summarization（最后，与 Deep/Supervisor 一致）
+	// 4. summarization last, consistent with Deep/Supervisor.
 	if a.AppCfg != nil {
 		sumMw, sumErr := newEinoSummarizationMiddleware(ctx, a.ExecModel, a.AppCfg, a.MwCfg, a.ConversationID, a.Logger)
 		if sumErr != nil {
@@ -97,8 +99,8 @@ func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.Resuma
 		}
 		execHandlers = append(execHandlers, sumMw)
 	}
-	// 5. 孤儿 tool 消息兜底：必须挂在所有改写历史中间件（summarization/reduction/skill）之后、
-	//    telemetry 之前，保证送入 ChatModel 的消息序列 tool_call ↔ tool_result 配对完整。
+	// 5. Orphan tool-message fallback: it must run after all history-rewriting middleware (summarization/reduction/skill)
+	//    and before telemetry, ensuring the message sequence sent to ChatModel has complete tool_call <-> tool_result pairs.
 	execHandlers = append(execHandlers, newOrphanToolPrunerMiddleware(a.Logger, "plan_execute_executor"))
 	if teleMw := newEinoModelInputTelemetryMiddleware(a.Logger, a.ModelName, a.ConversationID, "plan_execute_executor"); teleMw != nil {
 		execHandlers = append(execHandlers, teleMw)
@@ -129,8 +131,8 @@ func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.Resuma
 	})
 }
 
-// planExecutePlannerGenInput 将 orchestrator instruction 作为 SystemMessage 注入 planner 输入。
-// 返回 nil 时 Eino 使用内置默认 planner prompt。
+// planExecutePlannerGenInput injects the orchestrator instruction as a SystemMessage into planner input.
+// When it returns nil, Eino uses the built-in default planner prompt.
 func planExecutePlannerGenInput(
 	orchInstruction string,
 	appCfg *config.Config,
@@ -146,14 +148,12 @@ func planExecutePlannerGenInput(
 	}
 	return func(ctx context.Context, userInput []adk.Message) ([]adk.Message, error) {
 		userInput = capPlanExecuteUserInputMessages(userInput, appCfg, mwCfg)
-		msgs := make([]adk.Message, 0, 1+len(userInput))
-		if oi != "" {
-			msgs = append(msgs, schema.SystemMessage(oi))
-		}
+		msgs := make([]adk.Message, 0, len(userInput))
 		msgs = append(msgs, userInput...)
 		if rewritten, rerr := applyBeforeModelRewriteHandlers(ctx, msgs, rewriteHandlers); rerr == nil && len(rewritten) > 0 {
 			msgs = rewritten
 		}
+		msgs = normalizeSingleLeadingSystemMessage(msgs, oi)
 		logPlanExecuteModelInputEstimate(logger, modelName, conversationID, "plan_execute_planner", msgs)
 		return msgs, nil
 	}
@@ -182,9 +182,7 @@ func planExecuteExecutorGenInput(
 		if err != nil {
 			return nil, err
 		}
-		if oi != "" {
-			userMsgs = append([]adk.Message{schema.SystemMessage(oi)}, userMsgs...)
-		}
+		userMsgs = normalizeSingleLeadingSystemMessage(userMsgs, oi)
 		logPlanExecuteModelInputEstimate(logger, modelName, conversationID, "plan_execute_executor_gen_input", userMsgs)
 		return userMsgs, nil
 	}
@@ -204,8 +202,8 @@ func planExecuteFormatExecutedSteps(results []planexecute.ExecutedStep, appCfg *
 	return renderPlanExecuteStepsByBudget(capped, appCfg, mwCfg)
 }
 
-// planExecuteReplannerGenInput 与 Eino 默认 Replanner 输入一致，但 executed_steps 经 cap 后再写入 prompt，
-// 且在 orchInstruction 非空时 prepend SystemMessage 使 replanner 也能接收全局指令。
+// planExecuteReplannerGenInput matches Eino's default Replanner input, but writes capped executed_steps into the prompt
+// and prepends a SystemMessage when orchInstruction is non-empty so the replanner also receives global instructions.
 func planExecuteReplannerGenInput(
 	orchInstruction string,
 	appCfg *config.Config,
@@ -231,15 +229,52 @@ func planExecuteReplannerGenInput(
 		if err != nil {
 			return nil, err
 		}
-		if oi != "" {
-			msgs = append([]adk.Message{schema.SystemMessage(oi)}, msgs...)
-		}
 		if rewritten, rerr := applyBeforeModelRewriteHandlers(ctx, msgs, rewriteHandlers); rerr == nil && len(rewritten) > 0 {
 			msgs = rewritten
 		}
+		msgs = normalizeSingleLeadingSystemMessage(msgs, oi)
 		logPlanExecuteModelInputEstimate(logger, modelName, conversationID, "plan_execute_replanner", msgs)
 		return msgs, nil
 	}
+}
+
+// normalizeSingleLeadingSystemMessage enforces a provider-friendly message shape:
+// exactly one system message at index 0 (when any system context exists).
+// For strict OpenAI-compatible backends (e.g. qwen/vllm templates), this avoids
+// "System message must be at the beginning" caused by multiple/disordered system messages.
+func normalizeSingleLeadingSystemMessage(msgs []adk.Message, extraSystem string) []adk.Message {
+	extraSystem = strings.TrimSpace(extraSystem)
+	if len(msgs) == 0 {
+		if extraSystem == "" {
+			return msgs
+		}
+		return []adk.Message{schema.SystemMessage(extraSystem)}
+	}
+
+	systemParts := make([]string, 0, 2)
+	if extraSystem != "" {
+		systemParts = append(systemParts, extraSystem)
+	}
+	nonSystem := make([]adk.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		if msg == nil {
+			continue
+		}
+		if msg.Role == schema.System {
+			if s := strings.TrimSpace(msg.Content); s != "" {
+				systemParts = append(systemParts, s)
+			}
+			continue
+		}
+		nonSystem = append(nonSystem, msg)
+	}
+	if len(systemParts) == 0 {
+		return nonSystem
+	}
+	out := make([]adk.Message, 0, len(nonSystem)+1)
+	out = append(out, schema.SystemMessage(strings.Join(systemParts, "\n\n")))
+	out = append(out, nonSystem...)
+	return out
 }
 
 func capPlanExecuteUserInputMessages(input []adk.Message, appCfg *config.Config, mwCfg *config.MultiAgentEinoMiddlewareConfig) []adk.Message {
@@ -348,7 +383,7 @@ func renderPlanExecuteStepsByBudget(steps []planexecute.ExecutedStep, appCfg *co
 	return sb.String()
 }
 
-// planExecuteStreamsMainAssistant 将规划/执行/重规划各阶段助手流式输出映射到主对话区。
+// planExecuteStreamsMainAssistant maps assistant streaming output from planning, execution, and replanning stages to the main conversation area.
 func planExecuteStreamsMainAssistant(agent string) bool {
 	if agent == "" {
 		return true

@@ -14,7 +14,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// RegisterBatchTaskMCPTools 注册批量任务队列相关 MCP 工具（需传入已初始化 DB 的 AgentHandler）
+// RegisterBatchTaskMCPTools registers MCP tools for batch task queues; h must have an initialized DB.
 func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *zap.Logger) {
 	if mcpServer == nil || h == nil || logger == nil {
 		return
@@ -27,27 +27,27 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- list ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskList,
-		Description:      "列出批量任务队列（精简摘要，省上下文）。含队列元数据、子任务 id/status/截断后的 message、各状态计数。完整子任务（含 result/error/conversationId/时间等）请用 batch_task_get(queue_id)。\n\n⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确提及查看/管理批量任务、任务队列时才可调用。不要在用户未要求时自行调用。",
-		ShortDescription: "列出批量任务队列",
+		Description:      "List batch task queues with compact summaries to save context. Includes queue metadata, child task id/status/truncated message, and per-status counts. Use batch_task_get(queue_id) for full child task details such as result, error, conversationId, and timestamps.\n\nCall constraint: this tool belongs to task management. Call it only when the user explicitly asks to view or manage batch tasks or task queues. Do not call it proactively.",
+		ShortDescription: "List batch task queues",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"status": map[string]interface{}{
 					"type":        "string",
-					"description": "筛选状态：all（默认）、pending、running、paused、completed、cancelled",
+					"description": "Filter status: all (default), pending, running, paused, completed, cancelled",
 					"enum":        []string{"all", "pending", "running", "paused", "completed", "cancelled"},
 				},
 				"keyword": map[string]interface{}{
 					"type":        "string",
-					"description": "按队列 ID 或标题模糊搜索",
+					"description": "Fuzzy search by queue ID or title",
 				},
 				"page": map[string]interface{}{
 					"type":        "integer",
-					"description": "页码，从 1 开始，默认 1",
+					"description": "Page number, starting at 1; default 1",
 				},
 				"page_size": map[string]interface{}{
 					"type":        "integer",
-					"description": "每页条数，默认 20，最大 100",
+					"description": "Items per page; default 20, maximum 100",
 				},
 			},
 		},
@@ -101,14 +101,14 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- get ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskGet,
-		Description:      "根据 queue_id 获取单个批量任务队列详情（含子任务列表、Cron、调度开关与最近错误信息）。\n\n⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确提及查看/管理批量任务、任务队列时才可调用。不要在用户未要求时自行调用。",
-		ShortDescription: "获取批量任务队列详情",
+		Description:      "Get one batch task queue by queue_id, including child tasks, Cron settings, schedule switch, and latest error.\n\nCall constraint: this tool belongs to task management. Call it only when the user explicitly asks to view or manage batch tasks or task queues. Do not call it proactively.",
+		ShortDescription: "Get batch task queue details",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 			},
 			"required": []string{"queue_id"},
@@ -128,53 +128,57 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- create ---
 	reg(mcp.Tool{
 		Name: builtin.ToolBatchTaskCreate,
-		Description: `⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求创建批量任务、任务队列时才可调用。禁止在用户未提及”批量任务””任务队列””定时任务”等关键词时自行调用。如果用户只是让你做某件事，请在当前对话中直接完成，不要自作主张创建任务队列。
+		Description: `Call constraint: this tool belongs to task management. Call it only when the user explicitly asks to create a batch task or task queue. Do not call it when the user has not mentioned batch tasks, task queues, scheduled tasks, or equivalent terms. If the user only asks you to do something, complete it in the current conversation instead of creating a task queue on your own.
 
-【用途】应用内「任务管理 / 批量任务队列」：把多条彼此独立的用户指令登记成一条队列，便于在界面里查看进度、暂停/继续、定时重跑等。这是队列数据与调度入口，不是再开一个”子代理会话”替你探索当前问题。
+Purpose: Task Management / Batch Task Queue inside the app. Registers multiple independent user instructions as one queue so the UI can show progress, pause/resume, and rerun on a schedule. This is a queue data and scheduling entry point, not a way to open another sub-agent conversation to explore the current problem.
 
-【何时用】用户明确要批量排队执行、Cron 周期跑同一批指令、或需要与任务管理页面对齐时调用。需要即时追问、强依赖当前对话上下文的分析/编码，应在本对话内直接完成，不要为了”委派”而创建队列。
+When to use: call this when the user explicitly wants batch queued execution, a Cron cycle for the same set of instructions, or alignment with the task-management page. Analysis or coding that requires immediate follow-up questions or strongly depends on the current conversation context should be completed in this conversation, not queued as delegation.
 
-【参数】tasks（字符串数组）或 tasks_text（多行，每行一条）二选一；每项是一条将来由系统按队列顺序执行的指令文案。agent_mode：single（原生 ReAct，默认）、eino_single（Eino ADK 单代理）、deep / plan_execute / supervisor（需系统启用多代理）；兼容旧值 multi（视为 deep）。非”把主对话拆给子代理”。schedule_mode：manual（默认）或 cron；cron 须填 cron_expr（5 段，如 “0 */6 * * *”）。
+Parameters: provide either tasks (array of strings) or tasks_text (multiline text, one item per line). Each item is one instruction that the system will execute later in queue order. agent_mode: single (native ReAct, default), eino_single (Eino ADK single agent), deep / plan_execute / supervisor (Eino orchestration, requires multi-agent support); legacy multi is treated as deep. This does not split the main conversation into sub-agents. schedule_mode: manual (default) or cron; cron requires cron_expr in standard 5-field format, for example "0 */6 * * *".
 
-【执行】默认创建后为 pending，不自动跑。execute_now=true 可创建后立即跑；否则之后调用 batch_task_start。Cron 自动下一轮需 schedule_enabled 为 true（可用 batch_task_schedule_enabled）。`,
-		ShortDescription: "任务管理：创建批量任务队列（登记多条指令，可选立即或 Cron）",
+Execution: queues are pending by default and do not start automatically. Set execute_now=true to start immediately after creation; otherwise call batch_task_start later. Cron automatic next runs require schedule_enabled=true, configured with batch_task_schedule_enabled.`,
+		ShortDescription: "Task management: create a batch task queue with multiple instructions and optional immediate or Cron execution",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"title": map[string]interface{}{
 					"type":        "string",
-					"description": "可选队列标题，便于在任务管理中识别",
+					"description": "Optional queue title for task-management display",
 				},
 				"role": map[string]interface{}{
 					"type":        "string",
-					"description": "队列使用的角色名，空表示默认",
+					"description": "Role name used by the queue; empty means default",
 				},
 				"tasks": map[string]interface{}{
 					"type":        "array",
-					"description": "队列中的子任务指令，每项一条独立待执行文案（与 tasks_text 二选一）",
+					"description": "Child task instructions in the queue, one independent instruction per item; mutually exclusive with tasks_text",
 					"items":       map[string]interface{}{"type": "string"},
 				},
 				"tasks_text": map[string]interface{}{
 					"type":        "string",
-					"description": "多行文本，每行一条子任务指令（与 tasks 二选一）",
+					"description": "Multiline text, one child task instruction per line; mutually exclusive with tasks",
 				},
 				"agent_mode": map[string]interface{}{
 					"type":        "string",
-					"description": "执行模式：single（原生 ReAct）、eino_single（Eino ADK）、deep/plan_execute/supervisor（Eino 编排，需启用多代理）；multi 兼容为 deep",
+					"description": "Execution mode: single (native ReAct), eino_single (Eino ADK), deep/plan_execute/supervisor (Eino orchestration, requires multi-agent); multi is treated as deep",
 					"enum":        []string{"single", "eino_single", "deep", "plan_execute", "supervisor", "multi"},
 				},
 				"schedule_mode": map[string]interface{}{
 					"type":        "string",
-					"description": "manual（仅手工/启动后跑）或 cron（按表达式触发）",
+					"description": "manual (run only manually or after explicit start) or cron (trigger by expression)",
 					"enum":        []string{"manual", "cron"},
 				},
 				"cron_expr": map[string]interface{}{
 					"type":        "string",
-					"description": "schedule_mode 为 cron 时必填。标准 5 段：分钟 小时 日 月 星期，例如 \"0 */6 * * *\"、\"30 2 * * 1-5\"",
+					"description": "Required when schedule_mode is cron. Standard 5-field format: minute hour day month weekday, for example \"0 */6 * * *\" or \"30 2 * * 1-5\"",
 				},
 				"execute_now": map[string]interface{}{
 					"type":        "boolean",
-					"description": "创建后是否立即开始执行队列，默认 false（pending，需 batch_task_start）",
+					"description": "Whether to start executing the queue immediately after creation; default false means pending and requires batch_task_start",
+				},
+				"project_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Project ID bound to child conversations in the queue; optional, config.project.default_project_id is used when omitted",
 				},
 			},
 		},
@@ -204,7 +208,8 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		if !ok {
 			executeNow = false
 		}
-		queue, createErr := h.batchTaskManager.CreateBatchQueue(title, role, agentMode, scheduleMode, cronExpr, nextRunAt, tasks)
+		projectID := strings.TrimSpace(mcpArgString(args, "project_id"))
+		queue, createErr := h.batchTaskManager.CreateBatchQueue(title, role, agentMode, scheduleMode, cronExpr, projectID, nextRunAt, tasks)
 		if createErr != nil {
 			return batchMCPTextResult("Failed to create queue: "+createErr.Error(), true), nil
 		}
@@ -240,17 +245,17 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- start ---
 	reg(mcp.Tool{
 		Name: builtin.ToolBatchTaskStart,
-		Description: `启动或继续执行批量任务队列（pending / paused）。
-与 batch_task_create 配合使用：仅创建队列不会自动执行，需调用本工具才会开始跑子任务。
+		Description: `Start or continue executing a batch task queue in pending or paused state.
+Use this with batch_task_create: creating a queue alone does not execute it; this tool starts child task execution.
 
-⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求启动/继续批量任务时才可调用。不要在用户未要求时自行调用。`,
-		ShortDescription: "启动/继续批量任务队列（创建后需调用才会执行）",
+Call constraint: this tool belongs to task management. Call it only when the user explicitly asks to start or continue batch tasks. Do not call it proactively.`,
+		ShortDescription: "Start or continue a batch task queue; required after creation unless execute_now was used",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 			},
 			"required": []string{"queue_id"},
@@ -274,14 +279,14 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- rerun (reset + start for completed/cancelled queues) ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskRerun,
-		Description:      "重跑已完成或已取消的批量任务队列。会重置所有子任务状态后重新执行一轮。\n\n⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求重跑批量任务时才可调用。不要在用户未要求时自行调用。",
-		ShortDescription: "重跑批量任务队列",
+		Description:      "Rerun a completed or cancelled batch task queue. Resets all child task statuses and executes another round.\n\nCall constraint: this tool belongs to task management. Call it only when the user explicitly asks to rerun batch tasks. Do not call it proactively.",
+		ShortDescription: "Rerun batch task queue",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 			},
 			"required": []string{"queue_id"},
@@ -315,14 +320,14 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- pause ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskPause,
-		Description:      "暂停正在运行的批量任务队列（当前子任务会被取消）。\n\n⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求暂停批量任务时才可调用。不要在用户未要求时自行调用。",
-		ShortDescription: "暂停批量任务队列",
+		Description:      "Pause a running batch task queue; the current child task will be cancelled.\n\nCall constraint: this tool belongs to task management. Call it only when the user explicitly asks to pause batch tasks. Do not call it proactively.",
+		ShortDescription: "Pause batch task queue",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 			},
 			"required": []string{"queue_id"},
@@ -342,14 +347,14 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- delete queue ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskDelete,
-		Description:      "删除批量任务队列及其子任务记录。\n\n⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求删除批量任务队列时才可调用。不要在用户未要求时自行调用。",
-		ShortDescription: "删除批量任务队列",
+		Description:      "Delete a batch task queue and its child task records.\n\nCall constraint: this tool belongs to task management. Call it only when the user explicitly asks to delete a batch task queue. Do not call it proactively.",
+		ShortDescription: "Delete batch task queue",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 			},
 			"required": []string{"queue_id"},
@@ -369,26 +374,26 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- update metadata (title/role/agentMode) ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskUpdateMetadata,
-		Description:      "修改批量任务队列的标题、角色和代理模式。仅在队列非 running 状态下可修改。\n\n⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求修改批量任务队列属性时才可调用。不要在用户未要求时自行调用。",
-		ShortDescription: "修改批量任务队列标题/角色/代理模式",
+		Description:      "Modify a batch task queue title, role, and agent mode. Only queues that are not running can be modified.\n\nCall constraint: this tool belongs to task management. Call it only when the user explicitly asks to modify batch task queue attributes. Do not call it proactively.",
+		ShortDescription: "Modify batch task queue title, role, and agent mode",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 				"title": map[string]interface{}{
 					"type":        "string",
-					"description": "新标题（空字符串清除标题）",
+					"description": "New title; empty string clears the title",
 				},
 				"role": map[string]interface{}{
 					"type":        "string",
-					"description": "新角色名（空字符串使用默认角色）",
+					"description": "New role name; empty string uses the default role",
 				},
 				"agent_mode": map[string]interface{}{
 					"type":        "string",
-					"description": "代理模式：single、eino_single、deep、plan_execute、supervisor；multi 视为 deep",
+					"description": "Agent mode: single, eino_single, deep, plan_execute, supervisor; multi is treated as deep",
 					"enum":        []string{"single", "eino_single", "deep", "plan_execute", "supervisor", "multi"},
 				},
 			},
@@ -413,26 +418,26 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- update schedule ---
 	reg(mcp.Tool{
 		Name: builtin.ToolBatchTaskUpdateSchedule,
-		Description: `修改批量任务队列的调度方式和 Cron 表达式。仅在队列非 running 状态下可修改。
-schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除 Cron 配置。
+		Description: `Modify a batch task queue schedule mode and Cron expression. Only queues that are not running can be modified.
+When schedule_mode is cron, a valid cron_expr is required. When schedule_mode is manual, Cron configuration is cleared.
 
-⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求修改批量任务调度配置时才可调用。不要在用户未要求时自行调用。`,
-		ShortDescription: "修改批量任务调度配置（Cron 表达式）",
+Call constraint: this tool belongs to task management. Call it only when the user explicitly asks to modify batch task schedule configuration. Do not call it proactively.`,
+		ShortDescription: "Modify batch task schedule configuration and Cron expression",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 				"schedule_mode": map[string]interface{}{
 					"type":        "string",
-					"description": "manual 或 cron",
+					"description": "manual or cron",
 					"enum":        []string{"manual", "cron"},
 				},
 				"cron_expr": map[string]interface{}{
 					"type":        "string",
-					"description": "Cron 表达式（schedule_mode 为 cron 时必填）。标准 5 段格式：分钟 小时 日 月 星期，如 \"0 */6 * * *\"（每6小时）、\"30 2 * * 1-5\"（工作日凌晨2:30）",
+					"description": "Cron expression, required when schedule_mode is cron. Standard 5-field format: minute hour day month weekday, for example \"0 */6 * * *\" (every 6 hours) or \"30 2 * * 1-5\" (weekdays at 02:30)",
 				},
 			},
 			"required": []string{"queue_id", "schedule_mode"},
@@ -472,21 +477,21 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 	// --- schedule enabled ---
 	reg(mcp.Tool{
 		Name: builtin.ToolBatchTaskScheduleEnabled,
-		Description: `设置是否允许 Cron 自动触发该队列。关闭后仍保留 Cron 表达式，仅停止定时自动跑；可用手工「启动」执行。
-仅对 schedule_mode 为 cron 的队列有意义。
+		Description: `Set whether Cron may automatically trigger this queue. Disabling keeps the Cron expression but stops scheduled automatic runs; manual start remains available.
+Only meaningful for queues where schedule_mode is cron.
 
-⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求开关批量任务自动调度时才可调用。不要在用户未要求时自行调用。`,
-		ShortDescription: "开关批量任务 Cron 自动调度",
+Call constraint: this tool belongs to task management. Call it only when the user explicitly asks to toggle batch task automatic scheduling. Do not call it proactively.`,
+		ShortDescription: "Toggle batch task Cron automatic scheduling",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 				"schedule_enabled": map[string]interface{}{
 					"type":        "boolean",
-					"description": "true 允许定时触发，false 仅手工执行",
+					"description": "true allows scheduled triggers; false allows only manual execution",
 				},
 			},
 			"required": []string{"queue_id", "schedule_enabled"},
@@ -514,18 +519,18 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 	// --- add task ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskAdd,
-		Description:      "向处于 pending 状态的队列追加一条子任务。\n\n⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求向批量任务队列添加子任务时才可调用。不要在用户未要求时自行调用。",
-		ShortDescription: "批量队列添加子任务",
+		Description:      "Append one child task to a pending queue.\n\nCall constraint: this tool belongs to task management. Call it only when the user explicitly asks to add a child task to a batch task queue. Do not call it proactively.",
+		ShortDescription: "Add a child task to a batch queue",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 				"message": map[string]interface{}{
 					"type":        "string",
-					"description": "任务指令内容",
+					"description": "Task instruction content",
 				},
 			},
 			"required": []string{"queue_id", "message"},
@@ -548,22 +553,22 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 	// --- update task ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskUpdate,
-		Description:      "修改 pending 队列中仍为 pending 的子任务文案。\n\n⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求修改批量子任务内容时才可调用。不要在用户未要求时自行调用。",
-		ShortDescription: "更新批量子任务内容",
+		Description:      "Modify the text of a child task that is still pending in a pending queue.\n\nCall constraint: this tool belongs to task management. Call it only when the user explicitly asks to modify batch child task content. Do not call it proactively.",
+		ShortDescription: "Update batch child task content",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 				"task_id": map[string]interface{}{
 					"type":        "string",
-					"description": "子任务 ID",
+					"description": "Child task ID",
 				},
 				"message": map[string]interface{}{
 					"type":        "string",
-					"description": "新的任务指令",
+					"description": "New task instruction",
 				},
 			},
 			"required": []string{"queue_id", "task_id", "message"},
@@ -586,18 +591,18 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 	// --- remove task ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskRemove,
-		Description:      "从 pending 队列中删除仍为 pending 的子任务。\n\n⚠️ 调用约束：本工具属于「任务管理」模块，仅当用户明确要求删除批量子任务时才可调用。不要在用户未要求时自行调用。",
-		ShortDescription: "删除批量子任务",
+		Description:      "Delete a child task that is still pending from a pending queue.\n\nCall constraint: this tool belongs to task management. Call it only when the user explicitly asks to delete a batch child task. Do not call it proactively.",
+		ShortDescription: "Delete batch child task",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"queue_id": map[string]interface{}{
 					"type":        "string",
-					"description": "队列 ID",
+					"description": "Queue ID",
 				},
 				"task_id": map[string]interface{}{
 					"type":        "string",
-					"description": "子任务 ID",
+					"description": "Child task ID",
 				},
 			},
 			"required": []string{"queue_id", "task_id"},
@@ -619,18 +624,18 @@ schedule_mode 为 cron 时必须提供有效 cron_expr；为 manual 时会清除
 	logger.Info("Batch task MCP tools registered", zap.Int("count", 12))
 }
 
-// --- batch_task_list 精简结构（避免把每条子任务的 result 等大段文本塞进列表上下文） ---
+// --- Compact batch_task_list structures; avoid putting each child task's large result text into list context. ---
 
 const mcpBatchListTaskMessageMaxRunes = 160
 
-// batchTaskMCPListSummary 列表中的子任务摘要（完整字段用 batch_task_get）
+// batchTaskMCPListSummary is the child task summary in list output; use batch_task_get for full fields.
 type batchTaskMCPListSummary struct {
 	ID      string `json:"id"`
 	Status  string `json:"status"`
 	Message string `json:"message,omitempty"`
 }
 
-// batchTaskQueueMCPListItem 列表中的队列摘要
+// batchTaskQueueMCPListItem is the queue summary in list output.
 type batchTaskQueueMCPListItem struct {
 	ID                    string                    `json:"id"`
 	Title                 string                    `json:"title,omitempty"`
@@ -669,7 +674,7 @@ func truncateStringRunes(s string, maxRunes int) string {
 	return s
 }
 
-const mcpBatchListMaxTasksPerQueue = 200 // 列表中每个队列最多返回的子任务摘要数
+const mcpBatchListMaxTasksPerQueue = 200 // Maximum child task summaries returned per queue in list output.
 
 func toBatchTaskQueueMCPListItem(q *BatchTaskQueue) batchTaskQueueMCPListItem {
 	counts := map[string]int{
@@ -685,7 +690,7 @@ func toBatchTaskQueueMCPListItem(q *BatchTaskQueue) batchTaskQueueMCPListItem {
 			continue
 		}
 		counts[t.Status]++
-		// 列表视图限制子任务摘要数量，完整列表通过 batch_task_get 查看
+		// Limit child task summaries in list view; use batch_task_get for the complete list.
 		if len(tasks) < mcpBatchListMaxTasksPerQueue {
 			tasks = append(tasks, batchTaskMCPListSummary{
 				ID:      t.ID,

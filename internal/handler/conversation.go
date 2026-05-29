@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/database"
@@ -11,7 +12,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// ConversationHandler 对话处理器
+// ConversationHandler Conversation handler
 type ConversationHandler struct {
 	db     *database.DB
 	logger *zap.Logger
@@ -23,7 +24,7 @@ func (h *ConversationHandler) SetAudit(s *audit.Service) {
 	h.audit = s
 }
 
-// NewConversationHandler 创建新的对话处理器
+// NewConversationHandler creates a new conversation handler
 func NewConversationHandler(db *database.DB, logger *zap.Logger) *ConversationHandler {
 	return &ConversationHandler{
 		db:     db,
@@ -31,12 +32,18 @@ func NewConversationHandler(db *database.DB, logger *zap.Logger) *ConversationHa
 	}
 }
 
-// CreateConversationRequest 创建对话请求
+// CreateConversationRequest create conversation request
 type CreateConversationRequest struct {
-	Title string `json:"title"`
+	Title     string `json:"title"`
+	ProjectID string `json:"projectId,omitempty"`
 }
 
-// CreateConversation 创建新对话
+// SetConversationProjectRequest set conversation project
+type SetConversationProjectRequest struct {
+	ProjectID string `json:"projectId"` // empty string means unbind
+}
+
+// CreateConversation Create new conversation
 func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 	var req CreateConversationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -49,7 +56,9 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		title = "New conversation"
 	}
 
-	conv, err := h.db.CreateConversation(title, audit.ConversationCreateMetaFromGin(c, "api"))
+	meta := audit.ConversationCreateMetaFromGin(c, "api")
+	meta.ProjectID = strings.TrimSpace(req.ProjectID)
+	conv, err := h.db.CreateConversation(title, meta)
 	if err != nil {
 		h.logger.Error("Failed to create conversation", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -59,11 +68,30 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, conv)
 }
 
-// ListConversations 列出对话
+// SetConversationProject Set or clear the project bound to a conversation
+func (h *ConversationHandler) SetConversationProject(c *gin.Context) {
+	id := c.Param("id")
+	var req SetConversationProjectRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if _, err := h.db.GetConversation(id); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Conversation does not exist"})
+		return
+	}
+	if err := h.db.SetConversationProjectID(id, req.ProjectID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "projectId": strings.TrimSpace(req.ProjectID)})
+}
+
+// ListConversations List conversations
 func (h *ConversationHandler) ListConversations(c *gin.Context) {
 	limitStr := c.DefaultQuery("limit", "50")
 	offsetStr := c.DefaultQuery("offset", "0")
-	search := c.Query("search") // 获取搜索参数
+	search := c.Query("search") // Get search parameter
 
 	limit, _ := strconv.Atoi(limitStr)
 	offset, _ := strconv.Atoi(offsetStr)
@@ -82,12 +110,12 @@ func (h *ConversationHandler) ListConversations(c *gin.Context) {
 	c.JSON(http.StatusOK, conversations)
 }
 
-// GetConversation 获取对话
+// GetConversation Get conversation
 func (h *ConversationHandler) GetConversation(c *gin.Context) {
 	id := c.Param("id")
 
-	// 默认轻量加载，只有用户需要展开详情时再按需拉取
-	// include_process_details=1/true 时返回全量 processDetails（兼容旧行为）
+	// Lightweight load by default; fetch details on demand only when the user expands them
+	// include_process_details=1/true returns full processDetails for backward compatibility
 	includeStr := c.DefaultQuery("include_process_details", "0")
 	include := includeStr == "1" || includeStr == "true" || includeStr == "yes"
 
@@ -109,7 +137,7 @@ func (h *ConversationHandler) GetConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, conv)
 }
 
-// GetMessageProcessDetails 获取指定消息的过程详情（按需加载）
+// GetMessageProcessDetails Get process details for the specified message on demand
 func (h *ConversationHandler) GetMessageProcessDetails(c *gin.Context) {
 	messageID := c.Param("id")
 	if messageID == "" {
@@ -126,7 +154,7 @@ func (h *ConversationHandler) GetMessageProcessDetails(c *gin.Context) {
 
 	details = database.DedupeConsecutiveProcessDetails(details)
 
-	// 转换为前端期望的 JSON 结构（与 GetConversation 中 processDetails 结构一致）
+	// Convert to the JSON structure expected by the frontend, matching processDetails in GetConversation
 	out := make([]map[string]interface{}, 0, len(details))
 	for _, d := range details {
 		var data interface{}
@@ -149,12 +177,12 @@ func (h *ConversationHandler) GetMessageProcessDetails(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"processDetails": out})
 }
 
-// UpdateConversationRequest 更新对话请求
+// UpdateConversationRequest update conversation request
 type UpdateConversationRequest struct {
 	Title string `json:"title"`
 }
 
-// UpdateConversation 更新对话
+// UpdateConversation Update conversation
 func (h *ConversationHandler) UpdateConversation(c *gin.Context) {
 	id := c.Param("id")
 
@@ -175,7 +203,7 @@ func (h *ConversationHandler) UpdateConversation(c *gin.Context) {
 		return
 	}
 
-	// 返回更新后的对话
+	// Return updated conversation
 	conv, err := h.db.GetConversation(id)
 	if err != nil {
 		h.logger.Error("Failed to get updated conversation", zap.Error(err))
@@ -186,7 +214,7 @@ func (h *ConversationHandler) UpdateConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, conv)
 }
 
-// DeleteConversation 删除对话
+// DeleteConversation Delete conversation
 func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
 	id := c.Param("id")
 
@@ -210,12 +238,12 @@ func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Deleted successfully"})
 }
 
-// DeleteTurnRequest 删除一轮对话（POST /api/conversations/:id/delete-turn）
+// DeleteTurnRequest delete one conversation turn (POST /api/conversations/:id/delete-turn)
 type DeleteTurnRequest struct {
 	MessageID string `json:"messageId"`
 }
 
-// DeleteConversationTurn 删除锚点消息所在轮次（从该轮 user 到下一轮 user 之前），并清空 last_react_*。
+// DeleteConversationTurn deletes the turn containing the anchor message, from that turn's user message to before the next user message, and clears last_react_*.
 func (h *ConversationHandler) DeleteConversationTurn(c *gin.Context) {
 	conversationID := c.Param("id")
 	if conversationID == "" {
@@ -246,7 +274,7 @@ func (h *ConversationHandler) DeleteConversationTurn(c *gin.Context) {
 	}
 
 	if h.audit != nil {
-		h.audit.RecordOK(c, "conversation", "delete_turn", "删除对话轮次", "conversation", conversationID, map[string]interface{}{
+		h.audit.RecordOK(c, "conversation", "delete_turn", "Delete conversation turn", "conversation", conversationID, map[string]interface{}{
 			"message_id": req.MessageID,
 			"deleted":    len(deletedIDs),
 		})

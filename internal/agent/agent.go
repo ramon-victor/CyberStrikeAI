@@ -18,6 +18,7 @@ import (
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/mcp/builtin"
 	"cyberstrike-ai/internal/openai"
+	"cyberstrike-ai/internal/project"
 	"cyberstrike-ai/internal/security"
 	"cyberstrike-ai/internal/storage"
 
@@ -365,12 +366,12 @@ type ProgressCallback func(eventType, message string, data interface{})
 
 // AgentLoop 执行Agent循环
 func (a *Agent) AgentLoop(ctx context.Context, userInput string, historyMessages []ChatMessage) (*AgentLoopResult, error) {
-	return a.AgentLoopWithProgress(ctx, userInput, historyMessages, "", nil, nil)
+	return a.AgentLoopWithProgress(ctx, userInput, historyMessages, "", nil, nil, "")
 }
 
 // AgentLoopWithConversationID 执行Agent循环（带对话ID）
 func (a *Agent) AgentLoopWithConversationID(ctx context.Context, userInput string, historyMessages []ChatMessage, conversationID string) (*AgentLoopResult, error) {
-	return a.AgentLoopWithProgress(ctx, userInput, historyMessages, conversationID, nil, nil)
+	return a.AgentLoopWithProgress(ctx, userInput, historyMessages, conversationID, nil, nil, "")
 }
 
 // EinoSingleAgentSystemInstruction 供 Eino adk.ChatModelAgent.Instruction 使用，与 AgentLoopWithProgress 首条 system 对齐（含 system_prompt_path）。
@@ -386,7 +387,7 @@ func (a *Agent) EinoSingleAgentSystemInstruction() string {
 				path = filepath.Join(base, path)
 			}
 			if b, err := os.ReadFile(path); err != nil {
-			a.logger.Warn("Failed to read single-agent system_prompt_path, using built-in prompt", zap.String("path", path), zap.Error(err))
+				a.logger.Warn("Failed to read single-agent system_prompt_path, using built-in prompt", zap.String("path", path), zap.Error(err))
 			} else if s := strings.TrimSpace(string(b)); s != "" {
 				systemPrompt = s
 			}
@@ -396,7 +397,7 @@ func (a *Agent) EinoSingleAgentSystemInstruction() string {
 }
 
 // AgentLoopWithProgress 执行Agent循环（带进度回调和对话ID）
-func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, historyMessages []ChatMessage, conversationID string, callback ProgressCallback, roleTools []string) (*AgentLoopResult, error) {
+func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, historyMessages []ChatMessage, conversationID string, callback ProgressCallback, roleTools []string, systemPromptExtra string) (*AgentLoopResult, error) {
 	ctx = withAgentConversationID(ctx, conversationID)
 	// 设置当前对话ID（兼容未走 context 的旧路径；并发会话应以 context 为准）
 	a.mu.Lock()
@@ -420,12 +421,13 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 				path = filepath.Join(base, path)
 			}
 			if b, err := os.ReadFile(path); err != nil {
-			a.logger.Warn("Failed to read single-agent system_prompt_path, using built-in prompt", zap.String("path", path), zap.Error(err))
+				a.logger.Warn("Failed to read single-agent system_prompt_path, using built-in prompt", zap.String("path", path), zap.Error(err))
 			} else if s := strings.TrimSpace(string(b)); s != "" {
 				systemPrompt = s
 			}
 		}
 	}
+	systemPrompt = project.AppendSystemPromptBlock(systemPrompt, systemPromptExtra)
 
 	messages := []ChatMessage{
 		{
@@ -455,7 +457,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 			if len(contentPreview) > 50 {
 				contentPreview = contentPreview[:50] + "..."
 			}
-		a.logger.Info("Adding history message to context",
+			a.logger.Info("Adding history message to context",
 				zap.Int("index", i),
 				zap.String("role", msg.Role),
 				zap.String("content", contentPreview),
@@ -518,12 +520,12 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 		select {
 		case <-ctx.Done():
 			// 上下文被取消（可能是用户主动暂停或其他原因）
-		a.logger.Info("Context cancellation detected, saving current ReAct data", zap.Error(ctx.Err()))
+			a.logger.Info("Context cancellation detected, saving current ReAct data", zap.Error(ctx.Err()))
 			result.LastAgentTraceInput = currentAgentTraceInput
 			if ctx.Err() == context.Canceled {
-			result.Response = "Task was cancelled."
+				result.Response = "Task was cancelled."
 			} else {
-			result.Response = fmt.Sprintf("Task execution interrupted: %v", ctx.Err())
+				result.Response = fmt.Sprintf("Task execution interrupted: %v", ctx.Err())
 			}
 			result.LastAgentTraceOutput = result.Response
 			return result, ctx.Err()
@@ -548,18 +550,18 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 
 		// 发送迭代开始事件
 		if i == 0 {
-		sendProgress("iteration", "Starting analysis and test strategy planning", map[string]interface{}{
+			sendProgress("iteration", "Starting analysis and test strategy planning", map[string]interface{}{
 				"iteration": i + 1,
 				"total":     maxIterations,
 			})
 		} else if isLastIteration {
-		sendProgress("iteration", fmt.Sprintf("Iteration %d (final)", i+1), map[string]interface{}{
+			sendProgress("iteration", fmt.Sprintf("Iteration %d (final)", i+1), map[string]interface{}{
 				"iteration": i + 1,
 				"total":     maxIterations,
 				"isLast":    true,
 			})
 		} else {
-		sendProgress("iteration", fmt.Sprintf("Iteration %d", i+1), map[string]interface{}{
+			sendProgress("iteration", fmt.Sprintf("Iteration %d", i+1), map[string]interface{}{
 				"iteration": i + 1,
 				"total":     maxIterations,
 			})
@@ -567,7 +569,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 
 		// 记录每次调用OpenAI
 		if i == 0 {
-		a.logger.Info("Calling OpenAI",
+			a.logger.Info("Calling OpenAI",
 				zap.Int("iteration", i+1),
 				zap.Int("messagesCount", len(messages)),
 			)
@@ -587,14 +589,14 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 				)
 			}
 		} else {
-		a.logger.Info("Calling OpenAI",
+			a.logger.Info("Calling OpenAI",
 				zap.Int("iteration", i+1),
 				zap.Int("messagesCount", len(messages)),
 			)
 		}
 
 		// 调用OpenAI
-	sendProgress("progress", "Calling AI model...", nil)
+		sendProgress("progress", "Calling AI model...", nil)
 		thinkingStreamSeq++
 		thinkingStreamId := fmt.Sprintf("thinking-stream-%s-%d-%d", conversationID, i+1, thinkingStreamSeq)
 		thinkingStreamStarted := false
@@ -626,48 +628,48 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 		if err != nil {
 			// API调用失败，保存当前的ReAct输入和错误信息作为输出
 			result.LastAgentTraceInput = currentAgentTraceInput
-		errorMsg := fmt.Sprintf("OpenAI call failed: %v", err)
+			errorMsg := fmt.Sprintf("OpenAI call failed: %v", err)
 			result.Response = errorMsg
 			result.LastAgentTraceOutput = errorMsg
-		a.logger.Warn("OpenAI call failed, ReAct data saved", zap.Error(err))
-		return result, fmt.Errorf("OpenAI call failed: %w", err)
+			a.logger.Warn("OpenAI call failed, ReAct data saved", zap.Error(err))
+			return result, fmt.Errorf("OpenAI call failed: %w", err)
 		}
 
 		if response.Error != nil {
 			if handled, toolName := a.handleMissingToolError(response.Error.Message, &messages); handled {
-			sendProgress("warning", fmt.Sprintf("Model attempted to call non-existent tool: %s, prompted to use available tools.", toolName), map[string]interface{}{
+				sendProgress("warning", fmt.Sprintf("Model attempted to call non-existent tool: %s, prompted to use available tools.", toolName), map[string]interface{}{
 					"toolName": toolName,
 				})
-			a.logger.Warn("Model called non-existent tool, will retry",
+				a.logger.Warn("Model called non-existent tool, will retry",
 					zap.String("tool", toolName),
 					zap.String("error", response.Error.Message),
 				)
 				continue
 			}
 			if a.handleToolRoleError(response.Error.Message, &messages) {
-			sendProgress("warning", "Detected orphaned tool results, auto-repaired context and retrying.", map[string]interface{}{
+				sendProgress("warning", "Detected orphaned tool results, auto-repaired context and retrying.", map[string]interface{}{
 					"error": response.Error.Message,
 				})
-			a.logger.Warn("Detected orphaned tool messages, repaired and retrying",
+				a.logger.Warn("Detected orphaned tool messages, repaired and retrying",
 					zap.String("error", response.Error.Message),
 				)
 				continue
 			}
 			// OpenAI返回错误，保存当前的ReAct输入和错误信息作为输出
 			result.LastAgentTraceInput = currentAgentTraceInput
-		errorMsg := fmt.Sprintf("OpenAI error: %s", response.Error.Message)
+			errorMsg := fmt.Sprintf("OpenAI error: %s", response.Error.Message)
 			result.Response = errorMsg
 			result.LastAgentTraceOutput = errorMsg
-		return result, fmt.Errorf("OpenAI error: %s", response.Error.Message)
+			return result, fmt.Errorf("OpenAI error: %s", response.Error.Message)
 		}
 
 		if len(response.Choices) == 0 {
 			// 没有收到响应，保存当前的ReAct输入和错误信息作为输出
 			result.LastAgentTraceInput = currentAgentTraceInput
-		errorMsg := "No response received"
+			errorMsg := "No response received"
 			result.Response = errorMsg
 			result.LastAgentTraceOutput = errorMsg
-		return result, fmt.Errorf("no response received")
+			return result, fmt.Errorf("no response received")
 		}
 
 		choice := response.Choices[0]
@@ -691,7 +693,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 			})
 
 			// 发送工具调用进度
-		sendProgress("tool_calls_detected", fmt.Sprintf("Detected %d tool call(s)", len(choice.Message.ToolCalls)), map[string]interface{}{
+			sendProgress("tool_calls_detected", fmt.Sprintf("Detected %d tool call(s)", len(choice.Message.ToolCalls)), map[string]interface{}{
 				"count":     len(choice.Message.ToolCalls),
 				"iteration": i + 1,
 			})
@@ -700,7 +702,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 			for idx, toolCall := range choice.Message.ToolCalls {
 				// 发送工具调用开始事件
 				toolArgsJSON, _ := json.Marshal(toolCall.Function.Arguments)
-			sendProgress("tool_call", fmt.Sprintf("Calling tool: %s", toolCall.Function.Name), map[string]interface{}{
+				sendProgress("tool_call", fmt.Sprintf("Calling tool: %s", toolCall.Function.Name), map[string]interface{}{
 					"toolName":     toolCall.Function.Name,
 					"arguments":    string(toolArgsJSON),
 					"argumentsObj": toolCall.Function.Arguments,
@@ -714,13 +716,13 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 				if interceptor, ok := ctx.Value(toolCallInterceptorCtxKey{}).(ToolCallInterceptor); ok && interceptor != nil {
 					newArgs, interceptErr := interceptor(ctx, toolCall.Function.Name, execArgs, toolCall.ID)
 					if interceptErr != nil {
-					errorMsg := fmt.Sprintf("Tool call rejected by human: %v", interceptErr)
+						errorMsg := fmt.Sprintf("Tool call rejected by human: %v", interceptErr)
 						messages = append(messages, ChatMessage{
 							Role:       "tool",
 							ToolCallID: toolCall.ID,
 							Content:    errorMsg,
 						})
-					sendProgress("tool_result", fmt.Sprintf("Tool %s execution failed", toolCall.Function.Name), map[string]interface{}{
+						sendProgress("tool_result", fmt.Sprintf("Tool %s execution failed", toolCall.Function.Name), map[string]interface{}{
 							"toolName":   toolCall.Function.Name,
 							"success":    false,
 							"isError":    true,
@@ -763,7 +765,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 					})
 
 					// 发送工具执行失败事件
-				sendProgress("tool_result", fmt.Sprintf("Tool %s execution failed", toolCall.Function.Name), map[string]interface{}{
+					sendProgress("tool_result", fmt.Sprintf("Tool %s execution failed", toolCall.Function.Name), map[string]interface{}{
 						"toolName":   toolCall.Function.Name,
 						"success":    false,
 						"isError":    true,
@@ -774,7 +776,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 						"iteration":  i + 1,
 					})
 
-				a.logger.Warn("Tool execution failed, detailed error returned",
+					a.logger.Warn("Tool execution failed, detailed error returned",
 						zap.String("tool", toolCall.Function.Name),
 						zap.Error(err),
 					)
@@ -795,7 +797,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 					if len(resultPreview) > 200 {
 						resultPreview = resultPreview[:200] + "..."
 					}
-				sendProgress("tool_result", fmt.Sprintf("Tool %s execution completed", toolCall.Function.Name), map[string]interface{}{
+					sendProgress("tool_result", fmt.Sprintf("Tool %s execution completed", toolCall.Function.Name), map[string]interface{}{
 						"toolName":      toolCall.Function.Name,
 						"success":       !execResult.IsError,
 						"isError":       execResult.IsError,
@@ -810,7 +812,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 
 					// 如果工具返回了错误，记录日志但不中断流程
 					if execResult.IsError {
-				a.logger.Warn("Tool returned error result, continuing",
+						a.logger.Warn("Tool returned error result, continuing",
 							zap.String("tool", toolCall.Function.Name),
 							zap.String("result", execResult.Result),
 						)
@@ -820,11 +822,11 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 
 			// 如果是最后一次迭代，执行完工具后要求AI进行总结
 			if isLastIteration {
-			sendProgress("progress", "Final iteration: generating summary and next steps...", nil)
+				sendProgress("progress", "Final iteration: generating summary and next steps...", nil)
 				// 添加用户消息，要求AI进行总结
 				messages = append(messages, ChatMessage{
 					Role:    "user",
-				Content: "This is the final iteration. Please summarize all test results, findings, and completed work so far. If further testing is needed, provide a detailed next-step plan. Reply directly without calling tools.",
+					Content: "This is the final iteration. Please summarize all test results, findings, and completed work so far. If further testing is needed, provide a detailed next-step plan. Reply directly without calling tools.",
 				})
 				messages = a.applyMemoryCompression(ctx, messages, 0) // 总结时不带 tools，不预留
 				// 流式调用OpenAI获取总结（不提供工具，强制AI直接回复）
@@ -848,7 +850,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 				if strings.TrimSpace(streamText) != "" {
 					result.Response = streamText
 					result.LastAgentTraceOutput = result.Response
-				sendProgress("progress", "Summary generation complete", nil)
+					sendProgress("progress", "Summary generation complete", nil)
 					return result, nil
 				}
 				// 如果获取总结失败，跳出循环，让后续逻辑处理
@@ -873,11 +875,11 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 
 		// 如果是最后一次迭代，无论finish_reason是什么，都要求AI进行总结
 		if isLastIteration {
-		sendProgress("progress", "Final iteration: generating summary and next steps...", nil)
+			sendProgress("progress", "Final iteration: generating summary and next steps...", nil)
 			// 添加用户消息，要求AI进行总结
 			messages = append(messages, ChatMessage{
 				Role:    "user",
-			Content: "This is the final iteration. Please summarize all test results, findings, and completed work so far. If further testing is needed, provide a detailed next-step plan. Reply directly without calling tools.",
+				Content: "This is the final iteration. Please summarize all test results, findings, and completed work so far. If further testing is needed, provide a detailed next-step plan. Reply directly without calling tools.",
 			})
 			messages = a.applyMemoryCompression(ctx, messages, 0) // 总结时不带 tools，不预留
 			// 流式调用OpenAI获取总结（不提供工具，强制AI直接回复）
@@ -901,7 +903,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 			if strings.TrimSpace(streamText) != "" {
 				result.Response = streamText
 				result.LastAgentTraceOutput = result.Response
-			sendProgress("progress", "Summary generation complete", nil)
+				sendProgress("progress", "Summary generation complete", nil)
 				return result, nil
 			}
 			// 如果获取总结失败，使用当前回复作为结果
@@ -916,7 +918,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 
 		// 如果完成，返回结果
 		if choice.FinishReason == "stop" {
-	sendProgress("progress", "Generating final response...", nil)
+			sendProgress("progress", "Generating final response...", nil)
 			result.Response = choice.Message.Content
 			result.LastAgentTraceOutput = result.Response
 			return result, nil
@@ -928,7 +930,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 	sendProgress("progress", "Reached maximum iterations, generating summary...", nil)
 	finalSummaryPrompt := ChatMessage{
 		Role:    "user",
-	Content: fmt.Sprintf("Maximum iterations (%d) reached. Please summarize all test results, findings, and completed work so far. If further testing is needed, provide a detailed next-step plan. Reply directly without calling tools.", a.maxIterations),
+		Content: fmt.Sprintf("Maximum iterations (%d) reached. Please summarize all test results, findings, and completed work so far. If further testing is needed, provide a detailed next-step plan. Reply directly without calling tools.", a.maxIterations),
 	}
 	messages = append(messages, finalSummaryPrompt)
 	messages = a.applyMemoryCompression(ctx, messages, 0) // 总结时不带 tools，不预留
@@ -954,7 +956,7 @@ func (a *Agent) AgentLoopWithProgress(ctx context.Context, userInput string, his
 	if strings.TrimSpace(streamText) != "" {
 		result.Response = streamText
 		result.LastAgentTraceOutput = result.Response
-	sendProgress("progress", "Summary generation complete", nil)
+		sendProgress("progress", "Summary generation complete", nil)
 		return result, nil
 	}
 
@@ -1013,7 +1015,7 @@ func (a *Agent) getAvailableTools(roleTools []string) []Tool {
 		externalTools, err := a.externalMCPMgr.GetAllTools(ctx)
 		extMap := make(map[string]string)
 		if err != nil {
-		a.logger.Warn("Failed to get external MCP tools", zap.Error(err))
+			a.logger.Warn("Failed to get external MCP tools", zap.Error(err))
 		} else {
 			// 获取外部MCP配置，用于检查工具启用状态
 			externalMCPConfigs := a.externalMCPMgr.GetConfigs()
@@ -1492,7 +1494,6 @@ Suggestions:
 		IsError:     result != nil && result.IsError,
 	}, nil
 }
-
 
 // formatMinimalNotification formats a minimal notification for large result storage
 func (a *Agent) formatMinimalNotification(executionID string, toolName string, size int, lineCount int, filePath string) string {

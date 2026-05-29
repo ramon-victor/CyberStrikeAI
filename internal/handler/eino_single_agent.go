@@ -19,7 +19,7 @@ import (
 
 // EinoSingleAgentLoopStream Eino ADK 单代理（ChatModelAgent + Runner）流式对话；不依赖 multi_agent.enabled。
 func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
-	c.Header("Content-Type", "text/event-stream")
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
 
@@ -230,6 +230,7 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 			roleTools,
 			progressCallback,
 			chatReasoningToClientIntent(req.Reasoning),
+			h.projectBlackboardBlock(conversationID),
 		)
 
 		if result != nil && len(result.MCPExecutionIDs) > 0 {
@@ -429,6 +430,7 @@ func (h *AgentHandler) EinoSingleAgentLoop(c *gin.Context) {
 		prep.RoleTools,
 		progressCallback,
 		chatReasoningToClientIntent(req.Reasoning),
+		h.projectBlackboardBlock(prep.ConversationID),
 	)
 	if runErr != nil {
 		if shouldPersistEinoAgentTraceAfterRunError(baseCtx) {
