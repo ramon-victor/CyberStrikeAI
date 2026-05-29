@@ -226,9 +226,9 @@ function initProjectsModalEscape() {
     window._projectsModalEscapeBound = true;
     document.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
-        if (document.getElementById('project-modal')?.style.display === 'flex') closeProjectModal();
-        else if (document.getElementById('fact-modal')?.style.display === 'flex') closeFactModal();
-        else if (document.getElementById('fact-detail-modal')?.style.display === 'flex') closeFactDetailModal();
+        if (isProjectsOverlayVisible('project-modal')) closeProjectModal();
+        else if (isProjectsOverlayVisible('fact-modal')) closeFactModal();
+        else if (isProjectsOverlayVisible('fact-detail-modal')) closeFactDetailModal();
     });
 }
 
@@ -236,6 +236,7 @@ async function initProjectsPage() {
     const page = document.getElementById('page-projects');
     if (!page || page.style.display === 'none') return;
     initProjectsModalEscape();
+    syncProjectsModalBodyLock();
     updateProjectsDetailVisibility();
     await loadProjectsList();
     if (!currentProjectId && projectsCache.length) {
@@ -927,18 +928,37 @@ function openProjectsOverlay(id) {
     const el = document.getElementById(id);
     if (!el) return;
     el.style.display = 'flex';
-    document.body.classList.add('projects-modal-open');
+    syncProjectsModalBodyLock();
     const focusTarget = el.querySelector('input.form-input, textarea.form-input, select.form-input');
     if (focusTarget) {
         setTimeout(() => focusTarget.focus(), 80);
     }
 }
 
+function isProjectsOverlayVisible(id) {
+    const el = document.getElementById(id);
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    return style.display !== 'none' && style.visibility !== 'hidden';
+}
+
+function hasVisibleProjectsOverlay() {
+    const overlays = document.querySelectorAll('.projects-modal-overlay');
+    return Array.from(overlays).some((el) => {
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+    });
+}
+
+function syncProjectsModalBodyLock() {
+    if (hasVisibleProjectsOverlay()) document.body.classList.add('projects-modal-open');
+    else document.body.classList.remove('projects-modal-open');
+}
+
 function closeProjectsOverlay(id) {
     const el = document.getElementById(id);
     if (el) el.style.display = 'none';
-    const anyOpen = document.querySelector('.projects-modal-overlay[style*="flex"]');
-    if (!anyOpen) document.body.classList.remove('projects-modal-open');
+    syncProjectsModalBodyLock();
 }
 
 function showNewProjectModal() {
