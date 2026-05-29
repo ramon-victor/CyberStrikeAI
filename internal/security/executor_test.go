@@ -288,3 +288,76 @@ func TestPaginateLines(t *testing.T) {
 		t.Errorf("空列表应该返回空结果。实际: %d行", len(emptyPage.Lines))
 	}
 }
+
+func TestExecutor_BuildCommandArgsForReconTools(t *testing.T) {
+	executor, _ := setupTestExecutor(t)
+
+	t.Run("gau defaults include subdomains with valid long flag", func(t *testing.T) {
+		tool := loadToolConfigForTest(t, "gau")
+
+		args := executor.buildCommandArgs(tool.Name, tool, map[string]interface{}{
+			"domain": "controlle360.com.br",
+		})
+
+		requireArgPresent(t, args, "--subs")
+		requireArgAbsent(t, args, "-subs")
+	})
+
+	t.Run("gau providers use valid long flag", func(t *testing.T) {
+		tool := loadToolConfigForTest(t, "gau")
+
+		args := executor.buildCommandArgs(tool.Name, tool, map[string]interface{}{
+			"domain":    "controlle360.com.br",
+			"providers": "wayback,commoncrawl",
+		})
+
+		requireArgPresent(t, args, "--providers")
+		requireArgAbsent(t, args, "-providers")
+	})
+
+	t.Run("katana defaults form extraction to valid flag", func(t *testing.T) {
+		tool := loadToolConfigForTest(t, "katana")
+
+		args := executor.buildCommandArgs(tool.Name, tool, map[string]interface{}{
+			"url":      "https://staging.controlle360.com.br/",
+			"depth":    3,
+			"js_crawl": true,
+		})
+
+		requireArgPresent(t, args, "-fx")
+		requireArgAbsent(t, args, "-forms")
+	})
+}
+
+func loadToolConfigForTest(t *testing.T, name string) *config.ToolConfig {
+	t.Helper()
+
+	tool, err := config.LoadToolFromFile(filepath.Join("..", "..", "tools", name+".yaml"))
+	if err != nil {
+		t.Fatalf("load %s tool config: %v", name, err)
+	}
+
+	return tool
+}
+
+func requireArgPresent(t *testing.T, args []string, want string) {
+	t.Helper()
+
+	for _, arg := range args {
+		if arg == want {
+			return
+		}
+	}
+
+	t.Fatalf("expected args to contain %q, got %#v", want, args)
+}
+
+func requireArgAbsent(t *testing.T, args []string, forbidden string) {
+	t.Helper()
+
+	for _, arg := range args {
+		if arg == forbidden {
+			t.Fatalf("expected args not to contain %q, got %#v", forbidden, args)
+		}
+	}
+}

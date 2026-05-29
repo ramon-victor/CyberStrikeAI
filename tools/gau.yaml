@@ -27,13 +27,13 @@ parameters:
     type: "string"
     description: "Data providers (wayback,commoncrawl,otx,urlscan) "
     required: false
-    flag: "-providers"
+    flag: "--providers"
     format: "flag"
   - name: "include_subs"
     type: "bool"
     description: "Include subdomains"
     required: false
-    flag: "-subs"
+    flag: "--subs"
     format: "flag"
     default: true
   - name: "additional_args"
@@ -42,9 +42,9 @@ parameters:
       Additional Gau parameters. Used to pass Gau options not defined in the parameter list.
 
       **Example Values:**
-      - "-o output.txt": Output to file
-      - "-t": Number of threads
-      - "-b": Blacklist extensions
+      - "--o output.txt": Output to file
+      - "--threads 10": Number of threads
+      - "--blacklist png,jpg,gif": Blacklist extensions
 
       **Notes:**
       - Separate multiple parameters with spaces

@@ -82,6 +82,7 @@ ARG TARGETARCH
 COPY requirements.txt ./requirements.txt
 COPY scripts/docker/install-system-tools.sh /usr/local/bin/install-system-tools.sh
 COPY scripts/docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY scripts/docker/nuclei-wrapper.sh /usr/local/bin/nuclei-wrapper.sh
 
 RUN chmod +x /usr/local/bin/install-system-tools.sh /usr/local/bin/docker-entrypoint.sh \
     && /usr/local/bin/install-system-tools.sh \
@@ -89,6 +90,20 @@ RUN chmod +x /usr/local/bin/install-system-tools.sh /usr/local/bin/docker-entryp
 
 COPY --from=app-builder /out/cyberstrike-ai ./cyberstrike-ai
 COPY --from=tools-builder /out/bin/ /opt/cyberstrike/bin/
+RUN set -eu; \
+    if [ -x /opt/cyberstrike/bin/nuclei ]; then \
+        mv /opt/cyberstrike/bin/nuclei /opt/cyberstrike/bin/nuclei.real; \
+        install -m 0755 /usr/local/bin/nuclei-wrapper.sh /opt/cyberstrike/bin/nuclei; \
+        mkdir -p /opt/cyberstrike/nuclei-templates; \
+        if NUCLEI_TEMPLATES_PATH=/opt/cyberstrike/nuclei-templates /opt/cyberstrike/bin/nuclei.real -update-templates -ud /opt/cyberstrike/nuclei-templates; then \
+            date +%s >/opt/cyberstrike/nuclei-templates/.cyberstrike-last-template-update; \
+        else \
+            echo "cyberstrike docker warning: failed to preinstall nuclei templates; runtime wrapper will retry" >&2; \
+        fi; \
+    else \
+        echo "missing required tool: nuclei" >&2; \
+        exit 1; \
+    fi
 COPY --from=rust-tools-builder /out/bin/ /opt/cyberstrike/bin/
 COPY --from=radare2-builder /opt/radare2/ /opt/radare2/
 COPY --from=node-tools-builder /usr/local/bin/node /usr/local/bin/node
