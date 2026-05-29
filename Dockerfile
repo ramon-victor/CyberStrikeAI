@@ -41,8 +41,9 @@ RUN apt-get update \
 
 RUN cargo install rustscan --locked \
     && cargo install pwninit --locked \
+    && cargo install x8 \
     && mkdir -p /out/bin \
-    && cp /usr/local/cargo/bin/rustscan /usr/local/cargo/bin/pwninit /out/bin/
+    && cp /usr/local/cargo/bin/rustscan /usr/local/cargo/bin/pwninit /usr/local/cargo/bin/x8 /out/bin/
 
 FROM debian:bookworm AS radare2-builder
 
@@ -94,7 +95,7 @@ COPY --from=node-tools-builder /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-tools-builder /usr/local/bin/spectral /usr/local/bin/spectral
 COPY --from=node-tools-builder /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
 
-RUN for command in rustscan amass responder linpeas.sh one_gadget r2 ROPgadget ropper pwninit volatility3 foremost tshark tcpdump trivy prowler scout kube-hunter kube-bench smbmap enum4linux-ng arp-scan fierce paramspider katana spectral; do \
+RUN for command in rustscan amass responder linpeas.sh one_gadget r2 ROPgadget ropper pwninit x8 volatility3 foremost tshark tcpdump trivy prowler scout kube-hunter kube-bench smbmap enum4linux-ng arp-scan fierce paramspider katana spectral; do \
         command -v "${command}" >/dev/null || { echo "missing required tool: ${command}" >&2; exit 1; }; \
     done
 
