@@ -42,6 +42,8 @@ function rolePlainDescription(role) {
 let currentRole = localStorage.getItem('currentRole') || '';
 const DEFAULT_ROLE_NAME = 'Default';
 let roles = [];
+let rolesLoaded = false;
+let rolesLoadingPromise = null;
 let rolesSearchKeyword = ''; // role search keyword
 let rolesSearchTimeout = null; // search debounce timer
 let allRoleTools = []; // Store all tool list (for role tool selection)
@@ -94,30 +96,36 @@ function sortRoles(rolesArray) {
 
 // Load all roles
 async function loadRoles() {
-    if (window.i18nReady && typeof window.i18nReady.then === 'function') {
+    if (rolesLoadingPromise) {
+        return rolesLoadingPromise;
+    }
+
+    rolesLoadingPromise = (async () => {
         try {
-            await window.i18nReady;
-        } catch (e) { /* ignore */ }
-    }
-    try {
-        const response = await apiFetch('/api/roles');
-        if (!response.ok) {
-            throw new Error('Failed to load roles');
+            const response = await apiFetch('/api/roles');
+            if (!response.ok) {
+                throw new Error('Failed to load roles');
+            }
+            const data = await response.json();
+            roles = Array.isArray(data.roles) ? data.roles : [];
+            rolesLoaded = true;
+            updateRoleSelectorDisplay();
+            renderRoleSelectionSidebar(); // Render sidebar role list
+            return roles;
+        } catch (error) {
+            console.error('Failed to load roles:', error);
+            // Use i18n for notice text; if i18n is not initialized yet, fall back to readable English instead of exposing the key.
+            var loadFailedLabel = (typeof window !== 'undefined' && typeof window.t === 'function')
+                ? window.t('roles.loadFailed')
+                : 'Failed to load roles';
+            showNotification(loadFailedLabel + ': ' + error.message, 'error');
+            return roles;
+        } finally {
+            rolesLoadingPromise = null;
         }
-        const data = await response.json();
-        roles = data.roles || [];
-        updateRoleSelectorDisplay();
-        renderRoleSelectionSidebar(); // Render sidebar role list
-        return roles;
-    } catch (error) {
-        console.error('Failed to load roles:', error);
-        // Use i18n for notice text; if i18n is not initialized yet, fall back to readable English instead of exposing the key.
-        var loadFailedLabel = (typeof window !== 'undefined' && typeof window.t === 'function')
-            ? window.t('roles.loadFailed')
-            : 'Failed to load roles';
-        showNotification(loadFailedLabel + ': ' + error.message, 'error');
-        return [];
-    }
+    })();
+
+    return rolesLoadingPromise;
 }
 
 // Handle role changes
@@ -188,8 +196,20 @@ function renderRoleSelectionSidebar() {
     const roleList = document.getElementById('role-selection-list');
     if (!roleList) return;
 
-    // Clear list
     roleList.innerHTML = '';
+
+    // The default role is a frontend/backend convention: empty selected role means
+    // "use the default prompt and all enabled tools". Render it even before the
+    // asynchronous /api/roles request finishes so the opened selector is never empty.
+    const configuredDefaultRole = roles.find(r => r.name === DEFAULT_ROLE_NAME);
+    const defaultRole = configuredDefaultRole || {
+        name: DEFAULT_ROLE_NAME,
+        name_en: 'Default',
+        description: _t('roles.defaultRoleDescription'),
+        description_en: _t('roles.defaultRoleDescription'),
+        icon: '🔵',
+        enabled: true
+    };
 
     // Get the icon from role config, or use the default icon if not configured.
     function getRoleIcon(role) {
@@ -209,35 +229,29 @@ function renderRoleSelectionSidebar() {
             }
             return icon;
         }
-        // If no icon is configured,generate default icon from the first character of the role name
-        // use some common default icons
-        return '👤';
+        return role.name === DEFAULT_ROLE_NAME ? '🔵' : '👤';
     }
-    
-    // Sort roles: default role first,others by name
-    const sortedRoles = sortRoles(roles);
-    
-    // Show only enabled roles
-    const enabledSortedRoles = sortedRoles.filter(r => r.enabled !== false);
-    
-    enabledSortedRoles.forEach(role => {
-        const isDefaultRole = role.name === DEFAULT_ROLE_NAME;
-        const isSelected = isDefaultRole ? (currentRole === '' || currentRole === DEFAULT_ROLE_NAME) : (currentRole === role.name);
+
+    function appendRoleItem(role, isDefaultRole) {
+        const isSelected = isDefaultRole
+            ? (currentRole === '' || currentRole === DEFAULT_ROLE_NAME)
+            : (currentRole === role.name);
         const roleItem = document.createElement('div');
         roleItem.className = 'role-selection-item-main' + (isSelected ? ' selected' : '');
+        roleItem.setAttribute('role', 'option');
+        roleItem.setAttribute('aria-selected', isSelected ? 'true' : 'false');
         roleItem.onclick = () => {
             selectRole(role.name);
             closeRoleSelectionPanel(); // close panel automatically after selection
         };
         const icon = getRoleIcon(role);
-        
-        // Handle default role description
+
         const plainDesc = rolePlainDescription(role);
         let description = plainDesc || _t('roles.noDescription');
         if (isDefaultRole && !plainDesc) {
             description = _t('roles.defaultRoleDescription');
         }
-        
+
         roleItem.innerHTML = `
             <div class="role-selection-item-icon-main">${icon}</div>
             <div class="role-selection-item-content-main">
@@ -247,7 +261,18 @@ function renderRoleSelectionSidebar() {
             ${isSelected ? '<div class="role-selection-checkmark-main">✓</div>' : ''}
         `;
         roleList.appendChild(roleItem);
-    });
+    }
+
+    appendRoleItem(defaultRole, true);
+
+    // Sort roles: default role first,others by name
+    const sortedRoles = sortRoles(roles);
+
+    // Show only enabled non-default roles. Default is rendered above so it is
+    // present during loading and never duplicated when the API also returns it.
+    sortedRoles
+        .filter(r => r.name && r.name !== DEFAULT_ROLE_NAME && r.enabled !== false)
+        .forEach(role => appendRoleItem(role, false));
 }
 
 // Select role
@@ -290,6 +315,13 @@ function toggleRoleSelectionPanel() {
             closeChatReasoningPanel();
         }
         renderRoleSelectionSidebar();
+        if (!rolesLoaded || roles.length === 0) {
+            loadRoles().then(() => {
+                if (isRoleSelectionPanelOpen()) {
+                    renderRoleSelectionSidebar();
+                }
+            });
+        }
         panel.style.display = 'flex'; // useflex layout
         // Add visual feedback for open state
         if (roleSelectorBtn) {

@@ -742,6 +742,14 @@ type ParameterConfig struct {
 }
 
 func Load(path string) (*Config, error) {
+	if absPath, err := filepath.Abs(path); err == nil {
+		if resolvedPath, err := filepath.EvalSymlinks(absPath); err == nil {
+			path = resolvedPath
+		} else {
+			path = absPath
+		}
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read configuration file: %w", err)
@@ -780,7 +788,7 @@ func Load(path string) (*Config, error) {
 		configDir := filepath.Dir(path)
 		toolsDir := cfg.Security.ToolsDir
 
-		// if relative, resolve from the configuration file directory
+		// if relative, resolve from the real configuration file directory
 		if !filepath.IsAbs(toolsDir) {
 			toolsDir = filepath.Join(configDir, toolsDir)
 		}
@@ -829,7 +837,7 @@ func Load(path string) (*Config, error) {
 		configDir := filepath.Dir(path)
 		rolesDir := cfg.RolesDir
 
-		// if relative, resolve from the configuration file directory
+		// if relative, resolve from the real configuration file directory
 		if !filepath.IsAbs(rolesDir) {
 			rolesDir = filepath.Join(configDir, rolesDir)
 		}

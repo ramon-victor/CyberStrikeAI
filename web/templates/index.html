@@ -982,7 +982,7 @@
                                     </div>
                                 </div>
                                 <div id="role-selector-wrapper" class="role-selector-wrapper">
-                                    <button type="button" id="role-selector-btn" class="role-selector-btn" onclick="toggleRoleSelectionPanel()" data-i18n="chat.selectRole" data-i18n-attr="title" title="Select role">
+                                    <button type="button" id="role-selector-btn" class="role-selector-btn" onclick="event.stopPropagation(); toggleRoleSelectionPanel()" data-i18n="chat.selectRole" data-i18n-attr="title" title="Select role" aria-haspopup="listbox" aria-expanded="false">
                                         <span id="role-selector-icon" class="role-selector-icon">🔵</span>
                                         <span id="role-selector-text" class="role-selector-text" data-i18n="chat.defaultRole">Default</span>
                                         <svg class="role-selector-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -990,10 +990,10 @@
                                         </svg>
                                     </button>
                                     <!-- UI section -->
-                                    <div id="role-selection-panel" class="role-selection-panel" style="display: none;">
+                                    <div id="role-selection-panel" class="role-selection-panel" style="display: none;" role="listbox" aria-labelledby="role-selection-panel-title">
                                         <div class="role-selection-panel-header">
-                                            <h3 class="role-selection-panel-title" data-i18n="chatGroup.rolePanelTitle">Select role</h3>
-                                            <button class="role-selection-panel-close" onclick="closeRoleSelectionPanel()" data-i18n="common.close" data-i18n-attr="title" title="Close">
+                                            <h3 id="role-selection-panel-title" class="role-selection-panel-title" data-i18n="chatGroup.rolePanelTitle">Select role</h3>
+                                            <button type="button" class="role-selection-panel-close" onclick="event.stopPropagation(); closeRoleSelectionPanel()" data-i18n="common.close" data-i18n-attr="title" title="Close">
                                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                                     <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                                                 </svg>

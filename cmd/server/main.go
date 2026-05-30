@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -34,6 +35,13 @@ func main() {
 	if strings.HasPrefix(cp, "-") {
 		fmt.Fprintf(os.Stderr, "Invalid -config path %q.\nFor HTTPS with config: ./cyberstrike-ai --https -config config.yaml (-config must be followed by a yaml file path).\n", cp)
 		os.Exit(2)
+	}
+	if absPath, err := filepath.Abs(cp); err == nil {
+		if resolvedPath, err := filepath.EvalSymlinks(absPath); err == nil {
+			cp = resolvedPath
+		} else {
+			cp = absPath
+		}
 	}
 	cfg, err := config.Load(cp)
 	if err != nil {
