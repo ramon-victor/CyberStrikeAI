@@ -10,7 +10,7 @@
 # ============================================
 
 # Version shown in the frontend (optional; uses the default version when empty)
-version: "v1.6.27"
+version: "v1.6.28"
 # Server settings
 server:
   host: 0.0.0.0 # Listen address; 0.0.0.0 listens on all network interfaces

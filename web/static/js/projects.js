@@ -336,6 +336,50 @@ function formatSeverityBadge(severity) {
     return `<span class="projects-severity ${cls}">${escapeHtml(severity || '—')}</span>`;
 }
 
+function formatVulnStatusBadge(status) {
+    const s = (status || 'open').toLowerCase();
+    const labelMap = {
+        open: 'vulnerabilityPage.statusOpen',
+        confirmed: 'vulnerabilityPage.statusConfirmed',
+        fixed: 'vulnerabilityPage.statusFixed',
+        false_positive: 'vulnerabilityPage.statusFalsePositive',
+    };
+    const label = labelMap[s] ? tp(labelMap[s]) : status || '—';
+    const cls = ['open', 'confirmed', 'fixed', 'false_positive'].includes(s) ? s : 'open';
+    return `<span class="status-badge status-${escapeHtml(cls)}">${escapeHtml(label)}</span>`;
+}
+
+let _projectVulnsFilterDebounce = null;
+
+function buildProjectVulnsQueryParams() {
+    const params = new URLSearchParams();
+    params.set('project_id', currentProjectId);
+    params.set('limit', '200');
+    const search = document.getElementById('project-vulns-search')?.value?.trim();
+    const severity = document.getElementById('project-vulns-filter-severity')?.value?.trim();
+    const status = document.getElementById('project-vulns-filter-status')?.value?.trim();
+    if (search) params.set('q', search);
+    if (severity) params.set('severity', severity);
+    if (status) params.set('status', status);
+    return params;
+}
+
+function projectVulnsHasActiveFilter() {
+    return !!(
+        document.getElementById('project-vulns-search')?.value?.trim() ||
+        document.getElementById('project-vulns-filter-severity')?.value ||
+        document.getElementById('project-vulns-filter-status')?.value
+    );
+}
+
+function debouncedLoadProjectVulnerabilities() {
+    if (_projectVulnsFilterDebounce) clearTimeout(_projectVulnsFilterDebounce);
+    _projectVulnsFilterDebounce = setTimeout(() => {
+        _projectVulnsFilterDebounce = null;
+        loadProjectVulnerabilities();
+    }, 280);
+}
+
 function getProjectsListFilter() {
     return (document.getElementById('projects-list-search')?.value || '').trim().toLowerCase();
 }
@@ -417,10 +461,16 @@ async function selectProject(id) {
     const catEl = document.getElementById('project-facts-filter-category');
     const confEl = document.getElementById('project-facts-filter-confidence');
     const sparseEl = document.getElementById('project-facts-filter-sparse');
+    const vulnSearchEl = document.getElementById('project-vulns-search');
+    const vulnSevEl = document.getElementById('project-vulns-filter-severity');
+    const vulnStatusEl = document.getElementById('project-vulns-filter-status');
     if (searchEl) searchEl.value = '';
     if (catEl) catEl.value = '';
     if (confEl) confEl.value = '';
     if (sparseEl) sparseEl.checked = false;
+    if (vulnSearchEl) vulnSearchEl.value = '';
+    if (vulnSevEl) vulnSevEl.value = '';
+    if (vulnStatusEl) vulnStatusEl.value = '';
     renderProjectsSidebar();
     updateProjectsDetailVisibility();
     try {
@@ -846,15 +896,18 @@ async function loadProjectVulnerabilities() {
     const tbody = document.getElementById('project-vulns-tbody');
     if (!tbody || !currentProjectId) return;
     tbody.innerHTML = `<tr class="is-empty-row"><td colspan="4">${escapeHtml(tp('common.loading'))}</td></tr>`;
-    const res = await apiFetch(`/api/vulnerabilities?project_id=${encodeURIComponent(currentProjectId)}&limit=100`);
+    const qs = buildProjectVulnsQueryParams().toString();
+    const res = await apiFetch(`/api/vulnerabilities?${qs}`);
     if (!res.ok) {
         tbody.innerHTML = `<tr class="is-empty-row"><td colspan="4">${escapeHtml(tp('common.loadFailed'))}</td></tr>`;
         return;
     }
     const data = await res.json();
-    const items = data.Vulnerabilities || data.vulnerabilities || data.items || [];
+    const items = data.Vulnerabilities || data.vulnerabilities || data.items || (Array.isArray(data) ? data : []);
     if (!items.length) {
-        tbody.innerHTML = `<tr class="is-empty-row"><td colspan="4">${escapeHtml(tp('projects.noVulnerabilityRecords'))}</td></tr>`;
+        tbody.innerHTML = `<tr class="is-empty-row"><td colspan="4">${
+            projectVulnsHasActiveFilter() ? tp('projects.noMatchingVulns') : tp('projects.noVulnerabilityRecords')
+        }</td></tr>`;
         refreshProjectHeaderStats();
         return;
     }
@@ -863,7 +916,7 @@ async function loadProjectVulnerabilities() {
         return `<tr>
             <td class="cell-summary" title="${escapeHtml(v.title)}">${escapeHtml(v.title)}</td>
             <td>${formatSeverityBadge(v.severity)}</td>
-            <td>${escapeHtml(v.status)}</td>
+            <td>${formatVulnStatusBadge(v.status)}</td>
             <td class="col-actions">
                 <div class="projects-table-actions">
                     <button type="button" class="projects-action-btn projects-action-btn--view" data-vuln-id="${idEsc}" onclick="openVulnerabilityDetail(this.dataset.vulnId)">${escapeHtml(tp('common.view'))}</button>
@@ -1542,6 +1595,8 @@ window.openVulnerabilitiesForProject = openVulnerabilitiesForProject;
 window.openVulnerabilityDetail = openVulnerabilityDetail;
 window.filterProjectsList = filterProjectsList;
 window.debouncedLoadProjectFacts = debouncedLoadProjectFacts;
+window.debouncedLoadProjectVulnerabilities = debouncedLoadProjectVulnerabilities;
+window.loadProjectVulnerabilities = loadProjectVulnerabilities;
 window.linkFactToExistingVulnerability = linkFactToExistingVulnerability;
 window.createVulnerabilityFromCurrentFact = createVulnerabilityFromCurrentFact;
 window.viewFactsForVulnerability = viewFactsForVulnerability;

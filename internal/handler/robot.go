@@ -28,20 +28,25 @@ import (
 )
 
 const (
-	robotCmdHelp       = "help"
-	robotCmdList       = "list"
-	robotCmdListAlt    = "conversation list"
-	robotCmdSwitch     = "switch"
-	robotCmdContinue   = "continue"
-	robotCmdNew        = "new conversation"
-	robotCmdClear      = "clear"
-	robotCmdCurrent    = "current"
-	robotCmdStop       = "stop"
-	robotCmdRoles      = "role"
-	robotCmdRolesList  = "roles"
-	robotCmdSwitchRole = "switch role"
-	robotCmdDelete     = "delete"
-	robotCmdVersion    = "version"
+	robotCmdHelp          = "help"
+	robotCmdList          = "list"
+	robotCmdListAlt       = "conversation list"
+	robotCmdSwitch        = "switch"
+	robotCmdContinue      = "continue"
+	robotCmdNew           = "new conversation"
+	robotCmdClear         = "clear"
+	robotCmdCurrent       = "current"
+	robotCmdStop          = "stop"
+	robotCmdRoles         = "role"
+	robotCmdRolesList     = "roles"
+	robotCmdSwitchRole    = "switch role"
+	robotCmdDelete        = "delete"
+	robotCmdVersion       = "version"
+	robotCmdProjects      = "projects"
+	robotCmdProjectsList  = "projects list"
+	robotCmdBindProject   = "bind project"
+	robotCmdNewProject    = "new project"
+	robotCmdUnbindProject = "unbind project"
 )
 
 // RobotHandler WeCom/Dingtalk/Lark robot callback handler
@@ -269,21 +274,176 @@ func (h *RobotHandler) robotMessageTimeout() time.Duration {
 }
 
 func (h *RobotHandler) cmdHelp() string {
-	return "**[CyberStrikeAI robot commands]**\n\n" +
-		"- `help` — Show this help\n" +
-		"- `list` — List conversation titles and IDs\n" +
-		"- `switch <ID>` — Switch to the specified conversation\n" +
-		"- `new` — Start a new conversation\n" +
-		"- `clear` — Clear current context\n" +
-		"- `current` — Show current conversation ID and title\n" +
-		"- `stop` — Stop the running task\n" +
-		"- `roles` — List available roles\n" +
-		"- `role <name>` — Switch current role\n" +
-		"- `delete <ID>` — Delete the specified conversation\n" +
-		"- `version` — Show current version\n\n" +
-		"---\n" +
-		"Outside these commands, send any text to the AI for penetration testing / security analysis.\n" +
-		"Otherwise, send any text for AI penetration testing / security analysis."
+	var b strings.Builder
+	b.WriteString("**[CyberStrikeAI robot commands]**\n\n")
+	b.WriteString("**[General]**\n")
+	b.WriteString("- `help` — Show this help\n")
+	b.WriteString("- `version` — Show current version\n")
+	b.WriteString("\n**[Conversation]**\n")
+	b.WriteString("- `list` — List all conversation titles and IDs\n")
+	b.WriteString("- `switch <ID>` — Switch to the specified conversation\n")
+	b.WriteString("- `new` — Start a new conversation\n")
+	b.WriteString("- `clear` — Clear current context\n")
+	b.WriteString("- `current` — Show current conversation, role, and project\n")
+	b.WriteString("- `stop` — Stop the running task\n")
+	b.WriteString("- `delete <ID>` — Delete the specified conversation\n")
+	b.WriteString("\n**[Role]**\n")
+	b.WriteString("- `roles` — List available roles\n")
+	b.WriteString("- `role <name>` — Switch current role\n")
+	if h.projectsEnabled() {
+		b.WriteString("\n**[Project]**\n")
+		b.WriteString("- `projects` — List all projects\n")
+		b.WriteString("- `new project <name>` — Create a project and bind current conversation\n")
+		b.WriteString("- `bind project <ID|name>` — Bind current conversation to an existing project\n")
+		b.WriteString("- `unbind project` — Unbind project from current conversation\n")
+	}
+	b.WriteString("\n---\n")
+	b.WriteString("Outside these commands, send any text to the AI for penetration testing / security analysis.")
+	return b.String()
+}
+
+func (h *RobotHandler) projectsEnabled() bool {
+	return h.config != nil && h.config.Project.Enabled
+}
+
+func (h *RobotHandler) resolveProjectByIDOrName(idOrName string) (*database.Project, string) {
+	idOrName = strings.TrimSpace(idOrName)
+	if idOrName == "" {
+		return nil, "Please specify a project ID or name, e.g.: bind project xxx-xxx"
+	}
+	if p, err := h.db.GetProject(idOrName); err == nil {
+		return p, ""
+	}
+	list, err := h.db.ListProjects("", 200, 0)
+	if err != nil {
+		return nil, "Failed to list projects: " + err.Error()
+	}
+	var matches []*database.Project
+	for _, p := range list {
+		if p.Name == idOrName {
+			matches = append(matches, p)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Sprintf("Project \"%s\" not found. Send `projects` to view the list.", idOrName)
+	case 1:
+		return matches[0], ""
+	default:
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("Multiple projects match name \"%s\". Use the ID to bind:\n", idOrName))
+		for _, p := range matches {
+			b.WriteString(fmt.Sprintf("- %s\n  ID: %s\n", p.Name, p.ID))
+		}
+		return nil, strings.TrimSuffix(b.String(), "\n")
+	}
+}
+
+func (h *RobotHandler) formatProjectLabel(projectID string) string {
+	if strings.TrimSpace(projectID) == "" {
+		return "Unbound"
+	}
+	if p, err := h.db.GetProject(projectID); err == nil {
+		return fmt.Sprintf("\"%s\" (%s)", p.Name, p.ID)
+	}
+	return projectID
+}
+
+func (h *RobotHandler) cmdProjects() string {
+	if !h.projectsEnabled() {
+		return "Projects are disabled (config.project.enabled)."
+	}
+	list, err := h.db.ListProjects("", 50, 0)
+	if err != nil {
+		return "Failed to list projects: " + err.Error()
+	}
+	if len(list) == 0 {
+		return "No projects yet. Send `new project <name>` to create and bind to the current conversation."
+	}
+	var b strings.Builder
+	b.WriteString("**[Project list]**\n")
+	for i, p := range list {
+		if i >= 20 {
+			b.WriteString("… showing only the first 20 items\n")
+			break
+		}
+		status := p.Status
+		if status == "" {
+			status = "active"
+		}
+		b.WriteString(fmt.Sprintf("- %s [%s]\n  ID: %s\n", p.Name, status, p.ID))
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func (h *RobotHandler) cmdBindProject(platform, userID, idOrName string) string {
+	if !h.projectsEnabled() {
+		return "Projects are disabled (config.project.enabled)."
+	}
+	p, errMsg := h.resolveProjectByIDOrName(idOrName)
+	if p == nil {
+		return errMsg
+	}
+	convID, _ := h.getOrCreateConversation(platform, userID, "")
+	if convID == "" {
+		return "Could not get current conversation; please try again later."
+	}
+	if err := h.db.SetConversationProjectID(convID, p.ID); err != nil {
+		return "Bind failed: " + err.Error()
+	}
+	return fmt.Sprintf("Bound current conversation to project: \"%s\"\nID: %s", p.Name, p.ID)
+}
+
+func (h *RobotHandler) cmdNewProject(platform, userID, name string) string {
+	if !h.projectsEnabled() {
+		return "Projects are disabled (config.project.enabled)."
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "Please specify a project name, e.g.: new project Target Pentest"
+	}
+	p := &database.Project{Name: name, Status: "active"}
+	created, err := h.db.CreateProject(p)
+	if err != nil {
+		return "Create project failed: " + err.Error()
+	}
+	convID, _ := h.getOrCreateConversation(platform, userID, name)
+	if convID == "" {
+		return fmt.Sprintf("Project created: \"%s\"\nID: %s\n(Failed to bind to current conversation; please send `bind project %s` manually)", created.Name, created.ID, created.ID)
+	}
+	if err := h.db.SetConversationProjectID(convID, created.ID); err != nil {
+		return fmt.Sprintf("Project created: \"%s\"\nID: %s\nBind failed: %s", created.Name, created.ID, err.Error())
+	}
+	return fmt.Sprintf("Project created and bound to current conversation: \"%s\"\nID: %s", created.Name, created.ID)
+}
+
+func (h *RobotHandler) cmdUnbindProject(platform, userID string) string {
+	if !h.projectsEnabled() {
+		return "Projects are disabled (config.project.enabled)."
+	}
+	sk := h.sessionKey(platform, userID)
+	h.mu.RLock()
+	convID := h.sessions[sk]
+	h.mu.RUnlock()
+	if convID == "" {
+		if persistedConvID, _ := h.loadSessionBinding(sk); persistedConvID != "" {
+			convID = persistedConvID
+		}
+	}
+	if convID == "" {
+		return "No active conversation; nothing to unbind."
+	}
+	projectID, err := h.db.GetConversationProjectID(convID)
+	if err != nil {
+		return "Failed to get conversation project: " + err.Error()
+	}
+	if strings.TrimSpace(projectID) == "" {
+		return "Current conversation is not bound to a project."
+	}
+	if err := h.db.SetConversationProjectID(convID, ""); err != nil {
+		return "Unbind failed: " + err.Error()
+	}
+	return "Unbound project from current conversation."
 }
 
 func (h *RobotHandler) cmdList() string {
@@ -357,7 +517,12 @@ func (h *RobotHandler) cmdCurrent(platform, userID string) string {
 		return "Current conversation ID: " + convID + " (failed to get title)"
 	}
 	role := h.getRole(platform, userID)
-	return fmt.Sprintf("Current conversation: `%s`\nID: %s\nCurrent role: %s", conv.Title, conv.ID, role)
+	reply := fmt.Sprintf("Current conversation: `%s`\nID: %s\nCurrent role: %s", conv.Title, conv.ID, role)
+	if h.projectsEnabled() {
+		projectID, _ := h.db.GetConversationProjectID(conv.ID)
+		reply += "\nCurrent project: " + h.formatProjectLabel(projectID)
+	}
+	return reply
 }
 
 func (h *RobotHandler) cmdRoles() string {
@@ -494,6 +659,26 @@ func (h *RobotHandler) handleRobotCommand(platform, userID, text string) (string
 		return h.cmdDelete(platform, userID, convID), true
 	case text == robotCmdVersion || text == "version":
 		return h.cmdVersion(), true
+	case text == robotCmdProjects || text == robotCmdProjectsList || text == "projects":
+		return h.cmdProjects(), true
+	case text == robotCmdUnbindProject || text == "unbind project":
+		return h.cmdUnbindProject(platform, userID), true
+	case strings.HasPrefix(text, robotCmdNewProject+" ") || strings.HasPrefix(text, "new project "):
+		var name string
+		if strings.HasPrefix(text, robotCmdNewProject+" ") {
+			name = strings.TrimSpace(text[len(robotCmdNewProject)+1:])
+		} else {
+			name = strings.TrimSpace(text[len("new project "):])
+		}
+		return h.cmdNewProject(platform, userID, name), true
+	case strings.HasPrefix(text, robotCmdBindProject+" ") || strings.HasPrefix(text, "bind project "):
+		var idOrName string
+		if strings.HasPrefix(text, robotCmdBindProject+" ") {
+			idOrName = strings.TrimSpace(text[len(robotCmdBindProject)+1:])
+		} else {
+			idOrName = strings.TrimSpace(text[len("bind project "):])
+		}
+		return h.cmdBindProject(platform, userID, idOrName), true
 	default:
 		return "", false
 	}
