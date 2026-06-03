@@ -1,11 +1,11 @@
 # Eino 多代理改造说明（DeepAgent）
 
-本文档记录 **单 Agent（原有 ReAct）** 与 **多 Agent（CloudWeGo Eino `adk/prebuilt/deep`）** 并存的改造范围、进度与后续事项。
+This document records the change scope, progress, and follow-up items for the **Eino single-agent (ADK)** and **multi-agent** (CloudWeGo Eino `adk/prebuilt`) paths. The native ReAct execution path has been removed.
 
 ## 总体结论
 
 - **改造已可用于生产试验**：流式对话、MCP 工具桥接、配置开关、前端模式切换均已落地。
-- **入口策略**：主聊天与 WebShell 在开启多代理且用户选择 **Deep / Plan-Execute / Supervisor** 时走 `/api/multi-agent/stream`，请求体字段 **`orchestration`** 指定当次编排（与界面一致）；**原生 ReAct** 走 `/api/agent-loop/stream`。机器人、批量任务无该请求体时服务端按 **`deep`** 执行。均需 `multi_agent.enabled`。
+- **Entry strategy**: **single-agent** uses `/api/eino-agent/stream`; multi-agent modes (**Deep / Plan-Execute / Supervisor**) use `/api/multi-agent/stream`, with the request body **`orchestration`** selecting the orchestration. Robots default to `robot_default_agent_mode: eino_single`; batch queues default to `eino_single`, and multi-agent modes require `multi_agent.enabled`.
 
 ## 已完成项
 
@@ -18,13 +18,13 @@
 | 编排 | `internal/multiagent/runner.go`：`deep.New` + 子 `ChatModelAgent` + `adk.NewRunner`（`EnableStreaming: true`，可选 `CheckPointStore`），事件映射为现有 SSE `tool_call` / `response_delta` 等。 |
 | HTTP | `POST /api/multi-agent`（非流式）、`POST /api/multi-agent/stream`（SSE）；路由**常注册**，是否可用由运行时 `multi_agent.enabled` 决定（流式未启用时 SSE 内 `error` + `done`）。 |
 | 会话准备 | `internal/handler/multi_agent_prepare.go`：`prepareMultiAgentSession`（含 **WebShell** `CreateConversationWithWebshell`、工具白名单与单代理一致）。 |
-| 单 Agent | `internal/agent` 增加 `ToolsForRole`、`ExecuteMCPToolForConversation`；原 `/api/agent-loop` 未删改语义。 |
-| 前端 | 主聊天 / WebShell：`multi_agent.enabled` 时可选 **原生 ReAct** 与三种 Eino 命名，多代理路径在 JSON 中带 `orchestration`。设置页不再配置预置编排项；`plan_execute` 外层循环上限等仍可在设置中保存。 |
-| 流式兼容 | 与 `/api/agent-loop/stream` 共用 `handleStreamEvent`：`conversation`、`progress`、`response_start` / `response_delta`、`thinking` / `thinking_stream_*`（模型 `ReasoningContent`）、`tool_*`、`response`、`done` 等；`tool_result` 带 `toolCallId` 与 `tool_call` 联动；`data.mcpExecutionIds` 与进度 i18n 已对齐。 |
+| Single Agent | `internal/agent` is the MCP/tool layer (`ToolsForRole`, `ExecuteMCPToolForConversation`); single-agent orchestration uses `RunEinoSingleChatModelAgent` (`/api/eino-agent*`). |
+| Frontend | Main chat / WebShell: **Eino single-agent** (`/api/eino-agent/stream`) and **Deep / Plan-Execute / Supervisor** (`/api/multi-agent/stream` + `orchestration`); `multi_agent.enabled` controls whether multi-agent options are shown. |
+| Streaming compatibility | Eino single-agent/multi-agent paths share `handleStreamEvent` with the Web UI: `conversation`, `progress`, `response_start` / `response_delta`, `thinking` / `thinking_stream_*`, `tool_*`, `response`, `done`, and related events. |
 | 批量任务 | 队列 `agentMode` 为 `deep` / `plan_execute` / `supervisor` 时子任务带对应 `orchestration` 调用 `RunDeepAgent`；旧值 `multi` 与「`agentMode` 为空且 `batch_use_multi_agent: true`」均按 `deep`。 |
 | 配置 API | `GET /api/config` 返回 `multi_agent: { enabled, robot_use_multi_agent, sub_agent_count }`；`PUT /api/config` 可更新 `enabled`、`robot_use_multi_agent`（不覆盖 `sub_agents`）。 |
 | OpenAPI | 多代理路径说明已更新（流式未启用为 SSE 错误事件）。 |
-| 机器人 | `ProcessMessageForRobot` 在 `enabled && robot_use_multi_agent` 时调用 `multiagent.RunDeepAgent`。 |
+| Robots | `ProcessMessageForRobot` calls `RunEinoSingleChatModelAgent` or `RunDeepAgent` according to `robot_default_agent_mode` (default `eino_single`). |
 | 预置编排 | 聊天 / WebShell：`POST /api/multi-agent*` 请求体 `orchestration`：`deep` \| `plan_execute` \| `supervisor`（缺省 `deep`）。`plan_execute` 不构建 YAML/Markdown 子代理；`plan_execute_loop_max_iterations` 仍来自配置。`supervisor` 至少需一个子代理。 |
 | Eino 中间件 | `multi_agent.eino_middleware`（可选）：`patchtoolcalls`（默认开）、`toolsearch`（按阈值拆分 MCP 工具列表）、`plantask`（需 `eino_skills`）、`reduction`（大工具输出截断/落盘）、`checkpoint_dir`（Runner 断点）、`deep_output_key` / `deep_model_retry_max_retries` / `task_tool_description_prefix`（Deep 与 supervisor 主代理共享其中模型重试与 OutputKey）。`plan_execute` 的 Executor 无 Handlers：仅继承 **ToolsConfig** 侧效果（如 `tool_search` 列表拆分），不挂载 patch/plantask/reduction 中间件。 |
 
@@ -59,3 +59,4 @@
 | 2026-03-22 | `orchestrator.md` / `kind: orchestrator` 主代理、列表主/子标记、与 `orchestrator_instruction` 优先级。 |
 | 2026-04-19 | 主聊天「对话模式」：原生 ReAct 与 Deep / Plan-Execute / Supervisor；`POST /api/multi-agent*` 请求体 `orchestration` 与界面一致；`config.yaml` / 设置页不再维护预置编排字段（机器人/批量默认 `deep`）。 |
 | 2026-04-21 | 移除角色 `skills` 与 `/api/roles/skills/list`；`bind_role` 仅继承 tools；Skills 仅通过 Eino `skill` 工具按需加载。 |
+| 2026-06-02 | **Removed native ReAct**: deleted the `/api/agent-loop*` execution entrypoints and `AgentLoopWithProgress`; standardized on Eino ADK (single-agent `/api/eino-agent*`, multi-agent `/api/multi-agent*`); task cancel/tasks APIs are retained. |

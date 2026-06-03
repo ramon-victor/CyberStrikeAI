@@ -423,8 +423,8 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						},
 						"agentMode": map[string]interface{}{
 							"type":        "string",
-							"description": "Agent mode: single (native ReAct), eino_single (Eino ADK single agent), deep, plan_execute, or supervisor; react is the same as single; legacy multi maps to deep",
-							"enum":        []string{"single", "eino_single", "deep", "plan_execute", "supervisor", "multi", "react"},
+							"description": "Agent mode: eino_single (Eino ADK single agent, default), deep, plan_execute, or supervisor",
+							"enum":        []string{"eino_single", "deep", "plan_execute", "supervisor"},
 						},
 						"scheduleMode": map[string]interface{}{
 							"type":        "string",
@@ -1121,7 +1121,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"post": map[string]interface{}{
 					"tags":        []string{"Conversation management"},
 					"summary":     "Create conversation",
-					"description": "Create a new security testing conversation。\n**Important notes**：\n- ✅ createoftext**saved to the database immediately**\n- ✅ The frontend page will**refresh automatically**display the new conversation\n- ✅ with a conversation created from the frontend**fully consistent**\n**Two ways to create a conversation**：\n**Method 1（recommended）：** use directly `/api/agent-loop` text，**omit** `conversationId` parameter，the system automaticallyCreate new conversationtext。This is the simplest way，create and send in one step。\n**Method 2：** First call this endpoint to create an empty conversation，thenUse the returned `conversationId` call `/api/agent-loop` text。suitable when you need toCreate a conversation first，laterThen send a messagescenario。\n**Example**：\n```json\n{\n  \"title\": \"Web application security test\"\n}\n```",
+					"description": "Create a new security testing conversation.\n**Important notes**:\n- Created conversations are **saved to the database immediately**\n- The frontend page can refresh automatically to show the new conversation\n- The result is fully consistent with conversations created from the frontend\n**Two ways to create a conversation**:\n**Method 1 (recommended):** send a message directly with `/api/eino-agent` and omit `conversationId`; the system creates a new conversation and sends the message in one step.\n**Method 2:** call this endpoint first to create an empty conversation, then use the returned `conversationId` with `/api/eino-agent`. This is useful when a conversation must exist before sending messages.\n**Example**:\n```json\n{\n  \"title\": \"Web application security test\"\n}\n```",
 					"operationId": "createConversation",
 					"requestBody": map[string]interface{}{
 						"required": true,
@@ -1412,148 +1412,11 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
-			"/api/agent-loop": map[string]interface{}{
-				"post": map[string]interface{}{
-					"tags":        []string{"Conversation interaction"},
-					"summary":     "Send message and get AI reply (non-streaming)",
-					"description": "Send a message to AI and get a non-streaming response.**This is the core endpoint for AI interaction**，It matches the frontend chat behavior。\n**Important notes**：\n- ✅ Messages created or sent through this API are**saved to the database immediately**\n- ✅ The frontend page will**refresh automatically**show the newly created conversation and messages\n- ✅ All operations have**complete interaction traces**，as if operated from the frontend\n- ✅ Role configuration is supported，you can specify which testing role to use\n**Recommended flow**：\n1. **Create a conversation first**：call `POST /api/conversations` Create new conversation，Get `conversationId`\n2. **Then send a message**：Use the returned `conversationId` to call this endpoint and send a message\n**Usage example**：\n**Step1 - Create conversation：**\n```json\nPOST /api/conversations\n{\n  \"title\": \"Web application security test\"\n}\n```\n**Step2 - text：**\n```json\nPOST /api/agent-loop\n{\n  \"conversationId\": \"returnofConversation ID\",\n  \"message\": \"Scan http://example.com for SQL injection vulnerabilities\",\n  \"role\": \"texttest\"\n}\n```\n**textmethod**：\ntextomit `conversationId`，the system automaticallyCreate new conversationtext。text**recommendedCreate a conversation first**，textmanagementtextlist。\n**response**：returnAIoftext、Conversation IDandMCP execution ID list。textrefresh automaticallytext。",
-					"operationId": "sendMessage",
-					"requestBody": map[string]interface{}{
-						"required": true,
-						"content": map[string]interface{}{
-							"application/json": map[string]interface{}{
-								"schema": map[string]interface{}{
-									"type": "object",
-									"properties": map[string]interface{}{
-										"message": map[string]interface{}{
-											"type":        "string",
-											"description": "Message to send, required",
-											"example":     "Scan http://example.com for SQL injection vulnerabilities",
-										},
-										"conversationId": map[string]interface{}{
-											"type":        "string",
-											"description": "Conversation ID（optional）。\n- **omit**：automaticCreate new conversationtext（recommended）\n- **provide**：textspecifiestext（text）",
-											"example":     "550e8400-e29b-41d4-a716-446655440000",
-										},
-										"role": map[string]interface{}{
-											"type":        "string",
-											"description": "Role name, optional; for example default, penetration testing, web application scanning",
-											"example":     "\u9ed8\u8ba4",
-										},
-									},
-									"required": []string{"message"},
-								},
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "Message sent successfully; returns AI response",
-							"content": map[string]interface{}{
-								"application/json": map[string]interface{}{
-									"schema": map[string]interface{}{
-										"type": "object",
-										"properties": map[string]interface{}{
-											"response": map[string]interface{}{
-												"type":        "string",
-												"description": "AI response content",
-											},
-											"conversationId": map[string]interface{}{
-												"type":        "string",
-												"description": "Conversation ID",
-											},
-											"mcpExecutionIds": map[string]interface{}{
-												"type":        "array",
-												"description": "MCP execution ID list",
-												"items": map[string]interface{}{
-													"type": "string",
-												},
-											},
-											"time": map[string]interface{}{
-												"type":        "string",
-												"format":      "date-time",
-												"description": "Response time",
-											},
-										},
-									},
-								},
-							},
-						},
-						"400": map[string]interface{}{
-							"description": "Invalid request parameters",
-						},
-						"401": map[string]interface{}{
-							"description": "Unauthorized，requires a valid token",
-						},
-						"500": map[string]interface{}{
-							"description": "Internal server error",
-						},
-					},
-				},
-			},
-			"/api/agent-loop/stream": map[string]interface{}{
-				"post": map[string]interface{}{
-					"tags":        []string{"Conversation interaction"},
-					"summary":     "Send message and get AI reply（streaming）",
-					"description": "Send a message to AI and get a streaming response（Server-Sent Events）。**This is the core endpoint for AI interaction**，It matches the frontend chat behavior。\n**Important notes**：\n- ✅ Messages created or sent through this API are**saved to the database immediately**\n- ✅ The frontend page will**refresh automatically**show the newly created conversation and messages\n- ✅ All operations have**complete interaction traces**，as if operated from the frontend\n- ✅ Role configuration is supported，you can specify which testing role to use\n- ✅ Returns streaming response，suitable for real-time AI reply display\n**Recommended flow**：\n1. **Create a conversation first**：call `POST /api/conversations` Create new conversation，Get `conversationId`\n2. **Then send a message**：Use the returned `conversationId` to call this endpoint and send a message\n**Usage example**：\n**Step1 - Create conversation：**\n```json\nPOST /api/conversations\n{\n  \"title\": \"Web application security test\"\n}\n```\n**Step2 - text（streaming）：**\n```json\nPOST /api/agent-loop/stream\n{\n  \"conversationId\": \"returnofConversation ID\",\n  \"message\": \"Scan http://example.com for SQL injection vulnerabilities\",\n  \"role\": \"texttest\"\n}\n```\n**responsetext**：Server-Sent Events (SSE)，Event typetext：\n- `message`: text\n- `response`: AItext\n- `progress`: textupdate\n- `done`: text\n- `error`: text\n- `cancelled`: text",
-					"operationId": "sendMessageStream",
-					"requestBody": map[string]interface{}{
-						"required": true,
-						"content": map[string]interface{}{
-							"application/json": map[string]interface{}{
-								"schema": map[string]interface{}{
-									"type": "object",
-									"properties": map[string]interface{}{
-										"message": map[string]interface{}{
-											"type":        "string",
-											"description": "Message to send, required",
-											"example":     "Scan http://example.com for SQL injection vulnerabilities",
-										},
-										"conversationId": map[string]interface{}{
-											"type":        "string",
-											"description": "Conversation ID（optional）。\n- **omit**：automaticCreate new conversationtext（recommended）\n- **provide**：textspecifiestext（text）",
-											"example":     "550e8400-e29b-41d4-a716-446655440000",
-										},
-										"role": map[string]interface{}{
-											"type":        "string",
-											"description": "Role name, optional; for example default, penetration testing, web application scanning",
-											"example":     "\u9ed8\u8ba4",
-										},
-									},
-									"required": []string{"message"},
-								},
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "streaming response（Server-Sent Events）",
-							"content": map[string]interface{}{
-								"text/event-stream": map[string]interface{}{
-									"schema": map[string]interface{}{
-										"type":        "string",
-										"description": "SSE streaming data",
-									},
-								},
-							},
-						},
-						"400": map[string]interface{}{
-							"description": "Invalid request parameters",
-						},
-						"401": map[string]interface{}{
-							"description": "Unauthorized，requires a valid token",
-						},
-						"500": map[string]interface{}{
-							"description": "Internal server error",
-						},
-					},
-				},
-			},
 			"/api/eino-agent": map[string]interface{}{
 				"post": map[string]interface{}{
 					"tags":        []string{"Conversation interaction"},
 					"summary":     "Send message and get AI reply (Eino ADK single agent, non-streaming)",
-					"description": "Uses the same request body as `POST /api/agent-loop`; executed by CloudWeGo Eino `adk.NewChatModelAgent` plus `adk.NewRunner.Run` as a single-agent MCP toolchain. Does not depend on `multi_agent.enabled`; `multi_agent.eino_skills`, `eino_middleware`, and similar settings can apply consistently with the multi-agent main agent. Supports `webshellConnectionId`.",
+					"description": "Send a message to AI and get a non-streaming response. The request is executed by **CloudWeGo Eino** `adk.NewChatModelAgent` plus `adk.NewRunner.Run` as a single-agent MCP toolchain. It **does not depend on** `multi_agent.enabled`; `multi_agent.eino_skills`, `eino_middleware`, and related settings can apply consistently with the multi-agent main agent. Supports `webshellConnectionId`, roles, and attachments.",
 					"operationId": "sendMessageEinoSingleAgent",
 					"requestBody": map[string]interface{}{
 						"required": true,
@@ -1573,7 +1436,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						},
 					},
 					"responses": map[string]interface{}{
-						"200": map[string]interface{}{"description": "Success; response format matches /api/agent-loop"},
+						"200": map[string]interface{}{"description": "Success; response format matches /api/eino-agent"},
 						"400": map[string]interface{}{"description": "Invalid parameters"},
 						"401": map[string]interface{}{"description": "Unauthorized"},
 						"500": map[string]interface{}{"description": "Execution failed"},
@@ -1584,7 +1447,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"post": map[string]interface{}{
 					"tags":        []string{"Conversation interaction"},
 					"summary":     "Send message and get AI reply (Eino ADK single agent, SSE)",
-					"description": "Similar to `POST /api/agent-loop/stream`；executed by Eino single-agent ADK。event types match multi-agent streaming（including `tool_call` / `response_delta` etc.）。**does not depend on** `multi_agent.enabled`。",
+					"description": "Send a message to AI and get a streaming SSE response. Eino single-agent ADK executes the request; event types match multi-agent streaming, including `tool_call`, `response_delta`, and `thinking`. It **does not depend on** `multi_agent.enabled`.",
 					"operationId": "sendMessageEinoSingleAgentStream",
 					"requestBody": map[string]interface{}{
 						"required": true,
@@ -1623,7 +1486,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"post": map[string]interface{}{
 					"tags":        []string{"Conversation interaction"},
 					"summary":     "Send message and get AI reply (Eino multi-agent, non-streaming)",
-					"description": "Uses the same request body as `POST /api/agent-loop`, but executes with CloudWeGo Eino multi-agent. Orchestration is specified by request body `orchestration` (`deep` | `plan_execute` | `supervisor`) and defaults to `deep`. Requires `multi_agent.enabled: true`; returns 404 JSON when disabled. Supports `webshellConnectionId`.",
+					"description": "Uses the same request body as `POST /api/eino-agent`, but executes with CloudWeGo Eino multi-agent. Orchestration is specified by request body `orchestration` (`deep` | `plan_execute` | `supervisor`) and defaults to `deep`. Requires `multi_agent.enabled: true`; returns 404 JSON when disabled. Supports `webshellConnectionId`.",
 					"operationId": "sendMessageMultiAgent",
 					"requestBody": map[string]interface{}{
 						"required": true,
@@ -1646,7 +1509,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										},
 										"webshellConnectionId": map[string]interface{}{
 											"type":        "string",
-											"description": "WebShell connection ID, optional; matches agent-loop behavior",
+											"description": "WebShell connection ID, optional; matches Eino single-agent and multi-agent streaming behavior",
 										},
 										"orchestration": map[string]interface{}{
 											"type":        "string",
@@ -1661,7 +1524,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 					"responses": map[string]interface{}{
 						"200": map[string]interface{}{
-							"description": "Success; response format matches /api/agent-loop",
+							"description": "Success; response format matches /api/eino-agent",
 						},
 						"400": map[string]interface{}{"description": "Invalid parameters"},
 						"401": map[string]interface{}{"description": "Unauthorized"},
@@ -1674,7 +1537,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"post": map[string]interface{}{
 					"tags":        []string{"Conversation interaction"},
 					"summary":     "Send message and get AI reply (Eino multi-agent, SSE)",
-					"description": "Similar to `POST /api/agent-loop/stream`；executed by Eino multi-agent。`orchestration` specifies deep / plan_execute / supervisor，default deep。**prerequisite**：`multi_agent.enabled: true`；when disabled SSE first item insideis `type: error` followed by `done`。support `webshellConnectionId`。",
+					"description": "Similar to `POST /api/eino-agent/stream`; executed by Eino multi-agent. `orchestration` specifies deep, plan_execute, or supervisor, defaulting to deep. Requires `multi_agent.enabled: true`; when disabled, the first SSE item is `type: error` followed by `done`. Supports `webshellConnectionId`.",
 					"operationId": "sendMessageMultiAgentStream",
 					"requestBody": map[string]interface{}{
 						"required": true,
@@ -4789,8 +4652,8 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 									"type": "object",
 									"properties": map[string]interface{}{
 										"title":     map[string]interface{}{"type": "string", "description": "Queue title"},
-										"role":      map[string]interface{}{"type": "string", "description": "usedRole name"},
-										"agentMode": map[string]interface{}{"type": "string", "description": "Agent mode", "enum": []string{"single", "eino_single", "deep", "plan_execute", "supervisor"}},
+										"role":      map[string]interface{}{"type": "string", "description": "Role name to use"},
+										"agentMode": map[string]interface{}{"type": "string", "description": "Agent mode", "enum": []string{"eino_single", "deep", "plan_execute", "supervisor"}},
 									},
 								},
 							},

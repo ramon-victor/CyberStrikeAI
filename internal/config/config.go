@@ -64,12 +64,12 @@ func (c ProjectConfig) FactSummaryMaxRunesEffective() int {
 	return c.FactSummaryMaxRunes
 }
 
-// MultiAgentConfig multi-agent orchestration based on CloudWeGo Eino adk/prebuilt (deep | plan_execute | supervisor, coexisting with single Agent /agent-loop).
+// MultiAgentConfig configures CloudWeGo Eino adk/prebuilt multi-agent orchestration (deep | plan_execute | supervisor).
 type MultiAgentConfig struct {
 	Enabled               bool   `yaml:"enabled" json:"enabled"`
-	RobotDefaultAgentMode string `yaml:"robot_default_agent_mode,omitempty" json:"robot_default_agent_mode,omitempty"` // react | eino_single | deep | plan_execute | supervisor
+	RobotDefaultAgentMode string `yaml:"robot_default_agent_mode,omitempty" json:"robot_default_agent_mode,omitempty"` // eino_single | deep | plan_execute | supervisor
 	BatchUseMultiAgent    bool   `yaml:"batch_use_multi_agent" json:"batch_use_multi_agent"`                           // when true, each subtask in the batch task queue uses Eino multi-agent
-	// Orchestration deprecated: kept only for compatibility with old config.yaml; orchestration is decided by the chat/WebShell request body orchestration field, defaulting to deep when omitted.
+	// Orchestration is deprecated and kept only for compatibility with old config.yaml; chat/WebShell request body orchestration decides the mode and defaults to deep when omitted.
 	Orchestration string `yaml:"orchestration,omitempty" json:"orchestration,omitempty"`
 	MaxIteration  int    `yaml:"max_iteration" json:"max_iteration"` // maximum reasoning iterations for the main agent / executor (Deep, Supervisor, and plan_execute Executor)
 	// PlanExecuteLoopMaxIterations plan_execute outer execute-replan loop limit in plan_execute mode; 0 uses Eino default 10.
@@ -237,9 +237,7 @@ type MultiAgentEinoMiddlewareConfig struct {
 	SummarizationTriggerRatio float64 `yaml:"summarization_trigger_ratio,omitempty" json:"summarization_trigger_ratio,omitempty"`
 	// SummarizationEmitInternalEvents controls middleware internal event emission (default true).
 	SummarizationEmitInternalEvents *bool `yaml:"summarization_emit_internal_events,omitempty" json:"summarization_emit_internal_events,omitempty"`
-	// HistoryInputBudgetRatio no longer affects Eino: converting last_react traces to ADK messages no longer trims by token ratio (fully injected).
-	// field is kept so old config files do not fail; new deployments may omit it.
-	HistoryInputBudgetRatio float64 `yaml:"history_input_budget_ratio,omitempty" json:"history_input_budget_ratio,omitempty"`
+
 	// PlanExecuteUserInputBudgetRatio caps planner/replanner/executor userInput prompt budget ratio (default 0.35).
 	PlanExecuteUserInputBudgetRatio float64 `yaml:"plan_execute_user_input_budget_ratio,omitempty" json:"plan_execute_user_input_budget_ratio,omitempty"`
 	// PlanExecuteExecutedStepsBudgetRatio caps executed_steps prompt budget ratio (default 0.2).
@@ -281,20 +279,6 @@ func (c MultiAgentEinoMiddlewareConfig) SummarizationEmitInternalEventsEffective
 		return *c.SummarizationEmitInternalEvents
 	}
 	return true
-}
-
-func (c MultiAgentEinoMiddlewareConfig) HistoryInputBudgetRatioEffective() float64 {
-	v := c.HistoryInputBudgetRatio
-	if v <= 0 {
-		return 0.35
-	}
-	if v < 0.15 {
-		return 0.15
-	}
-	if v > 0.6 {
-		return 0.6
-	}
-	return v
 }
 
 func (c MultiAgentEinoMiddlewareConfig) PlanExecuteUserInputBudgetRatioEffective() float64 {
@@ -403,16 +387,26 @@ type MultiAgentPublic struct {
 	ToolSearchAlwaysVisibleEffectiveTools []string `json:"tool_search_always_visible_effective_tools,omitempty"`
 }
 
-// NormalizeRobotAgentMode parses the default robot conversation mode (react | eino_single | deep | plan_execute | supervisor); empty is treated as react.
-func NormalizeRobotAgentMode(ma MultiAgentConfig) string {
-	s := strings.TrimSpace(strings.ToLower(ma.RobotDefaultAgentMode))
-	if s == "" || s == "single" || s == "react" {
-		return "react"
-	}
-	if s == "eino_single" {
+// NormalizeAgentMode parses agent mode (eino_single | deep | plan_execute | supervisor); empty defaults to eino_single.
+func NormalizeAgentMode(mode string) string {
+	s := strings.TrimSpace(strings.ToLower(mode))
+	switch s {
+	case "", "eino_single":
+		return "eino_single"
+	case "deep":
+		return "deep"
+	case "plan_execute", "plan-execute", "planexecute", "pe":
+		return "plan_execute"
+	case "supervisor", "super", "sv":
+		return "supervisor"
+	default:
 		return "eino_single"
 	}
-	return NormalizeMultiAgentOrchestration(s)
+}
+
+// NormalizeRobotAgentMode parses the default robot conversation mode.
+func NormalizeRobotAgentMode(ma MultiAgentConfig) string {
+	return NormalizeAgentMode(ma.RobotDefaultAgentMode)
 }
 
 // NormalizeMultiAgentOrchestration returns deep, plan_execute, or supervisor.
@@ -532,7 +526,7 @@ type OpenAIConfig struct {
 	BaseURL        string `yaml:"base_url" json:"base_url"`
 	Model          string `yaml:"model" json:"model"`
 	MaxTotalTokens int    `yaml:"max_total_tokens,omitempty" json:"max_total_tokens,omitempty"`
-	// Reasoning controls Eino ChatModel thinking / reasoning_effort / output_config and related fields (only effective on Eino paths; native ReAct ignores it).
+	// Reasoning controls Eino ChatModel thinking / reasoning_effort / output_config and related fields (effective on Eino single-agent and multi-agent paths).
 	Reasoning OpenAIReasoningConfig `yaml:"reasoning,omitempty" json:"reasoning,omitempty"`
 }
 

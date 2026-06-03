@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"cyberstrike-ai/internal/agent"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/multiagent"
 
@@ -689,36 +688,6 @@ func (h *AgentHandler) interceptHITLForEinoTool(runCtx context.Context, cancelRu
 		}
 	}
 	return arguments, nil
-}
-
-func (h *AgentHandler) interceptHITLForReactTool(runCtx context.Context, cancelRun context.CancelCauseFunc, conversationID, assistantMessageID string, sendEventFunc func(eventType, message string, data interface{}), toolName string, arguments map[string]interface{}, toolCallID string) (map[string]interface{}, error) {
-	payload := map[string]interface{}{
-		"toolName":     toolName,
-		"argumentsObj": arguments,
-		"toolCallId":   toolCallID,
-		"source":       "react_pre_exec",
-	}
-	d, err := h.waitHITLApproval(runCtx, cancelRun, conversationID, assistantMessageID, toolName, toolCallID, payload, sendEventFunc)
-	if err != nil || d == nil {
-		return arguments, err
-	}
-	if d.Decision == "reject" {
-		comment := strings.TrimSpace(d.Comment)
-		if comment == "" {
-			comment = "no extra feedback"
-		}
-		return arguments, errors.New("human rejected this tool call; feedback: " + comment)
-	}
-	if len(d.EditedArguments) > 0 {
-		return d.EditedArguments, nil
-	}
-	return arguments, nil
-}
-
-func (h *AgentHandler) injectReactHITLInterceptor(ctx context.Context, cancelRun context.CancelCauseFunc, conversationID, assistantMessageID string, sendEventFunc func(eventType, message string, data interface{})) context.Context {
-	return agent.WithToolCallInterceptor(ctx, func(c context.Context, toolName string, args map[string]interface{}, toolCallID string) (map[string]interface{}, error) {
-		return h.interceptHITLForReactTool(c, cancelRun, conversationID, assistantMessageID, sendEventFunc, toolName, args, toolCallID)
-	})
 }
 
 type hitlConfigReq struct {

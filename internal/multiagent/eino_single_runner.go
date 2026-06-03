@@ -25,8 +25,8 @@ import (
 // einoSingleAgentName matches ChatModelAgent.Name and maps streaming events to the main conversation area.
 const einoSingleAgentName = "cyberstrike-eino-single"
 
-// RunEinoSingleChatModelAgent uses Eino adk.NewChatModelAgent + adk.NewRunner.Run. The official Quick Start Query also uses the Runner API;
-// using history plus a user-message slice here is equivalent to multi-turn Query. It does not replace the existing native ReAct path; it shares runEinoADKAgentLoop SSE mapping and the MCP bridge with RunDeepAgent.
+// RunEinoSingleChatModelAgent uses Eino adk.NewChatModelAgent plus adk.NewRunner.Run. The official Quick Start Query also uses the Runner API;
+// using history plus a user-message slice here is equivalent to multi-turn Query. It shares runEinoADKAgentLoop SSE mapping and the MCP bridge with RunDeepAgent.
 func RunEinoSingleChatModelAgent(
 	ctx context.Context,
 	appCfg *config.Config,

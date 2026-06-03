@@ -38,7 +38,6 @@ final class CyberStrikeAIClient {
     }
 
     enum AgentMode {
-        NATIVE_REACT("Native ReAct", "/api/agent-loop/stream", null),
         EINO_SINGLE("Eino Single (ADK)", "/api/eino-agent/stream", null),
         DEEP("Deep (DeepAgent)", "/api/multi-agent/stream", "deep"),
         PLAN_EXECUTE("Plan-Execute", "/api/multi-agent/stream", "plan_execute"),

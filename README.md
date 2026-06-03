@@ -117,7 +117,7 @@ CyberStrikeAI is an **AI-native security testing platform** built in Go. It inte
 - 🛡️ Vulnerability management with CRUD operations, severity tracking, status workflow, and statistics
 - 📋 Batch task management: create task queues, add multiple tasks, and execute them sequentially
 - 🎭 Role-based testing: predefined security testing roles (Penetration Testing, CTF, Web App Scanning, etc.) with custom prompts and tool restrictions
-- 🧩 **Multi-agent (CloudWeGo Eino)**: alongside **single-agent ReAct** (`/api/agent-loop`), **multi mode** (`/api/multi-agent/stream`) offers **`deep`** (coordinator + `task` sub-agents), **`plan_execute`** (planner / executor / replanner), and **`supervisor`** (orchestrator + `transfer` / `exit`); chosen per request via **`orchestration`**. Markdown under `agents/`: `orchestrator.md` (Deep), `orchestrator-plan-execute.md`, `orchestrator-supervisor.md`, plus sub-agent `*.md` where applicable (see [Multi-agent doc](docs/MULTI_AGENT_EINO.md))
+- 🧩 **Agent orchestration (CloudWeGo Eino)**: **single-agent** via **`/api/eino-agent/stream`** (Eino ADK `ChatModelAgent`); **multi-agent** via **`/api/multi-agent/stream`** with **`deep`** (coordinator + `task` sub-agents), **`plan_execute`**, or **`supervisor`** (`orchestration` in the request body). Markdown under `agents/`: `orchestrator.md`, `orchestrator-plan-execute.md`, `orchestrator-supervisor.md`, plus sub-agent `*.md` (see [Multi-agent doc](docs/MULTI_AGENT_EINO.md))
 - 🎯 **Skills (refactored for Eino)**: packs under `skills_dir` follow **Agent Skills** layout (`SKILL.md` + optional files); **multi-agent** sessions use the official Eino ADK **`skill`** tool for **progressive disclosure** (load by name), with optional **host filesystem / shell** via `multi_agent.eino_skills`; optional **`eino_middleware`** adds patchtoolcalls, tool_search, plantask, reduction, checkpoints, and Deep tuning—20+ sample domains (SQLi, XSS, API security, …) ship under `skills/`
 - 📱 **Chatbot**: DingTalk and Lark (Feishu) long-lived connections so you can talk to CyberStrikeAI from mobile (see [Robot / Chatbot guide](docs/robot_en.md) for setup and commands)
 - 🧑‍⚖️ **Human-in-the-loop (HITL)**: Chat sidebar to set approval mode and tool allowlists (listed tools skip approval); global list in `config.yaml` under `hitl.tool_whitelist`; **Apply** can merge new tools into the file and update the running server without restart; dedicated **HITL** page for pending approvals
@@ -254,7 +254,7 @@ Requirements / tips:
 
 ### Core Workflows
 - **Conversation testing** – Natural-language prompts trigger toolchains with streaming SSE output.
-- **Single vs multi-agent** – With `multi_agent.enabled: true`, the chat UI can switch between **single** (classic **ReAct** loop, `/api/agent-loop/stream`) and **multi** (`/api/multi-agent/stream`). Multi mode keeps **`deep`** as the baseline coordinator + **`task`** sub-agents, and adds **`plan_execute`** and **`supervisor`** orchestrations via the request body **`orchestration`** field. MCP tools are bridged the same way as single-agent.
+- **Single vs multi-agent** – Chat UI switches between **Eino single-agent** (`/api/eino-agent/stream`) and **multi-agent** (`/api/multi-agent/stream` with `orchestration`: `deep` | `plan_execute` | `supervisor`). Multi mode requires `multi_agent.enabled: true`. MCP tools are bridged the same way for both paths.
 - **Role-based testing** – Select from predefined security testing roles (Penetration Testing, CTF, Web App Scanning, API Security Testing, etc.) to customize AI behavior and tool availability. Each role applies custom system prompts and can restrict available tools for focused testing scenarios.
 - **Tool monitor** – Inspect running jobs, execution logs, and large-result attachments.
 - **History & audit** – Every conversation and tool invocation is stored in SQLite with replay.
@@ -278,7 +278,7 @@ Requirements / tips:
 - **Predefined roles** – System includes 12+ predefined security testing roles (Penetration Testing, CTF, Web App Scanning, API Security Testing, Binary Analysis, Cloud Security Audit, etc.) in the `roles/` directory.
 - **Custom prompts** – Each role can define a `user_prompt` that prepends to user messages, guiding the AI to adopt specialized testing methodologies and focus areas.
 - **Tool restrictions** – Roles can specify a `tools` list to limit available tools, ensuring focused testing workflows (e.g., CTF role restricts to CTF-specific utilities).
-- **Skills** – Skill packs live under `skills_dir` and are loaded in **multi-agent / Eino** sessions via the ADK **`skill`** tool (**progressive disclosure**). Configure **`multi_agent.eino_skills`** for middleware, tool name override, and optional host **read_file / glob / grep / write / edit / execute** (**Deep / Supervisor** when enabled; **plan_execute** differs—see docs). Single-agent ReAct does not mount this Eino skill stack today.
+- **Skills** – Skill packs live under `skills_dir` and load via the Eino ADK **`skill`** tool (**progressive disclosure**) in both **single- and multi-agent** sessions when **`multi_agent.eino_skills`** is enabled. Optional host **read_file / glob / grep / write / edit / execute** and **`eino_middleware`** (tool_search, reduction, checkpoints, etc.) apply per mode—see docs.
 - **Easy role creation** – Create custom roles by adding YAML files to the `roles/` directory. Each role defines `name`, `description`, `user_prompt`, `icon`, `tools`, and `enabled` fields.
 - **Web UI integration** – Select roles from a dropdown in the chat interface. Role selection affects both AI behavior and available tool suggestions.
 
@@ -298,7 +298,7 @@ Requirements / tips:
 2. Restart the server or reload configuration; the role appears in the role selector dropdown.
 
 ### Multi-Agent Mode (Eino: Deep, Plan-Execute, Supervisor)
-- **What it is** – An optional execution path beside **single-agent ReAct**, built on CloudWeGo **Eino** `adk/prebuilt`: **`deep`** — coordinator + **`task`** sub-agents; **`plan_execute`** — planner / executor / replanner loop (no YAML/Markdown sub-agent list); **`supervisor`** — orchestrator with **`transfer`** and **`exit`** over Markdown-defined specialists. The client sends **`orchestration`**: `deep` | `plan_execute` | `supervisor` (default `deep`).
+- **What it is** – Multi-agent orchestration on CloudWeGo **Eino** `adk/prebuilt` (alongside **Eino single-agent** on `/api/eino-agent*`): **`deep`** — coordinator + **`task`** sub-agents; **`plan_execute`** — planner / executor / replanner; **`supervisor`** — orchestrator with **`transfer`** / **`exit`**. Client sends **`orchestration`**: `deep` | `plan_execute` | `supervisor` (default `deep`).
 - **Markdown agents** – Under `agents_dir` (default `agents/`):
   - **Deep orchestrator**: `orchestrator.md` *or* one `.md` with `kind: orchestrator`. Body or `multi_agent.orchestrator_instruction`, then Eino defaults.
   - **Plan-Execute orchestrator**: fixed name **`orchestrator-plan-execute.md`** (plus optional `orchestrator_instruction_plan_execute` in YAML).
@@ -555,8 +555,8 @@ skills_dir: "skills"  # Skills directory (relative to config file)
 agents_dir: "agents"  # Multi-agent Markdown definitions (orchestrator + sub-agents)
 multi_agent:
   enabled: false
-  default_mode: "single"   # single | multi (UI default when multi-agent is enabled)
-  robot_default_agent_mode: react
+  default_mode: "eino_single"   # eino_single | multi (UI default when multi-agent is enabled)
+  robot_default_agent_mode: eino_single
   batch_use_multi_agent: false
   orchestrator_instruction: ""  # Deep; used when orchestrator.md body is empty
   # orchestrator_instruction_plan_execute / orchestrator_instruction_supervisor optional

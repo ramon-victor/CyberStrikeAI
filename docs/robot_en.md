@@ -269,4 +269,4 @@ Check in this order:
 
 - DingTalk and Lark: **text messages only**; other types (e.g. image, voice) are not supported and may be ignored.  
 - Conversations are shared with the web UI: conversations created from the bot appear in the web “Conversations” list and vice versa.  
-- Bot execution uses the same logic as **`/api/agent-loop/stream`** (progress callbacks, process details stored in the DB); only the final reply is sent back to DingTalk/Lark in one message (no SSE to the client).
+- Bot execution uses the same **Eino single/multi-agent** path as the web UI (`ProcessMessageForRobot`, with progress callbacks and process details stored in the DB); only the final reply is sent back to DingTalk/Lark in one message (no SSE). Default: `robot_default_agent_mode: eino_single`.

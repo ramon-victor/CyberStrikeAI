@@ -801,10 +801,6 @@ func setupRoutes(
 		protected.POST("/robot/wechat/qrcode/verify", wechatRobotHandler.HandleWechatVerifyCode)
 		protected.GET("/robot/wechat/status", wechatRobotHandler.HandleWechatStatus)
 
-		// Agent Loop
-		protected.POST("/agent-loop", agentHandler.AgentLoop)
-		// Agent Loop streaming output
-		protected.POST("/agent-loop/stream", agentHandler.AgentLoopStream)
 		// Eino ADK single agent (ChatModelAgent + Runner; does not depend on multi_agent.enabled)
 		protected.POST("/eino-agent", agentHandler.EinoSingleAgentLoop)
 		protected.POST("/eino-agent/stream", agentHandler.EinoSingleAgentLoopStream)

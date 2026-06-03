@@ -116,7 +116,7 @@ CyberStrikeAI 是一款 **AI 原生安全测试平台**，基于 Go 构建，集
 - 🛡️ 漏洞管理功能：完整的漏洞 CRUD 操作，支持严重程度分级、状态流转、按对话/严重程度/状态过滤，以及统计看板
 - 📋 批量任务管理：创建任务队列，批量添加任务，依次顺序执行，支持任务编辑与状态跟踪
 - 🎭 角色化测试：预设安全测试角色（渗透测试、CTF、Web 应用扫描等），支持自定义提示词和工具限制
-- 🧩 **多代理（CloudWeGo Eino）**：在 **单代理 ReAct**（`/api/agent-loop`）之外，**多代理**（`/api/multi-agent/stream`）提供 **`deep`**（协调主代理 + `task` 子代理）、**`plan_execute`**（规划 / 执行 / 重规划）、**`supervisor`**（主代理 `transfer` / `exit` 监督子代理）；由请求体 **`orchestration`** 选择。`agents/` 下分模式主代理：`orchestrator.md`（Deep）、`orchestrator-plan-execute.md`、`orchestrator-supervisor.md`，及适用的子代理 `*.md`（详见 [多代理说明](docs/MULTI_AGENT_EINO.md)）
+- 🧩 **Agent 编排（CloudWeGo Eino）**：**单代理** `POST /api/eino-agent/stream`（Eino ADK）；**多代理** `POST /api/multi-agent/stream`，`orchestration` 选 **`deep`** / **`plan_execute`** / **`supervisor`**。`agents/` 下主代理与子代理 Markdown 见 [多代理说明](docs/MULTI_AGENT_EINO.md)
 - 🎯 **Skills（面向 Eino 重构）**：技能包放在 **`skills_dir`**，遵循 **Agent Skills** 目录规范（`SKILL.md` + 可选文件）；**多代理** 下通过 Eino 官方 **`skill`** 工具 **渐进式披露**（按 name 加载）。**`multi_agent.eino_skills`** 控制是否启用、本机文件/Shell 工具、工具名覆盖；**`eino_middleware`** 可选 patch、tool_search、plantask、reduction、断点目录及 Deep 调参。20+ 领域示例仍可绑定角色
 - 📱 **机器人**：支持钉钉、飞书长连接，在手机端与 CyberStrikeAI 对话（配置与命令详见 [机器人使用说明](docs/robot.md)）
 - 🧑‍⚖️ **人机协同（HITL）**：对话页侧栏配置协同模式与免审批工具白名单；全局列表在 `config.yaml` 的 `hitl.tool_whitelist`；点「应用」可将新增工具合并写入配置文件且**无需重启**即可生效；导航 **人机协同** 页处理待审批工具调用
@@ -252,7 +252,7 @@ docker compose up -d --build
 
 ### 常用流程
 - **对话测试**：自然语言触发多步工具编排，SSE 实时输出。
-- **单代理 / 多代理**：`multi_agent.enabled: true` 后可在聊天中切换 **单代理**（原有 **ReAct**，`/api/agent-loop/stream`）与 **多代理**（`/api/multi-agent/stream`）。多代理在既有 **`deep`**（`task` 子代理）基础上，新增 **`plan_execute`**、**`supervisor`**，由 **`orchestration`** 指定。MCP 工具与单代理同源桥接。
+- **单代理 / 多代理**：聊天可选 **Eino 单代理**（`/api/eino-agent/stream`）与 **多代理**（`/api/multi-agent/stream` + `orchestration`）。多代理需 `multi_agent.enabled: true`。MCP 工具桥接一致。
 - **角色化测试**：从预设的安全测试角色（渗透测试、CTF、Web 应用扫描、API 安全测试等）中选择，自定义 AI 行为和可用工具。每个角色可应用自定义系统提示词，并可限制可用工具列表，实现聚焦的测试场景。
 - **工具监控**：查看任务队列、执行日志、大文件附件。
 - **会话历史**：所有对话与工具调用保存在 SQLite，可随时重放。
@@ -276,7 +276,7 @@ docker compose up -d --build
 - **预设角色**：系统内置 12+ 个预设的安全测试角色（渗透测试、CTF、Web 应用扫描、API 安全测试、二进制分析、云安全审计等），位于 `roles/` 目录。
 - **自定义提示词**：每个角色可定义 `user_prompt`，会在用户消息前自动添加，引导 AI 采用特定的测试方法和关注重点。
 - **工具限制**：角色可指定 `tools` 列表，限制可用工具，实现聚焦的测试流程（如 CTF 角色限制为 CTF 专用工具）。
-- **Skills**：技能包位于 `skills_dir`；**多代理 / Eino** 下由 **`skill`** 工具 **按需加载**（渐进式披露）。**`multi_agent.eino_skills`** 控制中间件与本机 read_file/glob/grep/write/edit/execute（**Deep / Supervisor** 主/子代理；**plan_execute** 执行器无独立 skill 中间件，见文档）。**单代理 ReAct** 当前不挂载该 Eino skill 链。
+- **Skills**：技能包位于 `skills_dir`；启用 **`multi_agent.eino_skills`** 后，**单代理与多代理**均可通过 Eino **`skill`** 工具按需加载。中间件与本机 read_file/glob/grep 等见文档。
 - **轻松创建角色**：通过在 `roles/` 目录添加 YAML 文件即可创建自定义角色。每个角色定义 `name`、`description`、`user_prompt`、`icon`、`tools`、`enabled` 字段。
 - **Web 界面集成**：在聊天界面通过下拉菜单选择角色。角色选择会影响 AI 行为和可用工具建议。
 
@@ -296,7 +296,7 @@ docker compose up -d --build
 2. 重启服务或重新加载配置，角色会出现在角色选择下拉菜单中。
 
 ### 多代理模式（Eino：Deep / Plan-Execute / Supervisor）
-- **能力说明**：与 **单代理 ReAct** 并存的可选路径，基于 CloudWeGo **Eino** `adk/prebuilt`：**`deep`** — 协调主代理 + **`task`** 子代理；**`plan_execute`** — 规划 / 执行 / 重规划闭环（不使用 YAML/Markdown 子代理列表）；**`supervisor`** — 主代理 **`transfer`** / **`exit`** 调度 Markdown 专家。客户端通过 **`orchestration`** 选 `deep` | `plan_execute` | `supervisor`（缺省 `deep`）。
+- **能力说明**：在 **Eino 单代理**（`/api/eino-agent*`）之外，多代理基于 CloudWeGo **Eino** `adk/prebuilt`：**`deep`**、**`plan_execute`**、**`supervisor`**；客户端 **`orchestration`** 选择（缺省 `deep`）。
 - **Markdown 定义**（`agents_dir`，默认 `agents/`）：
   - **Deep 主代理**：`orchestrator.md` 或唯一 `kind: orchestrator` 的 `.md`；正文或 `multi_agent.orchestrator_instruction`，再回退 Eino 默认。
   - **Plan-Execute 主代理**：固定 **`orchestrator-plan-execute.md`**（另可配 `orchestrator_instruction_plan_execute`）。
@@ -553,8 +553,8 @@ skills_dir: "skills"  # Skills 目录（相对于配置文件所在目录）
 agents_dir: "agents"  # 多代理 Markdown（主代理 orchestrator.md + 子代理 *.md）
 multi_agent:
   enabled: false
-  default_mode: "single"   # single | multi（开启多代理时的界面默认模式）
-  robot_default_agent_mode: react
+  default_mode: "eino_single"   # eino_single | multi（开启多代理时的界面默认模式）
+  robot_default_agent_mode: eino_single
   batch_use_multi_agent: false
   orchestrator_instruction: ""  # Deep；orchestrator.md 正文为空时使用
   # orchestrator_instruction_plan_execute / orchestrator_instruction_supervisor 可选

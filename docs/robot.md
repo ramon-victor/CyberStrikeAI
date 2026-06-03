@@ -272,4 +272,4 @@ curl -X POST "http://localhost:8080/api/robot/test" \
 
 - 钉钉、飞书均**仅处理文本消息**；其他类型（如图片、语音）会提示暂不支持或忽略。  
 - 会话与 Web 端共用同一套对话数据：在机器人里创建的对话会在 Web 端「对话」列表中看到，反之亦然。  
-- 机器人执行逻辑与 **`/api/agent-loop/stream`** 一致（含进度回调、过程详情写入数据库），仅不向客户端推送 SSE，最后将完整回复一次性发回钉钉/飞书/企业微信。
+- Robot execution uses the same **Eino single-agent/multi-agent** logic (`ProcessMessageForRobot`, including progress callbacks and process-detail persistence); it only skips client-side SSE and replies once at the end to DingTalk/Lark/WeCom. Default `robot_default_agent_mode: eino_single`.

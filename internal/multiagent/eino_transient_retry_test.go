@@ -3,6 +3,7 @@ package multiagent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -21,6 +22,8 @@ func TestIsEinoTransientRunError(t *testing.T) {
 		{"nil", nil, false},
 		{"io eof", io.EOF, false},
 		{"plain eof text", errors.New("EOF"), false},
+		{"post chat completions eof", errors.New(`Post "https://token-plan-cn.xiaomimimo.com/v1/chat/completions": EOF`), true},
+		{"post eof wraps io.EOF", fmt.Errorf(`Post %q: %w`, "https://token-plan-cn.xiaomimimo.com/v1/chat/completions", io.EOF), true},
 		{"429", errors.New("HTTP 429 Too Many Requests"), true},
 		{"rate limit", errors.New(`{"error":"rate limit exceeded"}`), true},
 		{"connection reset", errors.New("read tcp: connection reset by peer"), true},

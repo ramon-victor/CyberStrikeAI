@@ -3,7 +3,6 @@ package multiagent
 import (
 	"context"
 	"errors"
-	"io"
 	"strings"
 	"time"
 
@@ -24,10 +23,7 @@ func isEinoTransientRunError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// io.EOF commonly appears when streaming ends normally and should not trigger segmented retry.
-	if errors.Is(err, io.EOF) {
-		return false
-	}
+
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
@@ -66,6 +62,7 @@ func isEinoTransientRunError(err error) bool {
 		"tls handshake timeout",
 		"stream error",
 		"unexpected eof",
+		`": eof`, // net/http: Post "url": EOF (often wraps io.EOF)
 		"unexpected end of json",
 		"status code: 406",
 		"status code: 502",

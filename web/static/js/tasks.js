@@ -14,8 +14,8 @@ function _tPlain(key, opts) {
     });
 }
 
-/** Valid agentMode values consistent with queue creation and API */
-const BATCH_QUEUE_AGENT_MODES = ['single', 'eino_single', 'deep', 'plan_execute', 'supervisor'];
+/** Valid agentMode values consistent with queue creation and API. */
+const BATCH_QUEUE_AGENT_MODES = ['eino_single', 'deep', 'plan_execute', 'supervisor'];
 
 function isBatchQueueAgentMode(mode) {
     return BATCH_QUEUE_AGENT_MODES.indexOf(String(mode || '').toLowerCase()) >= 0;
@@ -23,13 +23,12 @@ function isBatchQueueAgentMode(mode) {
 
 /** Batch queue agentMode display label (consistent with chat mode names) */
 function batchQueueAgentModeLabel(mode) {
-    const m = String(mode || 'single').toLowerCase();
-    if (m === 'single') return _t('chat.agentModeReactNative');
+    const m = String(mode || 'eino_single').toLowerCase();
     if (m === 'eino_single') return _t('chat.agentModeEinoSingle');
-    if (m === 'multi' || m === 'deep') return _t('chat.agentModeDeep');
+    if (m === 'deep') return _t('chat.agentModeDeep');
     if (m === 'plan_execute') return _t('chat.agentModePlanExecuteLabel');
     if (m === 'supervisor') return _t('chat.agentModeSupervisorLabel');
-    return _t('chat.agentModeReactNative');
+    return _t('chat.agentModeEinoSingle');
 }
 
 /** Cron Queue display label for "current run completed" and similar states (underlying status is unchanged; only UI emphasizes cyclic scheduling) */
@@ -867,7 +866,7 @@ async function showBatchImportModal() {
             projectSelect.value = '';
         }
         if (agentModeSelect) {
-            agentModeSelect.value = 'single';
+            agentModeSelect.value = 'eino_single';
         }
         if (scheduleModeSelect) {
             scheduleModeSelect.value = 'manual';
@@ -997,8 +996,8 @@ async function createBatchQueue() {
     // Get role (optional,empty string means default role)
     const role = roleSelect ? roleSelect.value || '' : '';
     const projectId = projectSelect ? (projectSelect.value || '').trim() : '';
-    const rawMode = agentModeSelect ? agentModeSelect.value : 'single';
-    const agentMode = isBatchQueueAgentMode(rawMode) ? rawMode : 'single';
+    const rawMode = agentModeSelect ? agentModeSelect.value : 'eino_single';
+    const agentMode = isBatchQueueAgentMode(rawMode) ? rawMode : 'eino_single';
     const scheduleMode = scheduleModeSelect ? (scheduleModeSelect.value === 'cron' ? 'cron' : 'manual') : 'manual';
     const cronExpr = cronExprInput ? cronExprInput.value.trim() : '';
     const executeNow = executeNowCheckbox ? !!executeNowCheckbox.checked : false;
@@ -2217,12 +2216,10 @@ function startInlineEditAgentMode() {
     if (!queueId) return;
     apiFetch(`/api/batch-tasks/${queueId}`).then(r => r.json()).then(detail => {
         const queue = detail.queue;
-        let currentMode = (queue.agentMode || 'single').toLowerCase();
-        if (currentMode === 'multi') currentMode = 'deep';
-        if (!isBatchQueueAgentMode(currentMode)) currentMode = 'single';
+        let currentMode = (queue.agentMode || 'eino_single').toLowerCase();
+        if (!isBatchQueueAgentMode(currentMode)) currentMode = 'eino_single';
         container.innerHTML = `<span class="bq-inline-edit-controls">
             <select id="bq-edit-agentmode">
-                <option value="single" ${currentMode === 'single' ? 'selected' : ''}>${escapeHtml(_t('chat.agentModeReactNative'))}</option>
                 <option value="eino_single" ${currentMode === 'eino_single' ? 'selected' : ''}>${escapeHtml(_t('chat.agentModeEinoSingle'))}</option>
                 <option value="deep" ${currentMode === 'deep' ? 'selected' : ''}>${escapeHtml(_t('chat.agentModeDeep'))}</option>
                 <option value="plan_execute" ${currentMode === 'plan_execute' ? 'selected' : ''}>${escapeHtml(_t('chat.agentModePlanExecuteLabel'))}</option>
@@ -2247,8 +2244,8 @@ async function saveInlineAgentMode() {
     const queueId = batchQueuesState.currentQueueId;
     if (!queueId) { _bqInlineSaving = false; return; }
     const sel = document.getElementById('bq-edit-agentmode');
-    const raw = sel ? sel.value : 'single';
-    const agentMode = isBatchQueueAgentMode(raw) ? raw : 'single';
+    const raw = sel ? sel.value : 'eino_single';
+    const agentMode = isBatchQueueAgentMode(raw) ? raw : 'eino_single';
     try {
         const detailResp = await apiFetch(`/api/batch-tasks/${queueId}`);
         const detail = await detailResp.json();

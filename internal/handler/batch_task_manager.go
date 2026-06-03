@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 
 	"go.uber.org/zap"
@@ -128,7 +129,7 @@ func (m *BatchTaskManager) CreateBatchQueue(
 		Title:           title,
 		Role:            role,
 		ProjectID:       strings.TrimSpace(projectID),
-		AgentMode:       normalizeBatchQueueAgentMode(agentMode),
+		AgentMode:       config.NormalizeAgentMode(agentMode),
 		ScheduleMode:    normalizeBatchQueueScheduleMode(scheduleMode),
 		CronExpr:        strings.TrimSpace(cronExpr),
 		NextRunAt:       nextRunAt,
@@ -225,7 +226,7 @@ func (m *BatchTaskManager) loadQueueFromDB(queueID string) *BatchTaskQueue {
 
 	queue := &BatchTaskQueue{
 		ID:           queueRow.ID,
-		AgentMode:    "single",
+		AgentMode:    "eino_single",
 		ScheduleMode: "manual",
 		Status:       queueRow.Status,
 		CreatedAt:    queueRow.CreatedAt,
@@ -240,7 +241,7 @@ func (m *BatchTaskManager) loadQueueFromDB(queueID string) *BatchTaskQueue {
 		queue.Role = queueRow.Role.String
 	}
 	if queueRow.AgentMode.Valid {
-		queue.AgentMode = normalizeBatchQueueAgentMode(queueRow.AgentMode.String)
+		queue.AgentMode = config.NormalizeAgentMode(queueRow.AgentMode.String)
 	}
 	if queueRow.ScheduleMode.Valid {
 		queue.ScheduleMode = normalizeBatchQueueScheduleMode(queueRow.ScheduleMode.String)
@@ -464,7 +465,7 @@ func (m *BatchTaskManager) LoadFromDB() error {
 
 		queue := &BatchTaskQueue{
 			ID:           queueRow.ID,
-			AgentMode:    "single",
+			AgentMode:    "eino_single",
 			ScheduleMode: "manual",
 			Status:       queueRow.Status,
 			CreatedAt:    queueRow.CreatedAt,
@@ -479,7 +480,7 @@ func (m *BatchTaskManager) LoadFromDB() error {
 			queue.Role = queueRow.Role.String
 		}
 		if queueRow.AgentMode.Valid {
-			queue.AgentMode = normalizeBatchQueueAgentMode(queueRow.AgentMode.String)
+			queue.AgentMode = config.NormalizeAgentMode(queueRow.AgentMode.String)
 		}
 		if queueRow.ScheduleMode.Valid {
 			queue.ScheduleMode = normalizeBatchQueueScheduleMode(queueRow.ScheduleMode.String)
@@ -669,7 +670,7 @@ func (m *BatchTaskManager) UpdateQueueMetadata(queueID, title, role, agentMode s
 
 	// If agentMode was not provided, keep the existing value
 	if strings.TrimSpace(agentMode) != "" {
-		agentMode = normalizeBatchQueueAgentMode(agentMode)
+		agentMode = config.NormalizeAgentMode(agentMode)
 	} else {
 		agentMode = queue.AgentMode
 	}

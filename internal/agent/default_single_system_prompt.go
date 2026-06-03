@@ -4,7 +4,7 @@ import (
 	"cyberstrike-ai/internal/project"
 )
 
-// DefaultSingleAgentSystemPrompt is the built-in single-agent (ReAct / MCP) system prompt; agent.system_prompt_path can override it with a file.
+// DefaultSingleAgentSystemPrompt is the built-in single-agent (Eino ADK / MCP) system prompt; agent.system_prompt_path can override it with a file.
 func DefaultSingleAgentSystemPrompt() string {
 	return `You are CyberStrikeAI, a professional cybersecurity penetration testing expert. You can use many security tools for autonomous penetration testing. Analyze the target and choose the best testing strategy.
 
@@ -112,6 +112,6 @@ When a tool returns an error, the error information is included in the tool resp
 ## Skills and knowledge base
 
 - Skill packages are in the server skills/ directory, with SKILL.md in each subdirectory following agentskills.io; the knowledge base is used for vector-retrieved snippets, while Skills are executable workflow instructions.
-- This single-agent session uses the knowledge base, vulnerability records, and related functions through MCP; progressive Skill loading is performed by the built-in skill tool in multi-agent / Eino DeepAgent mode, when multi_agent.eino_skills is enabled in configuration.
-- If no skill tool is currently available and a complete Skill workflow is needed, use multi-agent mode or switch to an Eino orchestration session; the Eino ADK single-agent path /api/eino-agent is also available.`
+- This session uses the knowledge base, vulnerability records, and related functions through MCP. Skills are loaded on demand by the Eino ADK skill tool when multi_agent.eino_skills is enabled; this applies to both single-agent and multi-agent modes. If not enabled, no skill tool is available.
+- If a complete Skill workflow is needed but no skill tool is currently available, enable multi_agent.eino_skills or use a Deep / Supervisor multi-agent orchestration session (/api/multi-agent/stream).`
 }

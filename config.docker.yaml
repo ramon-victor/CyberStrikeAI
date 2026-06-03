@@ -10,7 +10,7 @@
 # ============================================
 
 # Version shown in the frontend (optional; uses the default version when empty)
-version: "v1.6.27"
+version: "v1.6.29"
 # Server settings
 server:
   host: 0.0.0.0 # Listen address; 0.0.0.0 listens on all network interfaces
@@ -75,17 +75,17 @@ agent:
   large_result_threshold: 102400 # Large-result threshold in bytes; default 50 KB; larger results are automatically saved to storage
   result_storage_dir: ../tmp # Result storage directory; large results are saved here
   tool_timeout_minutes: 30 # Maximum duration in minutes for one tool execution; timed-out tools are terminated automatically; 0 means unlimited (not recommended because long hangs are likely)
-  # system_prompt_path: prompts/single-react.md # Optional: single-agent system prompt file, relative to this configuration file directory; when non-empty and readable, it replaces the built-in prompt
+  # system_prompt_path: prompts/single-agent.md # Optional: single-agent system prompt file, relative to this configuration file directory; when non-empty and readable, it replaces the built-in prompt
 # Human-in-the-loop (HITL) global whitelist: tools listed here always bypass approval and are unioned with the conversation page whitelist; the sidebar Apply action can merge entries into this list immediately.
 hitl:
   # Add or remove actual tool names from your environment (same as the sidebar, case-insensitive); use [] if no global approval bypass is needed
   tool_whitelist: [read_file, list_dir, glob, grep]
-# Multi-agent (CloudWeGo Eino DeepAgent, coexists with the single-agent /api/agent-loop above)
+# Multi-agent and Eino single-agent settings (CloudWeGo Eino ADK; single-agent entrypoint /api/eino-agent*, multi-agent entrypoint /api/multi-agent*)
 # Dependencies are pulled through go.mod; if downloads fail, set: go env -w GOPROXY=https://goproxy.cn,direct
-# After enabling, restart the service to register /api/multi-agent and /api/multi-agent/stream; Deep / Plan-Execute / Supervisor are passed in the request body from the mode selected on the conversation page and WebShell; robots and batches without a request body use deep
+# Deep / Plan-Execute / Supervisor are selected by the conversation page and WebShell through the request body's orchestration field; robots use robot_default_agent_mode
 multi_agent:
   enabled: true
-  robot_use_multi_agent: true # true: WeCom/DingTalk/Lark robots also use Eino multi-agent (higher cost)
+  robot_default_agent_mode: eino_single # WeCom/DingTalk/Lark robot default conversation mode: eino_single | deep | plan_execute | supervisor
   batch_use_multi_agent: false # true: each subtask in the batch task queue also uses Eino multi-agent (higher cost)
   max_iteration: 0 # Maximum rounds for the main agent / plan_execute executor; 0 means use agent.max_iterations
   # For plan_execute only: maximum outer execute-replan loop count; 0 means Eino default 10. The current Executor mounts pre-middlewares such as patch/reduction/tool_search.
@@ -119,7 +119,6 @@ multi_agent:
     reduction_sub_agents: true # true: sub-agents also mount reduction; false: only the orchestrator main agent uses reduction
     summarization_trigger_ratio: 0.8 # Summarization trigger ratio (max_total_tokens * ratio); recommended 0.75-0.85
     summarization_emit_internal_events: true # true: emits summarization internal events for diagnostics
-    history_input_budget_ratio: 0.35 # History input budget ratio (max_total_tokens * ratio)
     plan_execute_user_input_budget_ratio: 0.35 # userInput budget ratio in plan_execute (shared by planner/replanner/executor)
     plan_execute_executed_steps_budget_ratio: 0.2 # executed_steps budget ratio in plan_execute
     plan_execute_max_step_result_runes: 4000 # Maximum characters per plan_execute step result (truncated when exceeded)

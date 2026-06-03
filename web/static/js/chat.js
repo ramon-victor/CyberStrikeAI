@@ -38,11 +38,10 @@ function isInterruptContinueInjectChatMessage(content) {
 let chatAttachments = [];
 let chatAttachmentSeq = 0;
 
-// Internal UI state handling.
+// Conversation mode: eino_single = Eino ADK single agent (/api/eino-agent/stream); deep / plan_execute / supervisor = Eino multi-agent (/api/multi-agent/stream with request-body orchestration).
 const AGENT_MODE_STORAGE_KEY = 'cyberstrike-chat-agent-mode';
 const REASONING_MODE_LS = 'cyberstrike-chat-reasoning-mode';
 const REASONING_EFFORT_LS = 'cyberstrike-chat-reasoning-effort';
-const CHAT_AGENT_MODE_REACT = 'react';
 const CHAT_AGENT_MODE_EINO_SINGLE = 'eino_single';
 const CHAT_AGENT_EINO_MODES = ['deep', 'plan_execute', 'supervisor'];
 let multiAgentAPIEnabled = false;
@@ -391,19 +390,16 @@ async function applyHitlSidebarConfig() {
     }
 }
 
-/** Internal UI state handling. */
+/** Normalize localStorage to eino_single | deep | plan_execute | supervisor. */
 function chatAgentModeNormalizeStored(stored, cfg) {
     const pub = cfg && cfg.multi_agent ? cfg.multi_agent : null;
     const multiOn = !!(pub && pub.enabled);
-    const defOrch = 'deep';
-    let s = stored;
-    if (s === 'single') s = CHAT_AGENT_MODE_REACT;
-    if (s === 'multi') s = defOrch;
-    if (s === CHAT_AGENT_MODE_REACT || chatAgentModeIsEinoSingle(s)) return s;
+    const s = stored;
+    if (chatAgentModeIsEinoSingle(s)) return s;
     if (chatAgentModeIsEino(s)) {
-        return multiOn ? s : CHAT_AGENT_MODE_REACT;
+        return multiOn ? s : CHAT_AGENT_MODE_EINO_SINGLE;
     }
-    return CHAT_AGENT_MODE_REACT;
+    return CHAT_AGENT_MODE_EINO_SINGLE;
 }
 
 if (typeof window !== 'undefined') {
@@ -411,7 +407,6 @@ if (typeof window !== 'undefined') {
     window.csaiChatAgentMode = {
         EINO_MODES: CHAT_AGENT_EINO_MODES,
         EINO_SINGLE: CHAT_AGENT_MODE_EINO_SINGLE,
-        REACT: CHAT_AGENT_MODE_REACT,
         isEino: chatAgentModeIsEino,
         isEinoSingle: chatAgentModeIsEinoSingle,
         normalizeStored: chatAgentModeNormalizeStored,
@@ -448,8 +443,6 @@ document.addEventListener('DOMContentLoaded', function () {
 function getAgentModeLabelForValue(mode) {
     if (typeof window.t === 'function') {
         switch (mode) {
-            case CHAT_AGENT_MODE_REACT:
-                return window.t('chat.agentModeReactNative');
             case 'deep':
                 return window.t('chat.agentModeDeep');
             case 'plan_execute':
@@ -463,8 +456,7 @@ function getAgentModeLabelForValue(mode) {
         }
     }
     switch (mode) {
-        case CHAT_AGENT_MODE_REACT: return 'Native ReAct';
-        case CHAT_AGENT_MODE_EINO_SINGLE: return 'Eino Single agent';
+        case CHAT_AGENT_MODE_EINO_SINGLE: return 'Eino single agent';
         case 'deep': return 'Deep';
         case 'plan_execute': return 'Plan-Execute';
         case 'supervisor': return 'Supervisor';
@@ -474,7 +466,6 @@ function getAgentModeLabelForValue(mode) {
 
 function getAgentModeIconForValue(mode) {
     switch (mode) {
-        case CHAT_AGENT_MODE_REACT: return '🤖';
         case CHAT_AGENT_MODE_EINO_SINGLE: return '⚡';
         case 'deep': return '🧩';
         case 'plan_execute': return '📋';
@@ -655,7 +646,7 @@ function toggleAgentModePanel() {
 }
 
 function selectAgentMode(mode) {
-    const ok = mode === CHAT_AGENT_MODE_REACT || chatAgentModeIsEinoSingle(mode) || chatAgentModeIsEino(mode);
+    const ok = chatAgentModeIsEinoSingle(mode) || chatAgentModeIsEino(mode);
     if (!ok) return;
     try {
         localStorage.setItem(AGENT_MODE_STORAGE_KEY, mode);
@@ -672,8 +663,8 @@ async function initChatAgentModeFromConfig() {
     // Internal UI state handling.
     wrap.style.display = '';
     let stored = localStorage.getItem(AGENT_MODE_STORAGE_KEY);
-    if (!(stored === CHAT_AGENT_MODE_REACT || chatAgentModeIsEinoSingle(stored) || chatAgentModeIsEino(stored))) {
-        stored = CHAT_AGENT_MODE_REACT;
+    if (!(chatAgentModeIsEinoSingle(stored) || chatAgentModeIsEino(stored))) {
+        stored = CHAT_AGENT_MODE_EINO_SINGLE;
     }
     sel.value = stored;
     syncAgentModeFromValue(stored);
@@ -725,7 +716,7 @@ document.addEventListener('languagechange', function () {
     const hid = document.getElementById('agent-mode-select');
     if (!hid) return;
     const v = hid.value;
-    if (v === CHAT_AGENT_MODE_REACT || chatAgentModeIsEinoSingle(v) || chatAgentModeIsEino(v)) {
+    if (chatAgentModeIsEinoSingle(v) || chatAgentModeIsEino(v)) {
         syncAgentModeFromValue(v);
     }
     if (typeof updateChatReasoningSummary === 'function') {
@@ -945,10 +936,9 @@ async function sendMessage() {
     
     try {
         const modeSel = document.getElementById('agent-mode-select');
-        const modeVal = modeSel ? modeSel.value : CHAT_AGENT_MODE_REACT;
-        const useEinoSingle = chatAgentModeIsEinoSingle(modeVal);
+        let modeVal = modeSel ? modeSel.value : CHAT_AGENT_MODE_EINO_SINGLE;
         const useMulti = multiAgentAPIEnabled && chatAgentModeIsEino(modeVal);
-        const streamPath = useEinoSingle ? '/api/eino-agent/stream' : useMulti ? '/api/multi-agent/stream' : '/api/agent-loop/stream';
+        const streamPath = useMulti ? '/api/multi-agent/stream' : '/api/eino-agent/stream';
         if (useMulti && modeVal) {
             body.orchestration = modeVal;
         }

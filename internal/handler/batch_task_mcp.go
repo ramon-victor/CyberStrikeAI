@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/mcp/builtin"
 
@@ -134,7 +135,7 @@ Purpose: Task Management / Batch Task Queue inside the app. Registers multiple i
 
 When to use: call this when the user explicitly wants batch queued execution, a Cron cycle for the same set of instructions, or alignment with the task-management page. Analysis or coding that requires immediate follow-up questions or strongly depends on the current conversation context should be completed in this conversation, not queued as delegation.
 
-Parameters: provide either tasks (array of strings) or tasks_text (multiline text, one item per line). Each item is one instruction that the system will execute later in queue order. agent_mode: single (native ReAct, default), eino_single (Eino ADK single agent), deep / plan_execute / supervisor (Eino orchestration, requires multi-agent support); legacy multi is treated as deep. This does not split the main conversation into sub-agents. schedule_mode: manual (default) or cron; cron requires cron_expr in standard 5-field format, for example "0 */6 * * *".
+Parameters: provide either tasks (array of strings) or tasks_text (multiline text, one item per line). Each item is one instruction that the system will execute later in queue order. agent_mode: eino_single (Eino ADK single agent, default), deep / plan_execute / supervisor (Eino orchestration, requires multi-agent support). This does not split the main conversation into sub-agents. schedule_mode: manual (default) or cron; cron requires cron_expr in standard 5-field format, for example "0 */6 * * *".
 
 Execution: queues are pending by default and do not start automatically. Set execute_now=true to start immediately after creation; otherwise call batch_task_start later. Cron automatic next runs require schedule_enabled=true, configured with batch_task_schedule_enabled.`,
 		ShortDescription: "Task management: create a batch task queue with multiple instructions and optional immediate or Cron execution",
@@ -160,8 +161,8 @@ Execution: queues are pending by default and do not start automatically. Set exe
 				},
 				"agent_mode": map[string]interface{}{
 					"type":        "string",
-					"description": "Execution mode: single (native ReAct), eino_single (Eino ADK), deep/plan_execute/supervisor (Eino orchestration, requires multi-agent); multi is treated as deep",
-					"enum":        []string{"single", "eino_single", "deep", "plan_execute", "supervisor", "multi"},
+					"description": "Execution mode: eino_single (Eino ADK, default), deep/plan_execute/supervisor (Eino orchestration, requires multi-agent support)",
+					"enum":        []string{"eino_single", "deep", "plan_execute", "supervisor"},
 				},
 				"schedule_mode": map[string]interface{}{
 					"type":        "string",
@@ -189,7 +190,7 @@ Execution: queues are pending by default and do not start automatically. Set exe
 		}
 		title := mcpArgString(args, "title")
 		role := mcpArgString(args, "role")
-		agentMode := normalizeBatchQueueAgentMode(mcpArgString(args, "agent_mode"))
+		agentMode := config.NormalizeAgentMode(mcpArgString(args, "agent_mode"))
 		scheduleMode := normalizeBatchQueueScheduleMode(mcpArgString(args, "schedule_mode"))
 		cronExpr := strings.TrimSpace(mcpArgString(args, "cron_expr"))
 		var nextRunAt *time.Time
@@ -393,8 +394,8 @@ Call constraint: this tool belongs to task management. Call it only when the use
 				},
 				"agent_mode": map[string]interface{}{
 					"type":        "string",
-					"description": "Agent mode: single, eino_single, deep, plan_execute, supervisor; multi is treated as deep",
-					"enum":        []string{"single", "eino_single", "deep", "plan_execute", "supervisor", "multi"},
+					"description": "Agent mode: eino_single, deep, plan_execute, supervisor",
+					"enum":        []string{"eino_single", "deep", "plan_execute", "supervisor"},
 				},
 			},
 			"required": []string{"queue_id"},

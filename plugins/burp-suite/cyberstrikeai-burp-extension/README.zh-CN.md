@@ -10,8 +10,8 @@
 - 右键任意 HTTP 请求包 → **Send to CyberStrikeAI (stream test)**：
   - 将该 HTTP 请求（含 headers/body；若存在响应则附带截断片段）发送到 CyberStrikeAI
   - 以 **SSE 流式**接收返回内容，并在标签页中实时展示
-  - 单 Agent：`POST /api/agent-loop/stream`
-  - 多 Agent：`POST /api/multi-agent/stream`（需要服务端启用 `multi_agent.enabled: true`）
+  - 单 Agent：`POST /api/eino-agent/stream`
+  - 多 Agent：`POST /api/multi-agent/stream`（需 `multi_agent.enabled: true`，请求体 `orchestration`）
 - **测试历史侧边栏（可搜索）**：每次发送都会新增一条记录，方便回看与对比
 - **Output 分区**：`Progress`（可折叠）+ `Final Response`（主区域）
 - **Markdown 渲染**：最终输出可在 Output 主区域渲染为富文本（可开关）

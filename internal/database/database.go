@@ -388,7 +388,7 @@ func (db *DB) initTables() error {
 		id TEXT PRIMARY KEY,
 		title TEXT,
 		role TEXT,
-		agent_mode TEXT NOT NULL DEFAULT 'single',
+		agent_mode TEXT NOT NULL DEFAULT 'eino_single',
 		schedule_mode TEXT NOT NULL DEFAULT 'manual',
 		cron_expr TEXT,
 		next_run_at DATETIME,
@@ -984,14 +984,14 @@ func (db *DB) migrateBatchTaskQueuesTable() error {
 	var agentModeCount int
 	err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('batch_task_queues') WHERE name='agent_mode'").Scan(&agentModeCount)
 	if err != nil {
-		if _, addErr := db.Exec("ALTER TABLE batch_task_queues ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'single'"); addErr != nil {
+		if _, addErr := db.Exec("ALTER TABLE batch_task_queues ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'eino_single'"); addErr != nil {
 			errMsg := strings.ToLower(addErr.Error())
 			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
 				db.logger.Warn("failed to add agent_mode column", zap.Error(addErr))
 			}
 		}
 	} else if agentModeCount == 0 {
-		if _, err := db.Exec("ALTER TABLE batch_task_queues ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'single'"); err != nil {
+		if _, err := db.Exec("ALTER TABLE batch_task_queues ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'eino_single'"); err != nil {
 			db.logger.Warn("failed to add agent_mode column", zap.Error(err))
 		}
 	}

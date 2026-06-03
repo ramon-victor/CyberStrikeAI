@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// einoSummarizeUserInstruction shares the same goal as the single-agent MemoryCompressor: preserve critical penetration-testing information during compression.
+// einoSummarizeUserInstruction compresses history while preserving critical penetration-testing information.
 const einoSummarizeUserInstruction = `Compress the conversation history while preserving all critical security testing information.
 
 Must retain: confirmed vulnerabilities and attack paths, core findings in tool output, credentials and authentication details, architecture and weak points, current progress, failed attempts and dead ends, and strategy decisions.
@@ -29,7 +29,7 @@ Enumerated assets must retain an **inheritable summary**: primary domains, key s
 The output must enable a subsequent agent to seamlessly continue the same authorized testing task.`
 
 // newEinoSummarizationMiddleware uses the Eino ADK Summarization middleware (see https://www.cloudwego.io/zh/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_summarization/).
-// Trigger threshold matches the single-agent MemoryCompressor: summarize when estimated tokens exceed 90% of openai.max_total_tokens.
+// Trigger threshold: summarize when estimated tokens exceed openai.max_total_tokens * summarization_trigger_ratio (default 0.8).
 func newEinoSummarizationMiddleware(
 	ctx context.Context,
 	summaryModel model.BaseChatModel,

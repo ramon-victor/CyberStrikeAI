@@ -227,7 +227,7 @@ type ChatAttachment struct {
 	ServerPath string `json:"serverPath,omitempty"` // Absolute path already saved under chat_uploads, returned by POST /api/chat-uploads
 }
 
-// ChatReasoningRequest conversation-page model reasoning intent; consumed only by the Eino path and ignored by the native agent loop.
+// ChatReasoningRequest is the conversation-page model reasoning intent consumed by Eino single-agent and multi-agent paths.
 type ChatReasoningRequest struct {
 	// Mode: default（follow system settings）| off | on | auto
 	Mode string `json:"mode,omitempty"`
@@ -561,191 +561,6 @@ type ChatResponse struct {
 	Time            time.Time `json:"time"`
 }
 
-// AgentLoop handles Agent Loop requests
-func (h *AgentHandler) AgentLoop(c *gin.Context) {
-	var req ChatRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	h.logger.Info("Received Agent Loop request",
-		zap.String("message", req.Message),
-		zap.String("conversationId", req.ConversationID),
-	)
-
-	// Create a new conversation if no conversation ID was provided
-	conversationID := req.ConversationID
-	if conversationID == "" {
-		title := safeTruncateString(req.Message, 50)
-		meta := audit.ConversationCreateMetaFromGin(c, "agent_loop")
-		meta.ProjectID = effectiveProjectID(h.config, req.ProjectID)
-		conv, err := h.db.CreateConversation(title, meta)
-		if err != nil {
-			h.logger.Error("Failed to create conversation", zap.Error(err))
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		conversationID = conv.ID
-	} else {
-		// Verify that the conversation exists
-		_, err := h.db.GetConversation(conversationID)
-		if err != nil {
-			h.logger.Error("Conversation does not exist", zap.String("conversationId", conversationID), zap.Error(err))
-			c.JSON(http.StatusNotFound, gin.H{"error": "Conversation does not exist"})
-			return
-		}
-	}
-
-	h.activateHITLForConversation(conversationID, req.Hitl)
-	if h.hitlManager != nil {
-		defer h.hitlManager.DeactivateConversation(conversationID)
-	}
-
-	// First try to restore history context from the saved agent trace
-	agentHistoryMessages, err := h.loadHistoryFromAgentTrace(conversationID)
-	if err != nil {
-		h.logger.Warn("Failed to load history from agent trace; using messages table", zap.Error(err))
-		// Fall back to the database messages table
-		historyMessages, err := h.db.GetMessages(conversationID)
-		if err != nil {
-			h.logger.Warn("Failed to get history messages", zap.Error(err))
-			agentHistoryMessages = []agent.ChatMessage{}
-		} else {
-			agentHistoryMessages = dbMessagesToAgentChatMessages(historyMessages)
-			h.logger.Info("Loaded history messages from messages table", zap.Int("count", len(agentHistoryMessages)))
-		}
-	} else {
-		h.logger.Info("Restored history context from agent trace", zap.Int("count", len(agentHistoryMessages)))
-	}
-
-	// Validate attachment count（non-streaming）
-	if len(req.Attachments) > maxAttachments {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("At most %d attachments are allowed", maxAttachments)})
-		return
-	}
-
-	// Apply role user prompt and tool configuration
-	finalMessage := req.Message
-	var roleTools []string // Tool list configured by the role
-
-	// WebShell AI assistant mode: bind the current connection, expose only webshell_* tools, and inject connection_id
-	if req.WebShellConnectionID != "" {
-		conn, err := h.db.GetWebshellConnection(strings.TrimSpace(req.WebShellConnectionID))
-		if err != nil || conn == nil {
-			h.logger.Warn("WebShell AI assistant: connection not found", zap.String("id", req.WebShellConnectionID), zap.Error(err))
-			c.JSON(http.StatusBadRequest, gin.H{"error": "WebShell connection not found"})
-			return
-		}
-		webshellContext := BuildWebshellAssistantContext(conn, WebshellSkillHintDefault, req.Message)
-		// WebShell mode, if a role is also specified, append the role user_prompt while keeping tools limited to WebShell-specific tools
-		if req.Role != "" && req.Role != "\u9ed8\u8ba4" && h.config.Roles != nil {
-			if role, exists := h.config.Roles[req.Role]; exists && role.Enabled && role.UserPrompt != "" {
-				finalMessage = role.UserPrompt + "\n\n" + webshellContext
-				h.logger.Info("WebShell + role: applied role prompt", zap.String("role", req.Role))
-			} else {
-				finalMessage = webshellContext
-			}
-		} else {
-			finalMessage = webshellContext
-		}
-		roleTools = []string{
-			builtin.ToolWebshellExec,
-			builtin.ToolWebshellFileList,
-			builtin.ToolWebshellFileRead,
-			builtin.ToolWebshellFileWrite,
-			builtin.ToolRecordVulnerability,
-			builtin.ToolListVulnerabilities,
-			builtin.ToolGetVulnerability,
-			builtin.ToolListKnowledgeRiskTypes,
-			builtin.ToolSearchKnowledgeBase,
-		}
-	} else if req.Role != "" && req.Role != "\u9ed8\u8ba4" {
-		if h.config.Roles != nil {
-			if role, exists := h.config.Roles[req.Role]; exists && role.Enabled {
-				// Apply user prompt
-				if role.UserPrompt != "" {
-					finalMessage = role.UserPrompt + "\n\n" + req.Message
-					h.logger.Info("Applied role user prompt", zap.String("role", req.Role))
-				}
-				// Get the tool list configured by the role, preferring the tools field and remaining backward-compatible with mcps
-				if len(role.Tools) > 0 {
-					roleTools = role.Tools
-					h.logger.Info("Using role-configured tool list", zap.String("role", req.Role), zap.Int("toolCount", len(roleTools)))
-				}
-			}
-		}
-	}
-	var savedPaths []string
-	if len(req.Attachments) > 0 {
-		savedPaths, err = saveAttachmentsToDateAndConversationDir(req.Attachments, conversationID, h.logger)
-		if err != nil {
-			h.logger.Error("Failed to save chat attachments", zap.Error(err))
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save uploaded files: " + err.Error()})
-			return
-		}
-	}
-	finalMessage = appendAttachmentsToMessage(finalMessage, req.Attachments, savedPaths)
-
-	// Save user message：when attachments are present, also save attachment names and paths so refreshes display them and later turns expose paths through history
-	userContent := userMessageContentForStorage(req.Message, req.Attachments, savedPaths)
-	_, err = h.db.AddMessage(conversationID, "user", userContent, nil)
-	if err != nil {
-		h.logger.Error("Failed to save user message", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save user message: " + err.Error()})
-		return
-	}
-
-	baseCtx, cancelWithCause := context.WithCancelCause(c.Request.Context())
-	defer cancelWithCause(nil)
-	taskCtx, timeoutCancel := context.WithTimeout(baseCtx, 600*time.Minute)
-	defer timeoutCancel()
-	progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, "", nil)
-	taskCtx = h.injectReactHITLInterceptor(taskCtx, cancelWithCause, conversationID, "", nil)
-
-	// Run Agent Loop with history messages and conversation ID, using finalMessage with role prompt and the role tool list
-	result, err := h.agent.AgentLoopWithProgress(taskCtx, finalMessage, agentHistoryMessages, conversationID, progressCallback, roleTools, h.projectBlackboardBlock(conversationID))
-	if err != nil {
-		h.logger.Error("Agent Loop execution failed", zap.Error(err))
-
-		// Even on execution failure, try to save the agent trace if result contains one
-		if result != nil && (result.LastAgentTraceInput != "" || result.LastAgentTraceOutput != "") {
-			if saveErr := h.db.SaveAgentTrace(conversationID, result.LastAgentTraceInput, result.LastAgentTraceOutput); saveErr != nil {
-				h.logger.Warn("Failed to save agent trace for failed task", zap.Error(saveErr))
-			} else {
-				h.logger.Info("Saved agent trace for failed task", zap.String("conversationId", conversationID))
-			}
-		}
-
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Save assistant response
-	_, err = h.db.AddMessage(conversationID, "assistant", result.Response, result.MCPExecutionIDs)
-	if err != nil {
-		h.logger.Error("Failed to save assistant message", zap.Error(err))
-		// Even if saving fails, return the response but log the error
-		// because the AI already generated a response that the user should see
-	}
-
-	// Save the last agent trace and assistant output
-	if result.LastAgentTraceInput != "" || result.LastAgentTraceOutput != "" {
-		if err := h.db.SaveAgentTrace(conversationID, result.LastAgentTraceInput, result.LastAgentTraceOutput); err != nil {
-			h.logger.Warn("Failed to save agent trace", zap.Error(err))
-		} else {
-			h.logger.Info("Saved agent trace", zap.String("conversationId", conversationID))
-		}
-	}
-
-	c.JSON(http.StatusOK, ChatResponse{
-		Response:        result.Response,
-		MCPExecutionIDs: result.MCPExecutionIDs,
-		ConversationID:  conversationID,
-		Time:            time.Now(),
-	})
-}
-
 func (h *AgentHandler) finalizeRobotAgentError(ctx context.Context, assistantMessageID, conversationID string, resultMA *multiagent.RunResult, errMA error) (string, string, error) {
 	if shouldPersistEinoAgentTraceAfterRunError(ctx) {
 		h.persistEinoAgentTraceForResume(conversationID, resultMA)
@@ -774,7 +589,80 @@ func (h *AgentHandler) finalizeRobotAgentSuccess(assistantMessageID, conversatio
 	return resultMA.Response, conversationID, nil
 }
 
-// ProcessMessageForRobot called by robots (WeCom/DingTalk/Feishu): uses the same execution path as /api/agent-loop/stream, including progressCallback and process details, but does not send SSE and returns the full response at the end
+func (h *AgentHandler) runRobotEinoSingleWithRetry(
+	taskCtx context.Context,
+	conversationID, finalMessage string,
+	history []agent.ChatMessage,
+	roleTools []string,
+	progressCallback agent.ProgressCallback,
+	assistantMessageID string,
+	taskStatus *string,
+) (string, string, error) {
+	curHist := history
+	curMsg := finalMessage
+	segmentUserMessage := finalMessage
+	var resultMA *multiagent.RunResult
+	var errMA error
+	var transientRunAttempts int
+	for {
+		resultMA, errMA = multiagent.RunEinoSingleChatModelAgent(
+			taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger,
+			conversationID, curMsg, curHist, roleTools, progressCallback, nil, h.projectBlackboardBlock(conversationID),
+		)
+		if errMA == nil {
+			transientRunAttempts = 0
+			break
+		}
+		if handled, _ := h.handleEinoTransientRetryContinue(
+			taskCtx, conversationID, resultMA, errMA, &transientRunAttempts,
+			&curHist, &curMsg, segmentUserMessage, progressCallback, nil,
+		); handled {
+			continue
+		}
+		*taskStatus = "failed"
+		return h.finalizeRobotAgentError(taskCtx, assistantMessageID, conversationID, resultMA, errMA)
+	}
+	return h.finalizeRobotAgentSuccess(assistantMessageID, conversationID, resultMA)
+}
+
+func (h *AgentHandler) runRobotMultiAgentWithRetry(
+	taskCtx context.Context,
+	conversationID, finalMessage, orchestration string,
+	history []agent.ChatMessage,
+	roleTools []string,
+	progressCallback agent.ProgressCallback,
+	assistantMessageID string,
+	taskStatus *string,
+) (string, string, error) {
+	curHist := history
+	curMsg := finalMessage
+	segmentUserMessage := finalMessage
+	var resultMA *multiagent.RunResult
+	var errMA error
+	var transientRunAttempts int
+	for {
+		resultMA, errMA = multiagent.RunDeepAgent(
+			taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger,
+			conversationID, curMsg, curHist, roleTools, progressCallback,
+			h.agentsMarkdownDir, orchestration, nil, h.projectBlackboardBlock(conversationID),
+		)
+		if errMA == nil {
+			transientRunAttempts = 0
+			break
+		}
+		if handled, _ := h.handleEinoTransientRetryContinue(
+			taskCtx, conversationID, resultMA, errMA, &transientRunAttempts,
+			&curHist, &curMsg, segmentUserMessage, progressCallback, nil,
+		); handled {
+			continue
+		}
+		*taskStatus = "failed"
+		return h.finalizeRobotAgentError(taskCtx, assistantMessageID, conversationID, resultMA, errMA)
+	}
+	return h.finalizeRobotAgentSuccess(assistantMessageID, conversationID, resultMA)
+}
+
+// ProcessMessageForRobot is called by robots (WeCom/DingTalk/Lark): it uses the Eino single-agent/multi-agent execution paths with progressCallback and process details, but does not send SSE and returns the full reply at the end.
 func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, conversationID, message, role string) (response string, convID string, err error) {
 	if conversationID == "" {
 		title := safeTruncateString(message, 50)
@@ -823,7 +711,7 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, con
 		return "", "", fmt.Errorf("Failed to save user message: %w", err)
 	}
 
-	// Match agent-loop/stream: create an assistant message placeholder first and use progressCallback to write process details without sending SSE
+	// Match Eino streaming conversation behavior: create an assistant message placeholder first and let progressCallback write process details without sending SSE.
 	assistantMsg, err := h.db.AddMessage(conversationID, "assistant", "Processing...", nil)
 	if err != nil {
 		h.logger.Warn("Robot: failed to create assistant message placeholder", zap.Error(err))
@@ -833,7 +721,7 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, con
 		assistantMessageID = assistantMsg.ID
 	}
 
-	// Register the running task and mirror progress events to taskEventBus so web task-events can resume the stream, matching agent-loop/stream.
+	// Register the running task and mirror progress events to taskEventBus so web task-events can resume the stream.
 	taskCtx, cancelWithCause := context.WithCancelCause(ctx)
 	defer cancelWithCause(nil)
 	taskStatus := "completed"
@@ -848,98 +736,24 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, con
 	}
 	progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, nil)
 
-	robotMode := "react"
+	robotMode := "eino_single"
 	if h.config != nil {
 		robotMode = config.NormalizeRobotAgentMode(h.config.MultiAgent)
 	}
 	switch robotMode {
 	case "eino_single":
-		curHist := agentHistoryMessages
-		curMsg := finalMessage
-		segmentUserMessage := finalMessage
-		var resultMA *multiagent.RunResult
-		var errMA error
-		var transientRunAttempts int
-		for {
-			resultMA, errMA = multiagent.RunEinoSingleChatModelAgent(
-				taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger,
-				conversationID, curMsg, curHist, roleTools, progressCallback, nil, h.projectBlackboardBlock(conversationID),
-			)
-			if errMA == nil {
-				// After success, reset the transient retry window so the next segment starts from retry 1.
-				transientRunAttempts = 0
-				break
-			}
-			if handled, _ := h.handleEinoTransientRetryContinue(
-				taskCtx, conversationID, resultMA, errMA, &transientRunAttempts,
-				&curHist, &curMsg, segmentUserMessage, progressCallback, nil,
-			); handled {
-				continue
-			}
-			taskStatus = "failed"
-			return h.finalizeRobotAgentError(taskCtx, assistantMessageID, conversationID, resultMA, errMA)
-		}
-		return h.finalizeRobotAgentSuccess(assistantMessageID, conversationID, resultMA)
+		return h.runRobotEinoSingleWithRetry(taskCtx, conversationID, finalMessage, agentHistoryMessages, roleTools, progressCallback, assistantMessageID, &taskStatus)
 	case "deep", "plan_execute", "supervisor":
 		if h.config == nil || !h.config.MultiAgent.Enabled {
-			h.logger.Warn("Robot is configured for multi-agent mode but multi_agent is not enabled; falling back to native ReAct",
+			h.logger.Warn("Robot is configured for multi-agent mode but multi_agent is not enabled; falling back to Eino single-agent",
 				zap.String("robot_mode", robotMode))
-			break
+			return h.runRobotEinoSingleWithRetry(taskCtx, conversationID, finalMessage, agentHistoryMessages, roleTools, progressCallback, assistantMessageID, &taskStatus)
 		}
-		curHist := agentHistoryMessages
-		curMsg := finalMessage
-		segmentUserMessage := finalMessage
-		var resultMA *multiagent.RunResult
-		var errMA error
-		var transientRunAttempts int
-		for {
-			resultMA, errMA = multiagent.RunDeepAgent(
-				taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger,
-				conversationID, curMsg, curHist, roleTools, progressCallback,
-				h.agentsMarkdownDir, robotMode, nil, h.projectBlackboardBlock(conversationID),
-			)
-			if errMA == nil {
-				// After success, reset the transient retry window so the next segment starts from retry 1.
-				transientRunAttempts = 0
-				break
-			}
-			if handled, _ := h.handleEinoTransientRetryContinue(
-				taskCtx, conversationID, resultMA, errMA, &transientRunAttempts,
-				&curHist, &curMsg, segmentUserMessage, progressCallback, nil,
-			); handled {
-				continue
-			}
-			taskStatus = "failed"
-			return h.finalizeRobotAgentError(taskCtx, assistantMessageID, conversationID, resultMA, errMA)
-		}
-		return h.finalizeRobotAgentSuccess(assistantMessageID, conversationID, resultMA)
+		return h.runRobotMultiAgentWithRetry(taskCtx, conversationID, finalMessage, robotMode, agentHistoryMessages, roleTools, progressCallback, assistantMessageID, &taskStatus)
 	}
 
-	result, err := h.agent.AgentLoopWithProgress(taskCtx, finalMessage, agentHistoryMessages, conversationID, progressCallback, roleTools, h.projectBlackboardBlock(conversationID))
-	if err != nil {
-		taskStatus = "failed"
-		errMsg := "Execution failed: " + err.Error()
-		if assistantMessageID != "" {
-			_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
-			_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errMsg, nil)
-		}
-		return "", conversationID, err
-	}
-
-	// Update assistant message content and MCP execution IDs, matching stream behavior
-	if assistantMessageID != "" {
-		if errU := h.db.UpdateAssistantMessageFinalize(assistantMessageID, result.Response, result.MCPExecutionIDs, multiagent.AggregatedReasoningFromTraceJSON(result.LastAgentTraceInput)); errU != nil {
-			h.logger.Warn("Robot: failed to update assistant message", zap.Error(errU))
-		}
-	} else {
-		if _, err = h.db.AddMessage(conversationID, "assistant", result.Response, result.MCPExecutionIDs); err != nil {
-			h.logger.Warn("Robot: failed to save assistant message", zap.Error(err))
-		}
-	}
-	if result.LastAgentTraceInput != "" || result.LastAgentTraceOutput != "" {
-		_ = h.db.SaveAgentTrace(conversationID, result.LastAgentTraceInput, result.LastAgentTraceOutput)
-	}
-	return result.Response, conversationID, nil
+	taskStatus = "failed"
+	return "", conversationID, fmt.Errorf("unsupported robot agent mode: %s", robotMode)
 }
 
 // StreamEvent stream event
@@ -1440,508 +1254,7 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 	}
 }
 
-// AgentLoopStream handles Agent Loop streaming requests
-func (h *AgentHandler) AgentLoopStream(c *gin.Context) {
-	var req ChatRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		// For streaming requests, also send errors in SSE format
-		c.Header("Content-Type", "text/event-stream; charset=utf-8")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		event := StreamEvent{
-			Type:    "error",
-			Message: "Invalid request parameters: " + err.Error(),
-		}
-		eventJSON, _ := json.Marshal(event)
-		fmt.Fprintf(c.Writer, "data: %s\n\n", eventJSON)
-		done := StreamEvent{Type: "done", Message: ""}
-		doneJSON, _ := json.Marshal(done)
-		fmt.Fprintf(c.Writer, "data: %s\n\n", doneJSON)
-		c.Writer.Flush()
-		return
-	}
-
-	h.logger.Info("Received Agent Loop streaming request",
-		zap.String("message", req.Message),
-		zap.String("conversationId", req.ConversationID),
-	)
-
-	// Set SSE response headers
-	c.Header("Content-Type", "text/event-stream; charset=utf-8")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no") // Disable nginx buffering
-
-	// Send initial event
-	// Used to track whether the client disconnected
-	clientDisconnected := false
-	// Shared with sseKeepalive: do not write ResponseWriter concurrently, or chunked encoding may be corrupted (ERR_INVALID_CHUNKED_ENCODING).
-	var sseWriteMu sync.Mutex
-	var ssePublishConversationID string
-	// Used to quickly confirm whether the model actually produced streaming deltas
-	var responseDeltaCount int
-	var responseStartLogged bool
-
-	sendEvent := func(eventType, message string, data interface{}) {
-		if eventType == "response_start" {
-			responseDeltaCount = 0
-			responseStartLogged = true
-			h.logger.Info("SSE: response_start",
-				zap.Int("conversationIdPresent", func() int {
-					if m, ok := data.(map[string]interface{}); ok {
-						if v, ok2 := m["conversationId"]; ok2 && v != nil && fmt.Sprint(v) != "" {
-							return 1
-						}
-					}
-					return 0
-				}()),
-				zap.String("messageGeneratedBy", func() string {
-					if m, ok := data.(map[string]interface{}); ok {
-						if v, ok2 := m["messageGeneratedBy"]; ok2 {
-							if s, ok3 := v.(string); ok3 {
-								return s
-							}
-							return fmt.Sprint(v)
-						}
-					}
-					return ""
-				}()),
-			)
-		} else if eventType == "response_delta" {
-			responseDeltaCount++
-			// Log only the first few entries to avoid spam
-			if responseStartLogged && responseDeltaCount <= 3 {
-				h.logger.Info("SSE: response_delta",
-					zap.Int("index", responseDeltaCount),
-					zap.Int("deltaLen", len(message)),
-					zap.String("deltaPreview", func() string {
-						p := strings.ReplaceAll(message, "\n", "\\n")
-						if len(p) > 80 {
-							return p[:80] + "..."
-						}
-						return p
-					}()),
-				)
-			}
-		}
-
-		event := StreamEvent{
-			Type:    eventType,
-			Message: message,
-			Data:    data,
-		}
-		eventJSON, errJSON := json.Marshal(event)
-		if errJSON != nil {
-			eventJSON = []byte(`{"type":"error","message":"marshal failed"}`)
-		}
-		sseLine := make([]byte, 0, len(eventJSON)+8)
-		sseLine = append(sseLine, []byte("data: ")...)
-		sseLine = append(sseLine, eventJSON...)
-		sseLine = append(sseLine, '\n', '\n')
-		if ssePublishConversationID != "" && h.taskEventBus != nil {
-			h.taskEventBus.Publish(ssePublishConversationID, sseLine)
-		}
-
-		// If the client has disconnected, stop writing HTTP; mirror subscriptions can still receive events
-		if clientDisconnected {
-			return
-		}
-
-		// Check whether the request context was canceled by client disconnect
-		select {
-		case <-c.Request.Context().Done():
-			clientDisconnected = true
-			return
-		default:
-		}
-
-		sseWriteMu.Lock()
-		_, err := c.Writer.Write(sseLine)
-		if err != nil {
-			sseWriteMu.Unlock()
-			clientDisconnected = true
-			h.logger.Debug("Client disconnected; stop sending SSE events", zap.Error(err))
-			return
-		}
-		if flusher, ok := c.Writer.(http.Flusher); ok {
-			flusher.Flush()
-		} else {
-			c.Writer.Flush()
-		}
-		sseWriteMu.Unlock()
-	}
-
-	// Create a new conversation if no conversation ID was provided（WebShell assistant mode associates the connection ID for persistent display）
-	conversationID := req.ConversationID
-	if conversationID == "" {
-		title := safeTruncateString(req.Message, 50)
-		var conv *database.Conversation
-		var err error
-		meta := audit.ConversationCreateMetaFromGin(c, "agent_loop_stream")
-		meta.ProjectID = effectiveProjectID(h.config, req.ProjectID)
-		if req.WebShellConnectionID != "" {
-			meta.Source = "webshell_chat"
-			conv, err = h.db.CreateConversationWithWebshell(strings.TrimSpace(req.WebShellConnectionID), title, meta)
-		} else {
-			conv, err = h.db.CreateConversation(title, meta)
-		}
-		if err != nil {
-			h.logger.Error("Failed to create conversation", zap.Error(err))
-			sendEvent("error", "Failed to create conversation: "+err.Error(), nil)
-			return
-		}
-		conversationID = conv.ID
-		sendEvent("conversation", "Conversation created", map[string]interface{}{
-			"conversationId": conversationID,
-		})
-	} else {
-		// Verify that the conversation exists
-		_, err := h.db.GetConversation(conversationID)
-		if err != nil {
-			h.logger.Error("Conversation does not exist", zap.String("conversationId", conversationID), zap.Error(err))
-			sendEvent("error", "Conversation does not exist", nil)
-			return
-		}
-	}
-	ssePublishConversationID = conversationID
-
-	// First try to restore history context from the saved agent trace
-	agentHistoryMessages, err := h.loadHistoryFromAgentTrace(conversationID)
-	if err != nil {
-		h.logger.Warn("Failed to load history from agent trace; using messages table", zap.Error(err))
-		// Fall back to the database messages table
-		historyMessages, err := h.db.GetMessages(conversationID)
-		if err != nil {
-			h.logger.Warn("Failed to get history messages", zap.Error(err))
-			agentHistoryMessages = []agent.ChatMessage{}
-		} else {
-			agentHistoryMessages = dbMessagesToAgentChatMessages(historyMessages)
-			h.logger.Info("Loaded history messages from messages table", zap.Int("count", len(agentHistoryMessages)))
-		}
-	} else {
-		h.logger.Info("Restored history context from agent trace", zap.Int("count", len(agentHistoryMessages)))
-	}
-
-	// Validate attachment count
-	if len(req.Attachments) > maxAttachments {
-		sendEvent("error", fmt.Sprintf("At most %d attachments are allowed", maxAttachments), nil)
-		return
-	}
-
-	// Apply role user prompt and tool configuration
-	finalMessage := req.Message
-	var roleTools []string // Tool list configured by the role
-	if req.WebShellConnectionID != "" {
-		conn, errConn := h.db.GetWebshellConnection(strings.TrimSpace(req.WebShellConnectionID))
-		if errConn != nil || conn == nil {
-			h.logger.Warn("WebShell AI assistant: connection not found", zap.String("id", req.WebShellConnectionID), zap.Error(errConn))
-			sendEvent("error", "WebShell connection not found", nil)
-			return
-		}
-		webshellContext := BuildWebshellAssistantContext(conn, WebshellSkillHintDefault, req.Message)
-		// WebShell mode, if a role is also specified, append the role user_prompt while keeping tools limited to WebShell-specific tools
-		if req.Role != "" && req.Role != "\u9ed8\u8ba4" && h.config.Roles != nil {
-			if role, exists := h.config.Roles[req.Role]; exists && role.Enabled && role.UserPrompt != "" {
-				finalMessage = role.UserPrompt + "\n\n" + webshellContext
-				h.logger.Info("WebShell + role: applied role prompt（streaming）", zap.String("role", req.Role))
-			} else {
-				finalMessage = webshellContext
-			}
-		} else {
-			finalMessage = webshellContext
-		}
-		roleTools = []string{
-			builtin.ToolWebshellExec,
-			builtin.ToolWebshellFileList,
-			builtin.ToolWebshellFileRead,
-			builtin.ToolWebshellFileWrite,
-			builtin.ToolRecordVulnerability,
-			builtin.ToolListVulnerabilities,
-			builtin.ToolGetVulnerability,
-			builtin.ToolListKnowledgeRiskTypes,
-			builtin.ToolSearchKnowledgeBase,
-		}
-	} else if req.Role != "" && req.Role != "\u9ed8\u8ba4" {
-		if h.config.Roles != nil {
-			if role, exists := h.config.Roles[req.Role]; exists && role.Enabled {
-				// Apply user prompt
-				if role.UserPrompt != "" {
-					finalMessage = role.UserPrompt + "\n\n" + req.Message
-					h.logger.Info("Applied role user prompt", zap.String("role", req.Role))
-				}
-				// Get the tool list configured by the role, preferring the tools field and remaining backward-compatible with mcps
-				if len(role.Tools) > 0 {
-					roleTools = role.Tools
-					h.logger.Info("Using role-configured tool list", zap.String("role", req.Role), zap.Int("toolCount", len(roleTools)))
-				} else if len(role.MCPs) > 0 {
-					// Backward compatibility: if only the mcps field exists, use an empty list for now, meaning all tools are used
-					// Because mcps contains MCP server names, not a tool list
-					h.logger.Info("Role configuration uses the legacy mcps field; all tools will be used", zap.String("role", req.Role))
-				}
-			}
-		}
-	}
-	var savedPaths []string
-	if len(req.Attachments) > 0 {
-		savedPaths, err = saveAttachmentsToDateAndConversationDir(req.Attachments, conversationID, h.logger)
-		if err != nil {
-			h.logger.Error("Failed to save chat attachments", zap.Error(err))
-			sendEvent("error", "Failed to save uploaded files: "+err.Error(), nil)
-			return
-		}
-	}
-	// Append only attachment save paths to finalMessage to avoid inlining file content into model context
-	finalMessage = appendAttachmentsToMessage(finalMessage, req.Attachments, savedPaths)
-	// If roleTools is empty, use all tools, which covers the default role or roles without configured tools
-
-	// Save user message：when attachments are present, also save attachment names and paths so refreshes display them and later turns expose paths through history
-	userContent := userMessageContentForStorage(req.Message, req.Attachments, savedPaths)
-	userMsgRow, err := h.db.AddMessage(conversationID, "user", userContent, nil)
-	if err != nil {
-		h.logger.Error("Failed to save user message", zap.Error(err))
-	}
-
-	// Create assistant message in advance so process details can be associated
-	assistantMsg, err := h.db.AddMessage(conversationID, "assistant", "Processing...", nil)
-	if err != nil {
-		h.logger.Error("Failed to create assistant message", zap.Error(err))
-		// If creation fails, continue execution but do not save process details
-		assistantMsg = nil
-	}
-
-	// Create progress callback and save to database
-	var assistantMessageID string
-	if assistantMsg != nil {
-		assistantMessageID = assistantMsg.ID
-	}
-
-	// Send message ID early so the frontend can attach actions such as delete this turn before streaming ends without waiting for a refresh
-	if userMsgRow != nil {
-		sendEvent("message_saved", "", map[string]interface{}{
-			"conversationId": conversationID,
-			"userMessageId":  userMsgRow.ID,
-		})
-	}
-
-	// Create progress callback and reuse the unified logic
-	// Create an independent context for task execution that is not canceled with the HTTP request
-	// This lets the task continue even if the client disconnects, such as during page refresh
-	baseCtx, cancelWithCause := context.WithCancelCause(context.Background())
-	taskCtx, timeoutCancel := context.WithTimeout(baseCtx, 600*time.Minute)
-	defer timeoutCancel()
-	defer cancelWithCause(nil)
-	taskCtx = mcp.WithMCPConversationID(taskCtx, conversationID)
-	taskCtx = mcp.WithToolRunRegistry(taskCtx, h.tasks)
-	progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
-	taskCtx = h.injectReactHITLInterceptor(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
-
-	if _, err := h.tasks.StartTask(conversationID, req.Message, cancelWithCause); err != nil {
-		var errorMsg string
-		if errors.Is(err, ErrTaskAlreadyRunning) {
-			errorMsg = "⚠️ A task is already running in the current conversation. Wait for it to finish or click Stop Task before trying again."
-			sendEvent("error", errorMsg, map[string]interface{}{
-				"conversationId": conversationID,
-				"errorType":      "task_already_running",
-			})
-		} else {
-			errorMsg = "❌ Unable to start task: " + err.Error()
-			sendEvent("error", errorMsg, map[string]interface{}{
-				"conversationId": conversationID,
-				"errorType":      "task_start_failed",
-			})
-		}
-
-		// Update assistant message contentand save error details to the database
-		if assistantMessageID != "" {
-			if _, updateErr := h.db.Exec(
-				"UPDATE messages SET content = ?, updated_at = ? WHERE id = ?",
-				errorMsg,
-				time.Now(), assistantMessageID,
-			); updateErr != nil {
-				h.logger.Warn("Failed to update assistant message after error", zap.Error(updateErr))
-			}
-			// Save error details to database
-			if err := h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errorMsg, map[string]interface{}{
-				"errorType": func() string {
-					if errors.Is(err, ErrTaskAlreadyRunning) {
-						return "task_already_running"
-					}
-					return "task_start_failed"
-				}(),
-			}); err != nil {
-				h.logger.Warn("Failed to save error details", zap.Error(err))
-			}
-		}
-
-		sendEvent("done", "", map[string]interface{}{
-			"conversationId": conversationID,
-		})
-		return
-	}
-
-	taskStatus := "completed"
-	defer h.tasks.FinishTask(conversationID, taskStatus)
-
-	// Run Agent Loop with an independent context so the task is not interrupted by client disconnect, using finalMessage with role prompt and the role tool list
-	sendEvent("progress", "Analyzing your request...", nil)
-	stopKeepalive := make(chan struct{})
-	go sseKeepalive(c, stopKeepalive, &sseWriteMu)
-	defer close(stopKeepalive)
-
-	result, err := h.agent.AgentLoopWithProgress(taskCtx, finalMessage, agentHistoryMessages, conversationID, progressCallback, roleTools, h.projectBlackboardBlock(conversationID))
-	if err != nil {
-		h.logger.Error("Agent Loop execution failed", zap.Error(err))
-		cause := context.Cause(baseCtx)
-
-		// Check whether this is user cancellation: the context cause is ErrTaskCancelled
-		// If the cause is ErrTaskCancelled, treat it as user cancellation regardless of the error type, including context.Canceled
-		// This correctly handles cancellation during an API call
-		isCancelled := errors.Is(cause, ErrTaskCancelled)
-
-		switch {
-		case isCancelled:
-			taskStatus = "cancelled"
-			cancelMsg := "The task was canceled by the user; subsequent operations have stopped."
-
-			// Update task status before sending the event so the frontend can see the change promptly
-			h.tasks.UpdateTaskStatus(conversationID, taskStatus)
-
-			if assistantMessageID != "" {
-				if result != nil {
-					if updateErr := h.mergeAssistantMessagePartialOnCancel(assistantMessageID, result.Response); updateErr != nil {
-						h.logger.Warn("Failed to merge partial response before cancellation", zap.Error(updateErr))
-					}
-				}
-				if updateErr := h.appendAssistantMessageNotice(assistantMessageID, cancelMsg); updateErr != nil {
-					h.logger.Warn("Failed to update assistant message after cancellation", zap.Error(updateErr))
-				}
-				h.db.AddProcessDetail(assistantMessageID, conversationID, "cancelled", cancelMsg, nil)
-			}
-
-			// Even if the task is canceled, try to save the agent trace if result contains one
-			if result != nil && (result.LastAgentTraceInput != "" || result.LastAgentTraceOutput != "") {
-				if err := h.db.SaveAgentTrace(conversationID, result.LastAgentTraceInput, result.LastAgentTraceOutput); err != nil {
-					h.logger.Warn("Failed to save agent trace for canceled task", zap.Error(err))
-				} else {
-					h.logger.Info("Saved agent trace for canceled task", zap.String("conversationId", conversationID))
-				}
-			}
-
-			sendEvent("cancelled", cancelMsg, map[string]interface{}{
-				"conversationId": conversationID,
-				"messageId":      assistantMessageID,
-			})
-			sendEvent("done", "", map[string]interface{}{
-				"conversationId": conversationID,
-			})
-			return
-		case errors.Is(err, context.DeadlineExceeded) || errors.Is(cause, context.DeadlineExceeded):
-			taskStatus = "timeout"
-			timeoutMsg := "Task execution timed out and was terminated automatically."
-
-			// Update task status before sending the event so the frontend can see the change promptly
-			h.tasks.UpdateTaskStatus(conversationID, taskStatus)
-
-			if assistantMessageID != "" {
-				if _, updateErr := h.db.Exec(
-					"UPDATE messages SET content = ?, updated_at = ? WHERE id = ?",
-					timeoutMsg,
-					time.Now(), assistantMessageID,
-				); updateErr != nil {
-					h.logger.Warn("Failed to update assistant message after timeout", zap.Error(updateErr))
-				}
-				h.db.AddProcessDetail(assistantMessageID, conversationID, "timeout", timeoutMsg, nil)
-			}
-
-			// Even if the task times out, try to save the agent trace if result contains one
-			if result != nil && (result.LastAgentTraceInput != "" || result.LastAgentTraceOutput != "") {
-				if err := h.db.SaveAgentTrace(conversationID, result.LastAgentTraceInput, result.LastAgentTraceOutput); err != nil {
-					h.logger.Warn("Failed to save agent trace for timed-out task", zap.Error(err))
-				} else {
-					h.logger.Info("Saved agent trace for timed-out task", zap.String("conversationId", conversationID))
-				}
-			}
-
-			sendEvent("error", timeoutMsg, map[string]interface{}{
-				"conversationId": conversationID,
-				"messageId":      assistantMessageID,
-			})
-			sendEvent("done", "", map[string]interface{}{
-				"conversationId": conversationID,
-			})
-			return
-		default:
-			taskStatus = "failed"
-			errorMsg := "Execution failed: " + err.Error()
-
-			// Update task status before sending the event so the frontend can see the change promptly
-			h.tasks.UpdateTaskStatus(conversationID, taskStatus)
-
-			if assistantMessageID != "" {
-				if _, updateErr := h.db.Exec(
-					"UPDATE messages SET content = ?, updated_at = ? WHERE id = ?",
-					errorMsg,
-					time.Now(), assistantMessageID,
-				); updateErr != nil {
-					h.logger.Warn("Failed to update assistant message after failure", zap.Error(updateErr))
-				}
-				h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errorMsg, nil)
-			}
-
-			// Even if the task failed, try to save the agent trace if result contains one
-			if result != nil && (result.LastAgentTraceInput != "" || result.LastAgentTraceOutput != "") {
-				if err := h.db.SaveAgentTrace(conversationID, result.LastAgentTraceInput, result.LastAgentTraceOutput); err != nil {
-					h.logger.Warn("Failed to save agent trace for failed task", zap.Error(err))
-				} else {
-					h.logger.Info("Saved agent trace for failed task", zap.String("conversationId", conversationID))
-				}
-			}
-
-			sendEvent("error", errorMsg, map[string]interface{}{
-				"conversationId": conversationID,
-				"messageId":      assistantMessageID,
-			})
-			sendEvent("done", "", map[string]interface{}{
-				"conversationId": conversationID,
-			})
-		}
-		return
-	}
-
-	// Update assistant message content
-	if assistantMsg != nil {
-		if errU := h.db.UpdateAssistantMessageFinalize(assistantMessageID, result.Response, result.MCPExecutionIDs, multiagent.AggregatedReasoningFromTraceJSON(result.LastAgentTraceInput)); errU != nil {
-			h.logger.Error("Failed to update assistant message", zap.Error(errU))
-		}
-	} else {
-		// If creation failed earlier, create it now
-		_, err = h.db.AddMessage(conversationID, "assistant", result.Response, result.MCPExecutionIDs)
-		if err != nil {
-			h.logger.Error("Failed to save assistant message", zap.Error(err))
-		}
-	}
-
-	// Save the last agent trace and assistant output
-	if result.LastAgentTraceInput != "" || result.LastAgentTraceOutput != "" {
-		if err := h.db.SaveAgentTrace(conversationID, result.LastAgentTraceInput, result.LastAgentTraceOutput); err != nil {
-			h.logger.Warn("Failed to save agent trace", zap.Error(err))
-		} else {
-			h.logger.Info("Saved agent trace", zap.String("conversationId", conversationID))
-		}
-	}
-
-	// Send final response
-	sendEvent("response", result.Response, map[string]interface{}{
-		"mcpExecutionIds": result.MCPExecutionIDs,
-		"conversationId":  conversationID,
-		"messageId":       assistantMessageID, // Include message ID so the frontend can associate process details
-	})
-	sendEvent("done", "", map[string]interface{}{
-		"conversationId": conversationID,
-	})
-}
-
-// CancelAgentLoop cancels a running task
+// CancelAgentLoop cancels a running task.
 func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 	var req struct {
 		ConversationID string `json:"conversationId" binding:"required"`
@@ -2094,40 +1407,19 @@ func (h *AgentHandler) ListCompletedTasks(c *gin.Context) {
 // BatchTaskRequest batch task request
 type BatchTaskRequest struct {
 	Title        string   `json:"title"`                    // Task title, optional
-	Tasks        []string `json:"tasks" binding:"required"` // Task list, one task per line
+	Tasks        []string `json:"tasks" binding:"required"` // Task list, one task per entry
 	Role         string   `json:"role,omitempty"`           // Role name, optional; empty string means the default role
-	AgentMode    string   `json:"agentMode,omitempty"`      // single | eino_single | deep | plan_execute | supervisor（react is the same as single; legacy multi is treated as deep）
+	AgentMode    string   `json:"agentMode,omitempty"`      // eino_single | deep | plan_execute | supervisor
 	ScheduleMode string   `json:"scheduleMode,omitempty"`   // manual | cron
 	CronExpr     string   `json:"cronExpr,omitempty"`       // scheduleMode=cron is required when
 	ExecuteNow   bool     `json:"executeNow,omitempty"`     // Whether to execute immediately after creation, default false
 	ProjectID    string   `json:"projectId,omitempty"`      // Project bound to child conversations in the queue, optional
 }
 
-func normalizeBatchQueueAgentMode(mode string) string {
-	m := strings.TrimSpace(strings.ToLower(mode))
-	if m == "multi" {
-		return "deep"
-	}
-	if m == "" || m == "single" || m == "react" {
-		return "single"
-	}
-	if m == "eino_single" {
-		return "eino_single"
-	}
-	switch config.NormalizeMultiAgentOrchestration(m) {
-	case "plan_execute":
-		return "plan_execute"
-	case "supervisor":
-		return "supervisor"
-	default:
-		return "deep"
-	}
-}
-
-// batchQueueWantsEino whether the queue is configured to use Eino multi-agent, excluding runtime inference such as empty agentMode plus BatchUseMultiAgent only.
+// batchQueueWantsEino reports whether the queue is configured to use Eino multi-agent.
 func batchQueueWantsEino(agentMode string) bool {
 	m := strings.TrimSpace(strings.ToLower(agentMode))
-	return m == "multi" || m == "deep" || m == "plan_execute" || m == "supervisor"
+	return m == "deep" || m == "plan_execute" || m == "supervisor"
 }
 
 func normalizeBatchQueueScheduleMode(mode string) string {
@@ -2163,7 +1455,7 @@ func (h *AgentHandler) CreateBatchQueue(c *gin.Context) {
 		return
 	}
 
-	agentMode := normalizeBatchQueueAgentMode(req.AgentMode)
+	agentMode := config.NormalizeAgentMode(req.AgentMode)
 	scheduleMode := normalizeBatchQueueScheduleMode(req.ScheduleMode)
 	cronExpr := strings.TrimSpace(req.CronExpr)
 	var nextRunAt *time.Time
@@ -2843,55 +2135,41 @@ func (h *AgentHandler) executeBatchQueue(queueID string) {
 
 			// Use the role tool list configured by the queue; if empty, use all tools
 			useBatchMulti := false
-			useEinoSingle := false
 			batchOrch := "deep"
 			am := strings.TrimSpace(strings.ToLower(queue.AgentMode))
 			if am == "multi" {
 				am = "deep"
 			}
-			if am == "eino_single" {
-				useEinoSingle = true
-			} else if batchQueueWantsEino(queue.AgentMode) && h.config != nil && h.config.MultiAgent.Enabled {
+			if batchQueueWantsEino(queue.AgentMode) && h.config != nil && h.config.MultiAgent.Enabled {
 				useBatchMulti = true
 				batchOrch = config.NormalizeMultiAgentOrchestration(am)
-			} else if queue.AgentMode == "" {
-				// Backward compatibility: if the queue agent mode is not configured, use the old system-level switch
-				if h.config != nil && h.config.MultiAgent.Enabled && h.config.MultiAgent.BatchUseMultiAgent {
-					useBatchMulti = true
-					batchOrch = "deep"
-				}
+			} else if queue.AgentMode == "" && h.config != nil && h.config.MultiAgent.Enabled && h.config.MultiAgent.BatchUseMultiAgent {
+				// Backward compatibility: if queue agent mode is unset, keep using the legacy system-level switch.
+				useBatchMulti = true
+				batchOrch = "deep"
 			}
-			useRunResult := useBatchMulti || useEinoSingle
-			var result *agent.AgentLoopResult
 			var resultMA *multiagent.RunResult
 			var runErr error
 			switch {
 			case useBatchMulti:
 				resultMA, runErr = multiagent.RunDeepAgent(taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger, conversationID, finalMessage, []agent.ChatMessage{}, roleTools, progressCallback, h.agentsMarkdownDir, batchOrch, nil, h.projectBlackboardBlock(conversationID))
-			case useEinoSingle:
+			default:
 				if h.config == nil {
 					runErr = fmt.Errorf("Server configuration is not loaded")
 				} else {
 					resultMA, runErr = multiagent.RunEinoSingleChatModelAgent(taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger, conversationID, finalMessage, []agent.ChatMessage{}, roleTools, progressCallback, nil, h.projectBlackboardBlock(conversationID))
 				}
-			default:
-				result, runErr = h.agent.AgentLoopWithProgress(taskCtx, finalMessage, []agent.ChatMessage{}, conversationID, progressCallback, roleTools, h.projectBlackboardBlock(conversationID))
 			}
 
 			if runErr != nil {
-				if useRunResult && shouldPersistEinoAgentTraceAfterRunError(baseCtx) {
+				if shouldPersistEinoAgentTraceAfterRunError(baseCtx) {
 					h.persistEinoAgentTraceForResume(conversationID, resultMA)
 				}
-				// Check whether this is a cancellation error
-				// 1. Directly check whether it is context.Canceled, including wrapped errors
-				// 2. Check whether the error message contains the keywords "context canceled" or "cancelled"
-				// 3. Check whether result.Response contains a cancellation-related message
+
 				errStr := runErr.Error()
 				partialResp := ""
-				if useRunResult && resultMA != nil {
+				if resultMA != nil {
 					partialResp = resultMA.Response
-				} else if result != nil {
-					partialResp = result.Response
 				}
 				isCancelled := errors.Is(context.Cause(baseCtx), ErrTaskCancelled) ||
 					errors.Is(runErr, context.Canceled) ||
@@ -2954,40 +2232,35 @@ func (h *AgentHandler) executeBatchQueue(queueID string) {
 			} else {
 				h.logger.Info("Batch task execution succeeded", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.String("conversationId", conversationID))
 
-				var resText string
+				resText := ""
 				var mcpIDs []string
 				var lastIn, lastOut string
-				if useRunResult {
+				if resultMA != nil {
 					resText = resultMA.Response
 					mcpIDs = resultMA.MCPExecutionIDs
 					lastIn = resultMA.LastAgentTraceInput
 					lastOut = resultMA.LastAgentTraceOutput
-				} else {
-					resText = result.Response
-					mcpIDs = result.MCPExecutionIDs
-					lastIn = result.LastAgentTraceInput
-					lastOut = result.LastAgentTraceOutput
 				}
 
 				// Update assistant message content
 				if assistantMessageID != "" {
 					if updateErr := h.db.UpdateAssistantMessageFinalize(assistantMessageID, resText, mcpIDs, multiagent.AggregatedReasoningFromTraceJSON(lastIn)); updateErr != nil {
 						h.logger.Warn("Failed to update assistant message", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.Error(updateErr))
-						// If update failed, try creating a new message
+						// If update failed, try creating a new message.
 						_, err = h.db.AddMessage(conversationID, "assistant", resText, mcpIDs)
 						if err != nil {
 							h.logger.Error("Failed to save assistant message", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.String("conversationId", conversationID), zap.Error(err))
 						}
 					}
 				} else {
-					// If no assistant message was created in advance, create a new one
+					// If no assistant message was created in advance, create a new one.
 					_, err = h.db.AddMessage(conversationID, "assistant", resText, mcpIDs)
 					if err != nil {
 						h.logger.Error("Failed to save assistant message", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.String("conversationId", conversationID), zap.Error(err))
 					}
 				}
 
-				// Save agent trace
+				// Save agent trace.
 				if lastIn != "" || lastOut != "" {
 					if err := h.db.SaveAgentTrace(conversationID, lastIn, lastOut); err != nil {
 						h.logger.Warn("Failed to save agent trace", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.Error(err))
@@ -2996,7 +2269,7 @@ func (h *AgentHandler) executeBatchQueue(queueID string) {
 					}
 				}
 
-				// Save result
+				// Save result.
 				h.batchTaskManager.UpdateTaskStatusWithConversationID(queueID, task.ID, "completed", resText, "", conversationID)
 			}
 		}()
@@ -3054,7 +2327,7 @@ func (h *AgentHandler) loadHistoryFromAgentTrace(conversationID string) ([]agent
 			continue // Skip invalid message
 		}
 
-		// Skip system messages; AgentLoop adds them again
+		// Skip system messages; Eino Instruction provides them.
 		if msg.Role == "system" {
 			continue
 		}
