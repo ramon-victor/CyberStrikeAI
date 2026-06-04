@@ -79,7 +79,6 @@ vision:
   skip_preprocess_below_bytes: 2097152 # 低于 2MB 且长边<=max_dimension 且<=max_payload 时原图直传；0=始终压缩
   detail: auto # low | high | auto（Eino ImageURLDetail）
   timeout_seconds: 60
-  # allowed_roots: [] # 额外允许的绝对路径根目录
 # ============================================
 # 信息收集（FOFA）配置（可选）
 # ============================================
