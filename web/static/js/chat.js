@@ -430,6 +430,16 @@ function syncHitlSidebarAriaExpanded() {
     toggle.setAttribute('aria-expanded', card.classList.contains('hitl-sidebar-collapsed') ? 'false' : 'true');
 }
 
+function closeHitlSidebarCard() {
+    var card = document.getElementById('hitl-sidebar-card');
+    if (!card || card.classList.contains('hitl-sidebar-collapsed')) return;
+    card.classList.add('hitl-sidebar-collapsed');
+    syncHitlSidebarAriaExpanded();
+    try {
+        localStorage.setItem('hitl-sidebar-collapsed', '1');
+    } catch (e) {}
+}
+
 function toggleHitlSidebarCard() {
     var card = document.getElementById('hitl-sidebar-card');
     if (!card) return;
@@ -7403,7 +7413,7 @@ document.addEventListener('languagechange', function () {
     refreshHitlConfigByCurrentConversation();
 });
 
-// 点击外部关闭图标选择器、对话模式面板
+// 点击外部关闭图标选择器、对话模式面板、侧栏折叠卡片
 document.addEventListener('click', function(event) {
     const picker = document.getElementById('group-icon-picker');
     const iconBtn = document.getElementById('create-group-icon-btn');
@@ -7427,6 +7437,13 @@ document.addEventListener('click', function(event) {
         !reasoningWrap.classList.contains('conversation-reasoning-collapsed')) {
         if (!reasoningWrap.contains(event.target)) {
             closeChatReasoningPanel();
+        }
+    }
+
+    const hitlCard = document.getElementById('hitl-sidebar-card');
+    if (hitlCard && !hitlCard.classList.contains('hitl-sidebar-collapsed')) {
+        if (!hitlCard.contains(event.target)) {
+            closeHitlSidebarCard();
         }
     }
 });
