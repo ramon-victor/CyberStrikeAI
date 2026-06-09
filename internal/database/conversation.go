@@ -604,7 +604,7 @@ func (db *DB) UpdateAssistantMessageFinalize(messageID, content string, mcpExecu
 // GetMessages 获取对话的所有消息
 func (db *DB) GetMessages(conversationID string) ([]Message, error) {
 	rows, err := db.Query(
-		"SELECT id, conversation_id, role, content, reasoning_content, mcp_execution_ids, created_at, updated_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+		"SELECT id, conversation_id, role, content, reasoning_content, mcp_execution_ids, created_at, updated_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
 		conversationID,
 	)
 	if err != nil {
@@ -799,7 +799,7 @@ func (db *DB) AddProcessDetail(messageID, conversationID, eventType, message str
 // GetProcessDetails 获取消息的过程详情
 func (db *DB) GetProcessDetails(messageID string) ([]ProcessDetail, error) {
 	rows, err := db.Query(
-		"SELECT id, message_id, conversation_id, event_type, message, data, created_at FROM process_details WHERE message_id = ? ORDER BY created_at ASC",
+		"SELECT id, message_id, conversation_id, event_type, message, data, created_at FROM process_details WHERE message_id = ? ORDER BY created_at ASC, rowid ASC",
 		messageID,
 	)
 	if err != nil {
@@ -835,7 +835,7 @@ func (db *DB) GetProcessDetails(messageID string) ([]ProcessDetail, error) {
 // GetProcessDetailsByConversation 获取对话的所有过程详情（按消息分组）
 func (db *DB) GetProcessDetailsByConversation(conversationID string) (map[string][]ProcessDetail, error) {
 	rows, err := db.Query(
-		"SELECT id, message_id, conversation_id, event_type, message, data, created_at FROM process_details WHERE conversation_id = ? ORDER BY created_at ASC",
+		"SELECT id, message_id, conversation_id, event_type, message, data, created_at FROM process_details WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
 		conversationID,
 	)
 	if err != nil {

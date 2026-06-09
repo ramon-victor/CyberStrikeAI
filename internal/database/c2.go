@@ -840,7 +840,7 @@ func (db *DB) PopQueuedC2Tasks(sessionID string, limit int) ([]*C2Task, error) {
 			created_at
 		FROM c2_tasks
 		WHERE session_id = ? AND (status = 'queued' AND (approval_status = '' OR approval_status = 'approved'))
-		ORDER BY created_at ASC
+		ORDER BY created_at ASC, rowid ASC
 		LIMIT ?
 	`
 	rows, err := tx.Query(query, sessionID, limit)

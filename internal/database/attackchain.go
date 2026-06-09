@@ -77,7 +77,7 @@ func (db *DB) LoadAttackChainNodes(conversationID string) ([]AttackChainNode, er
 		SELECT id, node_type, node_name, tool_execution_id, metadata, risk_score
 		FROM attack_chain_nodes
 		WHERE conversation_id = ?
-		ORDER BY created_at ASC
+		ORDER BY created_at ASC, rowid ASC
 	`
 
 	rows, err := db.Query(query, conversationID)
@@ -123,7 +123,7 @@ func (db *DB) LoadAttackChainEdges(conversationID string) ([]AttackChainEdge, er
 		SELECT id, source_node_id, target_node_id, edge_type, weight
 		FROM attack_chain_edges
 		WHERE conversation_id = ?
-		ORDER BY created_at ASC
+		ORDER BY created_at ASC, rowid ASC
 	`
 
 	rows, err := db.Query(query, conversationID)
