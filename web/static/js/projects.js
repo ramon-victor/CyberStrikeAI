@@ -872,7 +872,6 @@ async function viewProjectFactBody(factKey) {
     ];
     if (f.related_vulnerability_id) metaParts.push(tpFmt('projects.factMetaRelatedVuln', `Related vulnerability: ${f.related_vulnerability_id}`, { value: f.related_vulnerability_id }));
     if (f.source_conversation_id) metaParts.push(tpFmt('projects.factMetaSourceConversation', `Source conversation: ${f.source_conversation_id}`, { value: f.source_conversation_id }));
-    if (f.supersedes_fact_id) metaParts.push(tp('projects.factMetaHasPrevious'));
     document.getElementById('fact-detail-meta').textContent = metaParts.join(' · ');
     document.getElementById('fact-detail-body').textContent = f.body || tp('projects.emptyBody');
     const warnEl = document.getElementById('fact-detail-sparse-warn');
@@ -883,33 +882,6 @@ async function viewProjectFactBody(factKey) {
         } else {
             warnEl.hidden = true;
             warnEl.textContent = '';
-        }
-    }
-    const prevWrap = document.getElementById('fact-detail-prev-wrap');
-    if (prevWrap) {
-        prevWrap.hidden = true;
-        if (f.id && f.supersedes_fact_id) {
-            try {
-                const prevRes = await apiFetch(
-                    `/api/projects/${currentProjectId}/facts/${encodeURIComponent(f.id)}/previous-version`,
-                );
-                if (prevRes.ok) {
-                    const prev = await prevRes.json();
-                    prevWrap.hidden = false;
-                    document.getElementById('fact-detail-prev-meta').textContent = tpFmt(
-                        'projects.factPreviousMeta',
-                        `Archived at ${formatProjectTime(prev.archived_at)} · Summary: ${prev.summary || '—'} · Confidence: ${prev.confidence || '—'}`,
-                        {
-                            time: formatProjectTime(prev.archived_at),
-                            summary: prev.summary || '—',
-                            confidence: prev.confidence || '—',
-                        },
-                    );
-                    document.getElementById('fact-detail-prev-body').textContent = prev.body || tp('projects.emptyBody');
-                }
-            } catch (e) {
-                console.warn(e);
-            }
         }
     }
     const linkBtn = document.getElementById('fact-detail-link-vuln-btn');

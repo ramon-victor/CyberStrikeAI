@@ -3412,6 +3412,21 @@ async function deleteConversation(conversationId, skipConfirm = false) {
         } else if (typeof loadConversations === 'function') {
             loadConversations();
         }
+
+        // 批量管理弹窗打开时，同步刷新弹窗内列表
+        const batchModal = document.getElementById('batch-manage-modal');
+        if (batchModal && batchModal.style.display === 'flex') {
+            allConversationsForBatch = allConversationsForBatch.filter(c => c.id !== conversationId);
+            updateBatchManageTitle(allConversationsForBatch.length);
+            const searchInput = document.getElementById('batch-search-input');
+            const query = searchInput ? searchInput.value : '';
+            if (query && query.trim()) {
+                filterBatchConversations(query);
+            } else {
+                renderBatchConversations();
+            }
+        }
+
         // 通知其他模块（如 WebShell AI 助手）同步删除，保持列表一致
         try {
             document.dispatchEvent(new CustomEvent('conversation-deleted', { detail: { conversationId } }));
