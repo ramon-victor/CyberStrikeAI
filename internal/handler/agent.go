@@ -637,13 +637,26 @@ func (h *AgentHandler) runRobotEinoSingleWithRetry(
 	var resultMA *multiagent.RunResult
 	var errMA error
 	var transientRunAttempts int
+	var emptyResponseAttempts int
 	for {
 		resultMA, errMA = multiagent.RunEinoSingleChatModelAgent(
 			taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger,
 			conversationID, curMsg, curHist, roleTools, progressCallback, nil, h.projectBlackboardBlock(conversationID),
 		)
+		handledEmpty, exhaustedEmpty := h.handleEinoEmptyResponseContinue(
+			taskCtx, conversationID, resultMA, errMA, &emptyResponseAttempts,
+			&curHist, &curMsg, segmentUserMessage, progressCallback, nil,
+		)
+		if exhaustedEmpty {
+			errMA = nil
+			break
+		}
+		if handledEmpty {
+			continue
+		}
 		if errMA == nil {
 			transientRunAttempts = 0
+			emptyResponseAttempts = 0
 			break
 		}
 		if handled, _ := h.handleEinoTransientRetryContinue(
@@ -673,14 +686,27 @@ func (h *AgentHandler) runRobotMultiAgentWithRetry(
 	var resultMA *multiagent.RunResult
 	var errMA error
 	var transientRunAttempts int
+	var emptyResponseAttempts int
 	for {
 		resultMA, errMA = multiagent.RunDeepAgent(
 			taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger,
 			conversationID, curMsg, curHist, roleTools, progressCallback,
 			h.agentsMarkdownDir, orchestration, nil, h.projectBlackboardBlock(conversationID),
 		)
+		handledEmpty, exhaustedEmpty := h.handleEinoEmptyResponseContinue(
+			taskCtx, conversationID, resultMA, errMA, &emptyResponseAttempts,
+			&curHist, &curMsg, segmentUserMessage, progressCallback, nil,
+		)
+		if exhaustedEmpty {
+			errMA = nil
+			break
+		}
+		if handledEmpty {
+			continue
+		}
 		if errMA == nil {
 			transientRunAttempts = 0
+			emptyResponseAttempts = 0
 			break
 		}
 		if handled, _ := h.handleEinoTransientRetryContinue(

@@ -188,6 +188,7 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 	// 同一 HTTP 流内多段 Run（如中断并继续）合并 MCP execution id，供最终 response / 库表与工具芯片展示完整列表
 	var cumulativeMCPExecutionIDs []string
 	var transientRunAttempts int
+	var emptyResponseAttempts int
 	// 同一请求内分段续跑时，主代理 iteration 事件按偏移累计，避免 UI 出现「第3轮 → 第1轮」回跳。
 	var mainIterationOffset int
 
@@ -249,9 +250,32 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 			cumulativeMCPExecutionIDs = mergeMCPExecutionIDLists(cumulativeMCPExecutionIDs, result.MCPExecutionIDs)
 		}
 
+		handledEmpty, exhaustedEmpty := h.handleEinoEmptyResponseContinue(
+			baseCtx, conversationID, result, runErr, &emptyResponseAttempts,
+			&curHistory, &curFinalMessage, segmentUserMessage, progressCallback,
+			func(msg string, extra map[string]interface{}) { sendEvent("progress", msg, extra) },
+		)
+		if exhaustedEmpty {
+			runErr = nil
+			transientRunAttempts = 0
+			timeoutCancel()
+			break
+		}
+		if handledEmpty {
+			mainIterationOffset += segmentMainIterationMax
+			transientRunAttempts = 0
+			timeoutCancel()
+			baseCtx, cancelWithCause = context.WithCancelCause(context.Background())
+			h.tasks.BindTaskCancel(conversationID, cancelWithCause)
+			taskCtx, timeoutCancel = context.WithTimeout(baseCtx, 600*time.Minute)
+			h.tasks.UpdateTaskStatus(conversationID, "running")
+			continue
+		}
+
 		if runErr == nil {
 			// 任一段成功完成后，重置临时错误重试窗口（次数/退避从头开始）。
 			transientRunAttempts = 0
+			emptyResponseAttempts = 0
 			timeoutCancel()
 			break
 		}
@@ -430,23 +454,51 @@ func (h *AgentHandler) MultiAgentLoop(c *gin.Context) {
 		return h.interceptHITLForEinoTool(ctx, cancelWithCause, prep.ConversationID, prep.AssistantMessageID, nil, toolName, arguments)
 	})
 
-	result, runErr := multiagent.RunDeepAgent(
-		taskCtx,
-		h.config,
-		&h.config.MultiAgent,
-		h.agent,
-		h.logger,
-		prep.ConversationID,
-		prep.FinalMessage,
-		prep.History,
-		prep.RoleTools,
-		progressCallback,
-		h.agentsMarkdownDir,
-		strings.TrimSpace(req.Orchestration),
-		chatReasoningToClientIntent(req.Reasoning),
-		h.projectBlackboardBlock(prep.ConversationID),
-	)
-	if runErr != nil {
+	curHist := prep.History
+	curMsg := prep.FinalMessage
+	var result *multiagent.RunResult
+	var runErr error
+	var transientRunAttempts int
+	var emptyResponseAttempts int
+	for {
+		result, runErr = multiagent.RunDeepAgent(
+			taskCtx,
+			h.config,
+			&h.config.MultiAgent,
+			h.agent,
+			h.logger,
+			prep.ConversationID,
+			curMsg,
+			curHist,
+			prep.RoleTools,
+			progressCallback,
+			h.agentsMarkdownDir,
+			strings.TrimSpace(req.Orchestration),
+			chatReasoningToClientIntent(req.Reasoning),
+			h.projectBlackboardBlock(prep.ConversationID),
+		)
+		handledEmpty, exhaustedEmpty := h.handleEinoEmptyResponseContinue(
+			baseCtx, prep.ConversationID, result, runErr, &emptyResponseAttempts,
+			&curHist, &curMsg, prep.FinalMessage, progressCallback, nil,
+		)
+		if exhaustedEmpty {
+			runErr = nil
+			break
+		}
+		if handledEmpty {
+			continue
+		}
+		if runErr == nil {
+			break
+		}
+		if handled, fatalErr := h.handleEinoTransientRetryContinue(
+			baseCtx, prep.ConversationID, result, runErr, &transientRunAttempts,
+			&curHist, &curMsg, prep.FinalMessage, progressCallback, nil,
+		); handled {
+			continue
+		} else if fatalErr != nil {
+			runErr = fatalErr
+		}
 		if shouldPersistEinoAgentTraceAfterRunError(baseCtx) {
 			h.persistEinoAgentTraceForResume(prep.ConversationID, result)
 		}
