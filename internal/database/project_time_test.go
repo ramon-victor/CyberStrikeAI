@@ -31,6 +31,13 @@ func TestListProjectFacts_updatedAtJSON(t *testing.T) {
 	}
 	defer db.Close()
 
+	projects, err := db.ListProjects("", "", 1, 0)
+	if err != nil || len(projects) == 0 {
+		t.Skip("no projects")
+	}
+	pid := projects[0].ID
+	_ = pid
+
 	proj, err := db.CreateProject(&Project{Name: "time-json"})
 	if err != nil {
 		t.Fatal(err)

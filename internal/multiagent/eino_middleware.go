@@ -43,22 +43,6 @@ func sanitizeEinoPathSegment(s string) string {
 	return s
 }
 
-// localPlantaskBackend wraps the eino-ext local backend with plantask.Delete (Local has no Delete).
-type localPlantaskBackend struct {
-	*localbk.Local
-}
-
-func (l *localPlantaskBackend) Delete(ctx context.Context, req *plantask.DeleteRequest) error {
-	if l == nil || l.Local == nil || req == nil {
-		return nil
-	}
-	p := strings.TrimSpace(req.FilePath)
-	if p == "" {
-		return nil
-	}
-	return os.Remove(p)
-}
-
 func splitToolsForToolSearch(all []tool.BaseTool, alwaysVisible int) (static []tool.BaseTool, dynamic []tool.BaseTool, ok bool) {
 	if alwaysVisible <= 0 || len(all) <= alwaysVisible+1 {
 		return all, nil, false
@@ -67,14 +51,7 @@ func splitToolsForToolSearch(all []tool.BaseTool, alwaysVisible int) (static []t
 }
 
 func splitToolsForToolSearchByNames(all []tool.BaseTool, names []string, fallbackAlwaysVisible int) (static []tool.BaseTool, dynamic []tool.BaseTool, ok bool) {
-	nameSet := make(map[string]struct{}, len(names))
-	for _, n := range names {
-		n = strings.TrimSpace(strings.ToLower(n))
-		if n == "" {
-			continue
-		}
-		nameSet[n] = struct{}{}
-	}
+	nameSet := expandAlwaysVisibleNameSet(names)
 	if len(nameSet) == 0 {
 		return splitToolsForToolSearch(all, fallbackAlwaysVisible)
 	}
@@ -87,9 +64,9 @@ func splitToolsForToolSearchByNames(all []tool.BaseTool, names []string, fallbac
 		info, err := t.Info(context.Background())
 		name := ""
 		if err == nil && info != nil {
-			name = strings.TrimSpace(strings.ToLower(info.Name))
+			name = info.Name
 		}
-		if _, keep := nameSet[name]; keep {
+		if toolMatchesAlwaysVisible(name, nameSet) {
 			static = append(static, t)
 			continue
 		}
@@ -238,7 +215,7 @@ func prependEinoMiddlewares(
 			if mk := os.MkdirAll(baseDir, 0o755); mk != nil {
 				return nil, nil, toolSearchActive, fmt.Errorf("plantask mkdir: %w", mk)
 			}
-			ptBE := &localPlantaskBackend{Local: einoLoc}
+			ptBE := newLocalPlantaskBackend(einoLoc)
 			pt, perr := plantask.New(ctx, &plantask.Config{Backend: ptBE, BaseDir: baseDir})
 			if perr != nil {
 				return nil, nil, toolSearchActive, fmt.Errorf("plantask: %w", perr)

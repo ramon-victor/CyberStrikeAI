@@ -6,7 +6,7 @@
 
     const loadedLangs = {};
 
-    // 供 bootstrap 等逻辑等待：避免 chat 在 t() 未就绪时用中文硬编码渲染，导致与语言标签不一致
+    // 供 bootstrap 等逻辑等待：避免 chat 在 t() 未就绪时用English硬编码渲染，导致与语言标签不一致
     let i18nReadyResolve;
     window.i18nReady = new Promise(function (resolve) {
         i18nReadyResolve = resolve;
@@ -89,7 +89,7 @@
             }
         });
 
-        // 对话输入框：若 value 与 placeholder 相同，清空 value 以便正确显示占位提示
+        // 对话输入框：若 value 与 placeholder 相同，清空 value 以便正确显示占位Hint
         try {
             const chatInput = document.getElementById('chat-input');
             if (chatInput && chatInput.tagName === 'TEXTAREA') {
@@ -209,7 +209,7 @@
 
         document.addEventListener('click', handleGlobalClickForLangDropdown);
 
-        // 若 chat 已在 i18n 完成前用后备中文渲染了系统就绪消息，这里按当前语言纠正一次
+        // 若 chat 已在 i18n 完成前用后备English渲染了系统就绪消息，这里按当前语言纠正一次
         try {
             if (typeof refreshSystemReadyMessageBubbles === 'function') {
                 refreshSystemReadyMessageBubbles();

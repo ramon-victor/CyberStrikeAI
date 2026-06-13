@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// setupC2Runtime 创建 C2 Manager、看门狗与取消函数；不注册 MCP 工具（由 Apply 统一 ClearTools 后注册）。
+// setupC2Runtime creates the C2 Manager, watchdog, and cancel function; does not register MCP tools (Apply calls ClearTools first then registers).
 func setupC2Runtime(
 	cfg *config.Config,
 	db *database.DB,
@@ -57,7 +57,7 @@ func setupC2Runtime(
 	return c2Manager, c2Watchdog, watchdogCancel
 }
 
-// ReconcileC2AfterConfigApply 根据当前内存配置启停 C2（不写盘；在 Apply 中 ClearTools 之前调用）。
+// ReconcileC2AfterConfigApply starts or stops C2 based on in-memory config (no disk writes; called before ClearTools in Apply).
 func (a *App) ReconcileC2AfterConfigApply() error {
 	if !a.config.C2.EnabledEffective() {
 		a.shutdownC2()
@@ -83,7 +83,7 @@ func (a *App) ReconcileC2AfterConfigApply() error {
 	return nil
 }
 
-// shutdownC2 停止看门狗与所有监听器，并断开 Handler 引用。
+// shutdownC2 stops the watchdog and all listeners, and disconnects Handler references.
 func (a *App) shutdownC2() {
 	had := a.c2WatchdogCancel != nil || a.c2Manager != nil
 	if a.c2WatchdogCancel != nil {

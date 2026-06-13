@@ -3,6 +3,7 @@ package database
 import (
 	"database/sql"
 	"encoding/json"
+	"sort"
 	"strings"
 	"time"
 
@@ -491,6 +492,68 @@ func (db *DB) UpdateToolStats(toolName string, totalCalls, successCalls, failedC
 	}
 
 	return nil
+}
+
+// CallsTimelineBucket 调用趋势时间桶
+type CallsTimelineBucket struct {
+	BucketTime time.Time
+	Total      int
+	Failed     int
+}
+
+// truncateCallsTimelineBucket 将时间截断到趋势图桶边界（本地时区，与 handler 侧 truncateToBucket 一致）
+func truncateCallsTimelineBucket(t time.Time, dailyBuckets bool) time.Time {
+	t = t.In(time.Local)
+	if dailyBuckets {
+		y, m, d := t.Date()
+		return time.Date(y, m, d, 0, 0, 0, 0, time.Local)
+	}
+	return t.Truncate(time.Hour)
+}
+
+// LoadCallsTimeline 按时间范围加载调用趋势（since 起至今，含边界）
+func (db *DB) LoadCallsTimeline(since time.Time, dailyBuckets bool) ([]CallsTimelineBucket, error) {
+	// 在 Go 侧按本地时区分桶，避免 SQLite strftime 对 UTC 存储时间分桶后再误当本地时间解析（差 8h 等问题）
+	query := `
+		SELECT start_time,
+			CASE WHEN status IN ('failed', 'cancelled') THEN 1 ELSE 0 END AS failed
+		FROM tool_executions
+		WHERE start_time >= ?
+	`
+
+	rows, err := db.Query(query, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	bucketMap := make(map[time.Time]struct{ total, failed int })
+	for rows.Next() {
+		var startTime time.Time
+		var failed int
+		if err := rows.Scan(&startTime, &failed); err != nil {
+			db.logger.Warn("加载调用趋势失败", zap.Error(err))
+			continue
+		}
+		key := truncateCallsTimelineBucket(startTime, dailyBuckets)
+		entry := bucketMap[key]
+		entry.total++
+		entry.failed += failed
+		bucketMap[key] = entry
+	}
+
+	buckets := make([]CallsTimelineBucket, 0, len(bucketMap))
+	for bucketTime, counts := range bucketMap {
+		buckets = append(buckets, CallsTimelineBucket{
+			BucketTime: bucketTime,
+			Total:      counts.total,
+			Failed:     counts.failed,
+		})
+	}
+	sort.Slice(buckets, func(i, j int) bool {
+		return buckets[i].BucketTime.Before(buckets[j].BucketTime)
+	})
+	return buckets, nil
 }
 
 // DecreaseToolStats 减少工具统计信息（用于删除执行记录时）

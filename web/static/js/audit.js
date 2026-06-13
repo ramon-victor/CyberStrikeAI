@@ -1,5 +1,5 @@
 /**
- * 系统设置 - 平台操作审计日志
+ * System Settings - Platform Operation Audit Logs
  */
 let auditLogsPage = 1;
 let auditLogsPageSize = 20;
@@ -7,7 +7,7 @@ let auditLogsTotal = 0;
 
 const AUDIT_PAGE_SIZE_KEY = 'cyberstrike_audit_page_size';
 
-/** 按类别列出的操作（用于 datalist 提示，避免超长下拉） */
+/** Actions listed by category (used for datalist hints to avoid overly long dropdowns) */
 const AUDIT_ACTIONS_BY_CATEGORY = {
     auth: ['login', 'logout', 'change_password'],
     config: ['apply', 'update'],
@@ -101,8 +101,8 @@ function rebuildAuditActionSelect() {
 
     const category = catEl ? catEl.value : '';
     const prev = actEl.value;
-    const allLabel = auditT('settingsAudit.filterAllActions', null, '全部操作');
-    const hint = auditT('settingsAudit.filterCascadeHint', null, '选择类别后可筛选具体操作');
+    const allLabel = auditT('settingsAudit.filterAllActions', null, 'All Actions');
+    const hint = auditT('settingsAudit.filterCascadeHint', null, 'Select a category to filter specific actions');
     actEl.innerHTML = '';
     const allOpt = document.createElement('option');
     allOpt.value = '';
@@ -168,14 +168,14 @@ async function loadAuditMeta() {
         if (!hint) return;
         if (!data.enabled) {
             hint.hidden = false;
-            hint.textContent = auditT('settingsAudit.disabledHint', null, '审计功能已关闭，新操作不会写入审计表。');
+            hint.textContent = auditT('settingsAudit.disabledHint', null, 'Audit function is disabled, new operations will not be written to the audit table.');
             return;
         }
         const days = data.retention_days;
         if (days > 0) {
             hint.hidden = false;
             hint.textContent = auditT('settingsAudit.retentionHint', { days: days },
-                '审计记录保留 ' + days + ' 天，超期自动清理。');
+                'Audit records are kept for ' + days + ' days, automatically cleaned up upon expiration.');
         } else {
             hint.hidden = true;
         }
@@ -204,7 +204,7 @@ async function loadAuditLogs(page) {
     auditLogsPage = page != null ? page : auditLogsPage;
     const listEl = document.getElementById('audit-log-list');
     if (listEl) {
-        listEl.innerHTML = '<div class="loading-spinner">' + (typeof escapeHtml === 'function' ? escapeHtml(auditT('settingsAudit.loading', null, '加载中...')) : '加载中...') + '</div>';
+        listEl.innerHTML = '<div class="loading-spinner">' + (typeof escapeHtml === 'function' ? escapeHtml(auditT('settingsAudit.loading', null, 'Loading...')) : 'Loading...') + '</div>';
     }
     try {
         const qs = buildAuditQueryParams(false);
@@ -239,7 +239,7 @@ function renderAuditLogs(logs) {
     if (!listEl) return;
     const esc = typeof escapeHtml === 'function' ? escapeHtml : function (s) { return String(s || ''); };
     if (!logs.length) {
-        listEl.innerHTML = '<div class="c2-empty">' + esc(auditT('settingsAudit.empty', null, '暂无审计记录')) + '</div>';
+        listEl.innerHTML = '<div class="c2-empty">' + esc(auditT('settingsAudit.empty', null, 'No audit records')) + '</div>';
         return;
     }
     listEl.innerHTML = logs.map(function (log) {
@@ -281,14 +281,14 @@ function renderAuditLogsPagination() {
     const start = total === 0 ? 0 : (currentPage - 1) * pageSize + 1;
     const end = total === 0 ? 0 : Math.min(currentPage * pageSize, total);
     const infoText = auditT('mcpMonitor.paginationInfo', { start: start, end: end, total: total },
-        '显示 ' + start + '-' + end + ' / 共 ' + total + ' 条记录');
-    const perPageLabel = auditT('mcpMonitor.perPageLabel', null, '每页显示');
-    const firstPageLabel = auditT('mcp.firstPage', null, '首页');
-    const prevPageLabel = auditT('mcp.prevPage', null, '上一页');
+        'Showing ' + start + '-' + end + ' / Total ' + total + ' records');
+    const perPageLabel = auditT('mcpMonitor.perPageLabel', null, 'Items per page');
+    const firstPageLabel = auditT('mcp.firstPage', null, 'First Page');
+    const prevPageLabel = auditT('mcp.prevPage', null, 'Previous Page');
     const pageInfoText = auditT('mcp.pageInfo', { page: currentPage, total: totalPages },
-        '第 ' + currentPage + ' / ' + totalPages + ' 页');
-    const nextPageLabel = auditT('mcp.nextPage', null, '下一页');
-    const lastPageLabel = auditT('mcp.lastPage', null, '末页');
+        'Page ' + currentPage + ' / ' + totalPages + '');
+    const nextPageLabel = auditT('mcp.nextPage', null, 'Next Page');
+    const lastPageLabel = auditT('mcp.lastPage', null, 'Last Page');
     const disabledFirst = currentPage === 1 || total === 0;
     const disabledLast = currentPage >= totalPages || total === 0;
     let html = '<div class="monitor-pagination">';
@@ -337,7 +337,7 @@ function resetAuditLogFilters() {
     filterAuditLogs();
 }
 
-/** 资源已被删除/移除的审计操作，不再提供「打开关联资源」 */
+/** Audit actions where the resource has been deleted/removed, no longer providing "Open Associated Resource" */
 const AUDIT_ACTIONS_RESOURCE_REMOVED = {
     delete: true,
     item_delete: true,
@@ -357,7 +357,7 @@ function auditResourceWasRemoved(log) {
     return !!AUDIT_ACTIONS_RESOURCE_REMOVED[log.action];
 }
 
-/** 删除类操作，或关联资源已不存在（由详情 API resourceAvailable 判定） */
+/** Delete-type operations, or associated resource no longer exists (determined by the details API resourceAvailable) */
 function auditResourceUnavailable(log) {
     if (!log) return false;
     if (auditResourceWasRemoved(log)) return true;
@@ -369,8 +369,8 @@ function auditResourceMeta(log) {
     const esc = typeof escapeHtml === 'function' ? escapeHtml : function (s) { return String(s || ''); };
     const id = esc(log.resourceId);
     if (auditResourceUnavailable(log)) {
-        const idLabel = esc(auditT('settingsAudit.resourceIdLabel', null, '资源 ID'));
-        const removed = esc(auditT('settingsAudit.resourceRemoved', null, '（关联对象已删除）'));
+        const idLabel = esc(auditT('settingsAudit.resourceIdLabel', null, 'Resource ID'));
+        const removed = esc(auditT('settingsAudit.resourceRemoved', null, '(Associated object deleted)'));
         return '<p class="audit-resource-meta"><strong>' + idLabel + ':</strong> <code>' + id +
             '</code> <span class="audit-resource-removed">' + removed + '</span></p>';
     }
@@ -386,7 +386,7 @@ async function auditOpenConversationChat(conversationId) {
             const r = await apiFetch('/api/conversations/' + encodeURIComponent(id));
             if (!r.ok) {
                 if (typeof showToast === 'function') {
-                    showToast(auditT('settingsAudit.resourceRemoved', null, '（关联对象已删除）'), 'warning');
+                    showToast(auditT('settingsAudit.resourceRemoved', null, '(Associated object deleted)'), 'warning');
                 }
                 return;
             }
@@ -410,9 +410,9 @@ function auditResourceLink(log) {
     const id = log.resourceId || '';
     if (!id) return '';
     const esc = typeof escapeHtml === 'function' ? escapeHtml : function (s) { return String(s || ''); };
-    const label = esc(auditT('settingsAudit.openResource', null, '打开关联资源'));
+    const label = esc(auditT('settingsAudit.openResource', null, 'Open Associated Resource'));
     if (type === 'conversation' || (type === '' && id.length > 8 && !id.startsWith('c2_'))) {
-        const chatLabel = esc(auditT('settingsAudit.openResourceChat', null, '打开关联资源（chat）'));
+        const chatLabel = esc(auditT('settingsAudit.openResourceChat', null, 'Open Associated Resource (chat)'));
         return '<p><button type="button" class="btn-secondary btn-small audit-open-chat-btn" data-conversation-id="' +
             esc(id) + '">' + chatLabel + '</button></p>';
     }
@@ -505,7 +505,7 @@ async function exportAuditLogs() {
             'audit-logs-' + new Date().toISOString().slice(0, 10) + '.json'
         );
         if (typeof showToast === 'function') {
-            showToast(auditT('settingsAudit.exportDone', null, '导出完成'), 'success');
+            showToast(auditT('settingsAudit.exportDone', null, 'Export Completed'), 'success');
         }
     } catch (e) {
         if (typeof showToast === 'function') {
@@ -523,7 +523,7 @@ async function exportAuditLogsCsv() {
             'audit-logs-' + new Date().toISOString().slice(0, 10) + '.csv'
         );
         if (typeof showToast === 'function') {
-            showToast(auditT('settingsAudit.exportDone', null, '导出完成'), 'success');
+            showToast(auditT('settingsAudit.exportDone', null, 'Export Completed'), 'success');
         }
     } catch (e) {
         if (typeof showToast === 'function') {
@@ -555,22 +555,22 @@ async function showAuditLogDetail(id) {
         overlay.innerHTML =
             '<div class="modal-content" style="max-width: 720px;">' +
             '<div class="modal-header">' +
-            '<h2>' + esc(auditT('settingsAudit.detailTitle', null, '审计详情')) + '</h2>' +
+            '<h2>' + esc(auditT('settingsAudit.detailTitle', null, 'Audit Details')) + '</h2>' +
             '<span class="modal-close" onclick="closeAuditDetailModal()">&times;</span>' +
             '</div>' +
             '<div class="modal-body audit-detail-body">' +
-            '<p><strong>' + esc(auditT('settingsAudit.detailTime', null, '时间')) + ':</strong> ' + esc(formatAuditTime(log.createdAt)) + '</p>' +
-            '<p><strong>' + esc(auditT('settingsAudit.detailCategory', null, '类别')) + ':</strong> ' + catAction + '</p>' +
-            '<p><strong>' + esc(auditT('settingsAudit.detailResult', null, '结果')) + ':</strong> ' + esc(log.result || '') + '</p>' +
-            '<p><strong>' + esc(auditT('settingsAudit.detailMessage', null, '说明')) + ':</strong> ' + esc(log.message || '') + '</p>' +
+            '<p><strong>' + esc(auditT('settingsAudit.detailTime', null, 'Time')) + ':</strong> ' + esc(formatAuditTime(log.createdAt)) + '</p>' +
+            '<p><strong>' + esc(auditT('settingsAudit.detailCategory', null, 'Category')) + ':</strong> ' + catAction + '</p>' +
+            '<p><strong>' + esc(auditT('settingsAudit.detailResult', null, 'Result')) + ':</strong> ' + esc(log.result || '') + '</p>' +
+            '<p><strong>' + esc(auditT('settingsAudit.detailMessage', null, 'Message')) + ':</strong> ' + esc(log.message || '') + '</p>' +
             (log.clientIp ? '<p><strong>IP:</strong> ' + esc(log.clientIp) + '</p>' : '') +
-            (log.sessionHint ? '<p><strong>' + esc(auditT('settingsAudit.detailSession', null, '会话')) + ':</strong> ' + esc(log.sessionHint) + '</p>' : '') +
+            (log.sessionHint ? '<p><strong>' + esc(auditT('settingsAudit.detailSession', null, 'Session')) + ':</strong> ' + esc(log.sessionHint) + '</p>' : '') +
             (log.userAgent ? '<p><strong>UA:</strong> ' + esc(log.userAgent) + '</p>' : '') +
             auditResourceMeta(log) +
             (detail ? '<pre class="audit-detail-pre">' + esc(detail) + '</pre>' : '') +
             '</div>' +
             '<div class="modal-footer"><button type="button" class="btn-secondary" onclick="closeAuditDetailModal()">' +
-            esc(auditT('common.close', null, '关闭')) + '</button></div>' +
+            esc(auditT('common.close', null, 'Close')) + '</button></div>' +
             '</div>';
         document.body.appendChild(overlay);
         const chatBtn = overlay.querySelector('.audit-open-chat-btn');

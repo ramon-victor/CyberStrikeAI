@@ -209,7 +209,9 @@ type TaskResultReport struct {
 	TaskID     string `json:"task_id"`
 	Success    bool   `json:"success"`
 	Output     string `json:"output,omitempty"`
+	OutputB64  string `json:"output_b64,omitempty"` // 原始控制台字节（base64），避免 JSON 破坏非 UTF-8 输出
 	Error      string `json:"error,omitempty"`
+	ErrorB64   string `json:"error_b64,omitempty"`
 	BlobBase64 string `json:"blob_b64,omitempty"` // 如截图二进制
 	BlobSuffix string `json:"blob_suffix,omitempty"` // 如 ".png"
 	StartedAt  int64  `json:"started_at"`

@@ -101,7 +101,40 @@ func sameResponseStreamMeta(a, b map[string]interface{}) bool {
 	}
 	orchA, _ := a["orchestration"].(string)
 	orchB, _ := b["orchestration"].(string)
-	return strings.TrimSpace(orchA) == strings.TrimSpace(orchB)
+	if strings.TrimSpace(orchA) != strings.TrimSpace(orchB) {
+		return false
+	}
+	iterA := responseStreamIterationFromMeta(a)
+	iterB := responseStreamIterationFromMeta(b)
+	if iterA != 0 && iterB != 0 && iterA != iterB {
+		return false
+	}
+	streamA, _ := a["streamId"].(string)
+	streamB, _ := b["streamId"].(string)
+	streamA = strings.TrimSpace(streamA)
+	streamB = strings.TrimSpace(streamB)
+	if streamA != "" && streamB != "" && streamA != streamB {
+		return false
+	}
+	return true
+}
+
+func responseStreamIterationFromMeta(m map[string]interface{}) int {
+	if m == nil {
+		return 0
+	}
+	switch v := m["iteration"].(type) {
+	case int:
+		return v
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
 }
 
 func discardPlanningIfEchoesToolResult(respPlan *responsePlanAgg, toolData interface{}) {
@@ -604,13 +637,26 @@ func (h *AgentHandler) runRobotEinoSingleWithRetry(
 	var resultMA *multiagent.RunResult
 	var errMA error
 	var transientRunAttempts int
+	var emptyResponseAttempts int
 	for {
 		resultMA, errMA = multiagent.RunEinoSingleChatModelAgent(
 			taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger,
 			conversationID, curMsg, curHist, roleTools, progressCallback, nil, h.projectBlackboardBlock(conversationID),
 		)
+		handledEmpty, exhaustedEmpty := h.handleEinoEmptyResponseContinue(
+			taskCtx, conversationID, resultMA, errMA, &emptyResponseAttempts,
+			&curHist, &curMsg, segmentUserMessage, progressCallback, nil,
+		)
+		if exhaustedEmpty {
+			errMA = nil
+			break
+		}
+		if handledEmpty {
+			continue
+		}
 		if errMA == nil {
 			transientRunAttempts = 0
+			emptyResponseAttempts = 0
 			break
 		}
 		if handled, _ := h.handleEinoTransientRetryContinue(
@@ -640,14 +686,27 @@ func (h *AgentHandler) runRobotMultiAgentWithRetry(
 	var resultMA *multiagent.RunResult
 	var errMA error
 	var transientRunAttempts int
+	var emptyResponseAttempts int
 	for {
 		resultMA, errMA = multiagent.RunDeepAgent(
 			taskCtx, h.config, &h.config.MultiAgent, h.agent, h.logger,
 			conversationID, curMsg, curHist, roleTools, progressCallback,
 			h.agentsMarkdownDir, orchestration, nil, h.projectBlackboardBlock(conversationID),
 		)
+		handledEmpty, exhaustedEmpty := h.handleEinoEmptyResponseContinue(
+			taskCtx, conversationID, resultMA, errMA, &emptyResponseAttempts,
+			&curHist, &curMsg, segmentUserMessage, progressCallback, nil,
+		)
+		if exhaustedEmpty {
+			errMA = nil
+			break
+		}
+		if handledEmpty {
+			continue
+		}
 		if errMA == nil {
 			transientRunAttempts = 0
+			emptyResponseAttempts = 0
 			break
 		}
 		if handled, _ := h.handleEinoTransientRetryContinue(
@@ -830,7 +889,11 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 	seenToolCallSigs := make(map[string]string)      // toolCallId -> payload signature
 	seenToolResultSigs := make(map[string]string)    // toolCallId -> payload signature
 
-	// response_start + response_delta：The frontend timeline displays this as planning in monitor.js; do not persist each delta;
+	// progressMu protects closure map and aggregation state. Eino parallelRunToolCall triggers concurrent progress callbacks
+	// (ToolInvokeNotifyHolder.Fire → createProgressCallback); unlocked map access causes fatal panic.
+	var progressMu sync.Mutex
+
+	// response_start + response_delta: frontend timeline displays this as planning in monitor.js; do not persist each delta;
 	// aggregate into one planning row in process_details so refresh matches the live stream.
 	var respPlan responsePlanAgg
 	flushResponsePlan := func() {
@@ -891,6 +954,9 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 	}
 
 	return func(eventType, message string, data interface{}) {
+		progressMu.Lock()
+		defer progressMu.Unlock()
+
 		// Upstream retries or compensation may call back the same tool_call/tool_result more than once.
 		// Apply idempotency filtering here so frontend display and process_details are based on unique events.
 		if (eventType == "tool_call" || eventType == "tool_result") && data != nil {

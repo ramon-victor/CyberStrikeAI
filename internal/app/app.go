@@ -113,6 +113,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	// register vulnerability recording tools
 	registerVulnerabilityTools(mcpServer, db, log.Logger)
 	registerProjectFactTools(mcpServer, db, cfg, log.Logger)
+	registerVisionTools(mcpServer, cfg, log.Logger)
 
 	if cfg.Auth.GeneratedPassword != "" {
 		config.PrintGeneratedPasswordWarning(cfg.Auth.GeneratedPassword, cfg.Auth.GeneratedPasswordPersisted, cfg.Auth.GeneratedPasswordPersistErr)
@@ -314,6 +315,14 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	skillsDir := skillpackage.SkillsRootFromConfig(cfg.SkillsDir, configPath)
 	log.Logger.Info("Skills directory (Eino ADK skill middleware + Web management API)", zap.String("skillsDir", skillsDir))
 	configDir := filepath.Dir(configPath)
+	plantaskRel := strings.TrimSpace(cfg.MultiAgent.EinoMiddleware.PlantaskRelDir)
+	if plantaskRel == "" {
+		plantaskRel = ".eino/plantask"
+	}
+	plantaskBase := filepath.Join(skillsDir, plantaskRel)
+	// Match eino_adk_run_loop: checkpoint_dir is used as configured (relative to process CWD when not absolute).
+	checkpointBase := strings.TrimSpace(cfg.MultiAgent.EinoMiddleware.CheckpointDir)
+	db.SetEinoConversationDirs(plantaskBase, checkpointBase)
 	agent.SetPromptBaseDir(configDir)
 
 	agentsDir := cfg.AgentsDir
@@ -418,6 +427,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	vulnerabilityRegistrar := func() error {
 		registerVulnerabilityTools(mcpServer, db, log.Logger)
 		registerProjectFactTools(mcpServer, db, cfg, log.Logger)
+		registerVisionTools(mcpServer, cfg, log.Logger)
 		return nil
 	}
 	configHandler.SetVulnerabilityToolRegistrar(vulnerabilityRegistrar)
@@ -878,6 +888,7 @@ func setupRoutes(
 		protected.DELETE("/monitor/execution/:id", monitorHandler.DeleteExecution)
 		protected.DELETE("/monitor/executions", monitorHandler.DeleteExecutions)
 		protected.GET("/monitor/stats", monitorHandler.GetStats)
+		protected.GET("/monitor/calls-timeline", monitorHandler.GetCallsTimeline)
 		protected.GET("/notifications/summary", notificationHandler.GetSummary)
 		protected.POST("/notifications/read", notificationHandler.MarkRead)
 
@@ -888,6 +899,7 @@ func setupRoutes(
 		protected.PUT("/config", configHandler.UpdateConfig)
 		protected.POST("/config/apply", configHandler.ApplyConfig)
 		protected.POST("/config/test-openai", configHandler.TestOpenAI)
+		protected.POST("/config/test-vision", configHandler.TestVision)
 
 		// system settings - terminal (execute commands to improve operations efficiency)
 		protected.POST("/terminal/run", terminalHandler.RunCommand)
@@ -1062,6 +1074,7 @@ func setupRoutes(
 		// vulnerability management
 		protected.GET("/vulnerabilities", vulnerabilityHandler.ListVulnerabilities)
 		protected.GET("/vulnerabilities/export", vulnerabilityHandler.ExportVulnerabilities)
+		protected.DELETE("/vulnerabilities/batch", vulnerabilityHandler.BatchDeleteVulnerabilities)
 		protected.GET("/vulnerabilities/filter-options", vulnerabilityHandler.GetVulnerabilityFilterOptions)
 		protected.GET("/vulnerabilities/stats", vulnerabilityHandler.GetVulnerabilityStats)
 		protected.GET("/vulnerabilities/:id", vulnerabilityHandler.GetVulnerability)
@@ -1070,6 +1083,7 @@ func setupRoutes(
 		protected.DELETE("/vulnerabilities/:id", vulnerabilityHandler.DeleteVulnerability)
 
 		// project management and fact blackboard
+		protected.GET("/projects/dashboard-summary", projectHandler.GetDashboardSummary)
 		protected.GET("/projects", projectHandler.ListProjects)
 		protected.POST("/projects", projectHandler.CreateProject)
 		protected.GET("/projects/:id/stats", projectHandler.GetProjectStats)
@@ -1078,8 +1092,6 @@ func setupRoutes(
 		protected.PUT("/projects/:id", projectHandler.UpdateProject)
 		protected.DELETE("/projects/:id", projectHandler.DeleteProject)
 		protected.GET("/projects/:id/facts", projectHandler.ListFacts)
-		protected.GET("/projects/:id/facts/:factId/previous-version", projectHandler.GetFactPreviousVersion)
-		protected.GET("/projects/:id/facts/:factId/versions", projectHandler.ListFactVersions)
 		protected.POST("/projects/:id/facts", projectHandler.CreateFact)
 		protected.PUT("/projects/:id/facts/:factId", projectHandler.UpdateFact)
 		protected.DELETE("/projects/:id/facts/:factId", projectHandler.DeleteFact)

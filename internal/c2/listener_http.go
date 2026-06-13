@@ -367,6 +367,7 @@ func (l *HTTPBeaconListener) handleFileServe(w http.ResponseWriter, r *http.Requ
 	}
 	prefix := l.cfg.BeaconFilePath
 	taskID := strings.TrimPrefix(r.URL.Path, prefix)
+	taskID = strings.TrimSuffix(taskID, ".bin")
 	if taskID == "" || strings.Contains(taskID, "/") || strings.Contains(taskID, "\\") || strings.Contains(taskID, "..") {
 		l.disguisedReject(w)
 		return

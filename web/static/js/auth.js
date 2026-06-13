@@ -297,7 +297,7 @@ async function refreshAppData(showTaskErrors = false) {
 
 async function bootstrapApp() {
     if (!isAppInitialized) {
-        // 等待 i18n 首包加载完成后再插系统就绪消息，避免清除缓存后语言显示 English 气泡仍是中文
+        // 等待 i18n 首包加载完成后再插系统就绪消息，避免清除缓存后语言显示 English 气泡仍是English
         try {
             if (window.i18nReady && typeof window.i18nReady.then === 'function') {
                 await window.i18nReady;
@@ -343,48 +343,13 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-function formatMarkdown(text) {
-    const sanitizeConfig = {
-        ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'u', 's', 'code', 'pre', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'a', 'img', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr'],
-        ALLOWED_ATTR: ['href', 'title', 'alt', 'src', 'class'],
-        ALLOW_DATA_ATTR: false,
-    };
-
-    const raw = text == null ? '' : String(text);
-    const src = typeof window.normalizeAssistantMarkdownSource === 'function'
-        ? window.normalizeAssistantMarkdownSource(raw)
-        : raw;
-
-    if (typeof DOMPurify !== 'undefined') {
-        if (typeof marked !== 'undefined' && !/<[a-z][\s\S]*>/i.test(src)) {
-            try {
-                marked.setOptions({
-                    breaks: true,
-                    gfm: true,
-                });
-                const parsedContent = marked.parse(src, { async: false });
-                return DOMPurify.sanitize(parsedContent, sanitizeConfig);
-            } catch (e) {
-                console.error('Markdown parsing failed:', e);
-                return DOMPurify.sanitize(src, sanitizeConfig);
-            }
-        } else {
-            return DOMPurify.sanitize(src, sanitizeConfig);
-        }
-    } else if (typeof marked !== 'undefined') {
-        try {
-            marked.setOptions({
-                breaks: true,
-                gfm: true,
-            });
-            return marked.parse(src, { async: false });
-        } catch (e) {
-            console.error('Markdown parsing failed:', e);
-            return escapeHtml(src).replace(/\n/g, '<br>');
-        }
-    } else {
-        return escapeHtml(src).replace(/\n/g, '<br>');
+/** @param {string} text @param {{ profile?: 'chat'|'timeline' }} [options] */
+function formatMarkdown(text, options) {
+    if (typeof window.csMarkdownSanitize !== 'undefined') {
+        return window.csMarkdownSanitize.formatMarkdownToHtml(text, options);
     }
+    const raw = text == null ? '' : String(text);
+    return escapeHtml(raw).replace(/\n/g, '<br>');
 }
 
 function setupLoginUI() {
@@ -417,7 +382,7 @@ async function initializeApp() {
     showLoginOverlay();
 }
 
-// 用户菜单控制
+// User menu control
 function toggleUserMenu() {
     const dropdown = document.getElementById('user-menu-dropdown');
     if (!dropdown) return;
@@ -426,7 +391,7 @@ function toggleUserMenu() {
     dropdown.style.display = isVisible ? 'none' : 'block';
 }
 
-// 点击页面其他地方时关闭下拉菜单
+// Close dropdown when clicking outside
 document.addEventListener('click', function(event) {
     const dropdown = document.getElementById('user-menu-dropdown');
     const avatarBtn = document.querySelector('.user-avatar-btn');
@@ -438,16 +403,16 @@ document.addEventListener('click', function(event) {
     }
 });
 
-// 退出登录
+// Logout
 async function logout() {
-    // 关闭下拉菜单
+    // Close dropdown menu
     const dropdown = document.getElementById('user-menu-dropdown');
     if (dropdown) {
         dropdown.style.display = 'none';
     }
     
     try {
-        // 先尝试调用退出API（如果token有效）
+        // Try calling logout API first (if token is valid)
         if (authToken) {
             const headers = new Headers();
             headers.set('Authorization', `Bearer ${authToken}`);
@@ -455,20 +420,20 @@ async function logout() {
                 method: 'POST',
                 headers: headers,
             }).catch(() => {
-                // 忽略错误，继续清除本地认证信息
+                // Ignore errors, continue clearing local auth info
             });
         }
     } catch (error) {
         console.error('Logout API call failed:', error);
     } finally {
-        // 无论如何都清除本地认证信息
+        // Always clear local auth info regardless
         clearAuthStorage();
         hideLoginOverlay();
         showLoginOverlay(typeof window.t === 'function' ? window.t('auth.loggedOut') : 'Logged out');
     }
 }
 
-// 导出函数供HTML使用
+// Export functions for HTML use
 window.toggleUserMenu = toggleUserMenu;
 window.logout = logout;
 

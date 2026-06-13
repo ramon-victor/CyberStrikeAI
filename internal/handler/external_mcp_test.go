@@ -271,6 +271,16 @@ func TestExternalMCPHandler_DeleteExternalMCP(t *testing.T) {
 	}
 }
 
+func TestExternalMCPStatusError(t *testing.T) {
+	manager := mcp.NewExternalMCPManager(zap.NewNop())
+	if got := externalMCPStatusError(manager, "x", "connected"); got != "" {
+		t.Fatalf("connected status should not return error, got %q", got)
+	}
+	if got := externalMCPStatusError(manager, "x", "connecting"); got != "" {
+		t.Fatalf("connecting status should not return error, got %q", got)
+	}
+}
+
 func TestExternalMCPHandler_GetExternalMCPs(t *testing.T) {
 	router, handler, _ := setupTestRouter()
 

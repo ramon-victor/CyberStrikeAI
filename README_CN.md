@@ -28,7 +28,6 @@
 
 CyberStrikeAI 是一款 **AI 原生安全测试平台**，基于 Go 构建，集成了 100+ 安全工具、智能编排引擎、角色化测试与预设安全测试角色、Skills 技能系统与专业测试技能、完整的测试生命周期管理能力，以及面向 **授权场景** 的 **内置轻量 C2（Command & Control，指挥与控制）** 能力（监听器、加密通信、会话与任务、实时事件、REST 与 MCP 协同）。通过原生 MCP 协议与 AI 智能体，支持从对话指令到漏洞发现、攻击链分析、知识检索与结果可视化的全流程自动化，为安全团队提供可审计、可追溯、可协作的专业测试环境。
 
-
 ## 界面与集成预览
 
 <div align="center">
@@ -116,8 +115,9 @@ CyberStrikeAI 是一款 **AI 原生安全测试平台**，基于 Go 构建，集
 - 🛡️ 漏洞管理功能：完整的漏洞 CRUD 操作，支持严重程度分级、状态流转、按对话/严重程度/状态过滤，以及统计看板
 - 📋 批量任务管理：创建任务队列，批量添加任务，依次顺序执行，支持任务编辑与状态跟踪
 - 🎭 角色化测试：预设安全测试角色（渗透测试、CTF、Web 应用扫描等），支持自定义提示词和工具限制
-- 🧩 **Agent 编排（CloudWeGo Eino）**：**单代理** `POST /api/eino-agent/stream`（Eino ADK）；**多代理** `POST /api/multi-agent/stream`，`orchestration` 选 **`deep`** / **`plan_execute`** / **`supervisor`**。`agents/` 下主代理与子代理 Markdown 见 [多代理说明](docs/MULTI_AGENT_EINO.md)
-- 🎯 **Skills（面向 Eino 重构）**：技能包放在 **`skills_dir`**，遵循 **Agent Skills** 目录规范（`SKILL.md` + 可选文件）；**多代理** 下通过 Eino 官方 **`skill`** 工具 **渐进式披露**（按 name 加载）。**`multi_agent.eino_skills`** 控制是否启用、本机文件/Shell 工具、工具名覆盖；**`eino_middleware`** 可选 patch、tool_search、plantask、reduction、断点目录及 Deep 调参。20+ 领域示例仍可绑定角色
+- 🧩 **Agent 编排（CloudWeGo Eino）**：**单代理** `POST /api/eino-agent/stream`（Eino ADK）；**多代理** `POST /api/multi-agent/stream`，`orchestration` 选 **`deep`** / **`plan_execute`** / **`supervisor`**。ADK **Summarization** 在上下文过长时压缩历史；压缩前将可恢复 **转录** 写入 `data/conversation_artifacts/<会话ID>/summarization/transcript.txt`（保留完整 user/assistant/tool 轮次，省略静态 system）。`agents/` 下主代理与子代理 Markdown 见 [多代理说明](docs/MULTI_AGENT_EINO.md)
+- 🖼️ **视觉分析（`analyze_image`）**：独立 Vision 模型（如 `qwen-vl-max`），MCP 工具分析本地截图/验证码/UI；图片仅在单次 VL 调用中出现，对话上下文只保留文字摘要。配置见 `config.yaml` → `vision` 与 [视觉分析说明](docs/VISION.md)
+- 🎯 **Skills（面向 Eino 重构）**：技能包放在 **`skills_dir`**，遵循 **Agent Skills** 目录规范（`SKILL.md` + 可选文件）；**多代理** 下通过 Eino 官方 **`skill`** 工具 **渐进式披露**（按 name 加载）。**`multi_agent.eino_skills`** 控制是否启用、本机文件/Shell 工具、工具名覆盖；**`eino_middleware`** 可选 patch、tool_search、**plantask**（`TaskCreate` / `TaskList` 任务板，落在 `skills_dir/.eino/plantask/`）、reduction、文件型 **checkpoint**（`checkpoint_dir`）、ChatModel **重试**、会话 **输出键** 及 Deep 调参。20+ 领域示例仍可绑定角色
 - 📱 **机器人**：支持钉钉、飞书长连接，在手机端与 CyberStrikeAI 对话（配置与命令详见 [机器人使用说明](docs/robot.md)）
 - 🧑‍⚖️ **人机协同（HITL）**：对话页侧栏配置协同模式与免审批工具白名单；全局列表在 `config.yaml` 的 `hitl.tool_whitelist`；点「应用」可将新增工具合并写入配置文件且**无需重启**即可生效；导航 **人机协同** 页处理待审批工具调用
 - 🐚 **WebShell 管理**：添加与管理 WebShell 连接（兼容冰蝎/蚁剑等），通过虚拟终端执行命令、内置文件管理进行文件操作，并提供按连接维度保存历史的 AI 助手标签页；支持 PHP/ASP/ASPX/JSP 及自定义类型，可配置请求方法与命令参数。
@@ -188,14 +188,21 @@ chmod +x run.sh && ./run.sh
      ```
    - 或启动前直接编辑 `config.yaml` 文件
 2. **登录系统** - 使用控制台显示的自动生成密码（或在 `config.yaml` 中设置 `auth.password`）
-3. **安装安全工具（可选）** - 按需安装所需工具：
+3. **安装安全工具（可选）** - 按需安装 `tools/` 目录中的工具；未安装的工具在执行时会自动跳过或改用替代方案。常用示例：
+
+   **macOS（Homebrew）：**
    ```bash
-   # macOS
-   brew install nmap sqlmap nuclei httpx gobuster feroxbuster subfinder amass
-   # Ubuntu/Debian
-   sudo apt-get install nmap sqlmap nuclei httpx gobuster feroxbuster
+   brew install nmap masscan sqlmap nikto gobuster ffuf hydra hashcat nuclei subfinder
    ```
-   未安装的工具会自动跳过或改用替代方案。
+
+   **Linux（Kali / Debian / Ubuntu）：**
+   ```bash
+   sudo apt update
+   sudo apt install -y nmap masscan sqlmap nikto gobuster hydra hashcat john binwalk
+   # 部分发行版需自行安装：ffuf、nuclei、subfinder 等可用 go install 或见各工具官网
+   ```
+
+   完整工具列表见 `tools/` 目录；各工具安装方式以官方文档为准。
 
 **其他启动方式：**
 ```bash
@@ -276,7 +283,7 @@ docker compose up -d --build
 - **预设角色**：系统内置 12+ 个预设的安全测试角色（渗透测试、CTF、Web 应用扫描、API 安全测试、二进制分析、云安全审计等），位于 `roles/` 目录。
 - **自定义提示词**：每个角色可定义 `user_prompt`，会在用户消息前自动添加，引导 AI 采用特定的测试方法和关注重点。
 - **工具限制**：角色可指定 `tools` 列表，限制可用工具，实现聚焦的测试流程（如 CTF 角色限制为 CTF 专用工具）。
-- **Skills**：技能包位于 `skills_dir`；启用 **`multi_agent.eino_skills`** 后，**单代理与多代理**均可通过 Eino **`skill`** 工具按需加载。中间件与本机 read_file/glob/grep 等见文档。
+- **Skills**：技能包位于 `skills_dir`；启用 **`multi_agent.eino_skills`** 后，**单代理与多代理**均可通过 Eino **`skill`** 工具按需加载。可选 **`eino_middleware`**（tool_search、plantask、reduction、checkpoint、Summarization 转录等）与本机 read_file/glob/grep 等见文档。
 - **轻松创建角色**：通过在 `roles/` 目录添加 YAML 文件即可创建自定义角色。每个角色定义 `name`、`description`、`user_prompt`、`icon`、`tools`、`enabled` 字段。
 - **Web 界面集成**：在聊天界面通过下拉菜单选择角色。角色选择会影响 AI 行为和可用工具建议。
 
@@ -304,6 +311,7 @@ docker compose up -d --build
   - **子代理**（**deep** / **supervisor**）：其余 `*.md`；标成 orchestrator 的不会进入 `task` 列表。
 - **界面管理**：**Agents → Agent 管理**；API `/api/multi-agent/markdown-agents`。
 - **配置项**：`multi_agent`：`enabled`、`robot_default_agent_mode`、`batch_use_multi_agent`、`max_iteration`、`plan_execute_loop_max_iterations`、各模式 orchestrator 指令字段、可选 YAML `sub_agents` 与目录合并（同 `id` → Markdown 优先）、**`eino_skills`**、**`eino_middleware`**。
+- **长任务与恢复**：`checkpoint_dir` 支持进程崩溃后 ADK **断点续跑**（与基于 trace 的「中断继续」不同）。`deep_model_retry_max_retries` 在同一次 LLM 调用内重试瞬时 API 失败。**Summarization** 触发压缩时会写入过滤后的 **transcript**，摘要消息中带路径，模型可用 `read_file` 找回扫描输出等压缩前细节。
 - **更多细节**：[docs/MULTI_AGENT_EINO.md](docs/MULTI_AGENT_EINO.md)（流式、机器人、批量、中间件差异）。
 
 ### Skills 技能系统（Agent Skills + Eino）
@@ -311,7 +319,7 @@ docker compose up -d --build
 - **运行侧重构**：**`skills_dir`** 为技能包唯一根目录；**多代理** 通过 Eino 官方 **`skill`** 中间件做 **渐进式披露**（模型按 **name** 调用 `skill`，而非一次性注入全文）。由 **`multi_agent.eino_skills`** 控制：`disable`、`filesystem_tools`（本机读写与 Shell）、`skill_tool_name`。
 - **Eino / 知识流水线**：技能包可切分为 `schema.Document`，供 `FilesystemSkillsRetriever`（`skills.AsEinoRetriever()`）在 **compose** 图（如索引/编排）中使用。
 - **HTTP 管理**：`/api/skills` 列表与 `depth=summary|full`、`section`、`resource_path` 等仍用于 Web 与运维；**模型侧** 多代理走 **`skill`** 工具，而非 MCP。
-- **可选 `eino_middleware`**：如 `tool_search`（动态工具列表）、`patch_tool_calls`、`plantask`（结构化任务；默认落在 `skills_dir` 下子目录）、`reduction`、`checkpoint_dir`、Deep 输出键 / 模型重试 / task 描述前缀等，见 `config.yaml` 与 `internal/config/config.go`。
+- **可选 `eino_middleware`**：如 `tool_search`（动态工具列表）、`patch_tool_calls`、**`plantask`**（Eino `TaskCreate` / `TaskGet` / `TaskUpdate` / `TaskList`；JSON 存于 `skills_dir/.eino/plantask/<会话ID>/`；**全部**任务标为 completed 后 Eino 会清理任务文件）、`reduction`、**`checkpoint_dir`**（如 `data/eino-checkpoints/`）、**`deep_model_retry_max_retries`**、**`deep_output_key`**、task 描述前缀等，见 `config.yaml` 与 `internal/config/config.go`。
 - **自带示例**：`skills/cyberstrike-eino-demo/`；说明见 `skills/README.md`。
 
 **新建技能：**
@@ -559,7 +567,7 @@ multi_agent:
   orchestrator_instruction: ""  # Deep；orchestrator.md 正文为空时使用
   # orchestrator_instruction_plan_execute / orchestrator_instruction_supervisor 可选
   # eino_skills: { disable: false, filesystem_tools: true, skill_tool_name: skill }
-  # eino_middleware: 可选 patch_tool_calls、tool_search、plantask、reduction、checkpoint_dir 等
+  # eino_middleware: plantask_enable、checkpoint_dir、deep_model_retry_max_retries、deep_output_key 等
 ```
 
 ### 工具模版示例（`tools/nmap.yaml`）

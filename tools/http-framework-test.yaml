@@ -337,13 +337,12 @@ args:
                 meta["mode"] = "raw"
             content_type = headers.get("Content-Type")
             charset = extract_charset_from_content_type(content_type) if content_type else ""
-            if not charset and meta["mode"] in ("json", "text", "form-urlencoded"):
+            if not charset:
                 charset = "utf-8"
-            base = (content_type or "text/plain").split(";")[0].strip()
-            headers["Content-Type"] = f"{base}; charset={charset}"
-        elif not charset:
-            charset = "utf-8"
-        body_bytes = processed.encode(charset, errors="surrogatepass")
+                if meta["mode"] in ("json", "text", "form-urlencoded"):
+                    base = (content_type or "text/plain").split(";")[0].strip()
+                    headers["Content-Type"] = f"{base}; charset={charset}"
+            body_bytes = processed.encode(charset, errors="surrogatepass")
         meta["charset"] = charset
         meta["length"] = len(body_bytes)
         if debug:

@@ -9,14 +9,18 @@ import (
 
 	"cyberstrike-ai/internal/agent"
 	"cyberstrike-ai/internal/config"
+	copenai "cyberstrike-ai/internal/openai"
 
 	"github.com/bytedance/sonic"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/summarization"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"go.uber.org/zap"
 )
+
+const defaultSummarizationRetryMax = 3
 
 // einoSummarizeUserInstruction compresses history while preserving critical penetration-testing information.
 const einoSummarizeUserInstruction = `Compress the conversation history while preserving all critical security testing information.
@@ -89,8 +93,32 @@ func newEinoSummarizationMiddleware(
 		}
 	}
 
+	retryMax := defaultSummarizationRetryMax
+	if mwCfg != nil && mwCfg.SummarizationRetryMaxAttempts > 0 {
+		retryMax = mwCfg.SummarizationRetryMaxAttempts
+	}
+
+	// ModelOptions apply only to summarization Generate (same ChatModel instance as the agent).
+	// Strip thinking/reasoning on this call path; mark requests for empty-choices diagnostics.
+	summaryModelOpts := []model.Option{
+		einoopenai.WithExtraHeader(map[string]string{
+			copenai.SummarizationRequestHeader: "1",
+		}),
+		einoopenai.WithRequestPayloadModifier(func(_ context.Context, in []*schema.Message, rawBody []byte) ([]byte, error) {
+			if logger != nil {
+				logger.Info("eino summarization generate request",
+					zap.Int("input_messages", len(in)),
+					zap.Int("payload_bytes", len(rawBody)),
+					zap.String("model", modelName),
+				)
+			}
+			return stripReasoningFromSummarizationPayload(rawBody)
+		}),
+	}
+
 	mw, err := summarization.New(ctx, &summarization.Config{
-		Model: summaryModel,
+		Model:        summaryModel,
+		ModelOptions: summaryModelOpts,
 		Trigger: &summarization.TriggerCondition{
 			ContextTokens: trigger,
 		},
@@ -102,24 +130,43 @@ func newEinoSummarizationMiddleware(
 			Enabled:   true,
 			MaxTokens: preserveMax,
 		},
+		Retry: &summarization.RetryConfig{
+			MaxRetries: &retryMax,
+			ShouldRetry: func(_ context.Context, _ adk.Message, err error) bool {
+				if err != nil && logger != nil {
+					logger.Warn("eino summarization generate attempt failed, will retry if attempts remain",
+						zap.Error(err),
+						zap.Int("max_retries", retryMax),
+					)
+				}
+				return err != nil
+			},
+		},
 		Finalize: func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
 			return summarizeFinalizeWithRecentAssistantToolTrail(ctx, originalMessages, summary, tokenCounter, recentTrailMax)
 		},
 		Callback: func(ctx context.Context, before, after adk.ChatModelAgentState) error {
-			if logger == nil {
-				return nil
+			if transcriptPath != "" && len(before.Messages) > 0 {
+				if werr := writeSummarizationTranscript(transcriptPath, before.Messages); werr != nil && logger != nil {
+					logger.Warn("eino summarization transcript 写入失败",
+						zap.String("path", transcriptPath),
+						zap.Error(werr),
+					)
+				}
 			}
-			beforeTokens, _ := tokenCounter(ctx, &summarization.TokenCounterInput{Messages: before.Messages})
-			afterTokens, _ := tokenCounter(ctx, &summarization.TokenCounterInput{Messages: after.Messages})
-			logger.Info("eino summarization compressed context",
-				zap.Int("messages_before", len(before.Messages)),
-				zap.Int("messages_after", len(after.Messages)),
-				zap.Int("tokens_before_estimated", beforeTokens),
-				zap.Int("tokens_after_estimated", afterTokens),
-				zap.Int("max_total_tokens", maxTotal),
-				zap.Int("trigger_context_tokens", trigger),
-				zap.String("transcript_file", transcriptPath),
-			)
+			if logger != nil {
+				beforeTokens, _ := tokenCounter(ctx, &summarization.TokenCounterInput{Messages: before.Messages})
+				afterTokens, _ := tokenCounter(ctx, &summarization.TokenCounterInput{Messages: after.Messages})
+				logger.Info("eino summarization 已压缩上下文",
+					zap.Int("messages_before", len(before.Messages)),
+					zap.Int("messages_after", len(after.Messages)),
+					zap.Int("tokens_before_estimated", beforeTokens),
+					zap.Int("tokens_after_estimated", afterTokens),
+					zap.Int("max_total_tokens", maxTotal),
+					zap.Int("trigger_context_tokens", trigger),
+					zap.String("transcript_file", transcriptPath),
+				)
+			}
 			return nil
 		},
 	})
@@ -293,6 +340,23 @@ func splitMessagesIntoRounds(msgs []adk.Message) []messageRound {
 		}
 	}
 	return rounds
+}
+
+// writeSummarizationTranscript persists pre-compaction history for read_file after summarization.
+// Eino TranscriptFilePath only embeds the path in summary text; the file must be written by the host app.
+func writeSummarizationTranscript(path string, msgs []adk.Message) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	body := formatSummarizationTranscript(msgs)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir transcript dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		return fmt.Errorf("write transcript: %w", err)
+	}
+	return nil
 }
 
 func einoSummarizationTokenCounter(openAIModel string) summarization.TokenCounterFunc {

@@ -20,20 +20,20 @@ import (
 	"go.uber.org/zap"
 )
 
-// Builder 攻击链构建器
+// Builder is an attack chain builder.
 type Builder struct {
 	db           *database.DB
 	logger       *zap.Logger
 	openAIClient *openai.Client
 	openAIConfig *config.OpenAIConfig
 	tokenCounter agent.TokenCounter
-	maxTokens    int // 最大tokens限制，默认100000
+	maxTokens    int // max token limit, default 100000
 }
 
-// Node 攻击链节点（使用database包的类型）
+// Node is an attack chain node (uses types from the database package).
 type Node = database.AttackChainNode
 
-// Edge 攻击链边（使用database包的类型）
+// Edge is an attack chain edge (uses types from the database package).
 type Edge = database.AttackChainEdge
 
 // Chain 完整的攻击链
@@ -42,7 +42,7 @@ type Chain struct {
 	Edges []Edge `json:"edges"`
 }
 
-// NewBuilder 创建新的攻击链构建器
+// NewBuilder creates a new attack chain builder.
 func NewBuilder(db *database.DB, openAIConfig *config.OpenAIConfig, logger *zap.Logger) *Builder {
 	transport := &http.Transport{
 		MaxIdleConns:        100,
@@ -51,24 +51,24 @@ func NewBuilder(db *database.DB, openAIConfig *config.OpenAIConfig, logger *zap.
 	}
 	httpClient := &http.Client{Timeout: 5 * time.Minute, Transport: transport}
 
-	// 优先使用配置文件中的统一 Token 上限（config.yaml -> openai.max_total_tokens）
+	// Prefer the unified token cap from the config file (config.yaml -> openai.max_total_tokens)
 	maxTokens := 0
 	if openAIConfig != nil && openAIConfig.MaxTotalTokens > 0 {
 		maxTokens = openAIConfig.MaxTotalTokens
 	} else if openAIConfig != nil {
-		// 如果未显式配置 max_total_tokens，则根据模型设置一个合理的默认值
+	} else if openAIConfig != nil {
 		model := strings.ToLower(openAIConfig.Model)
 		if strings.Contains(model, "gpt-4") {
-			maxTokens = 128000 // gpt-4通常支持128k
+			maxTokens = 128000 // gpt-4 typically supports 128k
 		} else if strings.Contains(model, "gpt-3.5") {
-			maxTokens = 16000 // gpt-3.5-turbo通常支持16k
+			maxTokens = 16000 // gpt-3.5-turbo typically supports 16k
 		} else if strings.Contains(model, "deepseek") {
-			maxTokens = 131072 // deepseek-chat通常支持131k
+			maxTokens = 131072 // deepseek-chat typically supports 131k
 		} else {
-			maxTokens = 100000 // 兜底默认值
+			maxTokens = 100000 // fallback default
 		}
 	} else {
-		// 没有 OpenAI 配置时使用兜底值，避免为 0
+		// No OpenAI config; use fallback value to avoid zero
 		maxTokens = 100000
 	}
 
@@ -82,11 +82,11 @@ func NewBuilder(db *database.DB, openAIConfig *config.OpenAIConfig, logger *zap.
 	}
 }
 
-// BuildChainFromConversation 从对话构建攻击链（单次 LLM 调用；输入为当前任务轮次的 last_react 轨迹，与继续对话续跑范围一致）。
+// BuildChainFromConversation builds an attack chain from a conversation (single LLM call; input is the last_react trace of the current task turn, aligned with the continue-conversation scope).
 func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID string) (*Chain, error) {
 	b.logger.Info("Starting attack chain construction (simplified version)", zap.String("conversationId", conversationID))
 
-	// 0. 首先检查是否有实际的工具执行记录
+	// 0. First check if there are actual tool execution records
 	messages, err := b.db.GetMessages(conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get conversation messages: %w", err)
@@ -97,8 +97,8 @@ func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID
 		return &Chain{Nodes: []Node{}, Edges: []Edge{}}, nil
 	}
 
-	// 检查是否有实际的工具执行：assistant 的 mcp_execution_ids，或过程详情中的 tool_call/tool_result
-	//（多代理下若 MCP 未返回 execution_id，IDs 可能为空，但工具已通过 Eino 执行并写入 process_details）
+	// Check if there are actual tool executions: assistant's mcp_execution_ids, or tool_call/tool_result in process details
+	// (in multi-agent mode, MCP may not return execution_id so IDs may be empty, but tools were executed via Eino and written to process_details)
 	hasToolExecutions := false
 	for i := len(messages) - 1; i >= 0; i-- {
 		if strings.EqualFold(messages[i].Role, "assistant") {
@@ -110,54 +110,54 @@ func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID
 	}
 	if !hasToolExecutions {
 		if pdOK, err := b.db.ConversationHasToolProcessDetails(conversationID); err != nil {
-			b.logger.Warn("查询过程详情判定工具执行失败", zap.Error(err))
+			b.logger.Warn("failed to query process details to determine tool execution", zap.Error(err))
 		} else if pdOK {
 			hasToolExecutions = true
 		}
 	}
 
-	// 检查任务是否被取消（通过检查最后一条assistant消息内容或process_details）
+	// Check if the task was cancelled (by checking the last assistant message content or process_details)
 	taskCancelled := false
 	for i := len(messages) - 1; i >= 0; i-- {
 		if strings.EqualFold(messages[i].Role, "assistant") {
 			content := strings.ToLower(messages[i].Content)
-			if strings.Contains(content, "取消") || strings.Contains(content, "cancelled") {
+		if strings.Contains(content, "取消") || strings.Contains(content, "cancelled") {
 				taskCancelled = true
 			}
 			break
 		}
 	}
 
-	// 如果任务被取消且没有实际工具执行，返回空攻击链
+	// If the task was cancelled and there were no actual tool executions, return an empty attack chain
 	if taskCancelled && !hasToolExecutions {
-		b.logger.Info("任务已取消且没有实际工具执行，返回空攻击链",
+		b.logger.Info("task cancelled with no actual tool executions, returning empty attack chain",
 			zap.String("conversationId", conversationID),
 			zap.Bool("taskCancelled", taskCancelled),
 			zap.Bool("hasToolExecutions", hasToolExecutions))
 		return &Chain{Nodes: []Node{}, Edges: []Edge{}}, nil
 	}
 
-	// 如果没有实际工具执行，也返回空攻击链（避免AI编造）
+	// If there are no actual tool executions, also return an empty attack chain (avoid AI fabrication)
 	if !hasToolExecutions {
-		b.logger.Info("没有实际工具执行记录，返回空攻击链",
+		b.logger.Info("no actual tool execution records, returning empty attack chain",
 			zap.String("conversationId", conversationID))
 		return &Chain{Nodes: []Node{}, Edges: []Edge{}}, nil
 	}
 
-	// 1. 优先尝试从数据库获取保存的最后一轮ReAct输入和输出
+	// 1. First try to get saved last-round ReAct input and output from database
 	reactInputJSON, modelOutput, err := b.db.GetAgentTrace(conversationID)
 	if err != nil {
-		b.logger.Warn("获取保存的ReAct数据失败，将使用消息历史构建", zap.Error(err))
-		// 继续使用原来的逻辑
+		b.logger.Warn("failed to get saved ReAct data, will use message history instead", zap.Error(err))
+		// Continue with original logic
 		reactInputJSON = ""
 		modelOutput = ""
 	}
 
 	// var userInput string
 	var reactInputFinal string
-	var dataSource string // 记录数据来源
+	var dataSource string // track data source
 
-	// 优先使用落库的代理轨迹（与继续对话 loadHistoryFromAgentTrace 同源），并裁剪为「当前任务轮次」
+	// Prefer the stored agent trace (same source as continue-conversation loadHistoryFromAgentTrace), trimmed to "current task turn"
 	if reactInputJSON != "" {
 		trimmedJSON := agent.ExtractLastUserTurnTraceJSON(reactInputJSON)
 		hash := sha256.Sum256([]byte(trimmedJSON))
@@ -169,15 +169,16 @@ func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID
 			msgs = agent.MergeAssistantTraceOutput(msgs, modelOutput)
 			reactInputFinal = b.formatAgentTraceFromChatMessages(msgs)
 		} else {
-			b.logger.Warn("解析代理轨迹失败，回退原始 JSON 格式化", zap.Error(parseErr))
+			b.logger.Warn("failed to parse agent trace, falling back to raw JSON formatting", zap.Error(parseErr))
 			reactInputFinal = b.formatAgentTraceInputFromJSON(trimmedJSON)
 			if strings.TrimSpace(modelOutput) != "" {
-				reactInputFinal += "\n\n## 助手结论（last_react_output）\n\n" + modelOutput
+				reactInputFinal += "\n\n## Assistant Conclusion (last_react_output)\n\n" + modelOutput
 			}
 		}
 
 		dataSource = "last_user_turn_agent_trace"
-		b.logger.Info("使用当前任务轮次代理轨迹构建攻击链（与续跑上下文范围一致）",
+		dataSource = "last_user_turn_agent_trace"
+		b.logger.Info("building attack chain using current task turn agent trace (aligned with continue-conversation context scope)",
 			zap.String("conversationId", conversationID),
 			zap.String("dataSource", dataSource),
 			zap.Int("traceInputSizeBeforeTrim", len(reactInputJSON)),
@@ -186,14 +187,14 @@ func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID
 			zap.String("reactInputHash", reactInputHash),
 			zap.Int("modelOutputSize", len(modelOutput)))
 	} else {
-		// 2. 如果没有保存的ReAct数据，从对话消息构建
+		// 2. If there is no saved ReAct data, build from conversation messages
 		dataSource = "messages_table"
-		b.logger.Info("从消息历史构建ReAct数据",
+		b.logger.Info("building ReAct data from message history",
 			zap.String("conversationId", conversationID),
 			zap.String("dataSource", dataSource),
 			zap.Int("messageCount", len(messages)))
 
-		// 提取用户输入（最后一条user消息）
+		// Extract user input (last user message)
 		for i := len(messages) - 1; i >= 0; i-- {
 			if strings.EqualFold(messages[i].Role, "user") {
 				// userInput = messages[i].Content
@@ -201,10 +202,10 @@ func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID
 			}
 		}
 
-		// 提取最后一轮ReAct的输入（历史消息+当前用户输入）
+		// Extract the last round of ReAct input (history messages + current user input)
 		reactInputFinal = b.buildAgentTraceInput(messages)
 
-		// 提取大模型最后的输出（最后一条assistant消息）
+		// Extract the model's last output (last assistant message)
 		for i := len(messages) - 1; i >= 0; i-- {
 			if strings.EqualFold(messages[i].Role, "assistant") {
 				modelOutput = messages[i].Content
@@ -213,7 +214,7 @@ func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID
 		}
 	}
 
-	// 多代理：保存的轨迹列可能仅为首轮用户消息，不含工具轨迹；补充最后一轮助手的过程详情（与单代理完整轨迹对齐）
+	// Multi-agent: the saved trace column may only contain the first-round user message without tool traces; supplement with the last assistant turn's process details (align with single-agent complete trace)
 	hasMCPOnAssistant := false
 	var lastAssistantID string
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -230,64 +231,64 @@ func (b *Builder) BuildChainFromConversation(ctx context.Context, conversationID
 		if pdHasTools && !(hasMCPOnAssistant && reactInputContainsToolTrace(reactInputJSON)) {
 			detailsMap, err := b.db.GetProcessDetailsByConversation(conversationID)
 			if err != nil {
-				b.logger.Warn("加载过程详情用于攻击链失败", zap.Error(err))
+			b.logger.Warn("failed to load process details for attack chain", zap.Error(err))
 			} else if dets := detailsMap[lastAssistantID]; len(dets) > 0 {
 				extra := b.formatProcessDetailsForAttackChain(dets)
 				if strings.TrimSpace(extra) != "" {
-					reactInputFinal = reactInputFinal + "\n\n## 执行过程与工具记录（含多代理编排与子任务）\n\n" + extra
-					b.logger.Info("攻击链输入已补充过程详情",
-						zap.String("conversationId", conversationID),
-						zap.String("messageId", lastAssistantID),
-						zap.Int("detailEvents", len(dets)))
+					reactInputFinal = reactInputFinal + "\n\n## Execution Process and Tool Records (including multi-agent orchestration and subtasks)\n\n" + extra
+				b.logger.Info("attack chain input supplemented with process details",
+					zap.String("conversationId", conversationID),
+					zap.String("messageId", lastAssistantID),
+					zap.Int("detailEvents", len(dets)))
 				}
 			}
 		}
 	}
 
-	// 3. 按 token 预算压缩输入，再构建 prompt（避免超出模型上下文）
+	// 3. Compress input by token budget, then build prompt (avoid exceeding model context)
 	reactInputFinal, modelOutput, _ = b.fitAttackChainPayload(reactInputFinal, modelOutput)
 
-	// 4. 构建 prompt 并单次调用大模型（助手结论已并入轨迹时不再重复传入）
+	// 4. Build prompt and call LLM once (assistant conclusion already merged into trace — don't pass it again)
 	promptAssistantOut := modelOutput
 	if reactInputJSON != "" {
 		promptAssistantOut = ""
 	}
 	prompt := b.buildSimplePrompt(reactInputFinal, promptAssistantOut)
 	// fmt.Println(prompt)
-	// 6. 调用AI生成攻击链（一次性，不做任何处理）
+	// 6. Call AI to generate attack chain (one-shot, no post-processing)
 	chainJSON, err := b.callAIForChainGeneration(ctx, prompt)
 	if err != nil {
-		return nil, fmt.Errorf("AI生成失败: %w", err)
+		return nil, fmt.Errorf("AI generation failed: %w", err)
 	}
 
-	// 7. 解析JSON并生成节点/边ID（前端需要有效的ID）
+	// 7. Parse JSON and generate node/edge IDs (frontend requires valid IDs)
 	chainData, err := b.parseChainJSON(chainJSON)
 	if err != nil {
-		// 如果解析失败，返回空链，让前端处理错误
-		b.logger.Warn("解析攻击链JSON失败", zap.Error(err), zap.String("raw_json", chainJSON))
+		// If parsing fails, return empty chain — let the frontend handle the error
+		b.logger.Warn("failed to parse attack chain JSON", zap.Error(err), zap.String("raw_json", chainJSON))
 		return &Chain{
 			Nodes: []Node{},
 			Edges: []Edge{},
 		}, nil
 	}
 
-	b.logger.Info("攻击链构建完成",
+	b.logger.Info("attack chain construction completed",
 		zap.String("conversationId", conversationID),
 		zap.String("dataSource", dataSource),
 		zap.Int("nodes", len(chainData.Nodes)),
 		zap.Int("edges", len(chainData.Edges)))
 
-	// 保存到数据库（供后续加载使用）
+	// Save to database (for subsequent loading)
 	if err := b.saveChain(conversationID, chainData.Nodes, chainData.Edges); err != nil {
-		b.logger.Warn("保存攻击链到数据库失败", zap.Error(err))
-		// 即使保存失败，也返回数据给前端
+		b.logger.Warn("failed to save attack chain to database", zap.Error(err))
+		// Even if saving fails, return data to the frontend
 	}
 
-	// 直接返回，不做任何处理和校验
+	// Return directly without any post-processing or validation
 	return chainData, nil
 }
 
-// reactInputContainsToolTrace 判断保存的 ReAct JSON 是否包含可解析的工具调用轨迹（单代理完整保存时为 true）。
+// reactInputContainsToolTrace checks whether the saved ReAct JSON contains parseable tool-call traces (true when single-agent saves the full trace).
 func reactInputContainsToolTrace(reactInputJSON string) bool {
 	s := strings.TrimSpace(reactInputJSON)
 	if s == "" {
@@ -299,21 +300,21 @@ func reactInputContainsToolTrace(reactInputJSON string) bool {
 		strings.Contains(s, `"role": "tool"`)
 }
 
-// formatProcessDetailsForAttackChain 将最后一轮助手的过程详情格式化为攻击链分析的输入（覆盖多代理下 last_react_input 不完整的情况）。
+// formatProcessDetailsForAttackChain formats the last assistant turn's process details as input for attack chain analysis (covers incomplete last_react_input in multi-agent scenarios).
 func (b *Builder) formatProcessDetailsForAttackChain(details []database.ProcessDetail) string {
 	if len(details) == 0 {
 		return ""
 	}
 	var sb strings.Builder
 	for _, d := range details {
-		// 目标：以主 agent（编排器）视角输出整轮迭代
-		// - 保留：编排器工具调用/结果、对子代理的 task 调度、子代理最终回复（不含推理）
-		// - 丢弃：thinking/planning/progress 等噪声、子代理的工具细节与推理过程
+		// Goal: output the full iteration from the perspective of the main agent (orchestrator)
+		// - Keep: orchestrator tool calls/results, subtask dispatches to sub-agents, sub-agent final replies (excluding reasoning)
+		// - Drop: noise such as thinking/planning/progress, sub-agent tool details and reasoning process
 		if d.EventType == "progress" || d.EventType == "thinking" || d.EventType == "reasoning_chain" || d.EventType == "planning" {
 			continue
 		}
 
-		// 解析 data（JSON string），用于识别 einoRole / toolName 等
+		// Parse data (JSON string) to identify einoRole / toolName, etc.
 		var dataMap map[string]interface{}
 		if strings.TrimSpace(d.Data) != "" {
 			_ = json.Unmarshal([]byte(d.Data), &dataMap)
@@ -327,7 +328,7 @@ func (b *Builder) formatProcessDetailsForAttackChain(details []database.ProcessD
 			toolName = strings.TrimSpace(fmt.Sprint(v))
 		}
 
-		// 1) 编排器的工具调用/结果：保留（这是“主 agent 调了什么工具”）
+		// 1) Orchestrator tool calls/results: keep (these are "what tools the main agent called")
 		if (d.EventType == "tool_call" || d.EventType == "tool_result" || d.EventType == "tool_calls_detected" || d.EventType == "iteration") && einoRole == "orchestrator" {
 			sb.WriteString("[")
 			sb.WriteString(d.EventType)
@@ -342,7 +343,7 @@ func (b *Builder) formatProcessDetailsForAttackChain(details []database.ProcessD
 			continue
 		}
 
-		// 2) 子代理调度：tool_call(toolName=="task") 代表编排器把子任务派发出去；保留（只需任务，不要子代理推理）
+		// 2) Sub-agent dispatch: tool_call(toolName=="task") represents the orchestrator dispatching a subtask; keep (only the task, not sub-agent reasoning)
 		if d.EventType == "tool_call" && strings.EqualFold(toolName, "task") {
 			sb.WriteString("[dispatch_subagent_task] ")
 			sb.WriteString(strings.TrimSpace(d.Message))
@@ -355,12 +356,12 @@ func (b *Builder) formatProcessDetailsForAttackChain(details []database.ProcessD
 			continue
 		}
 
-		// 3) 子代理最终回复：保留（只保留最终输出，不保留分析过程）
+		// 3) Sub-agent final reply: keep (only the final output, not the analysis process)
 		if d.EventType == "eino_agent_reply" && einoRole == "sub" {
 			sb.WriteString("[subagent_final_reply] ")
 			sb.WriteString(strings.TrimSpace(d.Message))
 			sb.WriteString("\n")
-			// data 里含 einoAgent 等元信息，保留有助于追踪“哪个子代理说的”
+			// data contains metadata like einoAgent — keeping it helps trace "which sub-agent said this"
 			if strings.TrimSpace(d.Data) != "" {
 				sb.WriteString(d.Data)
 				sb.WriteString("\n")
@@ -369,12 +370,12 @@ func (b *Builder) formatProcessDetailsForAttackChain(details []database.ProcessD
 			continue
 		}
 
-		// 其他事件默认丢弃，避免把子代理工具细节/推理塞进 prompt，偏离“主 agent 一轮迭代”的视角。
+		// Other events are dropped by default to avoid stuffing sub-agent tool details/reasoning into the prompt, deviating from the "main agent one-round iteration" perspective.
 	}
 	return strings.TrimSpace(sb.String())
 }
 
-// buildAgentTraceInput 构建最后一轮 ReAct 的输入（从最后一条 user 消息起，不含更早轮次）。
+// buildAgentTraceInput builds the last round of ReAct input (starting from the last user message, excluding earlier turns).
 func (b *Builder) buildAgentTraceInput(messages []database.Message) string {
 	start := 0
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -390,16 +391,16 @@ func (b *Builder) buildAgentTraceInput(messages []database.Message) string {
 	return builder.String()
 }
 
-// extractUserInputFromReActInput 从保存的ReAct输入（JSON格式的messages数组）中提取最后一条用户输入
+// extractUserInputFromReActInput extracts the last user input from saved ReAct input (JSON-formatted messages array)
 // func (b *Builder) extractUserInputFromReActInput(reactInputJSON string) string {
-// 	// reactInputJSON是JSON格式的ChatMessage数组，需要解析
+// 	// reactInputJSON is a JSON-formatted ChatMessage array that needs parsing
 // 	var messages []map[string]interface{}
 // 	if err := json.Unmarshal([]byte(reactInputJSON), &messages); err != nil {
-// 		b.logger.Warn("解析ReAct输入JSON失败", zap.Error(err))
+// 		b.logger.Warn("failed to parse ReAct input JSON", zap.Error(err))
 // 		return ""
 // 	}
 
-// 	// 从后往前查找最后一条user消息
+// 	// Iterate backward to find the last user message
 // 	for i := len(messages) - 1; i >= 0; i-- {
 // 		if role, ok := messages[i]["role"].(string); ok && strings.EqualFold(role, "user") {
 // 			if content, ok := messages[i]["content"].(string); ok {
@@ -411,18 +412,18 @@ func (b *Builder) buildAgentTraceInput(messages []database.Message) string {
 // 	return ""
 // }
 
-// formatAgentTraceInputFromJSON 将 JSON 轨迹转为可读文本（会先按当前任务轮次裁剪）。
+// formatAgentTraceInputFromJSON converts JSON trace to readable text (trims to the current task turn first).
 func (b *Builder) formatAgentTraceInputFromJSON(reactInputJSON string) string {
 	trimmed := agent.ExtractLastUserTurnTraceJSON(reactInputJSON)
 	msgs, err := agent.ParseTraceMessages(trimmed)
 	if err != nil {
-		b.logger.Warn("解析ReAct输入JSON失败", zap.Error(err))
+		b.logger.Warn("failed to parse ReAct input JSON", zap.Error(err))
 		return trimmed
 	}
 	return b.formatAgentTraceFromChatMessages(msgs)
 }
 
-// formatAgentTraceFromChatMessages 将代理消息带格式化为攻击链分析输入（与续跑轨迹字段一致）。
+// formatAgentTraceFromChatMessages formats agent messages as attack chain analysis input (aligned with continue-conversation trace fields).
 func (b *Builder) formatAgentTraceFromChatMessages(msgs []agent.ChatMessage) string {
 	var builder strings.Builder
 	for _, msg := range msgs {
@@ -433,7 +434,7 @@ func (b *Builder) formatAgentTraceFromChatMessages(msgs []agent.ChatMessage) str
 			if content != "" {
 				builder.WriteString(fmt.Sprintf("[%s]: %s\n", role, content))
 			}
-			builder.WriteString(fmt.Sprintf("[%s] 工具调用 (%d个):\n", role, len(msg.ToolCalls)))
+			builder.WriteString(fmt.Sprintf("[%s] tool calls (%d):\n", role, len(msg.ToolCalls)))
 			for i, tc := range msg.ToolCalls {
 				args := ""
 				if tc.Function.Arguments != nil {
@@ -441,10 +442,10 @@ func (b *Builder) formatAgentTraceFromChatMessages(msgs []agent.ChatMessage) str
 						args = string(b)
 					}
 				}
-				builder.WriteString(fmt.Sprintf("  [工具调用 %d]\n", i+1))
+				builder.WriteString(fmt.Sprintf("  [tool call %d]\n", i+1))
 				builder.WriteString(fmt.Sprintf("    ID: %s\n", tc.ID))
-				builder.WriteString(fmt.Sprintf("    工具名称: %s\n", tc.Function.Name))
-				builder.WriteString(fmt.Sprintf("    参数: %s\n", args))
+				builder.WriteString(fmt.Sprintf("    tool name: %s\n", tc.Function.Name))
+				builder.WriteString(fmt.Sprintf("    arguments: %s\n", args))
 			}
 			builder.WriteString("\n")
 			continue
@@ -464,7 +465,7 @@ func (b *Builder) formatAgentTraceFromChatMessages(msgs []agent.ChatMessage) str
 	return builder.String()
 }
 
-// buildSimplePrompt 构建简化的prompt
+// buildSimplePrompt builds a simplified prompt.
 func (b *Builder) buildSimplePrompt(reactInput, modelOutput string) string {
 	return fmt.Sprintf(`你是专业的安全测试分析师和攻击链构建专家。你的任务是根据**当前任务轮次**的对话记录和工具执行结果，一次性输出攻击链 JSON（不要分多轮追问）。
 
@@ -771,43 +772,43 @@ func assistantOutSection(modelOutput string) string {
 	if modelOutput == "" {
 		return ""
 	}
-	return "\n## 助手结论（补充）\n\n" + modelOutput + "\n"
+	return "\n## Assistant Conclusion (supplementary)\n\n" + modelOutput + "\n"
 }
 
-// saveChain 保存攻击链到数据库
+// saveChain saves the attack chain to the database.
 func (b *Builder) saveChain(conversationID string, nodes []Node, edges []Edge) error {
-	// 先删除旧的攻击链数据
+	// Delete old attack chain data first
 	if err := b.db.DeleteAttackChain(conversationID); err != nil {
-		b.logger.Warn("删除旧攻击链失败", zap.Error(err))
+		b.logger.Warn("failed to delete old attack chain", zap.Error(err))
 	}
 
 	for _, node := range nodes {
 		metadataJSON, _ := json.Marshal(node.Metadata)
 		if err := b.db.SaveAttackChainNode(conversationID, node.ID, node.Type, node.Label, "", string(metadataJSON), node.RiskScore); err != nil {
-			b.logger.Warn("保存攻击链节点失败", zap.String("nodeId", node.ID), zap.Error(err))
+		b.logger.Warn("failed to save attack chain node", zap.String("nodeId", node.ID), zap.Error(err))
 		}
 	}
 
-	// 保存边
+	// Save edges
 	for _, edge := range edges {
 		if err := b.db.SaveAttackChainEdge(conversationID, edge.ID, edge.Source, edge.Target, edge.Type, edge.Weight); err != nil {
-			b.logger.Warn("保存攻击链边失败", zap.String("edgeId", edge.ID), zap.Error(err))
+		b.logger.Warn("failed to save attack chain edge", zap.String("edgeId", edge.ID), zap.Error(err))
 		}
 	}
 
 	return nil
 }
 
-// LoadChainFromDatabase 从数据库加载攻击链
+// LoadChainFromDatabase loads an attack chain from the database.
 func (b *Builder) LoadChainFromDatabase(conversationID string) (*Chain, error) {
 	nodes, err := b.db.LoadAttackChainNodes(conversationID)
 	if err != nil {
-		return nil, fmt.Errorf("加载攻击链节点失败: %w", err)
+		return nil, fmt.Errorf("failed to load attack chain nodes: %w", err)
 	}
 
 	edges, err := b.db.LoadAttackChainEdges(conversationID)
 	if err != nil {
-		return nil, fmt.Errorf("加载攻击链边失败: %w", err)
+		return nil, fmt.Errorf("failed to load attack chain edges: %w", err)
 	}
 
 	return &Chain{
@@ -816,14 +817,14 @@ func (b *Builder) LoadChainFromDatabase(conversationID string) (*Chain, error) {
 	}, nil
 }
 
-// callAIForChainGeneration 调用AI生成攻击链
+// callAIForChainGeneration calls AI to generate an attack chain.
 func (b *Builder) callAIForChainGeneration(ctx context.Context, prompt string) (string, error) {
 	requestBody := map[string]interface{}{
 		"model": b.openAIConfig.Model,
 		"messages": []map[string]interface{}{
 			{
 				"role":    "system",
-				"content": "你是一个专业的安全测试分析师，擅长构建攻击链图。请严格按照JSON格式返回攻击链数据。",
+				"content": "You are a professional security testing analyst skilled in building attack chain graphs. Please return attack chain data strictly in JSON format.",
 			},
 			{
 				"role":    "user",
@@ -843,7 +844,7 @@ func (b *Builder) callAIForChainGeneration(ctx context.Context, prompt string) (
 	}
 
 	if b.openAIClient == nil {
-		return "", fmt.Errorf("OpenAI客户端未初始化")
+		return "", fmt.Errorf("OpenAI client not initialized")
 	}
 	if err := b.openAIClient.ChatCompletion(ctx, requestBody, &apiResponse); err != nil {
 		var apiErr *openai.APIError
@@ -855,15 +856,15 @@ func (b *Builder) callAIForChainGeneration(ctx context.Context, prompt string) (
 		} else if strings.Contains(strings.ToLower(err.Error()), "context") || strings.Contains(strings.ToLower(err.Error()), "length") {
 			return "", fmt.Errorf("context length exceeded")
 		}
-		return "", fmt.Errorf("请求失败: %w", err)
+		return "", fmt.Errorf("request failed: %w", err)
 	}
 
 	if len(apiResponse.Choices) == 0 {
-		return "", fmt.Errorf("API未返回有效响应")
+		return "", fmt.Errorf("API returned no valid response")
 	}
 
 	content := strings.TrimSpace(apiResponse.Choices[0].Message.Content)
-	// 尝试提取JSON（可能包含markdown代码块）
+	// Try to extract JSON (may be wrapped in markdown code blocks)
 	content = strings.TrimPrefix(content, "```json")
 	content = strings.TrimPrefix(content, "```")
 	content = strings.TrimSuffix(content, "```")
@@ -872,7 +873,7 @@ func (b *Builder) callAIForChainGeneration(ctx context.Context, prompt string) (
 	return content, nil
 }
 
-// ChainJSON 攻击链JSON结构
+// ChainJSON is the attack chain JSON structure.
 type ChainJSON struct {
 	Nodes []struct {
 		ID        string                 `json:"id"`
@@ -889,20 +890,20 @@ type ChainJSON struct {
 	} `json:"edges"`
 }
 
-// parseChainJSON 解析攻击链JSON
+// parseChainJSON parses attack chain JSON.
 func (b *Builder) parseChainJSON(chainJSON string) (*Chain, error) {
 	var chainData ChainJSON
 	if err := json.Unmarshal([]byte(chainJSON), &chainData); err != nil {
-		return nil, fmt.Errorf("解析JSON失败: %w", err)
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
-	// 创建节点ID映射（AI返回的ID -> 新的UUID）
+	// Create node ID mapping (AI-returned ID -> new UUID)
 	nodeIDMap := make(map[string]string)
 
-	// 转换为Chain结构
+	// Convert to Chain structure
 	nodes := make([]Node, 0, len(chainData.Nodes))
 	for _, n := range chainData.Nodes {
-		// 生成新的UUID节点ID
+		// Generate new UUID node ID
 		newNodeID := fmt.Sprintf("node_%s", uuid.New().String())
 		nodeIDMap[n.ID] = newNodeID
 
@@ -919,7 +920,7 @@ func (b *Builder) parseChainJSON(chainJSON string) (*Chain, error) {
 		nodes = append(nodes, node)
 	}
 
-	// 转换边
+	// Convert edges
 	edges := make([]Edge, 0, len(chainData.Edges))
 	for _, e := range chainData.Edges {
 		sourceID, ok := nodeIDMap[e.Source]
@@ -931,7 +932,7 @@ func (b *Builder) parseChainJSON(chainJSON string) (*Chain, error) {
 			continue
 		}
 
-		// 生成边的ID（前端需要）
+		// Generate edge ID (required by frontend)
 		edgeID := fmt.Sprintf("edge_%s", uuid.New().String())
 
 		edges = append(edges, Edge{
@@ -949,4 +950,4 @@ func (b *Builder) parseChainJSON(chainJSON string) (*Chain, error) {
 	}, nil
 }
 
-// 以下所有方法已不再使用，已删除以简化代码
+// All methods below are no longer used and have been removed to simplify the code.

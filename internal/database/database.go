@@ -49,6 +49,8 @@ type DB struct {
 	*sql.DB
 	logger                   *zap.Logger
 	conversationArtifactsDir string
+	einoPlantaskBaseDir      string // skills_dir + plantask_rel_dir (per-conversation subdirs)
+	einoCheckpointBaseDir    string // checkpoint_dir root (per-conversation subdirs)
 	checkpointLoopName       string
 	checkpointStop           chan struct{}
 	checkpointDone           chan struct{}
@@ -153,6 +155,16 @@ func NewDB(dbPath string, logger *zap.Logger) (*DB, error) {
 	database.startPassiveCheckpointLoop("conversations")
 
 	return database, nil
+}
+
+// SetEinoConversationDirs configures best-effort filesystem cleanup on DeleteConversation.
+// plantaskBase is skills_root/plantask_rel (no conversation id); checkpointBase is checkpoint_dir root.
+func (db *DB) SetEinoConversationDirs(plantaskBase, checkpointBase string) {
+	if db == nil {
+		return
+	}
+	db.einoPlantaskBaseDir = strings.TrimSpace(plantaskBase)
+	db.einoCheckpointBaseDir = strings.TrimSpace(checkpointBase)
 }
 
 // initTables initializes database tables
@@ -334,7 +346,6 @@ func (db *DB) initTables() error {
 		source_conversation_id TEXT,
 		source_message_id TEXT,
 		pinned INTEGER NOT NULL DEFAULT 0,
-		supersedes_fact_id TEXT,
 		related_vulnerability_id TEXT,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
@@ -342,30 +353,11 @@ func (db *DB) initTables() error {
 		UNIQUE(project_id, fact_key)
 	);`
 
-	createProjectFactVersionsTable := `
-	CREATE TABLE IF NOT EXISTS project_fact_versions (
-		id TEXT PRIMARY KEY,
-		fact_id TEXT NOT NULL,
-		project_id TEXT NOT NULL,
-		fact_key TEXT NOT NULL,
-		category TEXT NOT NULL DEFAULT 'note',
-		summary TEXT NOT NULL DEFAULT '',
-		body TEXT,
-		confidence TEXT NOT NULL DEFAULT 'tentative',
-		source_conversation_id TEXT,
-		source_message_id TEXT,
-		pinned INTEGER NOT NULL DEFAULT 0,
-		related_vulnerability_id TEXT,
-		archived_at DATETIME NOT NULL,
-		FOREIGN KEY (fact_id) REFERENCES project_facts(id) ON DELETE CASCADE,
-		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-	);`
-
-	// Create the vulnerabilities table
+	// create vulnerabilities table
 	createVulnerabilitiesTable := `
 	CREATE TABLE IF NOT EXISTS vulnerabilities (
 		id TEXT PRIMARY KEY,
-		conversation_id TEXT NOT NULL,
+		conversation_id TEXT,
 		conversation_tag TEXT,
 		task_tag TEXT,
 		title TEXT NOT NULL,
@@ -379,7 +371,8 @@ func (db *DB) initTables() error {
 		recommendation TEXT,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+		project_id TEXT,
+		FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
 	);`
 
 	// Create the batch task queues table
@@ -598,7 +591,6 @@ func (db *DB) initTables() error {
 	CREATE INDEX IF NOT EXISTS idx_project_facts_project_id ON project_facts(project_id);
 	CREATE INDEX IF NOT EXISTS idx_project_facts_confidence ON project_facts(confidence);
 	CREATE INDEX IF NOT EXISTS idx_project_facts_related_vuln ON project_facts(related_vulnerability_id);
-	CREATE INDEX IF NOT EXISTS idx_project_fact_versions_fact_id ON project_fact_versions(fact_id);
 	CREATE INDEX IF NOT EXISTS idx_conversations_project_id ON conversations(project_id);
 	CREATE INDEX IF NOT EXISTS idx_vulnerabilities_project_id ON vulnerabilities(project_id);
 	CREATE INDEX IF NOT EXISTS idx_batch_tasks_queue_id ON batch_tasks(queue_id);
@@ -680,10 +672,6 @@ func (db *DB) initTables() error {
 		return fmt.Errorf("failed to create project_facts table: %w", err)
 	}
 
-	if _, err := db.Exec(createProjectFactVersionsTable); err != nil {
-		return fmt.Errorf("failed to create project_fact_versions table: %w", err)
-	}
-
 	if _, err := db.Exec(createVulnerabilitiesTable); err != nil {
 		return fmt.Errorf("failed to create vulnerabilities table: %w", err)
 	}
@@ -750,12 +738,15 @@ func (db *DB) initTables() error {
 		db.logger.Warn("failed to migrate vulnerabilities table", zap.Error(err))
 		// Do not return an error; allow startup to continue.
 	}
+	if err := db.migrateVulnerabilitiesConversationFK(); err != nil {
+		db.logger.Warn("迁移vulnerabilities会话外键失败", zap.Error(err))
+	}
 
 	if err := db.migrateProjectsTable(); err != nil {
 		db.logger.Warn("failed to migrate project-related tables", zap.Error(err))
 	}
-	if err := db.migrateProjectFactVersionsTable(); err != nil {
-		db.logger.Warn("failed to migrate project_fact_versions table", zap.Error(err))
+	if err := db.dropProjectFactVersionsTable(); err != nil {
+		db.logger.Warn("failed to drop project_fact_versions table", zap.Error(err))
 	}
 
 	if err := db.migrateWebshellConnectionsTable(); err != nil {
@@ -1153,32 +1144,120 @@ func (db *DB) migrateProjectsTable() error {
 	return nil
 }
 
-// migrateProjectFactVersionsTable creates the fact version table for existing databases.
-func (db *DB) migrateProjectFactVersionsTable() error {
-	ddl := `
-	CREATE TABLE IF NOT EXISTS project_fact_versions (
-		id TEXT PRIMARY KEY,
-		fact_id TEXT NOT NULL,
-		project_id TEXT NOT NULL,
-		fact_key TEXT NOT NULL,
-		category TEXT NOT NULL DEFAULT 'note',
-		summary TEXT NOT NULL DEFAULT '',
-		body TEXT,
-		confidence TEXT NOT NULL DEFAULT 'tentative',
-		source_conversation_id TEXT,
-		source_message_id TEXT,
-		pinned INTEGER NOT NULL DEFAULT 0,
-		related_vulnerability_id TEXT,
-		archived_at DATETIME NOT NULL,
-		FOREIGN KEY (fact_id) REFERENCES project_facts(id) ON DELETE CASCADE,
-		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-	);`
-	if _, err := db.Exec(ddl); err != nil {
+// dropProjectFactVersionsTable removes the deprecated fact version archive table.
+func (db *DB) dropProjectFactVersionsTable() error {
+	_, err := db.Exec(`DROP TABLE IF EXISTS project_fact_versions`)
+	return err
+}
+
+// migrateVulnerabilitiesConversationFK changes vulnerabilities.conversation_id FK to ON DELETE SET NULL, preserving vulnerability records on conversation deletion.
+func (db *DB) migrateVulnerabilitiesConversationFK() error {
+	ok, err := vulnerabilitiesConversationFKOnDeleteSetNull(db.DB)
+	if err != nil {
 		return err
 	}
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_project_fact_versions_fact_id ON project_fact_versions(fact_id)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_project_facts_related_vuln ON project_facts(related_vulnerability_id)`)
+	if ok {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const createNew = `
+	CREATE TABLE vulnerabilities_new (
+		id TEXT PRIMARY KEY,
+		conversation_id TEXT,
+		conversation_tag TEXT,
+		task_tag TEXT,
+		title TEXT NOT NULL,
+		description TEXT,
+		severity TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'open',
+		vulnerability_type TEXT,
+		target TEXT,
+		proof TEXT,
+		impact TEXT,
+		recommendation TEXT,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		project_id TEXT,
+		FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
+	);`
+	if _, err := tx.Exec(createNew); err != nil {
+		return fmt.Errorf("创建 vulnerabilities_new 失败: %w", err)
+	}
+
+	const copyRows = `
+	INSERT INTO vulnerabilities_new (
+		id, conversation_id, conversation_tag, task_tag, title, description,
+		severity, status, vulnerability_type, target, proof, impact, recommendation,
+		created_at, updated_at, project_id
+	)
+	SELECT
+		id, conversation_id, conversation_tag, task_tag, title, description,
+		severity, status, vulnerability_type, target, proof, impact, recommendation,
+		created_at, updated_at, project_id
+	FROM vulnerabilities;`
+	if _, err := tx.Exec(copyRows); err != nil {
+		return fmt.Errorf("复制 vulnerabilities 数据失败: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE vulnerabilities`); err != nil {
+		return fmt.Errorf("删除旧 vulnerabilities 表失败: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE vulnerabilities_new RENAME TO vulnerabilities`); err != nil {
+		return fmt.Errorf("重命名 vulnerabilities 表失败: %w", err)
+	}
+
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_vulnerabilities_conversation_id ON vulnerabilities(conversation_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_vulnerabilities_conversation_tag ON vulnerabilities(conversation_tag)`,
+		`CREATE INDEX IF NOT EXISTS idx_vulnerabilities_task_tag ON vulnerabilities(task_tag)`,
+		`CREATE INDEX IF NOT EXISTS idx_vulnerabilities_severity ON vulnerabilities(severity)`,
+		`CREATE INDEX IF NOT EXISTS idx_vulnerabilities_status ON vulnerabilities(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_vulnerabilities_created_at ON vulnerabilities(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_vulnerabilities_project_id ON vulnerabilities(project_id)`,
+	}
+	for _, stmt := range indexes {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("重建 vulnerabilities 索引失败: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交 vulnerabilities 外键迁移失败: %w", err)
+	}
+	db.logger.Info("vulnerabilities table migrated: preserve vulnerability records on conversation deletion")
 	return nil
+}
+
+func vulnerabilitiesConversationFKOnDeleteSetNull(db *sql.DB) (bool, error) {
+	rows, err := db.Query(`PRAGMA foreign_key_list(vulnerabilities)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var id, seq int
+		var table, from, to, onUpdate, onDelete, match string
+		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			return false, err
+		}
+		if from == "conversation_id" {
+			found = true
+			if !strings.EqualFold(onDelete, "SET NULL") {
+				return false, nil
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return found, nil
 }
 
 // migrateVulnerabilitiesTable migrates the vulnerabilities table by adding missing tag columns

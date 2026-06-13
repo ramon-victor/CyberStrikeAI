@@ -221,7 +221,6 @@
                             </svg>
                         </div>
                         <div class="nav-submenu" id="submenu-c2">
-                            <div class="nav-submenu-item" data-page="c2" onclick="switchPage('c2')" data-i18n="nav.c2Manage">C2 management</div>
                             <div class="nav-submenu-item" data-page="c2-listeners" onclick="switchPage('c2-listeners')" data-i18n="nav.c2Listeners">Listeners</div>
                             <div class="nav-submenu-item" data-page="c2-sessions" onclick="switchPage('c2-sessions')" data-i18n="nav.c2Sessions">Sessions</div>
                             <div class="nav-submenu-item" data-page="c2-tasks" onclick="switchPage('c2-tasks')" data-i18n="nav.c2Tasks">Tasks</div>
@@ -573,75 +572,59 @@
                                             </div>
                                         </div>
                                     </section>
-                                    <section class="dashboard-section dashboard-section-recent-vulns">
-                                        <div class="dashboard-section-header">
-                                            <h3 class="dashboard-section-title" data-i18n="dashboard.recentVulns">Recent vulnerabilities</h3>
-                                            <a class="dashboard-section-link" onclick="switchPage('vulnerabilities')" data-i18n="dashboard.viewAll">View all →</a>
+                                    <section class="dashboard-section dashboard-section-recent-feed">
+                                        <div class="dashboard-section-header dashboard-section-header--tabs">
+                                            <nav class="dashboard-feed-tabs" role="tablist" aria-label="Recent vulnerabilities and recent facts">
+                                                <button type="button" class="dashboard-feed-tab is-active" role="tab" id="dashboard-feed-tab-vulns" aria-selected="true" aria-controls="dashboard-feed-panel-vulns" onclick="switchDashboardFeedTab('vulns')" data-i18n="dashboard.recentVulns">Recent vulnerabilities</button>
+                                                <button type="button" class="dashboard-feed-tab" role="tab" id="dashboard-feed-tab-facts" aria-selected="false" aria-controls="dashboard-feed-panel-facts" onclick="switchDashboardFeedTab('facts')" data-i18n="dashboard.recentFacts">Recent facts</button>
+                                            </nav>
+                                            <a class="dashboard-section-link" id="dashboard-feed-view-all" onclick="switchPage('vulnerabilities')" data-i18n="dashboard.viewAll">View all →</a>
                                         </div>
-                                        <div class="dashboard-recent-vulns" id="dashboard-recent-vulns">
-                                            <div class="dashboard-recent-vulns-empty" id="dashboard-recent-vulns-empty" data-i18n="dashboard.noVulnYet">No recent vulnerabilities</div>
-                                        </div>
-                                    </section>
-                                    <!-- UI section -->
-                                    <section class="dashboard-section dashboard-section-c2" id="dashboard-section-c2" hidden>
-                                        <div class="dashboard-section-header">
-                                            <h3 class="dashboard-section-title" data-i18n="dashboard.c2OverviewTitle">C2 overview</h3>
-                                            <a class="dashboard-section-link" onclick="switchPage('c2')" data-i18n="dashboard.c2GoManage">Open C2 →</a>
-                                        </div>
-                                        <div class="dashboard-c2-strip">
-                                            <div class="dashboard-c2-stat" role="button" tabindex="0" onclick="switchPage('c2-listeners')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('c2-listeners'); }" data-i18n="dashboard.c2ClickListeners" data-i18n-attr="title" title="View listeners">
-                                                <span class="dashboard-c2-stat-value" id="dashboard-c2-listeners-running">-</span>
-                                                <span class="dashboard-c2-stat-label" data-i18n="dashboard.c2ListenersRunning">Listeners running</span>
+                                        <div class="dashboard-feed-panel" id="dashboard-feed-panel-vulns" role="tabpanel" aria-labelledby="dashboard-feed-tab-vulns">
+                                            <div class="dashboard-recent-vulns" id="dashboard-recent-vulns">
+                                                <div class="dashboard-recent-vulns-empty" id="dashboard-recent-vulns-empty" data-i18n="dashboard.noVulnYet">No recent vulnerabilities</div>
                                             </div>
-                                            <div class="dashboard-c2-stat" role="button" tabindex="0" onclick="switchPage('c2-sessions')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('c2-sessions'); }" data-i18n="dashboard.c2ClickSessions" data-i18n-attr="title" title="View sessions">
-                                                <span class="dashboard-c2-stat-value" id="dashboard-c2-sessions-online">-</span>
-                                                <span class="dashboard-c2-stat-label" data-i18n="dashboard.c2SessionsOnline">Sessions online</span>
-                                            </div>
-                                            <div class="dashboard-c2-stat" role="button" tabindex="0" onclick="switchPage('c2-tasks')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('c2-tasks'); }" data-i18n="dashboard.c2ClickTasks" data-i18n-attr="title" title="View tasks">
-                                                <span class="dashboard-c2-stat-value" id="dashboard-c2-tasks-pending">-</span>
-                                                <span class="dashboard-c2-stat-label" data-i18n="dashboard.c2TasksPending">Pending / queued tasks</span>
+                                        </div>
+                                        <div class="dashboard-feed-panel" id="dashboard-feed-panel-facts" role="tabpanel" aria-labelledby="dashboard-feed-tab-facts" hidden>
+                                            <div class="dashboard-recent-facts" id="dashboard-recent-facts">
+                                                <div class="dashboard-recent-facts-empty" id="dashboard-recent-facts-empty" data-i18n="dashboard.noFactsYet">No recent facts</div>
                                             </div>
                                         </div>
                                     </section>
-                                    <section class="dashboard-section dashboard-section-overview">
-                                        <div class="dashboard-section-header">
-                                            <h3 class="dashboard-section-title" data-i18n="dashboard.batchQueues">Batch task queues</h3>
-                                            <a class="dashboard-section-link" onclick="switchPage('tasks')" data-i18n="dashboard.viewAll">View all →</a>
+                                    <!-- Access overview: C2 / WebShell Tab switch -->
+                                    <section class="dashboard-section dashboard-section-access" id="dashboard-section-access" hidden>
+                                        <div class="dashboard-section-header dashboard-section-header--tabs">
+                                            <nav class="dashboard-feed-tabs" id="dashboard-access-tabs" role="tablist" aria-label="C2 and WebShell" data-i18n="dashboard.accessTabsAria" data-i18n-attr="aria-label">
+                                                <button type="button" class="dashboard-feed-tab is-active" role="tab" id="dashboard-access-tab-c2" aria-selected="true" aria-controls="dashboard-access-panel-c2" onclick="switchDashboardAccessTab('c2')" data-i18n="nav.c2">C2</button>
+                                                <button type="button" class="dashboard-feed-tab" role="tab" id="dashboard-access-tab-webshell" aria-selected="false" aria-controls="dashboard-access-panel-webshell" onclick="switchDashboardAccessTab('webshell')" data-i18n="dashboard.webshellLabel">WebShell</button>
+                                            </nav>
+                                            <a class="dashboard-section-link" id="dashboard-access-view-all" onclick="switchPage('c2-listeners')" data-i18n="dashboard.c2GoManage">Open C2 →</a>
                                         </div>
-                                        <div class="dashboard-overview-list">
-                                            <div class="dashboard-overview-item dashboard-overview-item-batch" role="button" tabindex="0" onclick="switchPage('tasks')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('tasks'); }">
-                                                <span class="dashboard-overview-icon dashboard-overview-icon-batch" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
-                                                <div class="dashboard-overview-content">
-                                                    <div class="dashboard-overview-header">
-                                                        <span class="dashboard-overview-label" data-i18n="dashboard.batchQueues">Batch task queues</span>
-                                                        <span class="dashboard-overview-total" id="dashboard-batch-total">-</span>
-                                                    </div>
-                                                    <div class="dashboard-overview-stats">
-                                                        <span class="dashboard-overview-stat dashboard-overview-stat-pending">
-                                                            <span class="dashboard-overview-stat-badge badge-pending"></span>
-                                                            <span class="dashboard-overview-stat-value" id="dashboard-batch-pending">-</span>
-                                                            <span class="dashboard-overview-stat-label" data-i18n="dashboard.pending">Pending</span>
-                                                        </span>
-                                                        <span class="dashboard-overview-stat dashboard-overview-stat-running">
-                                                            <span class="dashboard-overview-stat-badge badge-running"></span>
-                                                            <span class="dashboard-overview-stat-value" id="dashboard-batch-running">-</span>
-                                                            <span class="dashboard-overview-stat-label" data-i18n="dashboard.executing">Running</span>
-                                                        </span>
-                                                        <span class="dashboard-overview-stat dashboard-overview-stat-done">
-                                                            <span class="dashboard-overview-stat-badge badge-done"></span>
-                                                            <span class="dashboard-overview-stat-value" id="dashboard-batch-done">-</span>
-                                                            <span class="dashboard-overview-stat-label" data-i18n="dashboard.completed">Completed</span>
-                                                        </span>
-                                                    </div>
-                                                    <div class="dashboard-overview-progress">
-                                                        <div class="dashboard-overview-progress-bar">
-                                                            <div class="dashboard-overview-progress-segment dashboard-overview-progress-pending" id="dashboard-batch-progress-pending" style="width: 0%"></div>
-                                                            <div class="dashboard-overview-progress-segment dashboard-overview-progress-running" id="dashboard-batch-progress-running" style="width: 0%"></div>
-                                                            <div class="dashboard-overview-progress-segment dashboard-overview-progress-done" id="dashboard-batch-progress-done" style="width: 0%"></div>
-                                                        </div>
-                                                    </div>
+                                        <div class="dashboard-feed-panel" id="dashboard-access-panel-c2" role="tabpanel" aria-labelledby="dashboard-access-tab-c2">
+                                            <div class="dashboard-access-strip">
+                                                <div class="dashboard-access-stat dashboard-access-stat--c2" role="button" tabindex="0" onclick="switchPage('c2-listeners')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('c2-listeners'); }" data-i18n="dashboard.c2ClickListeners" data-i18n-attr="title" title="View listeners">
+                                                    <span class="dashboard-access-stat-value" id="dashboard-c2-listeners-running">-</span>
+                                                    <span class="dashboard-access-stat-label" data-i18n="dashboard.c2ListenersRunning">Listeners running</span>
+                                                </div>
+                                                <div class="dashboard-access-stat dashboard-access-stat--c2" role="button" tabindex="0" onclick="switchPage('c2-sessions')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('c2-sessions'); }" data-i18n="dashboard.c2ClickSessions" data-i18n-attr="title" title="View sessions">
+                                                    <span class="dashboard-access-stat-value" id="dashboard-c2-sessions-online">-</span>
+                                                    <span class="dashboard-access-stat-label" data-i18n="dashboard.c2SessionsOnline">Sessions online</span>
+                                                </div>
+                                                <div class="dashboard-access-stat dashboard-access-stat--c2" role="button" tabindex="0" onclick="switchPage('c2-tasks')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('c2-tasks'); }" data-i18n="dashboard.c2ClickTasks" data-i18n-attr="title" title="View tasks">
+                                                    <span class="dashboard-access-stat-value" id="dashboard-c2-tasks-pending">-</span>
+                                                    <span class="dashboard-access-stat-label" data-i18n="dashboard.c2TasksPending">Pending / queued tasks</span>
+                                                </div>
                                                 </div>
                                             </div>
+                                        </div>
+                                        <div class="dashboard-feed-panel" id="dashboard-access-panel-webshell" role="tabpanel" aria-labelledby="dashboard-access-tab-webshell" hidden>
+                                            <div class="dashboard-access-strip dashboard-access-strip--webshell">
+                                                <div class="dashboard-access-stat dashboard-access-stat--webshell" role="button" tabindex="0" onclick="switchPage('webshell')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('webshell'); }" data-i18n="dashboard.webshellClickConnections" data-i18n-attr="title" title="查看Connection">
+                                                    <span class="dashboard-access-stat-value" id="dashboard-webshell-connections">-</span>
+                                                    <span class="dashboard-access-stat-label" data-i18n="dashboard.webshellConnections">活跃Connection</span>
+                                                </div>
+                                            </div>
+                                            <div class="dashboard-webshell-recent" id="dashboard-webshell-recent" hidden></div>
                                         </div>
                                     </section>
                                     <!-- UI section -->
@@ -654,6 +637,36 @@
                                     </section>
                                 </div>
                                 <div class="dashboard-side">
+                                    <section class="dashboard-section dashboard-section-batch-side">
+                                        <div class="dashboard-section-header">
+                                            <h3 class="dashboard-section-title" data-i18n="dashboard.batchQueues">批量任务队列</h3>
+                                            <a class="dashboard-section-link" onclick="switchPage('tasks')" data-i18n="dashboard.viewAll">查看全部 →</a>
+                                        </div>
+                                        <div class="dashboard-batch-side-body" role="button" tabindex="0" onclick="switchPage('tasks')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('tasks'); }">
+                                            <div class="dashboard-batch-side-total" id="dashboard-batch-total">-</div>
+                                            <div class="dashboard-batch-side-stats">
+                                                <div class="dashboard-batch-side-stat dashboard-batch-side-stat--pending">
+                                                    <span class="dashboard-batch-side-stat-value" id="dashboard-batch-pending">-</span>
+                                                    <span class="dashboard-batch-side-stat-label" data-i18n="dashboard.pending">Pending</span>
+                                                </div>
+                                                <div class="dashboard-batch-side-stat dashboard-batch-side-stat--running">
+                                                    <span class="dashboard-batch-side-stat-value" id="dashboard-batch-running">-</span>
+                                                    <span class="dashboard-batch-side-stat-label" data-i18n="dashboard.executing">Executing</span>
+                                                </div>
+                                                <div class="dashboard-batch-side-stat dashboard-batch-side-stat--done">
+                                                    <span class="dashboard-batch-side-stat-value" id="dashboard-batch-done">-</span>
+                                                    <span class="dashboard-batch-side-stat-label" data-i18n="dashboard.completed">Completed</span>
+                                                </div>
+                                            </div>
+                                            <div class="dashboard-batch-side-progress" aria-hidden="true">
+                                                <div class="dashboard-batch-side-progress-bar">
+                                                    <div class="dashboard-batch-side-progress-segment dashboard-batch-side-progress-pending" id="dashboard-batch-progress-pending" style="width: 0%"></div>
+                                                    <div class="dashboard-batch-side-progress-segment dashboard-batch-side-progress-running" id="dashboard-batch-progress-running" style="width: 0%"></div>
+                                                    <div class="dashboard-batch-side-progress-segment dashboard-batch-side-progress-done" id="dashboard-batch-progress-done" style="width: 0%"></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </section>
                                     <section class="dashboard-section dashboard-section-tools">
                                         <div class="dashboard-section-header">
                                             <h3 class="dashboard-section-title" data-i18n="dashboard.toolsExecCount">Tool execution count</h3>
@@ -815,6 +828,7 @@
                                     <div id="conversations-list" class="conversations-list"></div>
                                 </div>
                             </div>
+                            <div id="conversations-pagination" class="sidebar-list-pagination conversation-sidebar-pagination"></div>
                             <div id="chat-reasoning-wrapper" class="chat-reasoning-wrapper conversation-reasoning-card conversation-reasoning-collapsed" style="display: none;">
                                 <button type="button" id="conversation-reasoning-toggle" class="conversation-reasoning-card-header" onclick="toggleConversationReasoningCard()" aria-expanded="false" aria-controls="conversation-reasoning-body" data-i18n="chat.reasoningCompactAria" data-i18n-attr="aria-label,title" data-i18n-skip-text="true" aria-label="Open model reasoning options" title="Open model reasoning options">
                                     <div class="conversation-reasoning-heading">
@@ -829,6 +843,11 @@
                                             <span id="chat-reasoning-summary" class="conversation-reasoning-summary"></span>
                                         </div>
                                     </div>
+                                    <span class="sidebar-card-chevron conversation-reasoning-chevron" aria-hidden="true">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                            <path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                        </svg>
+                                    </span>
                                 </button>
                                 <div id="conversation-reasoning-body" class="conversation-reasoning-body" role="region">
                                     <p class="chat-reasoning-panel-hint" data-i18n="chat.reasoningPanelHint">Only Eino single- and multi-agent requests use these; merged with defaults in Settings.</p>
@@ -857,7 +876,7 @@
                                 </div>
                             </div>
                             <div class="hitl-sidebar-card hitl-sidebar-collapsed" id="hitl-sidebar-card">
-                                <div class="hitl-sidebar-card-header" onclick="toggleHitlSidebarCard()">
+                                <div class="hitl-sidebar-card-header" id="hitl-sidebar-toggle" role="button" tabindex="0" aria-expanded="false" aria-controls="hitl-sidebar-body" onclick="toggleHitlSidebarCard()" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleHitlSidebarCard(); }">
                                     <div class="hitl-sidebar-heading">
                                         <span class="hitl-sidebar-icon" aria-hidden="true">
                                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -871,10 +890,15 @@
                                         </div>
                                     </div>
                                     <div class="hitl-sidebar-header-actions">
-                                        <button type="button" class="hitl-apply-btn" id="hitl-apply-btn" onclick="event.stopPropagation(); window.applyHitlSidebarConfig && window.applyHitlSidebarConfig()">
+                                        <button type="button" class="hitl-apply-btn" id="hitl-apply-btn" onclick="event.stopPropagation(); window.applyHitlSidebarConfig &amp;&amp; window.applyHitlSidebarConfig()">
                                             <span data-i18n="chat.hitlApply">Apply</span>
                                         </button>
                                     </div>
+                                    <span class="sidebar-card-chevron hitl-sidebar-chevron" aria-hidden="true">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                            <path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                        </svg>
+                                    </span>
                                 </div>
                                 <div class="hitl-sidebar-body" id="hitl-sidebar-body">
                                     <div id="hitl-apply-feedback" class="hitl-apply-feedback" role="status" aria-live="polite"></div>
@@ -891,6 +915,11 @@
                                             <label class="hitl-config-label" for="hitl-sensitive-tools" data-i18n="chat.hitlWhitelistTools">Whitelisted tools (skip approval, comma-separated)</label>
                                             <textarea id="hitl-sensitive-tools" class="hitl-config-textarea" rows="3" spellcheck="false" autocomplete="off" data-i18n="chat.hitlWhitelistPlaceholder" data-i18n-attr="placeholder" placeholder=""></textarea>
                                             <p class="hitl-config-hint" data-i18n="chat.hitlWhitelistHint">Separate with commas or new lines; shown merged with the global allowlist in config.</p>
+                                        </div>
+                                        <div class="hitl-config-actions">
+                                            <button type="button" class="hitl-apply-btn" id="hitl-apply-btn" onclick="window.applyHitlSidebarConfig && window.applyHitlSidebarConfig()">
+                                                <span data-i18n="chat.hitlApply">Apply</span>
+                                            </button>
                                         </div>
                                     </div>
                                 </div>
@@ -1112,21 +1141,24 @@
                     </div>
                 </div>
 
-                <!-- MCP monitorpage -->
-                <div id="page-mcp-monitor" class="page">
+                <!-- MCP Status Monitor page -->
+                <div id="page-mcp-monitor" class="page mcp-monitor-page">
                     <div class="page-header">
-<h2 data-i18n="mcp.monitorTitle">MCP Status Monitor</h2>
-                    <button class="btn-secondary" onclick="refreshMonitorPanel()"><span data-i18n="common.refresh">Refresh</span></button>
+                        <div class="page-header-main">
+                            <h2 data-i18n="mcp.monitorTitle">MCP Status Monitor</h2>
+                            <p id="monitor-stats-subtitle" class="monitor-page-subtitle" hidden></p>
+                        </div>
+                        <div class="page-header-actions">
+                            <button type="button" class="btn-secondary btn-icon-text" onclick="refreshMonitorPanel()" aria-label="Refresh">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                                <span data-i18n="common.refresh">Refresh</span>
+                            </button>
+                        </div>
                     </div>
                     <div class="page-content">
                         <div class="monitor-sections">
                             <section class="monitor-section monitor-overview">
-                                <div class="section-header monitor-stats-section-header">
-                                    <div class="monitor-stats-header-text">
-                                        <h3 data-i18n="mcp.execStats">Execution stats</h3>
-                                        <p id="monitor-stats-subtitle" class="monitor-stats-subtitle" hidden></p>
-                                    </div>
-                                </div>
+
                                 <div id="monitor-stats" class="mcp-exec-stats-root">
                                     <div class="monitor-empty" data-i18n="mcpMonitor.loading">Loading...</div>
                                 </div>
@@ -1442,6 +1474,7 @@
                                 <input type="search" id="projects-list-search" class="form-input" placeholder="Search projects…" oninput="filterProjectsList()" autocomplete="off" data-i18n="projects.searchProjectsPlaceholder" data-i18n-attr="placeholder">
                             </div>
                             <div id="projects-list" class="projects-list"></div>
+                            <div id="projects-pagination" class="sidebar-list-pagination projects-sidebar-pagination"></div>
                         </aside>
                         <main class="projects-detail" id="projects-detail-main">
                             <div class="projects-detail-placeholder" id="projects-detail-placeholder">
@@ -1594,6 +1627,7 @@
                                                     <option value="confirmed" data-i18n="vulnerabilityPage.statusConfirmed">Confirmed</option>
                                                     <option value="fixed" data-i18n="vulnerabilityPage.statusFixed">Fixed</option>
                                                     <option value="false_positive" data-i18n="vulnerabilityPage.statusFalsePositive">False positive</option>
+                                                    <option value="ignored" data-i18n="vulnerabilityPage.statusIgnored">Ignored</option>
                                                 </select>
                                             </label>
                                         </div>
@@ -1711,6 +1745,7 @@
                         <h2 data-i18n="vulnerability.title">Vulnerability Management</h2>
                         <div class="page-header-actions">
                             <button class="btn-secondary" onclick="exportVulnerabilityReports()" data-i18n="vulnerabilityPage.batchExport">Batch export</button>
+                            <button class="btn-secondary btn-delete" onclick="batchDeleteVulnerabilityReports()" data-i18n="vulnerabilityPage.batchDelete">Batch delete</button>
                             <button class="btn-secondary" onclick="refreshVulnerabilities()" data-i18n="common.refresh">Refresh</button>
                             <button class="btn-primary" onclick="showAddVulnerabilityModal()" data-i18n="vulnerability.addVuln">Add vulnerability</button>
                         </div>
@@ -1791,6 +1826,7 @@
                                             <option value="confirmed" data-i18n="vulnerabilityPage.statusConfirmed">Confirmed</option>
                                             <option value="fixed" data-i18n="vulnerabilityPage.statusFixed">Fixed</option>
                                             <option value="false_positive" data-i18n="vulnerabilityPage.statusFalsePositive">False positive</option>
+                                            <option value="ignored" data-i18n="vulnerabilityPage.statusIgnored">Ignored</option>
                                         </select>
                                     </label>
                                     <div class="vulnerability-filter-actions">
@@ -2036,7 +2072,7 @@
                     </div>
                 </div>
 
-                <!-- UI section -->
+                <!-- C2 Listener Management page -->
                 <div id="page-c2-listeners" class="page">
                     <div class="page-header">
                         <h2 data-i18n="c2.listeners.title">Listener Management</h2>
@@ -2474,13 +2510,92 @@
                                     </div>
                                 </div>
 
-                                <!-- UI section -->
+                                <!-- Vision analysis -->
+                                <div class="settings-subsection">
+                                    <h4 data-i18n="settingsBasic.visionConfig">Vision analysis (analyze_image)</h4>
+                                    <div class="settings-form">
+                                        <div class="form-group">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="vision-enabled" class="modern-checkbox" onchange="syncVisionFormEnabled()" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settingsBasic.visionEnabled">Enable vision analysis tool analyze_image</span>
+                                            </label>
+                                            <small class="form-hint" data-i18n="settingsBasic.visionEnabledHint">When enabled, registers an MCP tool; images only appear in single VL calls, and the Agent context keeps only a text summary.</small>
+                                        </div>
+                                        <div id="vision-fields-panel">
+                                            <div class="form-group">
+                                                <label for="vision-provider" data-i18n="settingsBasic.provider">Provider</label>
+                                                <select id="vision-provider" style="width: 100%; padding: 0.5rem 0.75rem; border: 1px solid var(--border-color, #e2e8f0); border-radius: 6px; background: var(--card-bg, #fff); color: var(--text-color, #2d3748); font-size: 0.875rem;">
+                                                    <option value="">OpenAI config (leave empty to reuse)</option>
+                                                    <option value="openai">OpenAI / OpenAI-compatible</option>
+                                                    <option value="claude">Claude (Anthropic Messages API)</option>
+                                                </select>
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="vision-base-url" data-i18n="settingsBasic.baseUrl">Base URL</label>
+                                                <input type="text" id="vision-base-url" data-i18n="settingsBasic.visionBaseUrlPlaceholder" data-i18n-attr="placeholder" placeholder="Leave empty to reuse OpenAI Base URL" />
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="vision-api-key" data-i18n="settingsBasic.apiKey">API Key</label>
+                                                <input type="password" id="vision-api-key" data-i18n="settingsBasic.visionApiKeyPlaceholder" data-i18n-attr="placeholder" placeholder="Leave empty to reuse OpenAI API Key" />
+                                            </div>
+                                            <div class="form-group">
+                                                <label for="vision-model"><span data-i18n="settingsBasic.visionModel">Vision model</span> <span style="color: red;">*</span></label>
+                                                <input type="text" id="vision-model" data-i18n="settingsBasic.visionModelPlaceholder" data-i18n-attr="placeholder" placeholder="qwen-vl-max" />
+                                            </div>
+                                            <details style="margin-top: 8px;">
+                                                <summary style="cursor: pointer; font-size: 0.875rem; color: var(--accent-color, #3182ce);" data-i18n="settingsBasic.visionAdvanced">Advanced: preprocessing &amp; limits</summary>
+                                                <div style="margin-top: 12px;">
+                                                    <div class="form-group">
+                                                        <label for="vision-max-image-bytes" data-i18n="settingsBasic.visionMaxImageBytes">Raw file size limit (bytes)</label>
+                                                        <input type="number" id="vision-max-image-bytes" min="0" step="1024" placeholder="5242880" />
+                                                    </div>
+                                                    <div class="form-group">
+                                                        <label for="vision-max-dimension" data-i18n="settingsBasic.visionMaxDimension">Long edge scale (pixels)</label>
+                                                        <input type="number" id="vision-max-dimension" min="256" step="1" placeholder="2048" />
+                                                    </div>
+                                                    <div class="form-group">
+                                                        <label for="vision-jpeg-quality" data-i18n="settingsBasic.visionJpegQuality">JPEG quality</label>
+                                                        <input type="number" id="vision-jpeg-quality" min="60" max="100" step="1" placeholder="82" />
+                                                    </div>
+                                                    <div class="form-group">
+                                                        <label for="vision-max-payload-bytes" data-i18n="settingsBasic.visionMaxPayloadBytes">API payload size limit (bytes)</label>
+                                                        <input type="number" id="vision-max-payload-bytes" min="0" step="1024" placeholder="524288" />
+                                                    </div>
+                                                    <div class="form-group">
+                                                        <label for="vision-skip-preprocess-bytes" data-i18n="settingsBasic.visionSkipPreprocessBytes">Below this size, send original image</label>
+                                                        <input type="number" id="vision-skip-preprocess-bytes" min="0" step="1024" placeholder="2097152" />
+                                                        <small class="form-hint" data-i18n="settingsBasic.visionSkipPreprocessHint">0 means always JPEG compress; must also satisfy long edge and payload limits.</small>
+                                                    </div>
+                                                    <div class="form-group">
+                                                        <label for="vision-detail" data-i18n="settingsBasic.visionDetail">Image detail</label>
+                                                        <select id="vision-detail" style="width: 100%; padding: 0.5rem 0.75rem; border: 1px solid var(--border-color, #e2e8f0); border-radius: 6px;">
+                                                            <option value="low">low</option>
+                                                            <option value="auto">auto</option>
+                                                            <option value="high">high</option>
+                                                        </select>
+                                                    </div>
+                                                    <div class="form-group">
+                                                        <label for="vision-timeout-seconds" data-i18n="settingsBasic.visionTimeout">Timeout (seconds)</label>
+                                                        <input type="number" id="vision-timeout-seconds" min="5" step="1" placeholder="60" />
+                                                    </div>
+                                                </div>
+                                            </details>
+                                            <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+                                                <a href="javascript:void(0)" id="test-vision-btn" onclick="testVisionConnection()" style="font-size: 0.8125rem; color: var(--accent-color, #3182ce); text-decoration: none; cursor: pointer;" data-i18n="settingsBasic.testConnection">Test connection</a>
+                                                <span id="test-vision-result" style="font-size: 0.8125rem;"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Agent config -->
                                 <div class="settings-subsection">
                                     <h4 data-i18n="settingsBasic.agentConfig">Agent config</h4>
                                     <div class="settings-form">
                                         <div class="form-group">
                                             <label for="agent-max-iterations" data-i18n="settingsBasic.maxIterations">Max iterations</label>
-                                            <input type="number" id="agent-max-iterations" min="1" max="100" data-i18n="settingsBasic.iterationsPlaceholder" data-i18n-attr="placeholder" placeholder="30" />
+                                            <input type="number" id="agent-max-iterations" min="1" data-i18n="settingsBasic.iterationsPlaceholder" data-i18n-attr="placeholder" placeholder="30" />
                                         </div>
                                         <div class="form-group">
                                             <label class="checkbox-label">
@@ -3422,10 +3537,10 @@
         </div>
     </div>
 
-    <!-- Marked.js for Markdown parsing -->
-    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
-    <!-- DOMPurify for HTML sanitization to prevent XSS -->
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
+    <!-- Marked.js + DOMPurify：本地 vendor，避免 CDN 不可用导致 Markdown 降级为纯文本 -->
+    <script src="/static/vendor/marked.min.js"></script>
+    <script src="/static/vendor/purify.min.js"></script>
+    <script src="/static/js/sanitize-markdown.js"></script>
     <!-- Cytoscape.js for attack chain visualization -->
     <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
     <!-- ELK.js for high-quality DAG layout (reduces edge crossings) -->
@@ -3459,8 +3574,9 @@
                 </div>
                 <div class="form-group" id="skill-package-editor" style="display: none;">
                     <label data-i18n="skillModal.packageFiles">Package files</label>
+                    <small class="skill-package-tree-hint" data-i18n="skillModal.packageFilesHint">Click a file to edit; folders are for grouping only and cannot be clicked</small>
                     <div style="display: flex; gap: 12px; align-items: flex-start; min-height: 300px;">
-                        <div id="skill-package-tree" style="flex: 0 0 240px; max-height: 440px; overflow: auto; border: 1px solid rgba(127,127,127,0.25); border-radius: 6px; padding: 8px; font-size: 13px; line-height: 1.4;"></div>
+                        <div id="skill-package-tree"></div>
                         <div style="flex: 1; min-width: 0;">
                             <div style="margin-bottom: 8px; font-size: 13px;">
                                 <span data-i18n="skillModal.editingFile">Editing</span> <code id="skill-active-path">SKILL.md</code>
@@ -3889,6 +4005,7 @@ Enumerate subdomains of example.com" style="font-family: 'Monaco', 'Menlo', 'Ubu
                         <option value="confirmed" data-i18n="vulnerabilityModal.statusConfirmed">Confirmed</option>
                         <option value="fixed" data-i18n="vulnerabilityModal.statusFixed">Fixed</option>
                         <option value="false_positive" data-i18n="vulnerabilityModal.statusFalsePositive">False positive</option>
+                        <option value="ignored" data-i18n="vulnerabilityModal.statusIgnored">Ignored</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -4166,6 +4283,11 @@ Enumerate subdomains of example.com" style="font-family: 'Monaco', 'Menlo', 'Ubu
                     </div>
                     <textarea id="fact-modal-body" class="form-input fact-modal-body-input" rows="14" placeholder="Attack-chain steps, HTTP/request POC, response evidence, notes…" oninput="updateFactFormHints()"></textarea>
                     <p id="fact-modal-body-hint" class="projects-field-hint" role="status"></p>
+                </div>
+                <div class="projects-form-field">
+                    <label class="projects-filter-check projects-pin-toggle">
+                        <input type="checkbox" id="fact-modal-pinned"> <span data-i18n="projects.pinFact">Pin fact (prioritized in list and blackboard index)</span>
+                    </label>
                 </div>
                 <div class="projects-form-field">
                     <label for="fact-modal-related-vuln" data-i18n="projects.relatedVulnIdLabel">Related vulnerability ID</label>

@@ -638,10 +638,18 @@ func (m *Manager) IngestTaskResult(report TaskResultReport) error {
 		status = string(TaskFailed)
 	}
 	duration := endedAt.Sub(startedAt).Milliseconds()
+
+	sessionOS := ""
+	if sess, serr := m.db.GetC2Session(t.SessionID); serr == nil && sess != nil {
+		sessionOS = sess.OS
+	}
+	resultText := ResolveTaskResultText(report.Output, report.OutputB64, sessionOS)
+	errText := ResolveTaskResultText(report.Error, report.ErrorB64, sessionOS)
+
 	upd := database.C2TaskUpdate{
 		Status:      &status,
-		ResultText:  &report.Output,
-		Error:       &report.Error,
+		ResultText:  &resultText,
+		Error:       &errText,
 		StartedAt:   &startedAt,
 		CompletedAt: &endedAt,
 		DurationMS:  &duration,
@@ -661,8 +669,8 @@ func (m *Manager) IngestTaskResult(report TaskResultReport) error {
 		return err
 	}
 	t.Status = status
-	t.ResultText = report.Output
-	t.Error = report.Error
+	t.ResultText = resultText
+	t.Error = errText
 
 	level := "info"
 	msg := fmt.Sprintf("Task completed: %s", t.TaskType)

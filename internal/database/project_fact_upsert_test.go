@@ -135,54 +135,6 @@ func TestRestoreProjectFact(t *testing.T) {
 	}
 }
 
-func TestUpsertProjectFact_createsVersionOnContentChange(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "facts.db")
-	db, err := NewDB(dbPath, zap.NewNop())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	proj, err := db.CreateProject(&Project{Name: "version-test"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	created, err := db.UpsertProjectFact(&ProjectFact{
-		ProjectID: proj.ID,
-		FactKey:   "finding/xss",
-		Category:  "finding",
-		Summary:   "v1",
-		Body:      "body v1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if created.SupersedesFactID != "" {
-		t.Fatalf("expected no supersedes on create, got %q", created.SupersedesFactID)
-	}
-
-	updated, err := db.UpsertProjectFact(&ProjectFact{
-		ProjectID: proj.ID,
-		FactKey:   "finding/xss",
-		Summary:   "v2",
-		Body:      "body v2",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.SupersedesFactID == "" {
-		t.Fatal("expected supersedes_fact_id after content change")
-	}
-	prev, err := db.GetProjectFactVersion(updated.SupersedesFactID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if prev.Summary != "v1" || prev.Body != "body v1" {
-		t.Fatalf("previous version mismatch: summary=%q body=%q", prev.Summary, prev.Body)
-	}
-}
-
 func TestMergeFactBodyOnUpdate(t *testing.T) {
 	if got := mergeFactBodyOnUpdate("", "keep"); got != "keep" {
 		t.Fatalf("empty incoming: got %q", got)

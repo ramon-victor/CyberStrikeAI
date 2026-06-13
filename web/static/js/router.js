@@ -56,8 +56,9 @@ function initRouter() {
     const hash = window.location.hash.slice(1);
     if (hash) {
         const hashParts = hash.split('?');
-        const pageId = hashParts[0];
-        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'projects', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
+        let pageId = hashParts[0];
+        if (pageId === 'c2') pageId = 'c2-listeners';
+        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'projects', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
                 scheduleChatConversationFromHash(500);
@@ -105,6 +106,7 @@ function updateNavState(pageId) {
     // Remove all active states
     document.querySelectorAll('.nav-item').forEach(item => {
         item.classList.remove('active');
+        item.classList.remove('expanded');
     });
     
     document.querySelectorAll('.nav-submenu-item').forEach(item => {
@@ -202,7 +204,7 @@ function getNavSubmenuItems(navItem) {
     return Array.from(submenu.querySelectorAll('.nav-submenu-item'));
 }
 
-/** Go directly when there is only one child page,avoidthe expanded menu may be hidden at the bottom of the sidebar */
+/** Go directly when there is only one child page, avoid the expanded menu being hidden at the bottom of the sidebar */
 function navigateSingleSubmenuPage(navItem) {
     const items = getNavSubmenuItems(navItem);
     if (items.length !== 1) return false;
@@ -228,12 +230,12 @@ function toggleSubmenu(menuId) {
         return;
     }
 
-    // Expanded sidebar with only one child item (roles, Agents, etc.):single click enters directly,no need to click a second-level menu
+    // Expanded sidebar with only one child item (roles, Agents, etc.): single click enters directly, no need to click a second-level menu
     if (navigateSingleSubmenuPage(navItem)) {
         return;
     }
 
-    // Toggle submenu while expanded,and scroll into view so child items are visible
+    // Toggle submenu while expanded, and scroll into view so child items are visible
     const willExpand = !navItem.classList.contains('expanded');
     navItem.classList.toggle('expanded');
     if (willExpand) {
@@ -261,10 +263,6 @@ function showSubmenuPopup(navItem, menuId) {
         }
     }
 
-    if (navigateSingleSubmenuPage(navItem)) {
-        return;
-    }
-    
     const navItemContent = navItem.querySelector('.nav-item-content');
     const submenu = navItem.querySelector('.nav-submenu');
     
@@ -332,6 +330,9 @@ function showSubmenuPopup(navItem, menuId) {
 async function initPage(pageId) {
     // Wait for i18n readiness,avoidfast refresh may display raw placeholder keys before translation functions initialize
     if (window.i18nReady) await window.i18nReady;
+    if (typeof stopExternalMcpPoll === 'function') {
+        stopExternalMcpPoll();
+    }
     switch(pageId) {
         case 'dashboard':
             if (typeof refreshDashboard === 'function') {
@@ -389,21 +390,26 @@ async function initPage(pageId) {
                     }, 100);
                 }
             };
-            // Fetch global config first,ensure persistent tool_search state is shown according to the backend effective set
+            const afterMcpConfigReady = () => {
+                startLoadMcpTools();
+                if (typeof loadExternalMCPs === 'function') {
+                    loadExternalMCPs().catch(err => {
+                        console.warn('Failed to load external MCP list:', err);
+                    });
+                }
+                if (typeof startExternalMcpPoll === 'function') {
+                    startExternalMcpPoll();
+                }
+            };
+            // Fetch global config first, ensure persistent tool_search state is shown according to the backend effective set
             if (typeof loadConfig === 'function') {
                 loadConfig(false)
                     .catch(err => {
                         console.warn('Failed to load config (will continue loading tool list):', err);
                     })
-                    .finally(startLoadMcpTools);
+                    .finally(afterMcpConfigReady);
             } else {
-                startLoadMcpTools();
-            }
-            // Load external MCP list first (fast), then load tool list
-            if (typeof loadExternalMCPs === 'function') {
-                loadExternalMCPs().catch(err => {
-                    console.warn('Failed to load external MCP list:', err);
-                });
+                afterMcpConfigReady();
             }
             break;
         case 'projects':
@@ -482,7 +488,6 @@ async function initPage(pageId) {
                 loadMarkdownAgents();
             }
             break;
-        case 'c2':
         case 'c2-listeners':
         case 'c2-sessions':
         case 'c2-tasks':
@@ -512,9 +517,10 @@ document.addEventListener('DOMContentLoaded', function() {
         const hash = window.location.hash.slice(1);
         // Handle hash with parameters (such as chat?conversation=xxx)
         const hashParts = hash.split('?');
-        const pageId = hashParts[0];
+        let pageId = hashParts[0];
         
-        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'tasks', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
+        if (pageId === 'c2') pageId = 'c2-listeners';
+        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'tasks', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
                 scheduleChatConversationFromHash(200);

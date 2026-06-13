@@ -15,7 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// peekedConn 在已预读首字节后仍将连接交给 net/http 或 crypto/tls。
+// peekedConn hands the connection to net/http or crypto/tls after the first byte has been peeked.
 type peekedConn struct {
 	net.Conn
 	r *bufio.Reader
@@ -25,7 +25,7 @@ func (c *peekedConn) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
-// oneConnListener 供 http.Server.Serve 处理单条 TCP 连接（含 keep-alive）。
+// oneConnListener lets http.Server.Serve handle a single TCP connection (with keep-alive).
 type oneConnListener struct {
 	conn net.Conn
 	addr net.Addr
@@ -46,6 +46,24 @@ func (l *oneConnListener) Accept() (net.Conn, error) {
 
 func (l *oneConnListener) Close() error   { return nil }
 func (l *oneConnListener) Addr() net.Addr { return l.addr }
+
+// httpServerForTLSConn copies servable fields from an existing Server for HTTP serving on an already-handshaked TLS connection.
+// Cannot copy the entire http.Server (it contains atomic/noCopy fields).
+func httpServerForTLSConn(src *http.Server) *http.Server {
+	return &http.Server{
+		Handler:                      src.Handler,
+		DisableGeneralOptionsHandler: src.DisableGeneralOptionsHandler,
+		ReadTimeout:                  src.ReadTimeout,
+		ReadHeaderTimeout:            src.ReadHeaderTimeout,
+		WriteTimeout:                 src.WriteTimeout,
+		IdleTimeout:                  src.IdleTimeout,
+		MaxHeaderBytes:               src.MaxHeaderBytes,
+		ConnState:                    src.ConnState,
+		ErrorLog:                     src.ErrorLog,
+		BaseContext:                  src.BaseContext,
+		ConnContext:                  src.ConnContext,
+	}
+}
 
 func isTLSHandshakeRecord(b byte) bool {
 	return b == 0x16
@@ -147,18 +165,18 @@ func (m *mainServerMux) handleConn(raw net.Conn) {
 		return
 	}
 	if err := m.redirectSrv.Serve(ocl); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
-		m.logger.Debug("HTTP 重定向连接处理结束", zap.Error(err))
+		m.logger.Debug("HTTP redirect connection handling finished", zap.Error(err))
 	}
 }
 
-// serveHTTPS 在已嗅探为 TLS 的连接上完成握手，再按 ALPN 走 HTTP/2 或 HTTP/1.1。
-// 不能对同一 http.Server 并发调用 Serve(TLSConfig!=nil)，否则握手/ALPN 会异常（浏览器 ERR_SSL_PROTOCOL_ERROR）。
+// serveHTTPS completes the TLS handshake on a connection already identified as TLS, then routes via ALPN to HTTP/2 or HTTP/1.1.
+// Cannot call Serve(TLSConfig!=nil) concurrently on the same http.Server, otherwise handshake/ALPN will fail (browser ERR_SSL_PROTOCOL_ERROR).
 func (m *mainServerMux) serveHTTPS(pc *peekedConn, localAddr net.Addr) {
 	tlsConn := tls.Server(pc, m.httpsSrv.TLSConfig)
 	handCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := tlsConn.HandshakeContext(handCtx); err != nil {
-		m.logger.Debug("TLS 握手失败", zap.Error(err))
+		m.logger.Debug("TLS handshake failed", zap.Error(err))
 		_ = pc.Close()
 		return
 	}
@@ -172,11 +190,10 @@ func (m *mainServerMux) serveHTTPS(pc *peekedConn, localAddr net.Addr) {
 		}
 	}
 
-	plain := *srv
-	plain.TLSConfig = nil
+	plain := httpServerForTLSConn(srv)
 	ocl := &oneConnListener{conn: tlsConn, addr: localAddr}
 	if err := plain.Serve(ocl); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
-		m.logger.Debug("HTTPS 连接处理结束", zap.Error(err))
+		m.logger.Debug("HTTPS connection handling finished", zap.Error(err))
 	}
 }
 

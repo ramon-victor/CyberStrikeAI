@@ -314,7 +314,7 @@ func (h *RobotHandler) resolveProjectByIDOrName(idOrName string) (*database.Proj
 	if p, err := h.db.GetProject(idOrName); err == nil {
 		return p, ""
 	}
-	list, err := h.db.ListProjects("", 200, 0)
+	list, err := h.db.ListProjects("", "", 200, 0)
 	if err != nil {
 		return nil, "Failed to list projects: " + err.Error()
 	}
@@ -353,7 +353,7 @@ func (h *RobotHandler) cmdProjects() string {
 	if !h.projectsEnabled() {
 		return "Projects are disabled (config.project.enabled)."
 	}
-	list, err := h.db.ListProjects("", 50, 0)
+	list, err := h.db.ListProjects("", "", 50, 0)
 	if err != nil {
 		return "Failed to list projects: " + err.Error()
 	}

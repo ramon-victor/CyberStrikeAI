@@ -56,6 +56,7 @@ func ApplyToEinoChatModelConfig(cfg *einoopenai.ChatModelConfig, oa *config.Open
 	}
 
 	if mode == "off" {
+		applyThinkingDisabled(cfg)
 		return
 	}
 	effort := effectiveEffort(sr, client, allowClient)
@@ -185,11 +186,21 @@ func resolveWireProfile(oa *config.OpenAIConfig, sr *config.OpenAIReasoningConfi
 	}
 }
 
-func applyDeepseek(cfg *einoopenai.ChatModelConfig, mode, effort string) {
-	// auto: enable thinking for DeepSeek line; on: same; auto without effort still opens thinking.
-	if mode == "off" {
+func applyThinkingDisabled(cfg *einoopenai.ChatModelConfig) {
+	if cfg == nil {
 		return
 	}
+	if cfg.ExtraFields == nil {
+		cfg.ExtraFields = make(map[string]any)
+	}
+	if _, exists := cfg.ExtraFields["thinking"]; exists {
+		return
+	}
+	cfg.ExtraFields["thinking"] = map[string]any{"type": "disabled"}
+}
+
+func applyDeepseek(cfg *einoopenai.ChatModelConfig, mode, effort string) {
+	// auto: enable thinking for DeepSeek line; on: same; auto without effort still opens thinking.
 	if mode == "auto" || mode == "on" {
 		if cfg.ExtraFields == nil {
 			cfg.ExtraFields = make(map[string]any)

@@ -237,6 +237,7 @@ func (h *ConfigHandler) ApplyWechatRobotBinding(wc config.RobotWechatConfig) err
 // GetConfigResponse 获取配置响应
 type GetConfigResponse struct {
 	OpenAI     config.OpenAIConfig     `json:"openai"`
+	Vision     config.VisionConfig     `json:"vision"`
 	FOFA       config.FofaConfig       `json:"fofa"`
 	MCP        config.MCPConfig        `json:"mcp"`
 	Tools      []ToolConfigInfo        `json:"tools"`
@@ -297,7 +298,7 @@ func (h *ConfigHandler) GetConfig(c *gin.Context) {
 		}
 	}
 
-	// 获取外部MCP工具
+	// 获取外部MCP工具（走缓存，持锁期间通常不阻塞）
 	if h.externalMCPMgr != nil {
 		ctx := context.Background()
 		externalTools := h.getExternalMCPTools(ctx)
@@ -333,6 +334,7 @@ func (h *ConfigHandler) GetConfig(c *gin.Context) {
 
 	c.JSON(http.StatusOK, GetConfigResponse{
 		OpenAI:     h.config.OpenAI,
+		Vision:     h.config.Vision,
 		FOFA:       h.config.FOFA,
 		MCP:        h.config.MCP,
 		Tools:      tools,
@@ -357,9 +359,6 @@ type GetToolsResponse struct {
 
 // GetTools 获取工具列表（支持分页和搜索）
 func (h *ConfigHandler) GetTools(c *gin.Context) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
 	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
 
 	// 解析分页参数
@@ -405,10 +404,35 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 		}
 	}
 
+	includeExternal := true
+	if v := strings.TrimSpace(strings.ToLower(c.Query("include_external"))); v == "0" || v == "false" || v == "no" {
+		includeExternal = false
+	}
+	refreshExternal := false
+	if v := strings.TrimSpace(strings.ToLower(c.Query("refresh_external"))); v == "1" || v == "true" || v == "yes" {
+		refreshExternal = true
+	}
+
+	// 按外部 MCP 名称筛选（MCP 管理页左侧卡片 → 右侧工具列表联动）
+	externalMCPFilter := strings.TrimSpace(c.Query("external_mcp"))
+
+	// 快照配置后立即释放锁，避免外部 MCP 网络 IO 阻塞整个配置子系统
+	h.mu.RLock()
+	securityTools := append([]config.ToolConfig(nil), h.config.Security.Tools...)
+	_ = h.config.Roles
+	toolDescriptionMode := h.config.Security.ToolDescriptionMode
+	mcpServer := h.mcpServer
+	externalMCPMgr := h.externalMCPMgr
+	h.mu.RUnlock()
+
+	pickDesc := func(shortDesc, fullDesc string) string {
+		return pickToolDescriptionWithMode(toolDescriptionMode, shortDesc, fullDesc)
+	}
+
 	// 解析角色参数，用于过滤工具并标注启用状态
 	roleName := c.Query("role")
 	var roleToolsSet map[string]bool // 角色配置的工具集合
-	var roleUsesAllTools bool = true // 角色是否使用所有工具（default角色）
+	var roleUsesAllTools bool = true // whether role uses all tools (default role)
 	if roleName != "" && roleName != "default" && h.config.Roles != nil {
 		if role, exists := h.config.Roles[roleName]; exists && role.Enabled {
 			if len(role.Tools) > 0 {
@@ -424,12 +448,12 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 
 	// 获取所有内部工具并应用搜索过滤
 	configToolMap := make(map[string]bool)
-	allTools := make([]ToolConfigInfo, 0, len(h.config.Security.Tools))
-	for _, tool := range h.config.Security.Tools {
+	allTools := make([]ToolConfigInfo, 0, len(securityTools))
+	for _, tool := range securityTools {
 		configToolMap[tool.Name] = true
 		toolInfo := ToolConfigInfo{
 			Name:        tool.Name,
-			Description: h.pickToolDescription(tool.ShortDescription, tool.Description),
+			Description: pickDesc(tool.ShortDescription, tool.Description),
 			Enabled:     tool.Enabled,
 			IsExternal:  false,
 		}
@@ -477,15 +501,15 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 	}
 
 	// 从MCP服务器获取所有已注册的工具（包括直接注册的工具，如知识检索工具）
-	if h.mcpServer != nil {
-		mcpTools := h.mcpServer.GetAllTools()
+	if mcpServer != nil {
+		mcpTools := mcpServer.GetAllTools()
 		for _, mcpTool := range mcpTools {
 			// 跳过已经在配置文件中的工具（避免重复）
 			if configToolMap[mcpTool.Name] {
 				continue
 			}
 
-			description := h.pickToolDescription(mcpTool.ShortDescription, mcpTool.Description)
+			description := pickDesc(mcpTool.ShortDescription, mcpTool.Description)
 
 			toolInfo := ToolConfigInfo{
 				Name:        mcpTool.Name,
@@ -532,11 +556,13 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 		}
 	}
 
-	// 获取外部MCP工具
-	if h.externalMCPMgr != nil {
-		// 创建context用于获取外部工具
+	// 获取外部MCP工具（可走缓存，不持有 config 锁）
+	if includeExternal && externalMCPMgr != nil {
+		if refreshExternal {
+			externalMCPMgr.InvalidateAllToolCaches()
+		}
 		ctx := context.Background()
-		externalTools := h.getExternalMCPTools(ctx)
+		externalTools := h.getExternalMCPToolsWithManager(ctx, externalMCPMgr, pickDesc)
 
 		// 应用搜索过滤和角色配置
 		for _, toolInfo := range externalTools {
@@ -582,6 +608,16 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 	// 如果角色配置了工具列表，过滤工具（只保留列表中的工具，但保留其他工具并标记为禁用）
 	// 注意：这里我们不直接过滤掉工具，而是保留所有工具，但通过 role_enabled 字段标注状态
 	// 这样前端可以显示所有工具，并标注哪些工具在当前角色中可用
+
+	if externalMCPFilter != "" {
+		filtered := make([]ToolConfigInfo, 0)
+		for _, tool := range allTools {
+			if tool.IsExternal && tool.ExternalMCP == externalMCPFilter {
+				filtered = append(filtered, tool)
+			}
+		}
+		allTools = filtered
+	}
 
 	// 统一按名称排序后再分页，避免配置文件中顺序导致「全部」与「仅已启用」前几页看起来完全一致
 	sort.SliceStable(allTools, func(i, j int) bool {
@@ -635,17 +671,18 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 	})
 }
 
-// UpdateConfigRequest 更新配置请求
+// UpdateConfigRequest update configuration request
 type UpdateConfigRequest struct {
-	OpenAI     *config.OpenAIConfig        `json:"openai,omitempty"`
-	FOFA       *config.FofaConfig          `json:"fofa,omitempty"`
-	MCP        *config.MCPConfig           `json:"mcp,omitempty"`
-	Tools      []ToolEnableStatus          `json:"tools,omitempty"`
-	Agent      *AgentConfigUpdate          `json:"agent,omitempty"`
-	Knowledge  *config.KnowledgeConfig     `json:"knowledge,omitempty"`
-	Robots     *config.RobotsConfig        `json:"robots,omitempty"`
-	MultiAgent *config.MultiAgentAPIUpdate `json:"multi_agent,omitempty"`
-	C2         *config.C2APIUpdate         `json:"c2,omitempty"`
+	OpenAI     *config.OpenAIConfig         `json:"openai,omitempty"`
+	Vision     *config.VisionConfig         `json:"vision,omitempty"`
+	FOFA       *config.FofaConfig           `json:"fofa,omitempty"`
+	MCP        *config.MCPConfig            `json:"mcp,omitempty"`
+	Tools      []ToolEnableStatus           `json:"tools,omitempty"`
+	Agent      *AgentConfigUpdate           `json:"agent,omitempty"`
+	Knowledge  *config.KnowledgeConfig      `json:"knowledge,omitempty"`
+	Robots     *config.RobotsConfig         `json:"robots,omitempty"`
+	MultiAgent *config.MultiAgentAPIUpdate  `json:"multi_agent,omitempty"`
+	C2         *config.C2APIUpdate          `json:"c2,omitempty"`
 }
 
 // AgentConfigUpdate 用于 PATCH /api/config 的 agent 段：仅 JSON 中出现的字段（指针非 nil）覆盖内存配置。
@@ -704,6 +741,15 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 		h.logger.Info("Updating OpenAI config",
 			zap.String("base_url", h.config.OpenAI.BaseURL),
 			zap.String("model", h.config.OpenAI.Model),
+		)
+	}
+
+	// Updating FOFA config
+	if req.Vision != nil {
+		h.config.Vision = *req.Vision
+		h.logger.Info("Updated Vision config",
+			zap.Bool("enabled", h.config.Vision.Enabled),
+			zap.String("model", h.config.Vision.Model),
 		)
 	}
 
@@ -1030,6 +1076,99 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 	})
 }
 
+// TestVisionRequest 测试 Vision 模型连接；vision.api_key/base_url 留空时可传 openai 段作回退。
+type TestVisionRequest struct {
+	Vision config.VisionConfig `json:"vision"`
+	OpenAI config.OpenAIConfig `json:"openai,omitempty"`
+}
+
+// TestVision 测试视觉模型 API 连接（最小 chat completion）。
+func (h *ConfigHandler) TestVision(c *gin.Context) {
+	var req TestVisionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		return
+	}
+	oa := req.Vision.OpenAICfgEffective(req.OpenAI)
+	if strings.TrimSpace(oa.APIKey) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key 不能为空（可填写 vision.api_key 或 openai.api_key）"})
+		return
+	}
+	if strings.TrimSpace(oa.Model) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "视觉模型不能为空"})
+		return
+	}
+
+	baseURL := strings.TrimSuffix(strings.TrimSpace(oa.BaseURL), "/")
+	if baseURL == "" {
+		if strings.EqualFold(strings.TrimSpace(oa.Provider), "claude") {
+			baseURL = "https://api.anthropic.com"
+		} else {
+			baseURL = "https://api.openai.com/v1"
+		}
+	}
+
+	payload := map[string]interface{}{
+		"model": oa.Model,
+		"messages": []map[string]string{
+			{"role": "user", "content": "Hi"},
+		},
+		"max_completion_tokens": 5,
+	}
+
+	tmpCfg := &config.OpenAIConfig{
+		Provider: oa.Provider,
+		BaseURL:  baseURL,
+		APIKey:   strings.TrimSpace(oa.APIKey),
+		Model:    oa.Model,
+	}
+	client := openai.NewClient(tmpCfg, nil, h.logger)
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	var chatResp struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	err := client.ChatCompletion(ctx, payload, &chatResp)
+	latency := time.Since(start)
+
+	if err != nil {
+		if apiErr, ok := err.(*openai.APIError); ok {
+			c.JSON(http.StatusOK, gin.H{
+				"success":     false,
+				"error":       fmt.Sprintf("API 返回错误 (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
+				"status_code": apiErr.StatusCode,
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"error":   "连接失败: " + err.Error(),
+		})
+		return
+	}
+	if len(chatResp.Choices) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"error":   "API 响应缺少 choices 字段，请检查 Base URL 与视觉模型名称",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":    true,
+		"model":      chatResp.Model,
+		"latency_ms": latency.Milliseconds(),
+	})
+}
+
 // ApplyConfig 应用配置（重新加载并重启相关服务）
 func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 	// 先检查是否需要动态初始化知识库（在锁外执行，避免阻塞其他请求）
@@ -1285,6 +1424,7 @@ func (h *ConfigHandler) saveConfig() error {
 	updateAgentConfig(root, h.config.Agent)
 	updateMCPConfig(root, h.config.MCP)
 	updateOpenAIConfig(root, h.config.OpenAI)
+	updateVisionConfig(root, h.config.Vision)
 	updateFOFAConfig(root, h.config.FOFA)
 	updateKnowledgeConfig(root, h.config.Knowledge)
 	updateC2Config(root, h.config.C2)
@@ -1403,6 +1543,45 @@ func updateMCPConfig(doc *yaml.Node, cfg config.MCPConfig) {
 	setBoolInMap(mcpNode, "enabled", cfg.Enabled)
 	setStringInMap(mcpNode, "host", cfg.Host)
 	setIntInMap(mcpNode, "port", cfg.Port)
+}
+
+func updateVisionConfig(doc *yaml.Node, cfg config.VisionConfig) {
+	root := doc.Content[0]
+	visionNode := ensureMap(root, "vision")
+	setBoolInMap(visionNode, "enabled", cfg.Enabled)
+	if strings.TrimSpace(cfg.APIKey) != "" {
+		setStringInMap(visionNode, "api_key", cfg.APIKey)
+	} else {
+		setStringInMap(visionNode, "api_key", "")
+	}
+	if strings.TrimSpace(cfg.BaseURL) != "" {
+		setStringInMap(visionNode, "base_url", cfg.BaseURL)
+	} else {
+		setStringInMap(visionNode, "base_url", "")
+	}
+	setStringInMap(visionNode, "model", cfg.Model)
+	if strings.TrimSpace(cfg.Provider) != "" {
+		setStringInMap(visionNode, "provider", cfg.Provider)
+	}
+	if cfg.TimeoutSeconds > 0 {
+		setIntInMap(visionNode, "timeout_seconds", cfg.TimeoutSeconds)
+	}
+	if cfg.MaxImageBytes > 0 {
+		setIntInMap(visionNode, "max_image_bytes", int(cfg.MaxImageBytes))
+	}
+	if cfg.MaxDimension > 0 {
+		setIntInMap(visionNode, "max_dimension", cfg.MaxDimension)
+	}
+	if cfg.JPEGQuality > 0 {
+		setIntInMap(visionNode, "jpeg_quality", cfg.JPEGQuality)
+	}
+	if cfg.MaxPayloadBytes > 0 {
+		setIntInMap(visionNode, "max_payload_bytes", int(cfg.MaxPayloadBytes))
+	}
+	setIntInMap(visionNode, "skip_preprocess_below_bytes", int(cfg.SkipPreprocessBelowBytes))
+	if strings.TrimSpace(cfg.Detail) != "" {
+		setStringInMap(visionNode, "detail", cfg.Detail)
+	}
 }
 
 func updateOpenAIConfig(doc *yaml.Node, cfg config.OpenAIConfig) {
@@ -1760,51 +1939,54 @@ func setFloatInMap(mapNode *yaml.Node, key string, value float64) {
 	}
 }
 
-// getExternalMCPTools 获取外部MCP工具列表（公共方法）
-// 返回 ToolConfigInfo 列表，已处理启用状态和Description信息
+// getExternalMCPTools gets the external MCP tool list (public method).
+// Returns ToolConfigInfo list with enabled status and Description processed.
 func (h *ConfigHandler) getExternalMCPTools(ctx context.Context) []ToolConfigInfo {
-	var result []ToolConfigInfo
-
 	if h.externalMCPMgr == nil {
+		return nil
+	}
+	return h.getExternalMCPToolsWithManager(ctx, h.externalMCPMgr, h.pickToolDescription)
+}
+
+// getExternalMCPToolsWithManager 获取外部 MCP 工具（不持有 config 锁，供 GetTools 等热路径使用）
+func (h *ConfigHandler) getExternalMCPToolsWithManager(
+	ctx context.Context,
+	mgr *mcp.ExternalMCPManager,
+	pickDesc func(shortDesc, fullDesc string) string,
+) []ToolConfigInfo {
+	var result []ToolConfigInfo
+	if mgr == nil {
 		return result
 	}
 
-	// 使用较短的超时时间（5秒）进行快速失败，避免阻塞页面加载
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	externalTools, err := h.externalMCPMgr.GetAllTools(timeoutCtx)
+	externalTools, err := mgr.GetAllTools(timeoutCtx)
 	if err != nil {
-		// 记录警告但不阻塞，继续返回已缓存的工具（如果有）
 		h.logger.Warn("获取外部MCP工具失败（可能连接断开），尝试返回缓存的工具",
 			zap.Error(err),
 			zap.String("hint", "如果外部MCP工具未显示，请检查连接状态或点击刷新按钮"),
 		)
 	}
 
-	// 如果获取到了工具（即使有错误），继续处理
 	if len(externalTools) == 0 {
 		return result
 	}
 
-	externalMCPConfigs := h.externalMCPMgr.GetConfigs()
+	externalMCPConfigs := mgr.GetConfigs()
 
 	for _, externalTool := range externalTools {
-		// 解析工具名称：mcpName::toolName
 		mcpName, actualToolName := h.parseExternalToolName(externalTool.Name)
 		if mcpName == "" || actualToolName == "" {
-			continue // 跳过格式不正确的工具
+			continue
 		}
 
-		// 计算启用状态
-		enabled := h.calculateExternalToolEnabled(mcpName, actualToolName, externalMCPConfigs)
-
-		// 处理Description信息
-		description := h.pickToolDescription(externalTool.ShortDescription, externalTool.Description)
+		enabled := h.calculateExternalToolEnabledWithManager(mcpName, actualToolName, externalMCPConfigs, mgr)
 
 		result = append(result, ToolConfigInfo{
 			Name:        actualToolName,
-			Description: description,
+			Description: pickDesc(externalTool.ShortDescription, externalTool.Description),
 			Enabled:     enabled,
 			IsExternal:  true,
 			ExternalMCP: mcpName,
@@ -1825,40 +2007,48 @@ func (h *ConfigHandler) parseExternalToolName(fullName string) (mcpName, toolNam
 
 // calculateExternalToolEnabled 计算外部工具的启用状态
 func (h *ConfigHandler) calculateExternalToolEnabled(mcpName, toolName string, configs map[string]config.ExternalMCPServerConfig) bool {
+	return h.calculateExternalToolEnabledWithManager(mcpName, toolName, configs, h.externalMCPMgr)
+}
+
+func (h *ConfigHandler) calculateExternalToolEnabledWithManager(
+	mcpName, toolName string,
+	configs map[string]config.ExternalMCPServerConfig,
+	mgr *mcp.ExternalMCPManager,
+) bool {
 	cfg, exists := configs[mcpName]
 	if !exists {
 		return false
 	}
 
-	// 首先检查外部MCP是否启用
 	if !cfg.ExternalMCPEnable {
-		return false // MCP未启用，所有工具都禁用
+		return false
 	}
 
-	// MCP已启用，检查单个工具的启用状态
-	// 如果ToolEnabled为空或未设置该工具，default为启用（向后兼容）
-	if cfg.ToolEnabled == nil {
-		// 未设置工具状态，default为启用
-	} else if toolEnabled, exists := cfg.ToolEnabled[toolName]; exists {
-		// 使用配置的工具状态
-		if !toolEnabled {
+	if cfg.ToolEnabled != nil {
+		if toolEnabled, exists := cfg.ToolEnabled[toolName]; exists && !toolEnabled {
 			return false
 		}
 	}
-	// 工具未在配置中，default为启用
 
-	// 最后检查外部MCP是否已连接
-	client, exists := h.externalMCPMgr.GetClient(mcpName)
+	if mgr == nil {
+		return false
+	}
+	client, exists := mgr.GetClient(mcpName)
 	if !exists || !client.IsConnected() {
-		return false // 未连接时视为禁用
+		return false
 	}
 
 	return true
 }
 
-// pickToolDescription 根据 security.tool_description_mode 选择 short 或 full Description并限制长度
+// pickToolDescription selects short or full description based on security.tool_description_mode and limits length.
+// Callers holding h.mu read lock should read mode directly and call pickToolDescriptionWithMode to avoid nested RLock deadlock.
 func (h *ConfigHandler) pickToolDescription(shortDesc, fullDesc string) string {
-	useFull := strings.TrimSpace(strings.ToLower(h.config.Security.ToolDescriptionMode)) == "full"
+	return pickToolDescriptionWithMode(h.config.Security.ToolDescriptionMode, shortDesc, fullDesc)
+}
+
+func pickToolDescriptionWithMode(mode, shortDesc, fullDesc string) string {
+	useFull := strings.TrimSpace(strings.ToLower(mode)) == "full"
 	description := shortDesc
 	if useFull {
 		description = fullDesc
@@ -1873,23 +2063,22 @@ func (h *ConfigHandler) pickToolDescription(shortDesc, fullDesc string) string {
 
 // GetToolSchema 获取单个工具的 inputSchema（按需加载，避免列表接口返回大量 schema 数据）
 func (h *ConfigHandler) GetToolSchema(c *gin.Context) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
 	toolName := c.Param("name")
 	if toolName == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Tool name cannot be empty"})
 		return
 	}
 
-	// 检查是否为外部工具（格式：mcpName::toolName）
 	externalMCP := c.Query("external_mcp")
 	if externalMCP != "" {
-		// 外部 MCP 工具
-		if h.externalMCPMgr != nil {
+		h.mu.RLock()
+		externalMCPMgr := h.externalMCPMgr
+		h.mu.RUnlock()
+
+		if externalMCPMgr != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			externalTools, _ := h.externalMCPMgr.GetAllTools(ctx)
+			externalTools, _ := externalMCPMgr.GetAllTools(ctx)
 			fullName := externalMCP + "::" + toolName
 			for _, t := range externalTools {
 				if t.Name == fullName {
@@ -1902,8 +2091,12 @@ func (h *ConfigHandler) GetToolSchema(c *gin.Context) {
 		return
 	}
 
-	// 内部工具：从 YAML 配置的 Parameters 构建
-	for _, tool := range h.config.Security.Tools {
+	h.mu.RLock()
+	securityTools := append([]config.ToolConfig(nil), h.config.Security.Tools...)
+	mcpServer := h.mcpServer
+	h.mu.RUnlock()
+
+	for _, tool := range securityTools {
 		if tool.Name == toolName {
 			c.JSON(http.StatusOK, gin.H{"input_schema": buildInputSchemaFromParams(tool.Parameters)})
 			return
@@ -1911,8 +2104,8 @@ func (h *ConfigHandler) GetToolSchema(c *gin.Context) {
 	}
 
 	// MCP 注册工具（如知识检索）
-	if h.mcpServer != nil {
-		for _, mt := range h.mcpServer.GetAllTools() {
+	if mcpServer != nil {
+		for _, mt := range mcpServer.GetAllTools() {
 			if mt.Name == toolName {
 				c.JSON(http.StatusOK, gin.H{"input_schema": mt.InputSchema})
 				return

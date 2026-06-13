@@ -2,6 +2,9 @@ package multiagent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/adk"
@@ -341,5 +344,93 @@ func assertNoOrphanTool(t *testing.T, msgs []adk.Message) {
 				t.Fatalf("orphan tool message found: ToolCallID=%q has no preceding assistant(tool_calls)", m.ToolCallID)
 			}
 		}
+	}
+}
+
+func TestWriteSummarizationTranscript(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "summarization", "transcript.txt")
+	msgs := []adk.Message{
+		schema.UserMessage("scan target"),
+		assistantToolCallsMsg("", "tc1"),
+		schema.ToolMessage("nmap output", "tc1"),
+	}
+	if err := writeSummarizationTranscript(path, msgs); err != nil {
+		t.Fatalf("writeSummarizationTranscript: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "Pre-compaction session record") {
+		t.Fatalf("missing transcript header: %q", text)
+	}
+	if !strings.Contains(text, "[user]") || !strings.Contains(text, "scan target") {
+		t.Fatalf("missing user section: %q", text)
+	}
+	if !strings.Contains(text, "tool_calls:") || !strings.Contains(text, "nmap output") {
+		t.Fatalf("missing tool round: %q", text)
+	}
+}
+
+func TestSanitizeSystemContentForTranscript_BestPractice(t *testing.T) {
+	t.Parallel()
+	system := strings.Join([]string{
+		"以下是当前会话绑定的工具名称索引（仅名称，无参数 JSON Schema）。",
+		"- nmap",
+		"- nuclei",
+		"",
+		"使用规则：",
+		"1) 上表仅为名称索引",
+		"5) 不要臆造不存在的工具名。",
+		"",
+		"你是CyberStrikeAI，是一个专业的网络安全渗透测试专家。",
+		"高强度扫描要求：全力出击",
+		"",
+		"## 项目黑板索引（project: 123, id: abc）",
+		"（暂无事实）",
+		"需要写入请使用 upsert_project_fact。",
+		"",
+		"# Skills System",
+		"**How to Use Skills**",
+		"Remember: Skills make you more capable",
+	}, "\n")
+
+	out := sanitizeSystemContentForTranscript(system)
+	if strings.Contains(out, "以下是当前会话绑定的工具名称索引") {
+		t.Fatalf("tool index should be stripped: %q", out)
+	}
+	if strings.Contains(out, "- nmap") || strings.Contains(out, "高强度扫描要求") {
+		t.Fatalf("static persona should be stripped: %q", out)
+	}
+	if strings.Contains(out, "# Skills System") || strings.Contains(out, "How to Use Skills") {
+		t.Fatalf("skills boilerplate should be stripped: %q", out)
+	}
+	if !strings.Contains(out, transcriptStaticSystemOmitNote) {
+		t.Fatalf("missing omission note: %q", out)
+	}
+	if !strings.Contains(out, "## 项目黑板索引（project: 123, id: abc）") {
+		t.Fatalf("project blackboard should be kept: %q", out)
+	}
+}
+
+func TestFormatSummarizationTranscript_OmitsBloatedSystem(t *testing.T) {
+	t.Parallel()
+	msgs := []adk.Message{
+		schema.SystemMessage("以下是当前会话绑定的工具名称索引\n- nmap\n\n你是CyberStrikeAI\n## 项目黑板索引（project: p1, id: x）\n（暂无事实）\n# Skills System\nboiler"),
+		schema.UserMessage("hello"),
+		schema.AssistantMessage("reply", nil),
+	}
+	out := formatSummarizationTranscript(msgs)
+	if strings.Contains(out, "- nmap") {
+		t.Fatalf("tool list leaked into transcript: %q", out)
+	}
+	if !strings.Contains(out, "hello") || !strings.Contains(out, "reply") {
+		t.Fatalf("conversation turns missing: %q", out)
+	}
+	if !strings.Contains(out, "## 项目黑板索引（project: p1, id: x）") {
+		t.Fatalf("dynamic blackboard missing: %q", out)
 	}
 }

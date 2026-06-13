@@ -51,7 +51,6 @@ type ProjectFact struct {
 	SourceConversationID   string    `json:"source_conversation_id,omitempty"`
 	SourceMessageID        string    `json:"source_message_id,omitempty"`
 	Pinned                 bool      `json:"pinned"`
-	SupersedesFactID       string    `json:"supersedes_fact_id,omitempty"`
 	RelatedVulnerabilityID string    `json:"related_vulnerability_id,omitempty"`
 	CreatedAt              time.Time `json:"created_at"`
 	UpdatedAt              time.Time `json:"updated_at"`
@@ -112,10 +111,30 @@ func (db *DB) GetProject(id string) (*Project, error) {
 	return &p, nil
 }
 
+// CountProjects counts projects with optional filters.
+func (db *DB) CountProjects(status, search string) (int, error) {
+	query := `SELECT COUNT(*) FROM projects WHERE 1=1`
+	args := []interface{}{}
+	if s := strings.TrimSpace(status); s != "" {
+		query += " AND status = ?"
+		args = append(args, s)
+	}
+	if q := strings.TrimSpace(search); q != "" {
+		pattern := "%" + q + "%"
+		query += " AND (name LIKE ? OR COALESCE(description,'') LIKE ?)"
+		args = append(args, pattern, pattern)
+	}
+	var count int
+	if err := db.QueryRow(query, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count projects: %w", err)
+	}
+	return count, nil
+}
+
 // ListProjects lists projects.
-func (db *DB) ListProjects(status string, limit, offset int) ([]*Project, error) {
+func (db *DB) ListProjects(status, search string, limit, offset int) ([]*Project, error) {
 	if limit <= 0 {
-		limit = 200
+		limit = 50
 	}
 	query := `SELECT id, name, COALESCE(description,''), COALESCE(scope_json,''), status, pinned, created_at, updated_at
 		FROM projects WHERE 1=1`
@@ -123,6 +142,11 @@ func (db *DB) ListProjects(status string, limit, offset int) ([]*Project, error)
 	if s := strings.TrimSpace(status); s != "" {
 		query += " AND status = ?"
 		args = append(args, s)
+	}
+	if q := strings.TrimSpace(search); q != "" {
+		pattern := "%" + q + "%"
+		query += " AND (name LIKE ? OR COALESCE(description,'') LIKE ?)"
+		args = append(args, pattern, pattern)
 	}
 	query += " ORDER BY pinned DESC, updated_at DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
@@ -215,7 +239,7 @@ func (db *DB) SetConversationProjectID(conversationID, projectID string) error {
 func (db *DB) ListProjectFactsForIndex(projectID string, includeDeprecated bool) ([]*ProjectFact, error) {
 	query := `SELECT id, project_id, fact_key, category, summary, COALESCE(body,''), confidence,
 		COALESCE(source_conversation_id,''), COALESCE(source_message_id,''), pinned,
-		COALESCE(supersedes_fact_id,''), COALESCE(related_vulnerability_id,''), created_at, updated_at
+		COALESCE(related_vulnerability_id,''), created_at, updated_at
 		FROM project_facts WHERE project_id = ?`
 	args := []interface{}{projectID}
 	if !includeDeprecated {
@@ -237,7 +261,7 @@ func (db *DB) ListProjectFacts(projectID string, filter ProjectFactListFilter, l
 	}
 	query := `SELECT id, project_id, fact_key, category, summary, COALESCE(body,''), confidence,
 		COALESCE(source_conversation_id,''), COALESCE(source_message_id,''), pinned,
-		COALESCE(supersedes_fact_id,''), COALESCE(related_vulnerability_id,''), created_at, updated_at
+		COALESCE(related_vulnerability_id,''), created_at, updated_at
 		FROM project_facts WHERE project_id = ?`
 	args := []interface{}{projectID}
 	if c := strings.TrimSpace(filter.Category); c != "" {
@@ -276,7 +300,7 @@ func (db *DB) GetProjectFactByKey(projectID, factKey string) (*ProjectFact, erro
 	row := db.QueryRow(
 		`SELECT id, project_id, fact_key, category, summary, COALESCE(body,''), confidence,
 			COALESCE(source_conversation_id,''), COALESCE(source_message_id,''), pinned,
-			COALESCE(supersedes_fact_id,''), COALESCE(related_vulnerability_id,''), created_at, updated_at
+			COALESCE(related_vulnerability_id,''), created_at, updated_at
 		 FROM project_facts WHERE project_id = ? AND fact_key = ?`,
 		projectID, factKey,
 	)
@@ -288,7 +312,7 @@ func (db *DB) GetProjectFact(id string) (*ProjectFact, error) {
 	row := db.QueryRow(
 		`SELECT id, project_id, fact_key, category, summary, COALESCE(body,''), confidence,
 			COALESCE(source_conversation_id,''), COALESCE(source_message_id,''), pinned,
-			COALESCE(supersedes_fact_id,''), COALESCE(related_vulnerability_id,''), created_at, updated_at
+			COALESCE(related_vulnerability_id,''), created_at, updated_at
 		 FROM project_facts WHERE id = ?`, id,
 	)
 	return scanProjectFactRow(row)
@@ -327,24 +351,15 @@ func (db *DB) UpsertProjectFact(f *ProjectFact) (*ProjectFact, error) {
 		if strings.TrimSpace(f.Confidence) == "" {
 			f.Confidence = existing.Confidence
 		}
-		if projectFactContentChanged(existing, f) {
-			versionID, verr := db.InsertProjectFactVersion(existing)
-			if verr != nil {
-				return nil, verr
-			}
-			f.SupersedesFactID = versionID
-		} else if f.SupersedesFactID == "" {
-			f.SupersedesFactID = existing.SupersedesFactID
-		}
 		_, err = db.Exec(
 			`UPDATE project_facts SET category = ?, summary = ?, body = ?, confidence = ?,
 				source_conversation_id = COALESCE(?, source_conversation_id),
 				source_message_id = COALESCE(?, source_message_id),
-				pinned = ?, supersedes_fact_id = ?, related_vulnerability_id = ?, updated_at = ?
+				pinned = ?, related_vulnerability_id = ?, updated_at = ?
 			 WHERE id = ?`,
 			f.Category, f.Summary, f.Body, f.Confidence,
 			nullIfEmpty(f.SourceConversationID), nullIfEmpty(f.SourceMessageID), boolToInt(f.Pinned),
-			nullIfEmpty(f.SupersedesFactID), nullIfEmpty(f.RelatedVulnerabilityID), f.UpdatedAt, f.ID,
+			nullIfEmpty(f.RelatedVulnerabilityID), f.UpdatedAt, f.ID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("update fact: %w", err)
@@ -360,12 +375,12 @@ func (db *DB) UpsertProjectFact(f *ProjectFact) (*ProjectFact, error) {
 	_, err = db.Exec(
 		`INSERT INTO project_facts (
 			id, project_id, fact_key, category, summary, body, confidence,
-			source_conversation_id, source_message_id, pinned, supersedes_fact_id, related_vulnerability_id,
+			source_conversation_id, source_message_id, pinned, related_vulnerability_id,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID, f.ProjectID, f.FactKey, f.Category, f.Summary, f.Body, f.Confidence,
 		nullIfEmpty(f.SourceConversationID), nullIfEmpty(f.SourceMessageID), boolToInt(f.Pinned),
-		nullIfEmpty(f.SupersedesFactID), nullIfEmpty(f.RelatedVulnerabilityID),
+		nullIfEmpty(f.RelatedVulnerabilityID),
 		f.CreatedAt, f.UpdatedAt,
 	)
 	if err != nil {
@@ -440,7 +455,7 @@ func scanProjectFactRow(row *sql.Row) (*ProjectFact, error) {
 	err := row.Scan(
 		&f.ID, &f.ProjectID, &f.FactKey, &f.Category, &f.Summary, &f.Body, &f.Confidence,
 		&f.SourceConversationID, &f.SourceMessageID, &pinned,
-		&f.SupersedesFactID, &f.RelatedVulnerabilityID, &createdAt, &updatedAt,
+		&f.RelatedVulnerabilityID, &createdAt, &updatedAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -461,7 +476,7 @@ func scanProjectFactFromRows(rows *sql.Rows) (*ProjectFact, error) {
 	err := rows.Scan(
 		&f.ID, &f.ProjectID, &f.FactKey, &f.Category, &f.Summary, &f.Body, &f.Confidence,
 		&f.SourceConversationID, &f.SourceMessageID, &pinned,
-		&f.SupersedesFactID, &f.RelatedVulnerabilityID, &createdAt, &updatedAt,
+		&f.RelatedVulnerabilityID, &createdAt, &updatedAt,
 	)
 	if err != nil {
 		return nil, err

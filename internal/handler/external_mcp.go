@@ -64,10 +64,7 @@ func (h *ExternalMCPHandler) GetExternalMCPs(c *gin.Context) {
 		}
 
 		toolCount := toolCounts[name]
-		errorMsg := ""
-		if status == "error" {
-			errorMsg = h.manager.GetError(name)
-		}
+		errorMsg := externalMCPStatusError(h.manager, name, status)
 
 		result[name] = ExternalMCPResponse{
 			Config:    cfg,
@@ -115,18 +112,20 @@ func (h *ExternalMCPHandler) GetExternalMCP(c *gin.Context) {
 		}
 	}
 
-	// 获取错误信息
-	errorMsg := ""
-	if status == "error" {
-		errorMsg = h.manager.GetError(name)
-	}
-
 	c.JSON(http.StatusOK, ExternalMCPResponse{
 		Config:    cfg,
 		Status:    status,
 		ToolCount: toolCount,
-		Error:     errorMsg,
+		Error:     externalMCPStatusError(h.manager, name, status),
 	})
+}
+
+// externalMCPStatusError 在 error/disconnected 状态下返回最近错误（含断连原因）。
+func externalMCPStatusError(manager *mcp.ExternalMCPManager, name, status string) string {
+	if status != "error" && status != "disconnected" {
+		return ""
+	}
+	return manager.GetError(name)
 }
 
 // AddOrUpdateExternalMCP 添加或更新外部MCP配置

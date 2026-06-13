@@ -20,6 +20,9 @@ const (
 	ToolListKnowledgeRiskTypes = "list_knowledge_risk_types"
 	ToolSearchKnowledgeBase    = "search_knowledge_base"
 
+	// AnalyzeImage visual analysis (local image → VL model → text summary)
+	ToolAnalyzeImage = "analyze_image"
+
 	// WebShell assistant tools (used by AI in WebShell management - AI assistant)
 	ToolWebshellExec      = "webshell_exec"
 	ToolWebshellFileList  = "webshell_file_list"
@@ -73,6 +76,7 @@ func IsBuiltinTool(toolName string) bool {
 		ToolRestoreProjectFact,
 		ToolListKnowledgeRiskTypes,
 		ToolSearchKnowledgeBase,
+		ToolAnalyzeImage,
 		ToolWebshellExec,
 		ToolWebshellFileList,
 		ToolWebshellFileRead,
@@ -124,6 +128,7 @@ func GetAllBuiltinTools() []string {
 		ToolRestoreProjectFact,
 		ToolListKnowledgeRiskTypes,
 		ToolSearchKnowledgeBase,
+		ToolAnalyzeImage,
 		ToolWebshellExec,
 		ToolWebshellFileList,
 		ToolWebshellFileRead,

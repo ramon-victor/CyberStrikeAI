@@ -176,6 +176,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 	lastPlanExecuteExecutor = ""
 	var reasoningStreamSeq int64
 	var einoSubReplyStreamSeq int64
+	var mainResponseStreamSeq int64
 	toolEmitSeen := make(map[string]struct{})
 	var einoMainRound int
 	var einoLastAgent string
@@ -632,6 +633,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 		mv := ev.Output.MessageOutput
 
 		if mv.IsStreaming && mv.MessageStream != nil {
+			mainStreamID := fmt.Sprintf("eino-main-%s-%d", conversationID, atomic.AddInt64(&mainResponseStreamSeq, 1))
 			streamHeaderSent := false
 			var reasoningStreamID string
 			var toolStreamFragments []schema.ToolCall
@@ -738,6 +740,8 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 											"einoRole":           "orchestrator",
 											"einoAgent":          ev.AgentName,
 											"orchestration":      orchMode,
+											"iteration":          einoMainRound,
+											"streamId":           mainStreamID,
 										})
 										streamHeaderSent = true
 									}
@@ -747,6 +751,8 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 										"einoRole":        "orchestrator",
 										"einoAgent":       ev.AgentName,
 										"orchestration":   orchMode,
+										"iteration":     einoMainRound,
+										"streamId":        mainStreamID,
 									}, mainAssistantBuf))
 									mainAssistWireAccum, _ = normalizeStreamingDelta(mainAssistWireAccum, contentDelta)
 								}
@@ -806,6 +812,8 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 										"einoRole":           "orchestrator",
 										"einoAgent":          ev.AgentName,
 										"orchestration":      orchMode,
+										"iteration":          einoMainRound,
+										"streamId":           mainStreamID,
 									})
 								}
 								progress("response_delta", eofTail, openai.WithSSEAccumulated(map[string]interface{}{
@@ -814,6 +822,8 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 									"einoRole":        "orchestrator",
 									"einoAgent":       ev.AgentName,
 									"orchestration":   orchMode,
+									"iteration":       einoMainRound,
+									"streamId":        mainStreamID,
 								}, mainAssistantBuf))
 								mainAssistWireAccum, _ = normalizeStreamingDelta(mainAssistWireAccum, eofTail)
 							}
@@ -916,6 +926,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 						}
 						executeStdoutDupMu.Unlock()
 						if progress != nil {
+							nonStreamID := fmt.Sprintf("eino-main-%s-%d", conversationID, atomic.AddInt64(&mainResponseStreamSeq, 1))
 							progress("response_start", "", map[string]interface{}{
 								"conversationId":     conversationID,
 								"mcpExecutionIds":    snapshotMCPIDs(),
@@ -923,6 +934,8 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 								"einoRole":           "orchestrator",
 								"einoAgent":          ev.AgentName,
 								"orchestration":      orchMode,
+								"iteration":          einoMainRound,
+								"streamId":           nonStreamID,
 							})
 							progress("response_delta", body, openai.WithSSEAccumulated(map[string]interface{}{
 								"conversationId":  conversationID,
@@ -930,6 +943,8 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 								"einoRole":        "orchestrator",
 								"einoAgent":       ev.AgentName,
 								"orchestration":   orchMode,
+								"iteration":       einoMainRound,
+								"streamId":        nonStreamID,
 							}, body))
 						}
 						lastAssistant = body
@@ -1012,7 +1027,30 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 		orchMode, runAccumulatedMsgs, persistTraceSource(args, runAccumulatedMsgs),
 		lastAssistant, lastPlanExecuteExecutor, emptyHint, ids, false,
 	)
+	if shouldEinoEmptyResponseContinue(out, emptyHint, len(runAccumulatedMsgs), baseAccumulatedCount) {
+		if logger != nil {
+			logger.Info("eino empty response, ending run segment for handler resume",
+				zap.String("conversationId", conversationID),
+				zap.String("orchestration", orchMode),
+				zap.Int("traceMessages", len(runAccumulatedMsgs)))
+		}
+		if progress != nil {
+			progress("eino_empty_response_continue", "会话已结束但未产生助手正文，正在基于轨迹自动续跑…", map[string]interface{}{
+				"conversationId": conversationID,
+				"source":         "eino",
+				"resumeKind":     "trace_segment",
+			})
+		}
+		return out, ErrEmptyResponseContinue
+	}
 	return out, nil
+}
+
+func shouldEinoEmptyResponseContinue(out *RunResult, emptyHint string, accumulatedLen, baseCount int) bool {
+	if out == nil || accumulatedLen <= baseCount {
+		return false
+	}
+	return strings.TrimSpace(out.Response) == strings.TrimSpace(emptyHint)
 }
 
 func persistTraceSource(args *einoADKRunLoopArgs, fallback []adk.Message) []adk.Message {

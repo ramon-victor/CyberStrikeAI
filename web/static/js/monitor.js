@@ -31,6 +31,25 @@ function shouldSkipTaskEventReplayAttach(conversationId) {
         return false;
     }
 }
+/** Monitor page display: internal mcp::tool → model-side mcp__tool */
+function formatMonitorToolName(name) {
+    if (!name || typeof name !== 'string') return name || '';
+    return name.includes('::') ? name.replace('::', '__') : name;
+}
+
+/** Filter/API: mcp__tool → internal mcp::tool (matches inventory) */
+function canonicalMonitorToolName(name) {
+    if (!name || typeof name !== 'string') return name || '';
+    if (name.includes('::')) return name;
+    const idx = name.indexOf('__');
+    if (idx > 0) return `${name.slice(0, idx)}::${name.slice(idx + 2)}`;
+    return name;
+}
+
+function monitorToolNamesEqual(a, b) {
+    return canonicalMonitorToolName(a) === canonicalMonitorToolName(b);
+}
+
 if (typeof window !== 'undefined') {
     window.shouldSkipTaskEventReplayAttach = shouldSkipTaskEventReplayAttach;
 }
@@ -286,7 +305,39 @@ function extractIterationTagFromStreamIdentity(identity) {
     return s.slice(idx + 6);
 }
 
-// Internal UI state handling.
+/** Plan-Execute multi-round executor/planner same-name agents: reuse stream entry only within the same iteration */
+function areMainResponseStreamIterationsCompatible(prevIterTag, streamIterTag, orchestration) {
+    const orch = String(orchestration != null ? orchestration : '').trim();
+    if (orch === 'plan_execute') {
+        return prevIterTag === streamIterTag && prevIterTag !== '';
+    }
+    return !prevIterTag || !streamIterTag || prevIterTag === streamIterTag;
+}
+
+/** Only merge duplicate response_start events emitted by Eino for the same MessageStream */
+function shouldReuseMainResponseStream(progressId, prevStream, responseData, streamOrch) {
+    if (!prevStream || !prevStream.itemId) {
+        return false;
+    }
+    if (!sameMainResponseStreamMeta(prevStream.streamMeta, responseData)) {
+        return false;
+    }
+    const streamId = responseData && responseData.streamId != null ? String(responseData.streamId).trim() : '';
+    if (streamId && prevStream.streamId === streamId) {
+        return true;
+    }
+    const orch = String(streamOrch != null ? streamOrch : '').trim();
+    if (orch === 'plan_execute') {
+        return false;
+    }
+    const prevIterTag = extractIterationTagFromStreamIdentity(prevStream.streamIdentity || '');
+    const streamIterTag = extractIterationTagFromStreamIdentity(
+        buildMainResponseStreamIdentity(progressId, responseData)
+    );
+    return areMainResponseStreamIterationsCompatible(prevIterTag, streamIterTag, orch);
+}
+
+// AI thinking stream output: progressId -> Map(streamId -> { itemId, buffer })
 const thinkingStreamStateByProgressId = new Map();
 
 // Internal UI state handling.
@@ -320,12 +371,8 @@ function applyEinoTimelineRole(item, data) {
     }
 }
 
-// Internal UI state handling.
-const assistantMarkdownSanitizeConfig = {
-    ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'u', 's', 'code', 'pre', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'a', 'img', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr'],
-    ALLOWED_ATTR: ['href', 'title', 'alt', 'src', 'class'],
-    ALLOW_DATA_ATTR: false,
-};
+/** Timeline detail view: stricter sanitization (no img; full-page HTML uses sanitize-markdown.js) */
+const timelineMarkdownOpts = { profile: 'timeline' };
 
 function escapeHtmlLocal(text) {
     if (!text) return '';
@@ -610,37 +657,135 @@ function mergeStreamBuffer(current, delta, data) {
 if (typeof window !== 'undefined') {
     window.streamBufferFromAccumulated = streamBufferFromAccumulated;
     window.mergeStreamBuffer = mergeStreamBuffer;
+    window.processSseDataLinesYielding = processSseDataLinesYielding;
+    window.flushStreamPlainTextUpdate = flushStreamPlainTextUpdate;
+    window.scheduleStreamPlainTextUpdate = scheduleStreamPlainTextUpdate;
+}
+
+/** Streaming plain text DOM: merge updates by frame, try to increment with appendData, avoid full textContent per SSE blocking the main thread */
+const streamPlainDomState = new WeakMap();
+/** Track streaming nodes that still need to be refreshed, so they can be flushed all at once before snapshotting the timeline */
+const streamPlainDomPendingElements = new Set();
+
+function applyStreamPlainTextNow(contentEl, text, state) {
+    if (!contentEl) return;
+    const full = text == null ? '' : String(text);
+    const prevLen = state && state.renderedLen ? state.renderedLen : 0;
+    contentEl.classList.add('timeline-stream-plain');
+
+    if (full.length > prevLen && contentEl.childNodes.length === 1 &&
+        contentEl.firstChild && contentEl.firstChild.nodeType === Node.TEXT_NODE) {
+        const existing = contentEl.firstChild.nodeValue || '';
+        if (existing.length === prevLen && full.startsWith(existing)) {
+            const delta = full.slice(prevLen);
+            if (delta) {
+                contentEl.firstChild.appendData(delta);
+                if (state) {
+                    state.renderedLen = full.length;
+                    state.pendingText = full;
+                }
+                return;
+            }
+        }
+    }
+
+    contentEl.textContent = full;
+    if (state) {
+        state.renderedLen = full.length;
+        state.pendingText = full;
+    }
+}
+
+function flushStreamPlainTextUpdate(contentEl) {
+    if (!contentEl) return;
+    const state = streamPlainDomState.get(contentEl);
+    if (!state) return;
+    if (state.rafId) {
+        cancelAnimationFrame(state.rafId);
+        state.rafId = 0;
+    }
+    applyStreamPlainTextNow(contentEl, state.pendingText, state);
+}
+
+function scheduleStreamPlainTextUpdate(contentEl, text) {
+    if (!contentEl) return;
+    const full = text == null ? '' : String(text);
+    let state = streamPlainDomState.get(contentEl);
+    if (!state) {
+        state = { pendingText: full, rafId: 0, renderedLen: 0 };
+        streamPlainDomState.set(contentEl, state);
+    } else {
+        state.pendingText = full;
+    }
+    streamPlainDomPendingElements.add(contentEl);
+    if (state.rafId) return;
+    state.rafId = requestAnimationFrame(function () {
+        state.rafId = 0;
+        applyStreamPlainTextNow(contentEl, state.pendingText, state);
+    });
+}
+
+function resetStreamPlainTextState(contentEl) {
+    if (!contentEl) return;
+    const state = streamPlainDomState.get(contentEl);
+    if (state && state.rafId) {
+        cancelAnimationFrame(state.rafId);
+    }
+    streamPlainDomState.delete(contentEl);
+    streamPlainDomPendingElements.delete(contentEl);
+}
+
+function flushAllPendingStreamPlainUpdates() {
+    streamPlainDomPendingElements.forEach(function (el) {
+        if (el && el.isConnected) {
+            flushStreamPlainTextUpdate(el);
+        }
+    });
 }
 
 /** Internal UI state handling. */
 function setTimelineItemContentStreamPlain(contentEl, text) {
     if (!contentEl) return;
-    contentEl.classList.add('timeline-stream-plain');
-    contentEl.textContent = text == null ? '' : String(text);
+    resetStreamPlainTextState(contentEl);
+    applyStreamPlainTextNow(contentEl, text, null);
+}
+
+/**
+ * Process SSE data lines in batches and yield the main thread between batches to avoid blocking the UI with hundreds of events in a single read().
+ * @param {string[]} lines
+ * @param {(event: object) => void} onEvent
+ * @param {{ yieldEvery?: number }} [options]
+ */
+async function processSseDataLinesYielding(lines, onEvent, options) {
+    const yieldEvery = (options && options.yieldEvery) || 32;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.startsWith('data: ')) {
+            try {
+                onEvent(JSON.parse(line.slice(6)));
+            } catch (e) {
+                console.error('Failed to parse event data:', e, line);
+            }
+        }
+        if ((i + 1) % yieldEvery === 0 && i + 1 < lines.length) {
+            await new Promise(function (resolve) { requestAnimationFrame(resolve); });
+        }
+    }
 }
 
 /** Internal UI state handling. */
 function setTimelineItemContentStreamRich(contentEl, html) {
     if (!contentEl) return;
+    resetStreamPlainTextState(contentEl);
     contentEl.classList.remove('timeline-stream-plain');
     contentEl.innerHTML = html;
 }
 
 function formatAssistantMarkdownContent(text) {
-    const raw = text == null ? '' : String(text);
-    const src = normalizeAssistantMarkdownSource(raw);
-    if (typeof marked !== 'undefined') {
-        try {
-            marked.setOptions({ breaks: true, gfm: true });
-            const parsed = marked.parse(src, { async: false });
-            if (typeof DOMPurify !== 'undefined') {
-                return DOMPurify.sanitize(parsed, assistantMarkdownSanitizeConfig);
-            }
-            return parsed;
-        } catch (e) {
-            return escapeHtmlLocal(raw).replace(/\n/g, '<br>');
-        }
+    if (typeof window.csMarkdownSanitize !== 'undefined') {
+        return window.csMarkdownSanitize.formatMarkdownToHtml(text, { profile: 'chat' });
     }
+    const raw = text == null ? '' : String(text);
     return escapeHtmlLocal(raw).replace(/\n/g, '<br>');
 }
 
@@ -668,6 +813,10 @@ function updateAssistantBubbleContent(assistantMessageId, content, renderMarkdow
         wrapTablesInBubble(bubble);
     }
     if (copyBtn) bubble.appendChild(copyBtn);
+
+    if (typeof window.csMarkdownSanitize !== 'undefined') {
+        window.csMarkdownSanitize.stripSuspiciousImages(bubble);
+    }
 }
 
 const conversationExecutionTracker = {
@@ -1031,6 +1180,9 @@ function getAssistantId() {
 function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecutionIds) {
     const progressElement = document.getElementById(progressId);
     if (!progressElement) return;
+
+    // Flush pending rAF streaming updates before snapshotting innerHTML to avoid missing the last few frames in the process details
+    flushAllPendingStreamPlainUpdates();
 
     // Ensure any "running" tool_call badges are closed before we snapshot timeline HTML.
     // Otherwise, once the progress element is removed, later 'done' events may not be able
@@ -1529,10 +1681,16 @@ function handleStreamEvent(event, progressElement, progressId,
             const n = d.iteration != null ? d.iteration : 1;
             const scope = d.einoScope != null ? String(d.einoScope).trim() : '';
             if (scope !== 'sub') {
+                const prevMainIter = mainIterationStateByProgressId.get(String(progressId));
+                const prevN = prevMainIter && prevMainIter.iteration != null ? prevMainIter.iteration : null;
                 mainIterationStateByProgressId.set(String(progressId), {
                     iteration: n,
                     orchestration: d.orchestration != null ? d.orchestration : ''
                 });
+                // After the main channel enters a new round, do not reuse the "execution output" timeline entry from the previous round
+                if (prevN != null && prevN !== n) {
+                    responseStreamStateByProgressId.delete(progressId);
+                }
             }
             let iterTitle;
             if (d.orchestration === 'plan_execute' && d.einoScope === 'main') {
@@ -1646,7 +1804,7 @@ function handleStreamEvent(event, progressElement, progressId,
             if (item) {
                 const contentEl = item.querySelector('.timeline-item-content');
                 if (contentEl) {
-                    setTimelineItemContentStreamPlain(contentEl, s.buffer);
+                    scheduleStreamPlainTextUpdate(contentEl, s.buffer);
                 }
             }
             break;
@@ -1666,8 +1824,9 @@ function handleStreamEvent(event, progressElement, progressId,
                     if (item) {
                         const contentEl = item.querySelector('.timeline-item-content');
                         if (contentEl) {
+                            flushStreamPlainTextUpdate(contentEl);
                             if (typeof formatMarkdown === 'function') {
-                                setTimelineItemContentStreamRich(contentEl, formatMarkdown(s.buffer));
+                                setTimelineItemContentStreamRich(contentEl, formatMarkdown(s.buffer, timelineMarkdownOpts));
                             } else {
                                 setTimelineItemContentStreamPlain(contentEl, s.buffer);
                             }
@@ -1690,6 +1849,8 @@ function handleStreamEvent(event, progressElement, progressId,
         }
             
         case 'tool_calls_detected':
+            // Assistant text segment ends, enters tool call: the next response_start should create a new timeline entry
+            responseStreamStateByProgressId.delete(progressId);
             addTimelineItem(timeline, 'tool_calls_detected', {
                 title: timelineAgentBracketPrefix(event.data) + '🔧 ' + (typeof window.t === 'function' ? window.t('chat.toolCallsDetected', { count: event.data?.count || 0 }) : 'Detected ' + (event.data?.count || 0) + '  tool calls'),
                 message: event.message,
@@ -1755,6 +1916,21 @@ function handleStreamEvent(event, progressElement, progressId,
                 message: event.message || (typeof window.t === 'function'
                     ? window.t('chat.einoStreamErrorMessage')
                     : 'This stream was interrupted.'),
+                data: d
+            });
+            break;
+        }
+
+        case 'eino_empty_response_continue': {
+            const d = event.data || {};
+            const title = typeof window.t === 'function'
+                ? window.t('chat.einoEmptyResponseContinueTitle')
+                : '🔁 Auto-resume (No assistant text)';
+            addTimelineItem(timeline, 'warning', {
+                title: title,
+                message: event.message || (typeof window.t === 'function'
+                    ? window.t('chat.einoEmptyResponseContinueMessage')
+                    : 'Session ended but assistant text not captured, auto-resuming based on trajectory...'),
                 data: d
             });
             break;
@@ -1875,7 +2051,7 @@ function handleStreamEvent(event, progressElement, progressId,
                 const pre = item.querySelector('pre.tool-result');
                 if (pre) {
                     pre.classList.remove('tool-result-pending');
-                    pre.textContent = state.buffer;
+                    scheduleStreamPlainTextUpdate(pre, state.buffer);
                 }
             }
             break;
@@ -1982,7 +2158,7 @@ function handleStreamEvent(event, progressElement, progressId,
                     }
                 }
                 if (contentEl) {
-                    setTimelineItemContentStreamPlain(contentEl, s.buffer);
+                    scheduleStreamPlainTextUpdate(contentEl, s.buffer);
                 }
             }
             break;
@@ -2009,8 +2185,9 @@ function handleStreamEvent(event, progressElement, progressId,
                         contentEl.className = 'timeline-item-content';
                         item.appendChild(contentEl);
                     }
+                    flushStreamPlainTextUpdate(contentEl);
                     if (typeof formatMarkdown === 'function') {
-                        setTimelineItemContentStreamRich(contentEl, formatMarkdown(full));
+                        setTimelineItemContentStreamRich(contentEl, formatMarkdown(full, timelineMarkdownOpts));
                     } else {
                         setTimelineItemContentStreamPlain(contentEl, full);
                     }
@@ -2122,18 +2299,16 @@ function handleStreamEvent(event, progressElement, progressId,
 
             // Internal UI state handling.
             const prevStream = responseStreamStateByProgressId.get(progressId);
-            const prevIterTag = extractIterationTagFromStreamIdentity(prevStream && prevStream.streamIdentity ? prevStream.streamIdentity : '');
-            const compatibleIterTag = !prevIterTag || !streamIterTag || prevIterTag === streamIterTag;
-            if (
-                prevStream &&
-                prevStream.itemId &&
-                sameMainResponseStreamMeta(prevStream.streamMeta, responseData) &&
-                compatibleIterTag
-            ) {
-                // Internal UI state handling.
+            const streamOrch = responseData.orchestration != null
+                ? responseData.orchestration
+                : (prevStream && prevStream.streamMeta ? prevStream.streamMeta.orchestration : '');
+            if (shouldReuseMainResponseStream(progressId, prevStream, responseData, streamOrch)) {
+                // Eino may emit duplicate response_start for the same stream; reuse existing entry and buffer to avoid multiple "assistant output" items
                 prevStream.streamMeta = Object.assign({}, prevStream.streamMeta || {}, responseData);
-                // Internal UI state handling.
                 prevStream.streamIdentity = streamIdentity;
+                if (responseData.streamId != null) {
+                    prevStream.streamId = String(responseData.streamId).trim();
+                }
                 responseStreamStateByProgressId.set(progressId, prevStream);
                 break;
             }
@@ -2144,10 +2319,12 @@ function handleStreamEvent(event, progressElement, progressId,
                 data: Object.assign({}, responseData, { responseStreamPlaceholder: true })
             });
             responseStreamStateByProgressId.set(progressId, {
+                progressId: progressId,
                 itemId: itemId,
                 buffer: '',
                 streamMeta: responseData,
-                streamIdentity: streamIdentity
+                streamIdentity: streamIdentity,
+                streamId: responseData.streamId != null ? String(responseData.streamId).trim() : ''
             });
             break;
         }
@@ -2167,11 +2344,18 @@ function handleStreamEvent(event, progressElement, progressId,
             // Internal UI state handling.
             // Internal UI state handling.
             let state = responseStreamStateByProgressId.get(progressId);
+            const incomingStreamId = responseData.streamId != null ? String(responseData.streamId).trim() : '';
             if (!state) {
-                state = { itemId: null, buffer: '', streamMeta: responseData };
+                state = { progressId: progressId, itemId: null, buffer: '', streamMeta: responseData, streamId: incomingStreamId };
                 responseStreamStateByProgressId.set(progressId, state);
             } else if (!state.streamMeta && responseData && (responseData.einoAgent || responseData.orchestration)) {
                 state.streamMeta = responseData;
+            }
+            if (incomingStreamId && state.streamId && state.streamId !== incomingStreamId) {
+                break;
+            }
+            if (incomingStreamId && !state.streamId) {
+                state.streamId = incomingStreamId;
             }
 
             const deltaContent = event.message || '';
@@ -2184,9 +2368,7 @@ function handleStreamEvent(event, progressElement, progressId,
                 if (item) {
                     const contentEl = item.querySelector('.timeline-item-content');
                     if (contentEl) {
-                        const meta = state.streamMeta || responseData;
-                        const body = formatTimelineStreamBody(state.buffer, meta);
-                        setTimelineItemContentStreamPlain(contentEl, body);
+                        scheduleStreamPlainTextUpdate(contentEl, state.buffer);
                     }
                 }
             }
@@ -2726,39 +2908,22 @@ async function attachRunningTaskEventStream(conversationId) {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
+            const dispatchTaskEvent = function (eventData) {
+                handleStreamEvent(eventData, null, progressId, getAssistantIdFn, setAssistantIdFn, function () { return mcpIds; }, function (ids) { mcpIds = mergeMcpExecutionIDLists(mcpIds, ids || []); });
+            };
             while (true) {
                 const chunk = await reader.read();
                 if (chunk.done) break;
                 buffer += decoder.decode(chunk.value, { stream: true });
                 const lines = buffer.split('\n');
                 buffer = lines.pop() || '';
-                for (let li = 0; li < lines.length; li++) {
-                    const line = lines[li];
-                    if (line.indexOf('data: ') === 0) {
-                        try {
-                            const eventData = JSON.parse(line.slice(6));
-                            handleStreamEvent(eventData, null, progressId, getAssistantIdFn, setAssistantIdFn, function () { return mcpIds; }, function (ids) { mcpIds = mergeMcpExecutionIDLists(mcpIds, ids || []); });
-                        } catch (e) {
-                            console.error('task-events parse', e);
-                        }
-                    }
-                }
+                await processSseDataLinesYielding(lines, dispatchTaskEvent);
             }
             // Flush decoder internal buffer to avoid dropping trailing partial UTF-8 bytes.
             buffer += decoder.decode();
             if (buffer.trim()) {
                 const lines = buffer.split('\n');
-                for (let li = 0; li < lines.length; li++) {
-                    const line = lines[li];
-                    if (line.indexOf('data: ') === 0) {
-                        try {
-                            const eventData = JSON.parse(line.slice(6));
-                            handleStreamEvent(eventData, null, progressId, getAssistantIdFn, setAssistantIdFn, function () { return mcpIds; }, function (ids) { mcpIds = mergeMcpExecutionIDLists(mcpIds, ids || []); });
-                        } catch (e) {
-                            console.error('task-events parse', e);
-                        }
-                    }
-                }
+                await processSseDataLinesYielding(lines, dispatchTaskEvent);
             }
             if (window.csTaskReplay && window.csTaskReplay.progressId === progressId) {
                 clearCsTaskReplay();
@@ -2890,7 +3055,9 @@ function mergeToolResultIntoCallItem(item, data, options) {
     const pre = section.querySelector('pre.tool-result');
     if (pre) {
         pre.classList.remove('tool-result-pending');
+        flushStreamPlainTextUpdate(pre);
         pre.textContent = text;
+        resetStreamPlainTextState(pre);
     }
 
     if (data.executionId) {
@@ -3132,7 +3299,7 @@ function addTimelineItem(timeline, type, options) {
         const streamBody = typeof formatTimelineStreamBody === 'function'
             ? formatTimelineStreamBody(options.message, options.data)
             : options.message;
-        content += `<div class="timeline-item-content">${formatMarkdown(streamBody)}</div>`;
+        content += `<div class="timeline-item-content">${formatMarkdown(streamBody, timelineMarkdownOpts)}</div>`;
     } else if (type === 'tool_call' && options.data) {
         const data = options.data;
         const args = parseToolCallArgsFromData(data);
@@ -3161,7 +3328,7 @@ function addTimelineItem(timeline, type, options) {
             </div>
         `;
     } else if (type === 'eino_agent_reply' && options.message) {
-        content += `<div class="timeline-item-content">${formatMarkdown(options.message)}</div>`;
+        content += `<div class="timeline-item-content">${formatMarkdown(options.message, timelineMarkdownOpts)}</div>`;
     } else if (type === 'tool_result' && options.data) {
         const data = options.data;
         const isError = data.isError || !data.success;
@@ -3190,14 +3357,14 @@ function addTimelineItem(timeline, type, options) {
         const streamBody = typeof formatTimelineStreamBody === 'function'
             ? formatTimelineStreamBody(options.message, options.data)
             : options.message;
-        content += `<div class="timeline-item-content">${formatMarkdown(streamBody)}</div>`;
+        content += `<div class="timeline-item-content">${formatMarkdown(streamBody, timelineMarkdownOpts)}</div>`;
     } else if (type === 'progress' && options.message) {
         content += `<div class="timeline-item-content timeline-eino-trace"><pre class="tool-result">${escapeHtml(options.message)}</pre></div>`;
     } else if (type === 'user_interrupt_continue' && options.message) {
         const streamBody = typeof formatTimelineStreamBody === 'function'
             ? formatTimelineStreamBody(options.message, options.data)
             : options.message;
-        content += `<div class="timeline-item-content">${formatMarkdown(streamBody)}</div>`;
+        content += `<div class="timeline-item-content">${formatMarkdown(streamBody, timelineMarkdownOpts)}</div>`;
     }
 
     item.innerHTML = content;
@@ -3345,6 +3512,9 @@ let monitorPanelFetchSeq = 0;
 const monitorState = {
     executions: [],
     stats: {},
+    timeline: null,
+    timelineRange: null,
+    timelineError: null,
     lastFetchedAt: null,
     pagination: {
         page: 1,
@@ -3431,17 +3601,15 @@ async function refreshMonitorPanel(page = null) {
             url += `&tool=${encodeURIComponent(currentToolFilter)}`;
         }
         
-        const response = await apiFetch(url, { method: 'GET' });
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok) {
-            throw new Error(result.error || 'Failed');
-        }
+        const { result, timeline, timelineError } = await fetchMonitorAndTimeline(url);
         if (mySeq !== monitorPanelFetchSeq) {
             return;
         }
 
         monitorState.executions = Array.isArray(result.executions) ? result.executions : [];
         monitorState.stats = result.stats || {};
+        monitorState.timeline = timeline;
+        monitorState.timelineError = timelineError;
         monitorState.lastFetchedAt = new Date();
         
         // UpdatedminutesPageInfo
@@ -3489,9 +3657,10 @@ async function applyMonitorFilters() {
     const statusFilter = document.getElementById('monitor-status-filter');
     const toolFilter = document.getElementById('monitor-tool-filter');
     const status = statusFilter ? statusFilter.value : 'all';
-    const tool = toolFilter ? (toolFilter.value.trim() || 'all') : 'all';
+    const toolRaw = toolFilter ? (toolFilter.value.trim() || 'all') : 'all';
+    const tool = toolRaw === 'all' ? 'all' : canonicalMonitorToolName(toolRaw);
     if (toolFilter) {
-        toolFilter.classList.toggle('is-filter-active', tool !== 'all');
+        toolFilter.classList.toggle('is-filter-active', toolRaw !== 'all');
     }
     // Internal UI state handling.
     await refreshMonitorPanelWithFilter(status, tool);
@@ -3515,17 +3684,15 @@ async function refreshMonitorPanelWithFilter(statusFilter = 'all', toolFilter = 
             url += `&tool=${encodeURIComponent(toolFilter)}`;
         }
         
-        const response = await apiFetch(url, { method: 'GET' });
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok) {
-            throw new Error(result.error || 'Failed');
-        }
+        const { result, timeline, timelineError } = await fetchMonitorAndTimeline(url);
         if (mySeq !== monitorPanelFetchSeq) {
             return;
         }
 
         monitorState.executions = Array.isArray(result.executions) ? result.executions : [];
         monitorState.stats = result.stats || {};
+        monitorState.timeline = timeline;
+        monitorState.timelineError = timelineError;
         monitorState.lastFetchedAt = new Date();
         
         // UpdatedminutesPageInfo
@@ -3557,13 +3724,429 @@ async function refreshMonitorPanelWithFilter(statusFilter = 'all', toolFilter = 
 
 
 const MCP_STATS_TOP_N = 6;
+const MCP_TIMELINE_RANGES = ['24h', '7d', '30d'];
+
+function getMcpMonitorTimelineRange() {
+    if (monitorState.timelineRange && MCP_TIMELINE_RANGES.includes(monitorState.timelineRange)) {
+        return monitorState.timelineRange;
+    }
+    const saved = localStorage.getItem('mcpMonitorTimelineRange');
+    const range = MCP_TIMELINE_RANGES.includes(saved) ? saved : '7d';
+    monitorState.timelineRange = range;
+    return range;
+}
+
+async function fetchMonitorAndTimeline(monitorUrl) {
+    const range = getMcpMonitorTimelineRange();
+    const [monitorResp, timelineResp] = await Promise.all([
+        apiFetch(monitorUrl, { method: 'GET' }),
+        apiFetch(`/api/monitor/calls-timeline?range=${encodeURIComponent(range)}`, { method: 'GET' })
+    ]);
+    const result = await monitorResp.json().catch(() => ({}));
+    if (!monitorResp.ok) {
+        throw new Error(result.error || 'Failed to fetch monitor data');
+    }
+    let timeline = null;
+    let timelineError = null;
+    try {
+        const timelineJson = await timelineResp.json().catch(() => ({}));
+        if (timelineResp.ok) {
+            timeline = timelineJson;
+        } else {
+            timelineError = timelineJson.error || 'timeline failed';
+        }
+    } catch (err) {
+        timelineError = err && err.message ? err.message : 'timeline failed';
+    }
+    return { result, timeline, timelineError };
+}
+
+function formatMcpTimelineLabel(isoOrDate, rangeKey, locale) {
+    const d = isoOrDate instanceof Date ? isoOrDate : new Date(isoOrDate);
+    if (Number.isNaN(d.getTime())) return '';
+    if (rangeKey === '24h') {
+        return d.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
+    }
+    if (rangeKey === '30d') {
+        return d.toLocaleDateString(locale, { month: 'numeric', day: 'numeric' });
+    }
+    return d.toLocaleString(locale, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function buildMcpTimelineSvg(points, rangeKey) {
+    if (!Array.isArray(points) || points.length === 0) return '';
+    const W = 400;
+    const H = 140;
+    const padL = 32;
+    const padR = 8;
+    const padT = 12;
+    const padB = 24;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+    const maxVal = Math.max(1, ...points.map((p) => p.total || 0));
+    const hasFailed = points.some((p) => (p.failed || 0) > 0);
+    const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
+
+    const coords = points.map((p, i) => {
+        const x = padL + (points.length <= 1 ? plotW / 2 : (i / (points.length - 1)) * plotW);
+        const y = padT + plotH - ((p.total || 0) / maxVal) * plotH;
+        return { x, y, p, i };
+    });
+
+    const linePath = coords.map((c, i) => `${i === 0 ? 'M' : 'L'} ${c.x.toFixed(2)} ${c.y.toFixed(2)}`).join(' ');
+    const baseY = padT + plotH;
+    const areaPath = `${linePath} L ${coords[coords.length - 1].x.toFixed(2)} ${baseY} L ${coords[0].x.toFixed(2)} ${baseY} Z`;
+
+    let failPath = '';
+    if (hasFailed) {
+        failPath = coords.map((c, i) => {
+            const fy = padT + plotH - ((c.p.failed || 0) / maxVal) * plotH;
+            return `${i === 0 ? 'M' : 'L'} ${c.x.toFixed(2)} ${fy.toFixed(2)}`;
+        }).join(' ');
+    }
+
+    let peakIdx = 0;
+    points.forEach((p, i) => {
+        if ((p.total || 0) >= (points[peakIdx].total || 0)) peakIdx = i;
+    });
+
+    const yTicks = [0, Math.ceil(maxVal / 2), maxVal];
+    const yLines = yTicks.map((v) => {
+        const y = padT + plotH - (v / maxVal) * plotH;
+        const isBase = v === 0;
+        return `<line class="mcp-stats-timeline-grid${isBase ? ' mcp-stats-timeline-grid--base' : ''}" x1="${padL}" y1="${y.toFixed(2)}" x2="${W - padR}" y2="${y.toFixed(2)}" />` +
+            `<text class="mcp-stats-timeline-y" x="${padL - 4}" y="${(y + 3.5).toFixed(2)}">${v}</text>`;
+    }).join('');
+
+    const tickIdx = points.length <= 2
+        ? points.map((_, i) => i)
+        : [0, Math.floor((points.length - 1) / 2), points.length - 1];
+    const xLabels = tickIdx.map((idx, ti) => {
+        const c = coords[idx];
+        const label = formatMcpTimelineLabel(c.p.t, rangeKey, locale);
+        let anchor = 'middle';
+        if (tickIdx.length > 1) {
+            if (ti === 0) anchor = 'start';
+            else if (ti === tickIdx.length - 1) anchor = 'end';
+        }
+        return `<text class="mcp-stats-timeline-axis" x="${c.x.toFixed(2)}" y="${H - 5}" text-anchor="${anchor}">${escapeHtml(label)}</text>`;
+    }).join('');
+
+    const dots = coords.map((c) => {
+        const tipTime = formatMcpTimelineLabel(c.p.t, rangeKey, locale);
+        const isPeak = c.i === peakIdx && (c.p.total || 0) > 0;
+        const dotClass = 'mcp-stats-timeline-dot' + (isPeak ? ' mcp-stats-timeline-dot--peak' : '');
+        return `<circle class="${dotClass}" cx="${c.x.toFixed(2)}" cy="${c.y.toFixed(2)}" r="${isPeak ? 3 : 2.5}"
+            data-time="${escapeHtml(tipTime)}"
+            data-total="${c.p.total || 0}"
+            data-failed="${c.p.failed || 0}" />`;
+    }).join('');
+
+    const peakC = coords[peakIdx];
+    const peakMarker = (peakC.p.total || 0) > 0
+        ? `<circle class="mcp-stats-timeline-peak-glow" cx="${peakC.x.toFixed(2)}" cy="${peakC.y.toFixed(2)}" r="7" />`
+        : '';
+
+    return `<svg class="mcp-stats-timeline__chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+        <defs>
+            <linearGradient id="mcpTimelineAreaFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.28"/>
+                <stop offset="85%" stop-color="#3b82f6" stop-opacity="0.04"/>
+                <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+            </linearGradient>
+            <linearGradient id="mcpTimelineLineStroke" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stop-color="#60a5fa"/>
+                <stop offset="50%" stop-color="#3b82f6"/>
+                <stop offset="100%" stop-color="#2563eb"/>
+            </linearGradient>
+        </defs>
+        ${yLines}
+        <path class="mcp-stats-timeline-area" d="${areaPath}" fill="url(#mcpTimelineAreaFill)" />
+        ${peakMarker}
+        <path class="mcp-stats-timeline-line" d="${linePath}" stroke="url(#mcpTimelineLineStroke)" />
+        ${hasFailed ? `<path class="mcp-stats-timeline-line mcp-stats-timeline-line--fail" d="${failPath}" />` : ''}
+        ${dots}
+        ${xLabels}
+    </svg>`;
+}
+
+let mcpTimelineEventsBound = false;
+let mcpTimelineTooltipEl = null;
+
+function bindMcpStatsTimelineEvents() {
+    const root = document.getElementById('monitor-stats');
+    if (!root) return;
+
+    root.querySelectorAll('.mcp-stats-timeline__range').forEach((btn) => {
+        btn.onclick = function () {
+            const range = btn.getAttribute('data-range');
+            if (range) setMcpMonitorTimelineRange(range);
+        };
+    });
+
+    if (mcpTimelineEventsBound) return;
+    if (!mcpTimelineTooltipEl) {
+        mcpTimelineTooltipEl = document.createElement('div');
+        mcpTimelineTooltipEl.className = 'mcp-stats-timeline-tooltip';
+        mcpTimelineTooltipEl.setAttribute('role', 'tooltip');
+        document.body.appendChild(mcpTimelineTooltipEl);
+    }
+
+    root.addEventListener('mousemove', function (e) {
+        const dot = e.target.closest('.mcp-stats-timeline-dot');
+        if (!dot || !mcpTimelineTooltipEl) {
+            root.querySelectorAll('.mcp-stats-timeline-dot.is-active').forEach((d) => d.classList.remove('is-active'));
+            mcpTimelineTooltipEl.style.display = 'none';
+            return;
+        }
+        root.querySelectorAll('.mcp-stats-timeline-dot.is-active').forEach((d) => d.classList.remove('is-active'));
+        dot.classList.add('is-active');
+        const time = dot.getAttribute('data-time') || '';
+        const total = dot.getAttribute('data-total') || '0';
+        const failed = dot.getAttribute('data-failed') || '0';
+        const tip = mcpMonitorT('timelineTooltip', { time, total, failed })
+            || `${time}: ${total} calls (${failed} failed)`;
+        mcpTimelineTooltipEl.textContent = tip;
+        mcpTimelineTooltipEl.style.display = 'block';
+        mcpTimelineTooltipEl.style.left = `${e.clientX}px`;
+        mcpTimelineTooltipEl.style.top = `${e.clientY}px`;
+    });
+
+    root.addEventListener('mouseleave', function (e) {
+        if (!e.target.closest || !e.target.closest('.mcp-stats-combined__timeline, .mcp-stats-timeline')) return;
+        if (e.relatedTarget && root.contains(e.relatedTarget)) return;
+        root.querySelectorAll('.mcp-stats-timeline-dot.is-active').forEach((d) => d.classList.remove('is-active'));
+        if (mcpTimelineTooltipEl) mcpTimelineTooltipEl.style.display = 'none';
+    });
+
+    mcpTimelineEventsBound = true;
+}
+
+function getMcpTimelineRangeLabel(rangeKey) {
+    const key = rangeKey === '24h' ? 'timelineRange24h' : rangeKey === '30d' ? 'timelineRange30d' : 'timelineRange7d';
+    return mcpMonitorT(key) || rangeKey;
+}
+
+function syncMcpMonitorTimelineRangeUI(activeRange) {
+    const range = activeRange || getMcpMonitorTimelineRange();
+    document.querySelectorAll('#monitor-stats .mcp-stats-timeline__range').forEach((btn) => {
+        const r = btn.getAttribute('data-range');
+        const on = r === range;
+        btn.classList.toggle('is-active', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    const scopeBadge = document.querySelector('#monitor-stats .mcp-stats-scope-badge--timeline');
+    if (scopeBadge) scopeBadge.textContent = getMcpTimelineRangeLabel(range);
+}
+
+function renderMcpStatsScopeBadges(showTools, showTimeline) {
+    const parts = [];
+    if (showTools) {
+        const cumulative = mcpMonitorT('scopeCumulative') || 'Cumulative';
+        parts.push(`<span class="mcp-stats-scope-badge mcp-stats-scope-badge--cumulative">${escapeHtml(cumulative)}</span>`);
+    }
+    if (showTimeline) {
+        const range = getMcpMonitorTimelineRange();
+        parts.push(`<span class="mcp-stats-scope-badge mcp-stats-scope-badge--timeline">${escapeHtml(getMcpTimelineRangeLabel(range))}</span>`);
+    }
+    if (!parts.length) return '';
+    return `<div class="mcp-stats-combined__scopes" role="note">${parts.join('')}</div>`;
+}
+
+function buildTimelineSparseHint(points, timeline) {
+    if (!Array.isArray(points) || points.length < 4 || !timeline || !timeline.summary) return '';
+    const summaryTotal = timeline.summary.totalCalls || 0;
+    const peak = timeline.summary.peak || 0;
+    if (summaryTotal === 0 || peak === 0) return '';
+
+    const nonZero = points.filter((p) => (p.total || 0) > 0).length;
+    const nonZeroRatio = nonZero / points.length;
+    let peakIdx = 0;
+    points.forEach((p, i) => {
+        if ((p.total || 0) >= (points[peakIdx].total || 0)) peakIdx = i;
+    });
+    const peakNearEnd = peakIdx >= Math.floor(points.length * 0.8);
+    if (nonZeroRatio > 0.3 && !peakNearEnd) return '';
+
+    const rangeKey = timeline.range || getMcpMonitorTimelineRange();
+    const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
+    const peakTime = timeline.summary.peakAt
+        ? formatMcpTimelineLabel(timeline.summary.peakAt, rangeKey, locale)
+        : formatMcpTimelineLabel(points[peakIdx].t, rangeKey, locale);
+    return mcpMonitorT('timelineSparseHint', { peak, peakTime })
+        || `Mostly 0 during this period, peak ${peak} calls at ${peakTime}`;
+}
+
+async function setMcpMonitorTimelineRange(range) {
+    if (!MCP_TIMELINE_RANGES.includes(range)) return;
+    localStorage.setItem('mcpMonitorTimelineRange', range);
+    monitorState.timelineRange = range;
+    monitorState.timelineError = null;
+    syncMcpMonitorTimelineRangeUI(range);
+    try {
+        const timelineResp = await apiFetch(`/api/monitor/calls-timeline?range=${encodeURIComponent(range)}`, { method: 'GET' });
+        const timelineJson = await timelineResp.json().catch(() => ({}));
+        if (!timelineResp.ok) {
+            throw new Error(timelineJson.error || 'Failed to load trend');
+        }
+        monitorState.timeline = timelineJson;
+        const timelineInner = document.querySelector('#monitor-stats .mcp-stats-combined__timeline-inner');
+        if (timelineInner) {
+            timelineInner.innerHTML = renderMcpStatsTimelineBody(monitorState.timeline, monitorState.timelineError);
+            bindMcpStatsTimelineEvents();
+            syncMcpMonitorTimelineRangeUI(range);
+        } else if (monitorState.stats && Object.keys(monitorState.stats).length > 0) {
+            renderMonitorStats(monitorState.stats, monitorState.lastFetchedAt);
+        }
+    } catch (err) {
+        monitorState.timelineError = err.message || 'error';
+        const timelineInner = document.querySelector('#monitor-stats .mcp-stats-combined__timeline-inner');
+        if (timelineInner) {
+            timelineInner.innerHTML = renderMcpStatsTimelineBody(monitorState.timeline, monitorState.timelineError);
+            bindMcpStatsTimelineEvents();
+            syncMcpMonitorTimelineRangeUI(range);
+        }
+    }
+}
+window.setMcpMonitorTimelineRange = setMcpMonitorTimelineRange;
+
+function renderMcpStatsTimelineRangeButtons() {
+    const activeRange = getMcpMonitorTimelineRange();
+    return MCP_TIMELINE_RANGES.map((r) => {
+        const labelKey = r === '24h' ? 'timelineRange24h' : r === '30d' ? 'timelineRange30d' : 'timelineRange7d';
+        const label = mcpMonitorT(labelKey) || r;
+        return `<button type="button" class="mcp-stats-timeline__range${activeRange === r ? ' is-active' : ''}"
+            data-range="${r}" aria-pressed="${activeRange === r ? 'true' : 'false'}">${escapeHtml(label)}</button>`;
+    }).join('');
+}
+
+function renderMcpStatsTimelineBody(timeline, timelineError) {
+    const hint = mcpMonitorT('timelineHint') || monitorFallback('All tools combined', 'All tools combined');
+
+    if (timelineError) {
+        const errText = mcpMonitorT('timelineLoadError') || monitorFallback('Failed to load call trend', 'Failed to load call trend');
+        return `<p class="mcp-stats-timeline-error">${escapeHtml(errText)}：${escapeHtml(timelineError)}</p>`;
+    }
+
+    const points = timeline && Array.isArray(timeline.points) ? timeline.points : [];
+    const summaryTotal = timeline && timeline.summary ? (timeline.summary.totalCalls || 0) : 0;
+    const peak = timeline && timeline.summary ? (timeline.summary.peak || 0) : 0;
+    const summaryText = mcpMonitorT('timelineSummary', { total: summaryTotal, peak })
+        || `${summaryTotal} calls in range · peak ${peak}`;
+
+    if (points.length === 0 || summaryTotal === 0) {
+        const noData = mcpMonitorT('timelineNoData') || monitorFallback('No calls in this period', 'No calls in this period');
+        return `<p class="mcp-stats-timeline-empty">${escapeHtml(noData)}</p>`;
+    }
+
+    const rangeKey = timeline.range || getMcpMonitorTimelineRange();
+    const chartSvg = buildMcpTimelineSvg(points, rangeKey);
+    const totalLegend = mcpMonitorT('timelineTotalLegend') || 'Total Calls';
+    const failLegend = mcpMonitorT('timelineFailedLegend') || 'Failed';
+    const hasFailed = points.some((p) => (p.failed || 0) > 0);
+    const sparseHint = buildTimelineSparseHint(points, timeline);
+    const sparseHtml = sparseHint
+        ? `<p class="mcp-stats-timeline__sparse-hint">${escapeHtml(sparseHint)}</p>`
+        : '';
+
+    return `
+        <p class="mcp-stats-timeline__inline-meta">${escapeHtml(hint)} · ${escapeHtml(summaryText)}</p>
+        <div class="mcp-stats-timeline__chart-wrap">${chartSvg}</div>
+        ${sparseHtml}
+        <div class="mcp-stats-timeline__legend">
+            <span class="mcp-stats-timeline__legend-item">${escapeHtml(totalLegend)}</span>
+            ${hasFailed ? `<span class="mcp-stats-timeline__legend-item mcp-stats-timeline__legend-item--fail">${escapeHtml(failLegend)}</span>` : ''}
+        </div>`;
+}
+
+function renderMcpStatsCombinedSection(topTools, totals, activeToolFilter, timeline, timelineError, showTimeline) {
+    const statsTitle = mcpMonitorT('toolStatsTitle') || monitorFallback('Tool statistics', 'Tool statistics');
+    const timelineTitle = mcpMonitorT('timelineTitle') || monitorFallback('Call trend', 'Call trend');
+    const statsHint = mcpMonitorT('toolStatsHint') || monitorFallback('Click a bar segment or row to filter records below', 'Click a bar segment or row to filter records below');
+    const hasTools = topTools.length > 0;
+
+    if (!hasTools && !showTimeline) return '';
+
+    const filterChipLabel = activeToolFilter ? formatMonitorToolName(activeToolFilter) : '';
+    const filterChip = activeToolFilter
+        ? `<span class="mcp-stats-filter-chip" title="${escapeHtml(mcpMonitorT('filterByToolTitle', { tool: filterChipLabel }) || filterChipLabel)}">
+            <span class="mcp-stats-filter-chip__label">${escapeHtml(mcpMonitorT('filterActive', { tool: filterChipLabel }) || `Filtered: ${filterChipLabel}`)}</span>
+            <button type="button" class="mcp-stats-filter-chip__clear mcp-stats-clear-filter" aria-label="${escapeHtml(mcpMonitorT('clearToolFilter') || 'Clear tool filter')}">×</button>
+        </span>`
+        : '';
+
+    const rangeButtons = showTimeline
+        ? `<div class="mcp-stats-timeline__ranges" role="group" aria-label="${escapeHtml(timelineTitle)}">${renderMcpStatsTimelineRangeButtons()}</div>`
+        : '';
+
+    const panelTitle = showTimeline && hasTools
+        ? `${statsTitle} · ${timelineTitle}`
+        : (hasTools ? statsTitle : timelineTitle);
+
+    const scopeBadges = renderMcpStatsScopeBadges(hasTools, showTimeline);
+    const metaHint = hasTools ? statsHint : '';
+
+    const timelineCol = showTimeline
+        ? `<div class="mcp-stats-combined__timeline">
+            <p class="mcp-stats-combined__col-label">${escapeHtml(timelineTitle)}</p>
+            <div class="mcp-stats-combined__timeline-inner">${renderMcpStatsTimelineBody(timeline, timelineError)}</div>
+        </div>`
+        : '';
+
+    let bodyMod = 'mcp-stats-combined__body';
+    if (hasTools && showTimeline) bodyMod += ' mcp-stats-combined__body--full';
+    else if (hasTools) bodyMod += ' mcp-stats-combined__body--tools';
+    else bodyMod += ' mcp-stats-combined__body--timeline';
+
+    const mainBlock = hasTools
+        ? `<div class="mcp-stats-combined__main">${renderMcpStatsToolsPanel(topTools, totals, activeToolFilter)}</div>`
+        : '';
+
+    return `
+        <section class="mcp-stats-combined" aria-label="${escapeHtml(panelTitle)}">
+            <header class="mcp-stats-combined__head">
+                <div class="mcp-stats-combined__head-text">
+                    <h4 class="mcp-stats-combined__title">${escapeHtml(panelTitle)}</h4>
+                    <div class="mcp-stats-combined__meta-row">
+                        ${scopeBadges}
+                        ${metaHint ? `<p class="mcp-stats-combined__meta">${escapeHtml(metaHint)}</p>` : ''}
+                    </div>
+                </div>
+                <div class="mcp-stats-combined__actions">
+                    ${filterChip}
+                    ${rangeButtons}
+                </div>
+            </header>
+            <div class="${bodyMod}">
+                ${mainBlock}
+                ${timelineCol}
+            </div>
+        </section>`;
+}
 
 function mcpMonitorT(key, params) {
     if (typeof window.t !== 'function') return '';
-    return window.t('mcpMonitor.' + key, {
+    const fullKey = 'mcpMonitor.' + key;
+    const text = window.t(fullKey, {
         ...(params || {}),
         interpolation: { escapeValue: false },
     });
+    if (!text || text === fullKey) return '';
+    return text;
+}
+
+function monitorFallback(zhText, enText) {
+    return (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? zhText : enText;
+}
+
+function refreshMonitorPanelFromState() {
+    if (!document.getElementById('monitor-stats')) return;
+    if (!monitorState.lastFetchedAt) return;
+    const statusFilter = document.getElementById('monitor-status-filter');
+    const currentStatusFilter = statusFilter ? statusFilter.value : 'all';
+    renderMonitorStats(monitorState.stats || {}, monitorState.lastFetchedAt);
+    renderMonitorExecutions(monitorState.executions || [], currentStatusFilter);
+    renderMonitorPagination();
 }
 
 function normalizeMonitorStatsEntries(statsMap) {
@@ -3627,6 +4210,69 @@ function getMcpToolRateClass(rateNum) {
 }
 
 const MCP_STATS_DIST_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#8b5cf6', '#14b8a6', '#ec4899'];
+const MCP_STATS_CHART_MIN_PCT = 5;
+
+function buildMcpStatsChartSegments(topTools, totals, options = {}) {
+    const groupSmall = options.groupSmall !== false;
+    const minPct = options.minPct ?? MCP_STATS_CHART_MIN_PCT;
+    const othersLabel = mcpMonitorT('distOthers') || 'Other tools';
+    const topNTotal = topTools.reduce((s, t) => s + (t.totalCalls || 0), 0);
+    const otherCalls = Math.max(0, totals.total - topNTotal);
+
+    const segments = [];
+    let bundledCalls = otherCalls;
+
+    topTools.forEach((tool, i) => {
+        const calls = tool.totalCalls || 0;
+        if (calls <= 0 || totals.total <= 0) return;
+        const pct = (calls / totals.total) * 100;
+        if (groupSmall && pct < minPct) {
+            bundledCalls += calls;
+            return;
+        }
+        segments.push({
+            color: MCP_STATS_DIST_COLORS[i % MCP_STATS_DIST_COLORS.length],
+            name: tool.toolName || '',
+            calls,
+            pct: pct.toFixed(1),
+            pctNum: pct,
+            isOthers: false,
+            colorIndex: i,
+        });
+    });
+
+    if (bundledCalls > 0 && totals.total > 0) {
+        const pct = (bundledCalls / totals.total) * 100;
+        segments.push({
+            color: '#cbd5e1',
+            name: othersLabel,
+            calls: bundledCalls,
+            pct: pct.toFixed(1),
+            pctNum: pct,
+            isOthers: true,
+            colorIndex: topTools.length,
+        });
+    }
+
+    let acc = 0;
+    return segments.map((s) => {
+        const start = acc;
+        acc += s.pctNum;
+        return { ...s, start, end: acc };
+    });
+}
+
+function renderMcpStatsShareCell(sharePct, color) {
+    const width = Math.min(100, Math.max(0, parseFloat(sharePct) || 0));
+    return `<td class="mcp-stats-col-share">
+        <div class="mcp-stats-share-cell">
+            <span class="mcp-stats-share-pct">${escapeHtml(sharePct)}%</span>
+            <span class="mcp-stats-share-track" aria-hidden="true">
+                <span class="mcp-stats-share-fill" style="width:${width.toFixed(1)}%;background:${color}"></span>
+            </span>
+        </div>
+    </td>`;
+}
 
 function mcpStatsDescribeDonutSegment(startPct, endPct, outerR, innerR) {
     if (endPct <= startPct) return '';
@@ -3691,21 +4337,37 @@ function previewMcpStatsDistCenter(panel, toolName, pct) {
 
 function setMcpStatsDistHover(toolName) {
     const panel = document.querySelector('.mcp-stats-dist-panel');
-    if (!panel) return;
-    const esc = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(toolName) : toolName.replace(/"/g, '\\"');
-    panel.querySelectorAll('.mcp-stats-dist-segment, .mcp-stats-dist-legend-item').forEach((el) => {
-        const t = el.getAttribute('data-tool-name') || '';
-        const match = toolName && t === toolName;
-        el.classList.toggle('is-highlighted', !!match);
-        el.classList.toggle('is-dimmed', !!toolName && !match && t);
-    });
-    if (toolName) {
-        const el = panel.querySelector(`[data-tool-name="${esc}"]`);
-        if (el) {
-            previewMcpStatsDistCenter(panel, toolName, el.getAttribute('data-pct') || '');
+    const root = document.getElementById('monitor-stats');
+    const esc = toolName && typeof CSS !== 'undefined' && CSS.escape
+        ? CSS.escape(toolName)
+        : (toolName || '').replace(/"/g, '\\"');
+
+    if (panel) {
+        panel.querySelectorAll('.mcp-stats-dist-segment, .mcp-stats-dist-legend-item').forEach((el) => {
+            const t = el.getAttribute('data-tool-name') || '';
+            const match = toolName && t === toolName;
+            el.classList.toggle('is-highlighted', !!match);
+            el.classList.toggle('is-dimmed', !!toolName && !match && t);
+        });
+        if (toolName) {
+            const el = panel.querySelector(`[data-tool-name="${esc}"]`);
+            if (el) {
+                previewMcpStatsDistCenter(panel, toolName, el.getAttribute('data-pct') || '');
+            }
+        } else {
+            resetMcpStatsDistCenter(panel);
         }
-    } else {
-        resetMcpStatsDistCenter(panel);
+    }
+
+    if (root) {
+        root.querySelectorAll(
+            'tr.mcp-stats-tool-row[data-tool-name], .mcp-stats-tool-item[data-tool-name], .mcp-stats-proportion-seg[data-tool-name]'
+        ).forEach((el) => {
+            const t = el.getAttribute('data-tool-name') || '';
+            const match = toolName && t === toolName;
+            el.classList.toggle('is-highlighted', !!match);
+            el.classList.toggle('is-dimmed', !!toolName && !match && t);
+        });
     }
 }
 
@@ -3719,48 +4381,17 @@ function handleMonitorStatsToolFilter(toolName) {
     filterMonitorByTool(toolName);
 }
 
-function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '') {
+function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '', options = {}) {
+    const embedded = !!options.embedded;
     const distTitle = mcpMonitorT('distTitle') || 'Call distribution';
-    const distLegend = mcpMonitorT('distLegend') || 'All calls';
     const distClickHint = mcpMonitorT('distClickHint') || 'Filter executions';
-    const distOthersTitle = mcpMonitorT('distOthersNoFilter') || 'Other toolsFilter';
+    const distOthersTitle = mcpMonitorT('distOthersNoFilter') || 'Other tools cannot be filtered individually';
     const top6ShareLabel = mcpMonitorT('distTop6Share', { n: MCP_STATS_TOP_N }) || `Top ${MCP_STATS_TOP_N} of all calls`;
-    const othersLabel = mcpMonitorT('distOthers') || 'Other tools';
-    const callsUnit = (n) => mcpMonitorT('distCallsUnit', { n }) || `${n} calls`;
 
     const top6Total = topTools.reduce((s, t) => s + (t.totalCalls || 0), 0);
     const top6SharePct = totals.total > 0 ? ((top6Total / totals.total) * 100).toFixed(1) : '0.0';
-    const otherCalls = Math.max(0, totals.total - top6Total);
 
-    let acc = 0;
-    const segments = [];
-    topTools.forEach((tool, i) => {
-        const calls = tool.totalCalls || 0;
-        if (calls <= 0 || totals.total <= 0) return;
-        const pct = (calls / totals.total) * 100;
-        segments.push({
-            color: MCP_STATS_DIST_COLORS[i % MCP_STATS_DIST_COLORS.length],
-            start: acc,
-            end: acc + pct,
-            name: tool.toolName || '',
-            calls,
-            pct: pct.toFixed(1),
-            isOthers: false,
-        });
-        acc += pct;
-    });
-    if (otherCalls > 0 && totals.total > 0) {
-        const pct = (otherCalls / totals.total) * 100;
-        segments.push({
-            color: '#cbd5e1',
-            start: acc,
-            end: acc + pct,
-            name: othersLabel,
-            calls: otherCalls,
-            pct: pct.toFixed(1),
-            isOthers: true,
-        });
-    }
+    const segments = buildMcpStatsChartSegments(topTools, totals, { groupSmall: embedded });
 
     const segmentPathsHtml = segments.map((s) => {
         const pathD = mcpStatsDescribeDonutSegment(s.start, s.end, 48, 30);
@@ -3782,12 +4413,12 @@ function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '') {
             aria-label="${segAria}" />`;
     }).join('');
 
-    const legendHtml = segments.map((s) => {
+    const legendHtml = embedded ? '' : segments.map((s) => {
         const isActive = !s.isOthers && activeToolFilter && activeToolFilter === s.name;
         const inner = `
             <span class="mcp-stats-dist-swatch" style="--swatch-color:${s.color}"></span>
             <span class="mcp-stats-dist-legend-name" title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</span>
-            <span class="mcp-stats-dist-legend-meta"><em>${s.pct}%</em><span>${escapeHtml(callsUnit(s.calls))}</span></span>`;
+            <span class="mcp-stats-dist-legend-pct">${s.pct}%</span>`;
         if (s.isOthers) {
             return `<li class="mcp-stats-dist-legend-item is-others" title="${escapeHtml(distOthersTitle)}" data-is-others="1">${inner}</li>`;
         }
@@ -3804,24 +4435,34 @@ function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '') {
         </li>`;
     }).join('');
 
-    const centerLabel = `Top ${MCP_STATS_TOP_N}`;
+    const centerLabel = embedded ? (mcpMonitorT('distTitle') || 'Share') : `Top ${MCP_STATS_TOP_N}`;
     const distHint = totals.total > 0
         ? (mcpMonitorT('distTotalCalls', { n: totals.total }) || `${totals.total} total calls`)
         : '';
 
-    return `
-        <div class="mcp-stats-tools-panel mcp-stats-dist-panel" aria-label="${escapeHtml(distTitle)}"
-            data-center-label="${escapeHtml(centerLabel)}"
-            data-center-value="${top6SharePct}"
-            data-center-suffix="%">
+    const bodyClass = embedded ? 'mcp-stats-dist-body mcp-stats-dist-body--chart-only' : 'mcp-stats-dist-body mcp-stats-dist-body--side';
+    const legendBlock = legendHtml
+        ? `<ul class="mcp-stats-dist-legend mcp-stats-dist-legend--side">${legendHtml}</ul>`
+        : '';
+
+    const headerHtml = embedded
+        ? `<div class="mcp-stats-dist-embedded-title">${escapeHtml(distTitle)}</div>`
+        : `
             <div class="mcp-stats-tools-header">
                 <div class="mcp-stats-tools-heading">
                     <h4 class="mcp-stats-tools-title">${escapeHtml(distTitle)}</h4>
-                    <span class="mcp-stats-tools-legend">${escapeHtml(distLegend)} · ${escapeHtml(distClickHint)}</span>
+                    <span class="mcp-stats-tools-legend">${escapeHtml(distClickHint)}</span>
                 </div>
                 <span class="mcp-stats-tools-hint">${escapeHtml(distHint)}</span>
-            </div>
-            <div class="mcp-stats-dist-body mcp-stats-dist-body--stacked">
+            </div>`;
+
+    return `
+        <div class="mcp-stats-dist-panel${embedded ? ' mcp-stats-dist-panel--embedded' : ''}" aria-label="${escapeHtml(distTitle)}"
+            data-center-label="${escapeHtml(centerLabel)}"
+            data-center-value="${top6SharePct}"
+            data-center-suffix="%">
+            ${headerHtml}
+            <div class="${bodyClass}">
                 <div class="mcp-stats-dist-chart-stage">
                     <div class="mcp-stats-dist-chart-wrap">
                         <svg class="mcp-stats-dist-svg" viewBox="0 0 100 100" role="img" aria-label="${escapeHtml(top6ShareLabel)} ${top6SharePct}%">
@@ -3833,7 +4474,7 @@ function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '') {
                         </div>
                     </div>
                 </div>
-                <ul class="mcp-stats-dist-legend mcp-stats-dist-legend--grid">${legendHtml}</ul>
+                ${legendBlock}
             </div>
         </div>
     `;
@@ -3869,7 +4510,7 @@ function updateMonitorStatsSubtitle(lastFetchedAt, toolCount) {
 function filterMonitorByTool(toolName) {
     const toolFilter = document.getElementById('monitor-tool-filter');
     if (!toolFilter || !toolName) return;
-    toolFilter.value = toolName;
+    toolFilter.value = formatMonitorToolName(toolName);
     toolFilter.classList.add('is-filter-active');
     applyMonitorFilters();
     const execSection = document.querySelector('.monitor-executions');
@@ -3899,50 +4540,311 @@ function bindMonitorStatsPanelEvents() {
             clearMonitorToolFilter();
             return;
         }
-        const distEl = e.target.closest('.mcp-stats-dist-segment[data-tool-name], .mcp-stats-dist-legend-item[data-tool-name]');
-        if (distEl && distEl.getAttribute('data-is-others') !== '1') {
-            const tool = distEl.getAttribute('data-tool-name');
+        const filterEl = e.target.closest(
+            '.mcp-stats-dist-segment[data-tool-name], .mcp-stats-dist-legend-item[data-tool-name], ' +
+            '.mcp-stats-proportion-seg[data-tool-name], .mcp-stats-tool-item[data-tool-name], tr.mcp-stats-tool-row[data-tool-name]'
+        );
+        if (filterEl && filterEl.getAttribute('data-is-others') !== '1') {
+            const tool = filterEl.getAttribute('data-tool-name');
             if (tool) {
                 e.preventDefault();
                 handleMonitorStatsToolFilter(tool);
             }
             return;
         }
-        const row = e.target.closest('.mcp-stats-tool-row');
-        if (!row) return;
-        const tool = row.getAttribute('data-tool-name');
-        if (tool) {
-            e.preventDefault();
-            handleMonitorStatsToolFilter(tool);
-        }
     });
     root.addEventListener('keydown', function (e) {
         if (e.key !== 'Enter' && e.key !== ' ') return;
-        const distSeg = e.target.closest('.mcp-stats-dist-segment[data-tool-name]');
-        if (!distSeg || distSeg.getAttribute('data-is-others') === '1') return;
-        const tool = distSeg.getAttribute('data-tool-name');
+        const filterEl = e.target.closest(
+            '.mcp-stats-dist-segment[data-tool-name], .mcp-stats-proportion-seg[data-tool-name], ' +
+            '.mcp-stats-tool-item[data-tool-name], tr.mcp-stats-tool-row[data-tool-name]'
+        );
+        if (!filterEl || filterEl.getAttribute('data-is-others') === '1') return;
+        const tool = filterEl.getAttribute('data-tool-name');
         if (tool) {
             e.preventDefault();
             handleMonitorStatsToolFilter(tool);
         }
     });
     root.addEventListener('mouseover', function (e) {
-        const el = e.target.closest('.mcp-stats-dist-segment[data-tool-name], .mcp-stats-dist-legend-item[data-tool-name]');
+        const el = e.target.closest(
+            '.mcp-stats-dist-segment[data-tool-name], .mcp-stats-dist-legend-item[data-tool-name], ' +
+            '.mcp-stats-proportion-seg[data-tool-name], .mcp-stats-tool-item[data-tool-name], tr.mcp-stats-tool-row[data-tool-name]'
+        );
         if (!el || el.getAttribute('data-is-others') === '1') return;
         const tool = el.getAttribute('data-tool-name');
         if (tool) setMcpStatsDistHover(tool);
     });
     root.addEventListener('mouseout', function (e) {
-        const el = e.target.closest('.mcp-stats-dist-segment[data-tool-name], .mcp-stats-dist-legend-item[data-tool-name]');
+        const el = e.target.closest(
+            '.mcp-stats-dist-segment[data-tool-name], .mcp-stats-dist-legend-item[data-tool-name], ' +
+            '.mcp-stats-proportion-seg[data-tool-name], .mcp-stats-tool-item[data-tool-name], tr.mcp-stats-tool-row[data-tool-name]'
+        );
         if (!el) return;
         const related = e.relatedTarget;
         const next = related && related.closest
-            ? related.closest('.mcp-stats-dist-segment[data-tool-name], .mcp-stats-dist-legend-item[data-tool-name]')
+            ? related.closest(
+                '.mcp-stats-dist-segment[data-tool-name], .mcp-stats-dist-legend-item[data-tool-name], ' +
+                '.mcp-stats-proportion-seg[data-tool-name], .mcp-stats-tool-item[data-tool-name], tr.mcp-stats-tool-row[data-tool-name]'
+            )
             : null;
         if (next) return;
         setMcpStatsDistHover('');
     });
     monitorStatsPanelEventsBound = true;
+}
+
+function renderMcpStatsMetricsBar(totals, successRate, rateTone, rateSubText, lastCallText, hasCalls = true) {
+    const totalCallsLabel = mcpMonitorT('totalCalls') || monitorFallback('Total calls', 'Total calls');
+    const successRateLabel = mcpMonitorT('successRate') || monitorFallback('Success rate', 'Success rate');
+    const lastCallLabel = mcpMonitorT('lastCall') || monitorFallback('Last call', 'Last call');
+    const successPill = mcpMonitorT('successCount', { n: totals.success }) || monitorFallback(`Success ${totals.success}`, `Success ${totals.success}`);
+    const failedPill = mcpMonitorT('failedCount', { n: totals.failed }) || monitorFallback(`Failed ${totals.failed}`, `Failed ${totals.failed}`);
+    const rateValue = hasCalls ? `${successRate}%` : successRate;
+
+    return `
+        <div class="mcp-stats-kpi" role="group" aria-label="${escapeHtml(totalCallsLabel)}">
+            <article class="mcp-stats-kpi__item mcp-stats-kpi__item--calls">
+                <span class="mcp-stats-kpi__accent" aria-hidden="true"></span>
+                <div class="mcp-stats-kpi__content">
+                    <span class="mcp-stats-kpi__label">${escapeHtml(totalCallsLabel)}</span>
+                    <span class="mcp-stats-kpi__value">${totals.total}</span>
+                    <div class="mcp-stats-kpi__meta">
+                        <span class="mcp-stats-kpi__chip is-ok">${escapeHtml(successPill)}</span>
+                        <span class="mcp-stats-kpi__chip is-fail">${escapeHtml(failedPill)}</span>
+                    </div>
+                </div>
+            </article>
+            <article class="mcp-stats-kpi__item mcp-stats-kpi__item--rate">
+                <span class="mcp-stats-kpi__accent" aria-hidden="true"></span>
+                <div class="mcp-stats-kpi__content">
+                    <span class="mcp-stats-kpi__label">${escapeHtml(successRateLabel)}</span>
+                    <span class="mcp-stats-kpi__value mcp-stats-kpi__value--rate ${rateTone}">${rateValue}</span>
+                    <span class="mcp-stats-kpi__status ${rateTone}">${escapeHtml(rateSubText)}</span>
+                </div>
+            </article>
+            <article class="mcp-stats-kpi__item mcp-stats-kpi__item--time">
+                <span class="mcp-stats-kpi__accent" aria-hidden="true"></span>
+                <div class="mcp-stats-kpi__content">
+                    <span class="mcp-stats-kpi__label">${escapeHtml(lastCallLabel)}</span>
+                    <time class="mcp-stats-kpi__value mcp-stats-kpi__value--time">${escapeHtml(lastCallText)}</time>
+                </div>
+            </article>
+        </div>`;
+}
+
+function renderMcpStatsToolTable(topTools, totals, activeToolFilter = '') {
+    const colTool = mcpMonitorT('columnTool') || 'Tool';
+    const colCalls = mcpMonitorT('columnCalls') || 'Calls';
+    const colShare = mcpMonitorT('columnShare') || 'Share';
+    const colRate = mcpMonitorT('columnSuccessRate') || 'Success Rate';
+    const unknownToolLabel = mcpMonitorT('unknownTool') || 'Unknown Tool';
+
+    let rowsHtml = '';
+    topTools.forEach((tool, index) => {
+        const rawName = tool.toolName || unknownToolLabel;
+        const name = formatMonitorToolName(rawName);
+        const total = tool.totalCalls || 0;
+        const success = tool.successCalls || 0;
+        const failed = tool.failedCalls || 0;
+        const toolRateNum = total > 0 ? (success / total) * 100 : 0;
+        const toolRate = toolRateNum.toFixed(1);
+        const sharePct = totals.total > 0 ? ((total / totals.total) * 100).toFixed(1) : '0.0';
+        const dotColor = MCP_STATS_DIST_COLORS[index % MCP_STATS_DIST_COLORS.length];
+        const isActive = activeToolFilter && monitorToolNamesEqual(activeToolFilter, rawName);
+        const rateClass = getMcpToolRateClass(toolRateNum);
+        const rankClass = index === 0 ? ' rank-1' : index === 1 ? ' rank-2' : index === 2 ? ' rank-3' : '';
+        const rowAria = mcpMonitorT('toolRowAriaLabel', { name, total, rate: toolRate })
+            || `${name}, ${total} calls, success rate ${toolRate}%`;
+        rowsHtml += `
+            <tr class="mcp-stats-tool-row${isActive ? ' is-active' : ''}"
+                data-tool-name="${escapeHtml(rawName)}"
+                tabindex="0"
+                role="button"
+                aria-label="${escapeHtml(rowAria)}"
+                aria-pressed="${isActive ? 'true' : 'false'}">
+                <td class="col-rank"><span class="mcp-stats-rank${rankClass}">${index + 1}</span></td>
+                <td class="col-tool" title="${escapeHtml(name)}">
+                    <span class="mcp-stats-tool-dot" style="background:${dotColor}" aria-hidden="true"></span>
+                    <span class="mcp-stats-tool-label">${escapeHtml(name)}</span>
+                </td>
+                <td class="col-num">${total}</td>
+                <td class="col-share">${sharePct}%</td>
+                <td class="col-rate">
+                    <span class="mcp-stats-rate ${rateClass}">${toolRate}%</span>
+                    ${failed > 0 ? `<span class="mcp-stats-fail-note">${escapeHtml(mcpMonitorT('failedCount', { n: failed }) || `Failed ${failed}`)}</span>` : ''}
+                </td>
+            </tr>`;
+    });
+
+    return `
+        <table class="mcp-stats-tool-table">
+            <thead>
+                <tr>
+                    <th class="col-rank" scope="col">#</th>
+                    <th class="col-tool" scope="col">${escapeHtml(colTool)}</th>
+                    <th class="col-num" scope="col">${escapeHtml(colCalls)}</th>
+                    <th class="col-share" scope="col">${escapeHtml(colShare)}</th>
+                    <th class="col-rate" scope="col">${escapeHtml(colRate)}</th>
+                </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+        </table>`;
+}
+
+/** MCP combined panel left: stacked share bar + tool ranking list (no nested charts/tables) */
+function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
+    const segments = buildMcpStatsChartSegments(topTools, totals, { groupSmall: false });
+    const topNTotal = topTools.reduce((s, t) => s + (t.totalCalls || 0), 0);
+    const topNSharePct = totals.total > 0 ? ((topNTotal / totals.total) * 100).toFixed(1) : '0.0';
+    const caption = mcpMonitorT('rankingSummary', { n: MCP_STATS_TOP_N, pct: topNSharePct, total: totals.total })
+        || `Top ${MCP_STATS_TOP_N} share ${topNSharePct}% · ${totals.total} calls total`;
+    const unknownToolLabel = mcpMonitorT('unknownTool') || 'Unknown Tool';
+    const colTool = mcpMonitorT('columnTool') || 'Tool';
+    const colCalls = mcpMonitorT('columnCalls') || 'Calls';
+    const colShare = mcpMonitorT('columnShare') || 'Share';
+    const colRate = mcpMonitorT('columnSuccessRate') || 'Success Rate';
+    const distAria = mcpMonitorT('distTitle') || 'Call Distribution';
+
+    const stackedHtml = segments.map((s) => {
+        const isActive = !s.isOthers && activeToolFilter && monitorToolNamesEqual(activeToolFilter, s.name);
+        const displayName = s.isOthers ? s.name : formatMonitorToolName(s.name);
+        const title = `${displayName} · ${s.pct}% · ${s.calls}`;
+        if (s.isOthers) {
+            return `<span class="mcp-stats-proportion-seg is-others" data-is-others="1" role="presentation"
+                style="flex:${s.pctNum} 1 0;background:${s.color}" title="${escapeHtml(title)}"></span>`;
+        }
+        const segAria = mcpMonitorT('distSegmentAria', { name: displayName, pct: s.pct, calls: s.calls })
+            || `${displayName}, share ${s.pct}%, ${s.calls} calls`;
+        return `<span class="mcp-stats-proportion-seg${isActive ? ' is-active' : ''}"
+            data-tool-name="${escapeHtml(s.name)}" data-pct="${s.pct}" data-calls="${s.calls}" data-is-others="0"
+            role="button" tabindex="0" aria-label="${escapeHtml(segAria)}"
+            style="flex:${s.pctNum} 1 0;background:${s.color}" title="${escapeHtml(title)}"></span>`;
+    }).join('');
+
+    const maxCalls = Math.max(1, ...topTools.map((t) => t.totalCalls || 0));
+    const listHtml = topTools.map((tool, index) => {
+        const rawName = tool.toolName || unknownToolLabel;
+        const name = formatMonitorToolName(rawName);
+        const total = tool.totalCalls || 0;
+        const success = tool.successCalls || 0;
+        const failed = tool.failedCalls || 0;
+        const toolRateNum = total > 0 ? (success / total) * 100 : 0;
+        const toolRate = toolRateNum.toFixed(1);
+        const sharePct = totals.total > 0 ? ((total / totals.total) * 100).toFixed(1) : '0.0';
+        const color = MCP_STATS_DIST_COLORS[index % MCP_STATS_DIST_COLORS.length];
+        const barPct = maxCalls > 0 ? ((total / maxCalls) * 100).toFixed(1) : '0';
+        const isActive = activeToolFilter && monitorToolNamesEqual(activeToolFilter, rawName);
+        const rateClass = getMcpToolRateClass(toolRateNum);
+        const rankClass = index === 0 ? ' rank-1' : index === 1 ? ' rank-2' : index === 2 ? ' rank-3' : '';
+        const rowAria = mcpMonitorT('toolRowAriaLabel', { name, total, rate: toolRate })
+            || `${name}, ${total} calls, success rate ${toolRate}%`;
+        const failNote = failed > 0
+            ? `<span class="mcp-stats-tool-item__fail">${escapeHtml(mcpMonitorT('failedCount', { n: failed }) || `Failed ${failed}`)}</span>`
+            : '';
+        return `<li class="mcp-stats-tool-item${isActive ? ' is-active' : ''}"
+            data-tool-name="${escapeHtml(rawName)}" tabindex="0" role="button"
+            aria-label="${escapeHtml(rowAria)}" aria-pressed="${isActive ? 'true' : 'false'}">
+            <span class="mcp-stats-tool-item__rank mcp-stats-rank${rankClass}">${index + 1}</span>
+            <span class="mcp-stats-tool-item__dot" style="background:${color}" aria-hidden="true"></span>
+            <div class="mcp-stats-tool-item__body">
+                <span class="mcp-stats-tool-item__name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                <span class="mcp-stats-tool-item__track" aria-hidden="true">
+                    <span class="mcp-stats-tool-item__fill" style="width:${barPct}%;background:${color}"></span>
+                </span>
+            </div>
+            <div class="mcp-stats-tool-item__metrics">
+                <span class="mcp-stats-tool-item__share">${sharePct}%</span>
+                <span class="mcp-stats-tool-item__calls">${total}</span>
+                <span class="mcp-stats-tool-item__rate ${rateClass}">${toolRate}%${failNote}</span>
+            </div>
+        </li>`;
+    }).join('');
+
+    return `
+        <div class="mcp-stats-tools-panel" role="region" aria-label="${escapeHtml(mcpMonitorT('toolStatsTitle') || '工具统计')}">
+            <div class="mcp-stats-tools-panel__hero">
+                <div class="mcp-stats-proportion-bar" role="img" aria-label="${escapeHtml(distAria)}">${stackedHtml}</div>
+                <p class="mcp-stats-tools-panel__caption">
+                    <span class="mcp-stats-scope-badge mcp-stats-scope-badge--cumulative mcp-stats-scope-badge--inline">${escapeHtml(mcpMonitorT('scopeCumulative') || 'Cumulative')}</span>
+                    ${escapeHtml(caption)}
+                </p>
+            </div>
+            <div class="mcp-stats-tools-panel__list-head" aria-hidden="true">
+                <span>#</span>
+                <span></span>
+                <span>${escapeHtml(colTool)}</span>
+                <span class="mcp-stats-tool-item__metrics-head">
+                    <span>${escapeHtml(colShare)}</span>
+                    <span>${escapeHtml(colCalls)}</span>
+                    <span>${escapeHtml(colRate)}</span>
+                </span>
+            </div>
+            <ol class="mcp-stats-tools-panel__list">${listHtml}</ol>
+        </div>`;
+}
+
+function renderMcpStatsChartAside(topTools, totals, activeToolFilter = '') {
+    const distTitle = mcpMonitorT('distTitle') || 'Call Distribution';
+    const distClickHint = mcpMonitorT('distClickHint') || 'Click sector to filter';
+    const top6ShareLabel = mcpMonitorT('distTop6Share', { n: MCP_STATS_TOP_N }) || `Top ${MCP_STATS_TOP_N} of total calls`;
+    const topNTotal = topTools.reduce((s, t) => s + (t.totalCalls || 0), 0);
+    const top6SharePct = totals.total > 0 ? ((topNTotal / totals.total) * 100).toFixed(1) : '0.0';
+    const centerLabel = `Top ${MCP_STATS_TOP_N}`;
+
+    const segments = buildMcpStatsChartSegments(topTools, totals, { groupSmall: true });
+    const segmentPathsHtml = segments.map((s) => {
+        const pathD = mcpStatsDescribeDonutSegment(s.start, s.end, 48, 30);
+        if (!pathD) return '';
+        const isActive = !s.isOthers && activeToolFilter && activeToolFilter === s.name;
+        const segAria = s.isOthers
+            ? escapeHtml(s.name)
+            : escapeHtml(mcpMonitorT('distSegmentAria', { name: s.name, pct: s.pct, calls: s.calls })
+                || `${s.name}, share ${s.pct}%, ${s.calls} calls`);
+        return `<path class="mcp-stats-dist-segment${isActive ? ' is-active' : ''}${s.isOthers ? ' is-others' : ''}"
+            d="${pathD}" fill="${s.color}"
+            data-tool-name="${s.isOthers ? '' : escapeHtml(s.name)}"
+            data-pct="${s.pct}" data-calls="${s.calls}"
+            data-is-others="${s.isOthers ? '1' : '0'}"
+            tabindex="${s.isOthers ? '-1' : '0'}"
+            role="${s.isOthers ? 'presentation' : 'button'}"
+            aria-label="${segAria}" />`;
+    }).join('');
+
+    return `
+        <div class="mcp-stats-dist-panel mcp-stats-dist-panel--compact"
+            aria-label="${escapeHtml(distTitle)}"
+            data-center-label="${escapeHtml(centerLabel)}"
+            data-center-value="${top6SharePct}"
+            data-center-suffix="%">
+            <p class="mcp-stats-panel__aside-title">${escapeHtml(distTitle)}</p>
+            <div class="mcp-stats-panel__chart">
+                <svg class="mcp-stats-dist-svg" viewBox="0 0 100 100" role="img" aria-label="${escapeHtml(top6ShareLabel)} ${top6SharePct}%">
+                    <g class="mcp-stats-dist-segments">${segmentPathsHtml}</g>
+                </svg>
+                <div class="mcp-stats-dist-donut-hole" aria-hidden="true">
+                    <span class="mcp-stats-dist-donut-label is-default">${centerLabel}</span>
+                    <span class="mcp-stats-dist-donut-value">
+                        <span class="mcp-stats-dist-donut-value-num">${top6SharePct}</span>
+                        <span class="mcp-stats-dist-donut-unit">%</span>
+                    </span>
+                </div>
+            </div>
+            <p class="mcp-stats-panel__aside-hint">${escapeHtml(distClickHint)}</p>
+        </div>`;
+}
+
+function renderMcpStatsDetailSection(topTools, totals, activeToolFilter = '', timeline = null, timelineError = null) {
+    const showTimeline = timeline != null || !!timelineError;
+    return renderMcpStatsCombinedSection(topTools, totals, activeToolFilter, timeline, timelineError, showTimeline);
+}
+
+/** @deprecated Retained for other pages; MCP monitor main panel should use renderMcpStatsToolTable */
+function renderMcpStatsToolRanking(topTools, totals, activeToolFilter = '', options = {}) {
+    if (options.bare || options.embedded) {
+        return renderMcpStatsToolTable(topTools, totals, activeToolFilter);
+    }
+    return renderMcpStatsDetailSection(topTools, totals, activeToolFilter);
 }
 
 function renderMonitorStats(statsMap = {}, lastFetchedAt = null) {
@@ -3952,7 +4854,8 @@ function renderMonitorStats(statsMap = {}, lastFetchedAt = null) {
     }
 
     const entries = normalizeMonitorStatsEntries(statsMap);
-    if (entries.length === 0) {
+    const showTimeline = monitorState.timeline != null || !!monitorState.timelineError;
+    if (entries.length === 0 && !showTimeline) {
         const noStats = mcpMonitorT('noStatsData') || 'No statistics';
         container.innerHTML = '<div class="monitor-empty">' + escapeHtml(noStats) + '</div>';
         const subtitle = document.getElementById('monitor-stats-subtitle');
@@ -3974,24 +4877,22 @@ function renderMonitorStats(statsMap = {}, lastFetchedAt = null) {
         { total: 0, success: 0, failed: 0, lastCallTime: null }
     );
 
-    const successRateNum = totals.total > 0 ? (totals.success / totals.total) * 100 : 0;
-    const successRate = successRateNum.toFixed(1);
+    const hasCalls = totals.total > 0;
+    const successRateNum = hasCalls ? (totals.success / totals.total) * 100 : 0;
+    const successRate = hasCalls ? successRateNum.toFixed(1) : '-';
     const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
     const noCallsYet = mcpMonitorT('noCallsYet') || 'No calls';
     const lastCallText = totals.lastCallTime
         ? (totals.lastCallTime.toLocaleString ? totals.lastCallTime.toLocaleString(locale) : String(totals.lastCallTime))
         : noCallsYet;
 
-    const totalCallsLabel = mcpMonitorT('totalCalls') || 'Total calls';
-    const successRateLabel = mcpMonitorT('successRate') || 'Success rate';
-    const lastCallLabel = mcpMonitorT('lastCall') || 'Latest call';
-    const statsFromAll = mcpMonitorT('statsFromAllTools') || 'Statistics from all tool calls';
-    const successPill = mcpMonitorT('successCount', { n: totals.success }) || `Succeeded ${totals.success}`;
-    const failedPill = mcpMonitorT('failedCount', { n: totals.failed }) || `Failed ${totals.failed}`;
-    const rateTone = getMcpStatsRateTone(successRateNum);
-    let rateSubText = mcpMonitorT('rateHealthy') || 'Healthy';
-    if (successRateNum < 80) rateSubText = mcpMonitorT('rateCritical') || 'High failure rate';
-    else if (successRateNum < 95) rateSubText = mcpMonitorT('rateWarning') || 'Failed calls exist';
+    const rateTone = hasCalls ? getMcpStatsRateTone(successRateNum) : 'is-muted';
+    let rateSubText = noCallsYet;
+    if (hasCalls) {
+        rateSubText = mcpMonitorT('rateHealthy') || 'Healthy';
+        if (successRateNum < 80) rateSubText = mcpMonitorT('rateCritical') || 'High failure rate';
+        else if (successRateNum < 95) rateSubText = mcpMonitorT('rateWarning') || 'Failed calls exist';
+    }
 
     const toolFilterEl = document.getElementById('monitor-tool-filter');
     const activeToolFilter = toolFilterEl ? toolFilterEl.value.trim() : '';
@@ -4002,120 +4903,24 @@ function renderMonitorStats(statsMap = {}, lastFetchedAt = null) {
         .sort((a, b) => (b.totalCalls || 0) - (a.totalCalls || 0))
         .slice(0, MCP_STATS_TOP_N);
 
-    const maxToolCalls = topTools.length > 0 ? (topTools[0].totalCalls || 0) : 0;
-    const unknownToolLabel = mcpMonitorT('unknownTool') || 'Unknown tool';
-    const topToolsTitle = mcpMonitorT('topToolsTitle', { n: MCP_STATS_TOP_N }) || `Top tool calls ${MCP_STATS_TOP_N}`;
-    const toolsHint = mcpMonitorT('clickToFilterTool') || 'Filter executions';
-    const barLegend = mcpMonitorT('barVolumeLegend') || 'Calls';
-    const successRateAria = mcpMonitorT('successRateAria', { rate: successRate }) || `Success rate ${successRate}%`;
-
-    const iconCalls = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>';
-    const iconRate = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-    const iconTime = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
-
-    let toolRowsHtml = '';
-    topTools.forEach((tool, index) => {
-        const name = tool.toolName || unknownToolLabel;
-        const total = tool.totalCalls || 0;
-        const success = tool.successCalls || 0;
-        const failed = tool.failedCalls || 0;
-        const toolRateNum = total > 0 ? (success / total) * 100 : 0;
-        const toolRate = toolRateNum.toFixed(1);
-        const isActive = activeToolFilter && activeToolFilter === name;
-        const rowAria = mcpMonitorT('toolRowAriaLabel', { name, total, rate: toolRate })
-            || `${name}, ${total} calls, Success rate ${toolRate}%`;
-        const rateClass = getMcpToolRateClass(toolRateNum);
-        toolRowsHtml += `
-            <li class="mcp-stats-tool-item">
-                <button type="button" class="mcp-stats-tool-row${isActive ? ' is-active' : ''}"
-                    data-tool-name="${escapeHtml(name)}"
-                    aria-label="${escapeHtml(rowAria)}"
-                    aria-pressed="${isActive ? 'true' : 'false'}">
-                    <span class="mcp-stats-tool-rank">${index + 1}</span>
-                    <div class="mcp-stats-tool-main">
-                        <div class="mcp-stats-tool-top">
-                            <span class="mcp-stats-tool-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
-                            <span class="mcp-stats-tool-metrics">
-                                <span class="mcp-stats-tool-count">${total}</span>
-                                <span aria-hidden="true">·</span>
-                                <span class="mcp-stats-tool-rate ${rateClass}">${toolRate}%</span>
-                                ${failed > 0 ? `<span class="mcp-stats-tool-fail-badge">${escapeHtml(mcpMonitorT('failedCount', { n: failed }) || `Failed ${failed}`)}</span>` : ''}
-                            </span>
-                        </div>
-                        ${renderMcpStatsToolVolumeBar(total, success, failed, maxToolCalls)}
-                    </div>
-                    ${MCP_STATS_TOOL_CHEVRON}
-                </button>
-            </li>
-        `;
-    });
-
-    const clearFilterBtn = activeToolFilter
-        ? `<button type="button" class="mcp-stats-clear-filter">${escapeHtml(mcpMonitorT('clearToolFilter') || 'Clear tool filter')}</button>`
-        : '';
-
+    const showCombined = showTimeline || topTools.length > 0;
     const html = `
         <div class="mcp-exec-stats">
-            <div class="mcp-stats-kpi-row">
-                <article class="mcp-stats-kpi-card mcp-stats-kpi-card--calls">
-                    <div class="mcp-stats-kpi-head">
-                        <span class="mcp-stats-kpi-label">${escapeHtml(totalCallsLabel)}</span>
-                        <span class="mcp-stats-kpi-icon mcp-stats-kpi-icon--calls" aria-hidden="true">${iconCalls}</span>
-                    </div>
-                    <div class="mcp-stats-kpi-value">${totals.total}</div>
-                    ${renderMcpStatsStackedBar(totals.success, totals.failed)}
-                    <div class="mcp-stats-kpi-sub">
-                        <span class="mcp-stats-pill mcp-stats-pill--success">${escapeHtml(successPill)}</span>
-                        <span class="mcp-stats-pill mcp-stats-pill--fail">${escapeHtml(failedPill)}</span>
-                    </div>
-                </article>
-                <article class="mcp-stats-kpi-card mcp-stats-kpi-card--rate">
-                    <div class="mcp-stats-kpi-head">
-                        <span class="mcp-stats-kpi-label">${escapeHtml(successRateLabel)}</span>
-                        <span class="mcp-stats-kpi-icon mcp-stats-kpi-icon--rate" aria-hidden="true">${iconRate}</span>
-                    </div>
-                    <div class="mcp-stats-kpi-body" role="img" aria-label="${escapeHtml(successRateAria)}">
-                        <div class="mcp-stats-kpi-value">${successRate}%</div>
-                        ${renderMcpStatsSuccessRing(successRate)}
-                    </div>
-                    <div class="mcp-stats-kpi-sub">
-                        <span class="mcp-stats-kpi-sub-text ${rateTone}">${escapeHtml(rateSubText)}</span>
-                        <span class="mcp-stats-kpi-sub-text">${escapeHtml(statsFromAll)}</span>
-                    </div>
-                </article>
-                <article class="mcp-stats-kpi-card mcp-stats-kpi-card--time">
-                    <div class="mcp-stats-kpi-head">
-                        <span class="mcp-stats-kpi-label">${escapeHtml(lastCallLabel)}</span>
-                        <span class="mcp-stats-kpi-icon mcp-stats-kpi-icon--time" aria-hidden="true">${iconTime}</span>
-                    </div>
-                    <div class="mcp-stats-kpi-value mcp-stats-kpi-value--time">${escapeHtml(lastCallText)}</div>
-                </article>
-            </div>
-            ${topTools.length > 0 ? `
-            <div class="mcp-stats-split">
-                <div class="mcp-stats-split-left">
-                    <div class="mcp-stats-tools-panel">
-                        <div class="mcp-stats-tools-header">
-                            <div class="mcp-stats-tools-heading">
-                                <h4 class="mcp-stats-tools-title">${escapeHtml(topToolsTitle)}</h4>
-                                <span class="mcp-stats-tools-legend">${escapeHtml(barLegend)}</span>
-                            </div>
-                            <span class="mcp-stats-tools-hint">${escapeHtml(toolsHint)}</span>
-                        </div>
-                        <ol class="mcp-stats-tool-list" aria-label="${escapeHtml(topToolsTitle)}">${toolRowsHtml}</ol>
-                        ${clearFilterBtn}
-                    </div>
-                </div>
-                <div class="mcp-stats-split-right">
-                    ${renderMcpStatsInsightPanel(topTools, totals, activeToolFilter)}
-                </div>
-            </div>
-            ` : ''}
+            ${renderMcpStatsMetricsBar(totals, successRate, rateTone, rateSubText, lastCallText, hasCalls)}
+            ${showCombined ? renderMcpStatsCombinedSection(
+                topTools,
+                totals,
+                activeToolFilter,
+                monitorState.timeline,
+                monitorState.timelineError,
+                showTimeline
+            ) : ''}
         </div>
     `;
 
     container.innerHTML = html;
     bindMonitorStatsPanelEvents();
+    bindMcpStatsTimelineEvents();
     if (toolFilterEl && activeToolFilter) {
         toolFilterEl.classList.add('is-filter-active');
     } else if (toolFilterEl) {
@@ -4140,7 +4945,11 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
         if (hasFilter) {
             container.innerHTML = '<div class="monitor-empty">' + escapeHtml(noRecordsFilter) + '</div>';
         } else {
-            container.innerHTML = '<div class="monitor-empty">' + escapeHtml(noExecutions) + '</div>';
+            const emptyHint = typeof window.t === 'function' ? window.t('mcpMonitor.emptyHint') : monitorFallback('Execution records will appear here after you invoke MCP tools in chat or tasks', 'Execution records will appear here after you invoke MCP tools in chat or tasks');
+            container.innerHTML = `<div class="monitor-empty">
+                <p class="monitor-empty__title">${escapeHtml(noExecutions)}</p>
+                <p class="monitor-empty__hint">${escapeHtml(emptyHint)}</p>
+            </div>`;
         }
         // Internal UI state handling.
         const batchActions = document.getElementById('monitor-batch-actions');
@@ -4168,7 +4977,7 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
             const statusLabel = (typeof window.t === 'function' && statusKey) ? window.t('mcpMonitor.' + statusKey) : getStatusText(status);
             const startTime = exec.startTime ? (new Date(exec.startTime).toLocaleString ? new Date(exec.startTime).toLocaleString(locale || 'en-US') : String(exec.startTime)) : unknownLabel;
             const duration = formatExecutionDuration(exec.startTime, exec.endTime);
-            const toolName = escapeHtml(exec.toolName || unknownToolLabel);
+            const toolName = escapeHtml(formatMonitorToolName(exec.toolName) || unknownToolLabel);
             const rawExecId = exec.id || '';
             const executionId = escapeHtml(rawExecId);
             const terminateBtn = status === 'running'
@@ -4264,13 +5073,15 @@ function renderMonitorPagination() {
     // Internal UI state handling.
     const startItem = total === 0 ? 0 : (page - 1) * pageSize + 1;
     const endItem = total === 0 ? 0 : Math.min(page * pageSize, total);
-    const paginationInfoText = typeof window.t === 'function' ? window.t('mcpMonitor.paginationInfo', { start: startItem, end: endItem, total: total }) : `text ${startItem}-${endItem} / text ${total} records`;
-    const perPageLabel = typeof window.t === 'function' ? window.t('mcpMonitor.perPageLabel') : 'Per page';
-    const firstPageLabel = typeof window.t === 'function' ? window.t('mcp.firstPage') : 'First';
-    const prevPageLabel = typeof window.t === 'function' ? window.t('mcp.prevPage') : 'Previous';
-    const pageInfoText = typeof window.t === 'function' ? window.t('mcp.pageInfo', { page: page, total: totalPages || 1 }) : `Round ${page} / ${totalPages || 1} Page`;
-    const nextPageLabel = typeof window.t === 'function' ? window.t('mcp.nextPage') : 'Next';
-    const lastPageLabel = typeof window.t === 'function' ? window.t('mcp.lastPage') : 'Last';
+    const paginationInfoText = mcpMonitorT('paginationInfo', { start: startItem, end: endItem, total: total })
+        || (typeof window.t === 'function' ? window.t('mcpMonitor.paginationInfo', { start: startItem, end: endItem, total: total }) : `Showing ${startItem}-${endItem} of ${total} records`);
+    const perPageLabel = mcpMonitorT('perPageLabel') || (typeof window.t === 'function' ? window.t('mcpMonitor.perPageLabel') : 'Per page');
+    const firstPageLabel = mcpMonitorT('firstPage') || (typeof window.t === 'function' ? window.t('mcp.firstPage') : 'First');
+    const prevPageLabel = mcpMonitorT('prevPage') || (typeof window.t === 'function' ? window.t('mcp.prevPage') : 'Previous');
+    const pageInfoText = mcpMonitorT('pageInfo', { page: page, total: totalPages || 1 })
+        || (typeof window.t === 'function' ? window.t('mcp.pageInfo', { page: page, total: totalPages || 1 }) : `Page ${page} / ${totalPages || 1}`);
+    const nextPageLabel = mcpMonitorT('nextPage') || (typeof window.t === 'function' ? window.t('mcp.nextPage') : 'Next');
+    const lastPageLabel = mcpMonitorT('lastPage') || (typeof window.t === 'function' ? window.t('mcp.lastPage') : 'Last');
     pagination.innerHTML = `
         <div class="pagination-info">
             <span>${escapeHtml(paginationInfoText)}</span>
@@ -4621,13 +5432,16 @@ document.addEventListener('languagechange', function () {
     updateBatchActionsState();
     loadActiveTasks();
     refreshProgressAndTimelineI18n();
-    if (monitorState.stats && Object.keys(monitorState.stats).length > 0) {
-        renderMonitorStats(monitorState.stats, monitorState.lastFetchedAt);
-    }
+    refreshMonitorPanelFromState();
 });
 
 document.addEventListener('DOMContentLoaded', function () {
     bindMonitorStatsPanelEvents();
+    if (window.i18nReady && typeof window.i18nReady.then === 'function') {
+        window.i18nReady.then(function () {
+            refreshMonitorPanelFromState();
+        });
+    }
 });
 
 window.filterMonitorByTool = filterMonitorByTool;

@@ -3,6 +3,7 @@
  */
 let projectsCache = [];
 let projectsCacheAll = [];
+const PROJECTS_LIST_PAGE_SIZE_KEY = 'cyberstrike.projects_list_page_size';
 let currentProjectId = null;
 let currentProjectTab = 'facts';
 const projectNameById = {};
@@ -167,23 +168,128 @@ function rebuildProjectNameMap(list) {
     });
 }
 
-async function fetchProjectsList(includeArchived) {
+function getProjectsListPageSize() {
+    try {
+        const saved = parseInt(localStorage.getItem(PROJECTS_LIST_PAGE_SIZE_KEY), 10);
+        if ([20, 50, 100].includes(saved)) return saved;
+    } catch (e) { /* ignore */ }
+    return 50;
+}
+
+let projectsListPagination = { page: 1, pageSize: getProjectsListPageSize(), total: 0 };
+let projectsListSearch = '';
+let _projectsListSearchDebounce = null;
+
+function parseListTotalValue(raw, itemsLength) {
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return raw;
+    if (raw != null && raw !== '') {
+        const n = parseInt(String(raw), 10);
+        if (Number.isFinite(n) && n >= 0) return n;
+    }
+    return itemsLength;
+}
+
+function parseListOffsetValue(raw) {
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return raw;
+    if (raw != null && raw !== '') {
+        const n = parseInt(String(raw), 10);
+        if (Number.isFinite(n) && n >= 0) return n;
+    }
+    return 0;
+}
+
+function parseProjectsListResponse(data) {
+    if (Array.isArray(data)) {
+        return { items: data, total: data.length, limit: data.length, offset: 0, isLegacyArray: true };
+    }
+    const items = data.projects || data.items || [];
+    const arr = Array.isArray(items) ? items : [];
+    return {
+        items: arr,
+        total: parseListTotalValue(data.total, arr.length),
+        limit: parseListTotalValue(data.limit, arr.length) || arr.length,
+        offset: parseListOffsetValue(data.offset),
+        isLegacyArray: false,
+    };
+}
+
+async function resolveProjectsListTotal(params, parsed, pageSize, offset) {
+    const serverTotal = parsed.total;
+    // Server total is clearly greater than the end of the current page → trust directly
+    if (!parsed.isLegacyArray && serverTotal > offset + parsed.items.length) {
+        return serverTotal;
+    }
+    // Less than a page → already the last page
+    if (parsed.items.length < pageSize) {
+        return Math.max(serverTotal, offset + parsed.items.length);
+    }
+    // Full page but total might be miscalculated as items.length → probe the next page
+    const probe = new URLSearchParams(params);
+    probe.set('offset', String(offset + pageSize));
+    probe.set('limit', '1');
+    try {
+        const res = await apiFetch(`/api/projects?${probe}`);
+        if (!res.ok) return Math.max(serverTotal, offset + parsed.items.length);
+        const probeParsed = parseProjectsListResponse(await res.json());
+        if (probeParsed.total > serverTotal) return probeParsed.total;
+        if (probeParsed.items.length > 0) {
+            return Math.max(serverTotal, offset + pageSize + 1);
+        }
+    } catch (e) { /* ignore */ }
+    return Math.max(serverTotal, offset + parsed.items.length);
+}
+
+async function fetchAllProjects(includeArchived) {
     const showArchived = includeArchived || document.getElementById('projects-show-archived')?.checked;
-    const url = showArchived ? '/api/projects?limit=200' : '/api/projects?status=active&limit=200';
-    const res = await apiFetch(url);
+    let all = [];
+    const pageSize = 200;
+    let offset = 0;
+    let total = Infinity;
+    while (all.length < total) {
+        const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
+        if (!showArchived) params.set('status', 'active');
+        const res = await apiFetch(`/api/projects?${params}`);
+        if (!res.ok) throw new Error(tp('projects.loadProjectsFailed'));
+        const parsed = parseProjectsListResponse(await res.json());
+        all = all.concat(parsed.items);
+        total = parsed.total;
+        if (!parsed.items.length) break;
+        offset += parsed.items.length;
+    }
+    return all;
+}
+
+async function fetchProjectsList(includeArchived, opts = {}) {
+    const showArchived = includeArchived || document.getElementById('projects-show-archived')?.checked;
+    const page = opts.page ?? projectsListPagination.page;
+    const pageSize = opts.pageSize ?? getProjectsListPageSize();
+    const search = opts.search !== undefined ? opts.search : projectsListSearch;
+    projectsListSearch = search;
+    const offset = (page - 1) * pageSize;
+    const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
+    if (search) params.set('search', search);
+    if (!showArchived) params.set('status', 'active');
+    const res = await apiFetch(`/api/projects?${params}`);
     if (!res.ok) throw new Error(tp('projects.loadProjectsFailed'));
-    const data = await res.json();
-    projectsCache = Array.isArray(data) ? data : [];
-    rebuildProjectNameMap(projectsCache);
-    _projectsListReady = true;
+    const parsed = parseProjectsListResponse(await res.json());
+    const total = await resolveProjectsListTotal(params, parsed, pageSize, offset);
+    projectsCache = parsed.items;
+    projectsListPagination = { page, pageSize: pageSize, total };
+    rebuildProjectNameMap(projectsCacheAll.length ? projectsCacheAll : projectsCache);
     return projectsCache;
 }
 
-/** Internal UI state handling. */
+/** Project selector on chat page etc.: ensure the full list has been fetched (dedup concurrent requests) */
 async function ensureProjectsLoaded(force) {
-    if (!force && _projectsListReady) return projectsCache;
+    if (!force && _projectsListReady) return projectsCacheAll;
     if (!force && _projectsFetchPromise) return _projectsFetchPromise;
-    _projectsFetchPromise = fetchProjectsList(false)
+    _projectsFetchPromise = fetchAllProjects(false)
+        .then((list) => {
+            projectsCacheAll = list;
+            rebuildProjectNameMap(projectsCacheAll);
+            _projectsListReady = true;
+            return projectsCacheAll;
+        })
         .catch((e) => {
             _projectsListReady = false;
             throw e;
@@ -204,9 +310,10 @@ async function ensureDefaultActiveProjectForNewChat() {
         await ensureProjectsLoaded();
         const cur = getActiveProjectId();
         if (cur && isActiveChatProjectId(cur)) return cur;
+        const source = projectsCacheAll.length ? projectsCacheAll : projectsCache;
         const first =
-            projectsCache.find((p) => p.pinned && p.status !== 'archived') ||
-            projectsCache.find((p) => p.status !== 'archived');
+            source.find((p) => p.pinned && p.status !== 'archived') ||
+            source.find((p) => p.status !== 'archived');
         if (first) {
             setActiveProjectId(first.id);
             return first.id;
@@ -238,6 +345,8 @@ async function initProjectsPage() {
     initProjectsModalEscape();
     syncProjectsModalBodyLock();
     updateProjectsDetailVisibility();
+    projectsListPagination.pageSize = getProjectsListPageSize();
+    renderProjectsPagination();
     await loadProjectsList();
     if (!currentProjectId && projectsCache.length) {
         const fromHash = new URLSearchParams(window.location.hash.split('?')[1] || '').get('id');
@@ -250,8 +359,19 @@ async function initProjectsPage() {
 }
 
 async function loadProjectsList() {
+    _projectsListReady = false;
+    projectsCacheAll = [];
+    projectsListPagination.pageSize = getProjectsListPageSize();
     await fetchProjectsList();
     renderProjectsSidebar();
+    renderProjectsPagination();
+    try {
+        projectsCacheAll = await fetchAllProjects();
+        rebuildProjectNameMap(projectsCacheAll);
+        _projectsListReady = true;
+    } catch (e) {
+        console.warn(e);
+    }
     if (typeof refreshChatProjectSelector === 'function') {
         refreshChatProjectSelector();
     }
@@ -277,7 +397,7 @@ function updateProjectsDetailVisibility() {
 
 function updateProjectsListCount() {
     const el = document.getElementById('projects-list-count');
-    if (el) el.textContent = String(projectsCache.length);
+    if (el) el.textContent = String(projectsListPagination.total || projectsCache.length);
 }
 
 /** Internal UI state handling. */
@@ -343,9 +463,10 @@ function formatVulnStatusBadge(status) {
         confirmed: 'vulnerabilityPage.statusConfirmed',
         fixed: 'vulnerabilityPage.statusFixed',
         false_positive: 'vulnerabilityPage.statusFalsePositive',
+        ignored: 'vulnerabilityPage.statusIgnored',
     };
     const label = labelMap[s] ? tp(labelMap[s]) : status || '—';
-    const cls = ['open', 'confirmed', 'fixed', 'false_positive'].includes(s) ? s : 'open';
+    const cls = ['open', 'confirmed', 'fixed', 'false_positive', 'ignored'].includes(s) ? s : 'open';
     return `<span class="status-badge status-${escapeHtml(cls)}">${escapeHtml(label)}</span>`;
 }
 
@@ -385,26 +506,97 @@ function getProjectsListFilter() {
 }
 
 function filterProjectsList() {
-    renderProjectsSidebar();
+    if (_projectsListSearchDebounce) clearTimeout(_projectsListSearchDebounce);
+    _projectsListSearchDebounce = setTimeout(() => {
+        _projectsListSearchDebounce = null;
+        const q = getProjectsListFilter();
+        projectsListPagination.page = 1;
+        fetchProjectsList(undefined, { page: 1, search: q })
+            .then(() => {
+                renderProjectsSidebar();
+                renderProjectsPagination();
+            })
+            .catch((e) => console.warn(e));
+    }, 280);
+}
+
+function goProjectsPage(page) {
+    const totalPages = Math.max(1, Math.ceil((projectsListPagination.total || 0) / projectsListPagination.pageSize) || 1);
+    const next = Math.min(Math.max(1, page), totalPages);
+    if (next === projectsListPagination.page) return;
+    fetchProjectsList(undefined, { page: next })
+        .then(() => {
+            renderProjectsSidebar();
+            renderProjectsPagination();
+            const listEl = document.getElementById('projects-list');
+            if (listEl) listEl.scrollTop = 0;
+        })
+        .catch((e) => console.warn(e));
+}
+
+function changeProjectsPageSize() {
+    const sel = document.getElementById('projects-page-size-pagination');
+    const newSize = sel ? parseInt(sel.value, 10) : 50;
+    if (![20, 50, 100].includes(newSize)) return;
+    try {
+        localStorage.setItem(PROJECTS_LIST_PAGE_SIZE_KEY, String(newSize));
+    } catch (e) { /* ignore */ }
+    projectsListPagination.pageSize = newSize;
+    projectsListPagination.page = 1;
+    fetchProjectsList(undefined, { page: 1, pageSize: newSize })
+        .then(() => {
+            renderProjectsSidebar();
+            renderProjectsPagination();
+        })
+        .catch((e) => console.warn(e));
+}
+
+function renderProjectsPagination() {
+    const el = document.getElementById('projects-pagination');
+    if (!el) return;
+    const { page, pageSize, total } = projectsListPagination;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
+    const navDisabled = total === 0 || totalPages <= 1;
+    el.hidden = false;
+    const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
+    const end = total === 0 ? 0 : Math.min(page * pageSize, total);
+    const infoText = tpFmt('projects.paginationRange', `${start}-${end}/${total}`, { start, end, total });
+    const pageText = tpFmt('projects.paginationPage', `${page}/${totalPages}`, { page, total: totalPages });
+    el.innerHTML = `
+        <div class="sidebar-list-pagination-inner sidebar-list-pagination-inner--compact">
+            <span class="pagination-info">${escapeHtml(infoText)}</span>
+            <div class="pagination-controls">
+                <button type="button" class="btn-icon-pagination" onclick="goProjectsPage(${page - 1})" ${page <= 1 || navDisabled ? 'disabled' : ''} title="${escapeHtml(tp('projects.paginationPrev'))}" aria-label="${escapeHtml(tp('projects.paginationPrev'))}">‹</button>
+                <span class="pagination-page">${escapeHtml(pageText)}</span>
+                <button type="button" class="btn-icon-pagination" onclick="goProjectsPage(${page + 1})" ${page >= totalPages || navDisabled ? 'disabled' : ''} title="${escapeHtml(tp('projects.paginationNext'))}" aria-label="${escapeHtml(tp('projects.paginationNext'))}">›</button>
+            </div>
+            <label class="pagination-page-size">
+                ${escapeHtml(tp('projects.paginationPerPage'))}
+                <select id="projects-page-size-pagination" onchange="changeProjectsPageSize()">
+                    <option value="20" ${pageSize === 20 ? 'selected' : ''}>20</option>
+                    <option value="50" ${pageSize === 50 ? 'selected' : ''}>50</option>
+                    <option value="100" ${pageSize === 100 ? 'selected' : ''}>100</option>
+                </select>
+            </label>
+        </div>`;
 }
 
 function renderProjectsSidebar() {
     const el = document.getElementById('projects-list');
     if (!el) return;
     updateProjectsListCount();
-    const q = getProjectsListFilter();
-    const list = q
-        ? projectsCache.filter((p) => (p.name || '').toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q))
-        : projectsCache;
+    const list = projectsCache;
     if (!projectsCache.length) {
         el.innerHTML =
             `<div class="projects-empty">${escapeHtml(tp('projects.noProjects'))}<br><button type="button" class="btn-primary btn-small projects-empty-btn" onclick="showNewProjectModal()">${escapeHtml(tp('projects.newProject'))}</button></div>`;
         updateProjectsDetailVisibility();
+        renderProjectsPagination();
         return;
     }
     if (!list.length) {
         el.innerHTML = `<div class="projects-empty">${escapeHtml(tp('projects.noMatchingProjects'))}</div>`;
         updateProjectsDetailVisibility();
+        renderProjectsPagination();
         return;
     }
     el.innerHTML = list.map((p) => {
@@ -574,9 +766,12 @@ async function loadProjectFacts() {
         const vulnLink = f.related_vulnerability_id
             ? `<span class="projects-fact-vuln-link" title="${escapeHtml(tp('projects.relatedVulnIdTitle'))}">${escapeHtml(f.related_vulnerability_id.slice(0, 8))}…</span>`
             : '';
+        const pinBadge = f.pinned
+            ? `<span class="projects-list-item-badge" title="${escapeHtml(tp('projects.pinned'))}">${escapeHtml(tp('projects.pinned'))}</span>`
+            : '';
         return `<tr>
-            <td><code>${keyEsc}</code>${vulnLink}</td>
-            <td>${formatCategoryBadge(f.category)}</td>
+            <td class="cell-fact-key"><code class="projects-fact-key-chip" title="${keyEsc}">${keyEsc}</code>${pinBadge}${vulnLink}</td>
+            <td class="cell-fact-category">${formatCategoryBadge(f.category)}</td>
             <td class="cell-summary" title="${escapeHtml(f.summary)}">${escapeHtml(f.summary)}</td>
             <td>${formatFactBodyBadge(f)}</td>
             <td>${formatConfidenceBadge(f.confidence)}</td>
@@ -678,7 +873,6 @@ async function viewProjectFactBody(factKey) {
     ];
     if (f.related_vulnerability_id) metaParts.push(tpFmt('projects.factMetaRelatedVuln', `Related vulnerability: ${f.related_vulnerability_id}`, { value: f.related_vulnerability_id }));
     if (f.source_conversation_id) metaParts.push(tpFmt('projects.factMetaSourceConversation', `Source conversation: ${f.source_conversation_id}`, { value: f.source_conversation_id }));
-    if (f.supersedes_fact_id) metaParts.push(tp('projects.factMetaHasPrevious'));
     document.getElementById('fact-detail-meta').textContent = metaParts.join(' · ');
     document.getElementById('fact-detail-body').textContent = f.body || tp('projects.emptyBody');
     const warnEl = document.getElementById('fact-detail-sparse-warn');
@@ -689,33 +883,6 @@ async function viewProjectFactBody(factKey) {
         } else {
             warnEl.hidden = true;
             warnEl.textContent = '';
-        }
-    }
-    const prevWrap = document.getElementById('fact-detail-prev-wrap');
-    if (prevWrap) {
-        prevWrap.hidden = true;
-        if (f.id && f.supersedes_fact_id) {
-            try {
-                const prevRes = await apiFetch(
-                    `/api/projects/${currentProjectId}/facts/${encodeURIComponent(f.id)}/previous-version`,
-                );
-                if (prevRes.ok) {
-                    const prev = await prevRes.json();
-                    prevWrap.hidden = false;
-                    document.getElementById('fact-detail-prev-meta').textContent = tpFmt(
-                        'projects.factPreviousMeta',
-                        `Archived at ${formatProjectTime(prev.archived_at)} · Summary: ${prev.summary || '—'} · Confidence: ${prev.confidence || '—'}`,
-                        {
-                            time: formatProjectTime(prev.archived_at),
-                            summary: prev.summary || '—',
-                            confidence: prev.confidence || '—',
-                        },
-                    );
-                    document.getElementById('fact-detail-prev-body').textContent = prev.body || tp('projects.emptyBody');
-                }
-            } catch (e) {
-                console.warn(e);
-            }
         }
     }
     const linkBtn = document.getElementById('fact-detail-link-vuln-btn');
@@ -1165,6 +1332,8 @@ function resetFactModalForm() {
     document.getElementById('fact-modal-summary').value = '';
     document.getElementById('fact-modal-body').value = '';
     document.getElementById('fact-modal-confidence').value = 'tentative';
+    const pinEl = document.getElementById('fact-modal-pinned');
+    if (pinEl) pinEl.checked = false;
     const rel = document.getElementById('fact-modal-related-vuln');
     if (rel) rel.value = '';
     updateFactFormHints();
@@ -1198,6 +1367,8 @@ function fillFactModalForm(f) {
     }
     const rel = document.getElementById('fact-modal-related-vuln');
     if (rel) rel.value = f.related_vulnerability_id || '';
+    const pinEl = document.getElementById('fact-modal-pinned');
+    if (pinEl) pinEl.checked = !!f.pinned;
     updateFactFormHints();
 }
 
@@ -1242,6 +1413,7 @@ async function saveFactModal() {
         summary,
         body,
         confidence: document.getElementById('fact-modal-confidence').value,
+        pinned: !!document.getElementById('fact-modal-pinned')?.checked,
         related_vulnerability_id: document.getElementById('fact-modal-related-vuln')?.value?.trim() || '',
     };
     const editId = window._factModalEditId;
@@ -1337,7 +1509,8 @@ function getChatProjectSelection() {
 
 function isActiveChatProjectId(id) {
     if (!id) return false;
-    return projectsCache.some((p) => p.id === id && p.status !== 'archived');
+    const source = projectsCacheAll.length ? projectsCacheAll : projectsCache;
+    return source.some((p) => p.id === id && p.status !== 'archived');
 }
 
 /** Internal UI state handling. */
@@ -1392,7 +1565,8 @@ function renderChatProjectPanelList() {
     const list = document.getElementById('chat-project-list');
     if (!list) return;
     const selected = resolveChatProjectSelection();
-    const activeProjects = projectsCache.filter((p) => p.status !== 'archived');
+    const source = projectsCacheAll.length ? projectsCacheAll : projectsCache;
+    const activeProjects = source.filter((p) => p.status !== 'archived');
     const items = [{ id: '', name: tp('projects.noProject'), description: tp('projects.noProjectDescription') }, ...activeProjects];
     if (!items.length) {
         list.innerHTML = `<div class="chat-project-panel-empty">${escapeHtml(tp('projects.noProjectsClickCreate'))}</div>`;
@@ -1535,6 +1709,7 @@ function initChatProjectSelector() {
         window._projectsLanguageListenerBound = true;
         document.addEventListener('languagechange', () => {
             renderProjectsSidebar();
+            renderProjectsPagination();
             updateChatProjectButtonLabel();
             const panel = document.getElementById('chat-project-panel');
             if (panel && panel.style.display === 'flex') renderChatProjectPanelList();
@@ -1594,6 +1769,10 @@ window.restoreProjectFactByKey = restoreProjectFactByKey;
 window.openVulnerabilitiesForProject = openVulnerabilitiesForProject;
 window.openVulnerabilityDetail = openVulnerabilityDetail;
 window.filterProjectsList = filterProjectsList;
+window.goProjectsPage = goProjectsPage;
+window.changeProjectsPageSize = changeProjectsPageSize;
+window.parseProjectsListResponse = parseProjectsListResponse;
+window.fetchAllProjects = fetchAllProjects;
 window.debouncedLoadProjectFacts = debouncedLoadProjectFacts;
 window.debouncedLoadProjectVulnerabilities = debouncedLoadProjectVulnerabilities;
 window.loadProjectVulnerabilities = loadProjectVulnerabilities;

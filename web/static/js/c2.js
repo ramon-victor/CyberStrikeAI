@@ -1,10 +1,10 @@
-// C2 模块前端逻辑 - 完整实现
-// 支持: xterm 终端、文件管理、监听器/会话/任务/事件/Payload/Profile 管理
+// C2 module frontend logic - complete implementation
+// Support: xterm terminal, file management, listener/session/task/event/Payload/Profile management
 
 (function() {
     'use strict';
 
-    // C2 模块命名空间
+    // C2 module namespace
     const C2 = {
         currentPage: '',
         listeners: [],
@@ -22,20 +22,26 @@
         selectedSessionId: null,
         selectedListenerId: null,
         eventSource: null,
-        // xterm 相关
+        // xterm related
         terminalInstance: null,
         terminalFitAddon: null,
         terminalResizeObserver: null,
         terminalContainer: null,
-        terminalSessionId: 'main',
-        // 文件管理
-        currentPath: '/',
+        terminalSessionId: null,
+        terminalHistory: {},
+        terminalLogs: {},
+        terminalBusy: false,
+        terminalQueue: [],
+        // File management
+        currentPath: '.',
+        implantPwd: null,
         fileList: [],
-        // 任务轮询
+        fileUploadBusy: false,
+        // Task polling
         taskPollInterval: null,
     };
 
-    // API 基础路径
+    // API base path
     const API_BASE = '/api/c2';
 
     window.__c2DownloadPayload = function(filename) {
@@ -90,8 +96,58 @@
         return status;
     }
 
+    function formatTaskCommand(task) {
+        if (!task) return '';
+        const type = String(task.taskType || '').toLowerCase();
+        const p = task.payload;
+        if (!p || typeof p !== 'object' || Object.keys(p).length === 0) {
+            if (type === 'pwd' || type === 'ps' || type === 'screenshot') return type;
+            return '';
+        }
+        switch (type) {
+            case 'shell':
+            case 'exec':
+                return p.command != null ? String(p.command) : '';
+            case 'ls':
+            case 'cd':
+                return p.path != null ? String(p.path) : '';
+            case 'download':
+                return p.remote_path != null ? String(p.remote_path) : '';
+            case 'upload':
+                if (p.remote_path) return String(p.remote_path);
+                if (p.file_id) return 'file:' + String(p.file_id);
+                return '';
+            case 'kill_proc':
+                return p.pid != null ? 'pid:' + String(p.pid) : '';
+            case 'sleep':
+                let sleepStr = p.seconds != null ? 'sleep ' + p.seconds + 's' : '';
+                if (p.jitter != null) sleepStr += (sleepStr ? ', ' : '') + 'jitter ' + p.jitter + '%';
+                return sleepStr;
+            case 'port_fwd':
+                return [p.action, p.remote_host, p.remote_port, p.local_port].filter(v => v != null && v !== '').join(':');
+            case 'socks_start':
+            case 'socks_stop':
+                return p.port != null ? 'port:' + String(p.port) : type;
+            case 'load_assembly':
+                if (p.args) return String(p.args);
+                if (p.file_id) return 'file:' + String(p.file_id);
+                return '';
+            case 'persist':
+                return p.method != null ? String(p.method) : '';
+            default:
+                try { return JSON.stringify(p); } catch (e) { return ''; }
+        }
+    }
+
+    function truncateCommand(cmd, maxLen) {
+        if (!cmd) return '';
+        const s = String(cmd);
+        if (!maxLen || s.length <= maxLen) return s;
+        return s.substring(0, maxLen - 1) + '\u2026';
+    }
+
     // ============================================================================
-    // 工具函数
+    // Utility functions
     // ============================================================================
 
     function apiRequest(method, url, data) {
@@ -116,10 +172,11 @@
         const container = document.getElementById('c2-toast-container') || (() => {
             const div = document.createElement('div');
             div.id = 'c2-toast-container';
-            div.style.cssText = 'position:fixed;top:20px;right:20px;z-index:10000;display:flex;flex-direction:column;gap:8px;';
+            div.style.cssText = 'position:fixed;top:20px;right:20px;z-index:10100;display:flex;flex-direction:column;gap:8px;';
             document.body.appendChild(div);
             return div;
         })();
+        container.style.zIndex = '10100';
         const toast = document.createElement('div');
         const colors = { error: '#e53e3e', success: '#38a169', info: '#3182ce', warn: '#d69e2e' };
         toast.style.cssText = `background:${colors[type] || colors.info};color:#fff;padding:10px 18px;border-radius:6px;font-size:0.875rem;box-shadow:0 4px 12px rgba(0,0,0,0.2);opacity:0;transition:opacity .3s;max-width:400px;word-break:break-word;`;
@@ -151,7 +208,7 @@
         return div.innerHTML;
     }
 
-    /** 任务列表操作按钮（查看/取消/删除）— 事件委托 */
+    /** Task list action buttons (view/cancel/delete) — event delegation */
     function bindC2TaskActionDelegation() {
         if (document.documentElement.dataset.c2TaskActionsBound === '1') return;
         document.documentElement.dataset.c2TaskActionsBound = '1';
@@ -170,7 +227,7 @@
     }
     bindC2TaskActionDelegation();
 
-    /** 监听器表单：Malleable Profile 下拉选项 HTML（value / 文本已转义） */
+    /** Listener form: Malleable Profile dropdown options HTML (value / text escaped) */
     function listenerProfileSelectHtml(selectedProfileId) {
         const sel = selectedProfileId ? String(selectedProfileId) : '';
         let opts = `<option value="">${escapeHtml(c2t('c2.listeners.malleableProfileNone'))}</option>`;
@@ -192,7 +249,7 @@
         return v != null ? String(v).trim() : '';
     }
 
-    /** 监听器卡片展示用 Profile 名称（依赖 C2.profiles，由 loadListeners 一并拉取） */
+    /** Profile name for listener card display (depends on C2.profiles, pulled together with loadListeners) */
     function listenerProfileDisplayName(l) {
         const pid = listenerResolvedProfileId(l);
         if (!pid) return '';
@@ -230,7 +287,7 @@
         return c2t('c2.listeners.stopped');
     }
 
-    /** 避免 i18n 插值把日期里的「/」转成 &#x2F;，与 formatTime 拼接后整体转义 */
+    /** Prevent i18n interpolation from converting '/' in dates to &#x2F;, escape as a whole after concatenating with formatTime */
     function formatListenerStartedHtml(dateStr) {
         if (!dateStr) return '';
         const prefix = c2t('c2.listeners.startedAtPrefix');
@@ -253,7 +310,7 @@
     }
 
     // ============================================================================
-    // 页面初始化
+    // Page initialization
     // ============================================================================
 
     C2.init = function() {
@@ -264,12 +321,12 @@
         }
 
         switch(pageId) {
-            case 'c2':
             case 'c2-listeners':
                 C2.loadListeners();
                 break;
             case 'c2-sessions':
                 C2.loadSessions();
+                C2.ensureListenersLoaded();
                 break;
             case 'c2-tasks':
                 C2.loadTasks();
@@ -287,8 +344,18 @@
     };
 
     // ============================================================================
-    // 监听器管理
+    // Listener management
     // ============================================================================
+
+    C2.ensureListenersLoaded = function() {
+        if (C2.listeners && C2.listeners.length > 0) {
+            return Promise.resolve(C2.listeners);
+        }
+        return apiRequest('GET', `${API_BASE}/listeners`).then(function(data) {
+            C2.listeners = (data && data.listeners) || [];
+            return C2.listeners;
+        });
+    };
 
     C2.loadListeners = function() {
         Promise.all([
@@ -302,11 +369,10 @@
                 C2.profiles = pdata.profiles;
             }
             C2.renderListeners();
-            C2.updateDashboardStats();
         });
     };
 
-    /** 拉取 Profile 列表（监听器表单用）；失败时置空列表不阻断弹窗 */
+    /** Fetch Profile list (for listener form); clear list on failure without blocking modal */
     C2.ensureProfilesLoaded = function() {
         return apiRequest('GET', `${API_BASE}/profiles`).then(data => {
             if (data && data.error) {
@@ -488,7 +554,7 @@
         });
     };
 
-    /** 非 HTTP/HTTPS Beacon 时隐藏 Profile 行（避免误以为 TCP 等也会用） */
+    /** Hide Profile row when not HTTP/HTTPS Beacon (avoid mistaking that TCP etc. will also use it) */
     C2.syncListenerProfileRowForType = function() {
         const typeEl = document.getElementById('c2-listener-type');
         const row = document.getElementById('c2-listener-profile-group');
@@ -668,7 +734,6 @@
         return apiRequest('GET', `${API_BASE}/sessions`).then(data => {
             C2.sessions = data.sessions || [];
             C2.renderSessions();
-            C2.updateDashboardStats();
         });
     };
 
@@ -723,9 +788,10 @@
 
     C2.selectSession = function(id) {
         C2.selectedSessionId = id;
+        C2.implantPwd = null;
+        C2.currentPath = '.';
         C2.renderSessions();
         C2.renderSessionDetail(id);
-        C2.initTerminal();
     };
 
     C2.renderSessionDetail = function(id) {
@@ -768,9 +834,16 @@
                     </div>
                     <div id="c2-tab-files" class="c2-tab-panel" style="display:none;">
                         <div class="c2-file-toolbar">
-                            <button class="btn-ghost btn-sm" onclick="C2.loadFileList('..')">⬆ ${escapeHtml(c2t('c2.files.parent'))}</button>
+                            <button class="btn-ghost btn-sm" onclick="C2.goToParentDirectory()">⬆ ${escapeHtml(c2t('c2.files.parent'))}</button>
                             <button class="btn-ghost btn-sm" onclick="C2.refreshFiles()">${escapeHtml(c2t('c2.files.refresh'))}</button>
+                            <button type="button" class="btn-ghost btn-sm" id="c2-file-upload-btn" onclick="C2.openFileUploadPicker()" title="${escapeHtml(c2t('c2.files.upload'))}">📤 ${escapeHtml(c2t('c2.files.upload'))}</button>
+                            <input type="file" id="c2-file-upload-input" style="display:none" onchange="C2.onC2FileUploadPick(event)" />
                             <span id="c2-current-path" class="c2-path-breadcrumb">/</span>
+                        </div>
+                        <div id="c2-file-upload-hint" class="c2-file-upload-hint" hidden role="status"></div>
+                        <div id="c2-file-upload-progress" class="c2-file-upload-progress" hidden role="status" aria-live="polite">
+                            <div class="c2-file-upload-progress-track" aria-hidden="true"><div class="c2-file-upload-progress-fill" id="c2-file-upload-progress-fill"></div></div>
+                            <span class="c2-file-upload-progress-label" id="c2-file-upload-progress-label"></span>
                         </div>
                         <div id="c2-file-list" class="c2-file-list"></div>
                     </div>
@@ -815,6 +888,10 @@
             if (!isCurlBeacon) C2.initTerminal();
             C2.loadFileList(s.id, '.');
             C2.loadSessionTasks(s.id);
+            C2.updateFileUploadButton(s);
+            C2.ensureListenersLoaded().then(function() {
+                C2.updateFileUploadButton(s);
+            });
         }, 50);
     };
 
@@ -829,7 +906,10 @@
         if (panel) panel.style.display = 'block';
 
         if (tab === 'terminal') {
-            setTimeout(() => C2.fitTerminal(), 50);
+            setTimeout(function () {
+                C2.fitTerminal();
+                if (C2.terminalInstance) C2.terminalInstance.focus();
+            }, 50);
         }
     };
 
@@ -875,97 +955,57 @@
     // xterm 终端
     // ============================================================================
 
-    C2.initTerminal = function() {
-        const container = document.getElementById('c2-terminal-container');
-        if (!container || typeof Terminal === 'undefined') return;
-
-        if (C2.terminalInstance) {
-            C2.terminalInstance.dispose();
+    C2.serializeTerminalBuffer = function(term) {
+        if (!term || !term.buffer || !term.buffer.active) return '';
+        const buf = term.buffer.active;
+        const lines = [];
+        for (let i = 0; i < buf.length; i++) {
+            const line = buf.getLine(i);
+            if (line) lines.push(line.translateToString(true));
         }
-
-        const term = new Terminal({
-            cursorBlink: true,
-            cursorStyle: 'block',
-            fontSize: 14,
-            fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-            lineHeight: 1.3,
-            scrollback: 5000,
-            theme: {
-                background: '#0d1117',
-                foreground: '#e6edf3',
-                cursor: '#58a6ff',
-                selection: 'rgba(88, 166, 255, 0.3)'
-            }
-        });
-
-        if (typeof FitAddon !== 'undefined') {
-            const FitCtor = FitAddon.FitAddon || FitAddon;
-            C2.terminalFitAddon = new FitCtor();
-            term.loadAddon(C2.terminalFitAddon);
-        }
-
-        term.open(container);
-        
-        try {
-            if (C2.terminalFitAddon) C2.terminalFitAddon.fit();
-        } catch (e) {}
-
-        let lineBuffer = '';
-        const prompt = '$ ';
-        
-        term.writeln('\x1b[36m' + c2t('c2.sessions.terminalWelcome') + '\x1b[0m');
-        term.writeln('');
-        term.write(prompt);
-
-        term.onData(e => {
-            const code = e.charCodeAt(0);
-            if (code === 13) { // Enter
-                term.writeln('');
-                const cmd = lineBuffer.trim();
-                lineBuffer = '';
-                if (cmd) {
-                    C2.executeInTerminal(cmd, term);
-                } else {
-                    term.write(prompt);
-                }
-            } else if (code === 127) { // Backspace
-                if (lineBuffer.length > 0) {
-                    lineBuffer = lineBuffer.slice(0, -1);
-                    term.write('\b \b');
-                }
-            } else if (code >= 32) { // Printable
-                lineBuffer += e;
-                term.write(e);
-            }
-        });
-
-        C2.terminalInstance = term;
-
-        // Resize observer
-        if (C2.terminalResizeObserver) {
-            C2.terminalResizeObserver.disconnect();
-        }
-        C2.terminalResizeObserver = new ResizeObserver(() => {
-            C2.fitTerminal();
-        });
-        C2.terminalResizeObserver.observe(container);
+        return lines.join('\n');
     };
 
-    C2.fitTerminal = function() {
-        if (C2.terminalFitAddon && C2.terminalInstance) {
-            try {
-                C2.terminalFitAddon.fit();
-            } catch (e) {}
+    C2.pushTerminalHistory = function(cmd) {
+        const sid = C2.selectedSessionId;
+        if (!sid || !cmd) return;
+        if (!C2.terminalHistory[sid]) C2.terminalHistory[sid] = [];
+        const hist = C2.terminalHistory[sid];
+        if (hist.length === 0 || hist[hist.length - 1] !== cmd) {
+            hist.push(cmd);
+            if (hist.length > 200) hist.shift();
         }
     };
 
-    C2.executeInTerminal = function(cmd, term) {
+    C2.finishTerminalCommand = function(term, status) {
+        C2.terminalBusy = false;
+        const statusEl = document.getElementById('c2-terminal-status');
+        if (status === 'err' && statusEl) {
+            statusEl.textContent = c2t('c2.sessions.termStatusErr');
+        } else if (status === 'timeout' && statusEl) {
+            statusEl.textContent = c2t('c2.sessions.termStatusTimeout');
+        } else if (statusEl && C2.terminalQueue.length === 0) {
+            statusEl.textContent = c2t('c2.sessions.termStatusReady');
+        }
+        if (C2.terminalQueue.length > 0) {
+            const next = C2.terminalQueue.shift();
+            C2.runTerminalCommand(next, term);
+            return;
+        }
+        term.write('$ ');
+        if (statusEl && status !== 'err' && status !== 'timeout') {
+            statusEl.textContent = c2t('c2.sessions.termStatusReady');
+        }
+    };
+
+    C2.runTerminalCommand = function(cmd, term) {
         if (!C2.selectedSessionId) {
             term.writeln('\x1b[31m' + c2t('c2.sessions.termNoSession') + '\x1b[0m');
             term.write('$ ');
             return;
         }
-
+        C2.terminalBusy = true;
+        C2.pushTerminalHistory(cmd);
         const statusEl = document.getElementById('c2-terminal-status');
         if (statusEl) statusEl.textContent = c2t('c2.sessions.termStatusExec');
 
@@ -976,12 +1016,27 @@
         }).then(data => {
             if (data.error) {
                 term.writeln(`\x1b[31mError: ${data.error}\x1b[0m`);
-                term.write('$ ');
-                if (statusEl) statusEl.textContent = c2t('c2.sessions.termStatusErr');
+                C2.finishTerminalCommand(term, 'err');
             } else {
                 C2.waitForTaskResult(data.task?.id || data.task_id, term);
             }
+        }).catch(function () {
+            term.writeln('\x1b[31mError: request failed\x1b[0m');
+            C2.finishTerminalCommand(term, 'err');
         });
+    };
+
+    C2.executeInTerminal = function(cmd, term) {
+        if (!cmd) {
+            term.write('$ ');
+            return;
+        }
+        if (C2.terminalBusy) {
+            C2.terminalQueue.push(cmd);
+            term.writeln('\x1b[33m' + c2t('c2.sessions.termQueued') + '\x1b[0m');
+            return;
+        }
+        C2.runTerminalCommand(cmd, term);
     };
 
     C2.waitForTaskResult = function(taskId, term) {
@@ -992,9 +1047,7 @@
         const check = () => {
             if (++attempts > maxAttempts) {
                 term.writeln('\x1b[33m' + c2t('c2.sessions.termWaitTimeout') + '\x1b[0m');
-                term.write('$ ');
-                const statusEl = document.getElementById('c2-terminal-status');
-                if (statusEl) statusEl.textContent = c2t('c2.sessions.termStatusTimeout');
+                C2.finishTerminalCommand(term, 'timeout');
                 return;
             }
             apiRequest('GET', `${API_BASE}/tasks/${taskId}`).then(data => {
@@ -1007,16 +1060,364 @@
                     if (task.error) {
                         term.writeln(`\x1b[31m${task.error}\x1b[0m`);
                     }
-                    term.write('$ ');
-                    const statusEl = document.getElementById('c2-terminal-status');
-                    if (statusEl) statusEl.textContent = c2t('c2.sessions.termStatusReady');
+                    C2.finishTerminalCommand(term, task.status === 'failed' ? 'err' : 'ready');
                 } else {
                     delay = Math.min(delay * 1.5, maxDelay);
                     setTimeout(check, delay);
                 }
+            }).catch(function () {
+                C2.finishTerminalCommand(term, 'err');
             });
         };
         check();
+    };
+
+    C2.initTerminal = function() {
+        const container = document.getElementById('c2-terminal-container');
+        if (!container || typeof Terminal === 'undefined') return;
+
+        if (C2.terminalInstance && C2.terminalSessionId) {
+            C2.terminalLogs[C2.terminalSessionId] = C2.serializeTerminalBuffer(C2.terminalInstance);
+        }
+        if (C2.terminalInstance) {
+            C2.terminalInstance.dispose();
+        }
+
+        const sessionId = C2.selectedSessionId || '_none';
+        C2.terminalSessionId = sessionId;
+        C2.terminalQueue = [];
+        C2.terminalBusy = false;
+
+        const term = new Terminal({
+            cursorBlink: true,
+            cursorStyle: 'block',
+            fontSize: 14,
+            fontFamily: 'Menlo, Monaco, "Courier New", "PingFang SC", "Microsoft YaHei", monospace',
+            lineHeight: 1.3,
+            scrollback: 5000,
+            theme: {
+                background: '#0d1117',
+                foreground: '#e6edf3',
+                cursor: '#58a6ff',
+                cursorAccent: '#0d1117',
+                selection: 'rgba(88, 166, 255, 0.3)'
+            }
+        });
+
+        if (typeof FitAddon !== 'undefined') {
+            const FitCtor = FitAddon.FitAddon || FitAddon;
+            C2.terminalFitAddon = new FitCtor();
+            term.loadAddon(C2.terminalFitAddon);
+        }
+
+        term.open(container);
+        try {
+            if (C2.terminalFitAddon) C2.terminalFitAddon.fit();
+        } catch (e) {}
+
+        let lineBuffer = '';
+        let cursorIndex = 0;
+        let historyIndex = -1;
+        let lastPasteAt = 0;
+        let lastPasteText = '';
+        const prompt = '$ ';
+
+        function redrawInputLine() {
+            term.write('\x1b[2K\r' + prompt + lineBuffer);
+            const tail = lineBuffer.length - cursorIndex;
+            if (tail > 0) term.write('\x1b[' + tail + 'D');
+        }
+
+        function resetInputLine() {
+            lineBuffer = '';
+            cursorIndex = 0;
+            historyIndex = -1;
+            term.write('\x1b[2K\r' + prompt);
+        }
+
+        function insertPlainText(text) {
+            const safe = String(text).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+            if (!safe) return;
+            lineBuffer = lineBuffer.slice(0, cursorIndex) + safe + lineBuffer.slice(cursorIndex);
+            cursorIndex += safe.length;
+            redrawInputLine();
+        }
+
+        function deleteWordBeforeCursor() {
+            if (cursorIndex === 0) return;
+            let start = cursorIndex;
+            while (start > 0 && /\s/.test(lineBuffer[start - 1])) start--;
+            while (start > 0 && !/\s/.test(lineBuffer[start - 1])) start--;
+            lineBuffer = lineBuffer.slice(0, start) + lineBuffer.slice(cursorIndex);
+            cursorIndex = start;
+            redrawInputLine();
+        }
+
+        function moveWordLeft() {
+            if (cursorIndex === 0) return;
+            let pos = cursorIndex;
+            while (pos > 0 && /\s/.test(lineBuffer[pos - 1])) pos--;
+            while (pos > 0 && !/\s/.test(lineBuffer[pos - 1])) pos--;
+            const delta = cursorIndex - pos;
+            if (delta > 0) {
+                term.write('\x1b[' + delta + 'D');
+                cursorIndex = pos;
+            }
+        }
+
+        function moveWordRight() {
+            if (cursorIndex >= lineBuffer.length) return;
+            let pos = cursorIndex;
+            while (pos < lineBuffer.length && /\s/.test(lineBuffer[pos])) pos++;
+            while (pos < lineBuffer.length && !/\s/.test(lineBuffer[pos])) pos++;
+            const delta = pos - cursorIndex;
+            if (delta > 0) {
+                term.write('\x1b[' + delta + 'C');
+                cursorIndex = pos;
+            }
+        }
+
+        function showHistoryEntry(entry) {
+            lineBuffer = entry || '';
+            cursorIndex = lineBuffer.length;
+            term.write('\x1b[2K\r' + prompt + lineBuffer);
+        }
+
+        function submitCurrentLine() {
+            if (C2.terminalBusy) {
+                term.writeln('');
+                term.writeln('\x1b[33m' + c2t('c2.sessions.termWaitFinish') + '\x1b[0m');
+                term.write(prompt + lineBuffer);
+                const tail = lineBuffer.length - cursorIndex;
+                if (tail > 0) term.write('\x1b[' + tail + 'D');
+                return;
+            }
+            term.writeln('');
+            const cmd = lineBuffer.trim();
+            lineBuffer = '';
+            cursorIndex = 0;
+            historyIndex = -1;
+            if (cmd) {
+                C2.executeInTerminal(cmd, term);
+            } else {
+                term.write(prompt);
+            }
+        }
+
+        function handlePasteText(text) {
+            const now = Date.now();
+            if (text === lastPasteText && now - lastPasteAt < 80) return;
+            lastPasteAt = now;
+            lastPasteText = text;
+
+            const normalized = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            if (normalized.indexOf('\n') === -1) {
+                insertPlainText(normalized);
+                return;
+            }
+            const endsWithNewline = normalized.endsWith('\n');
+            const parts = normalized.split('\n');
+            const tail = parts.pop() || '';
+            parts.forEach(function (part) {
+                insertPlainText(part);
+                submitCurrentLine();
+            });
+            if (tail) insertPlainText(tail);
+            else if (endsWithNewline && parts.length === 0) submitCurrentLine();
+        }
+
+        const savedLog = C2.terminalLogs[sessionId];
+        if (savedLog) {
+            term.write(String(savedLog).replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r\n'));
+            if (!savedLog.endsWith('\n')) term.write('\r\n');
+        } else {
+            term.writeln('\x1b[36m' + c2t('c2.sessions.terminalWelcome') + '\x1b[0m');
+            term.writeln('');
+        }
+        term.write(prompt);
+
+        term.onData(function (e) {
+            if (e === '\x0c') {
+                term.clear();
+                resetInputLine();
+                C2.terminalLogs[sessionId] = '';
+                return;
+            }
+            if (e === '\x03') {
+                if (C2.terminalBusy) {
+                    term.writeln('');
+                    term.writeln('\x1b[33m^C (' + c2t('c2.sessions.termCtrlC') + ')\x1b[0m');
+                }
+                resetInputLine();
+                return;
+            }
+            if (e === '\x16') {
+                if (navigator.clipboard && navigator.clipboard.readText) {
+                    navigator.clipboard.readText().then(handlePasteText).catch(function () {});
+                }
+                return;
+            }
+            if (e.length > 1 && e.indexOf('\x1b') !== 0) {
+                handlePasteText(e);
+                return;
+            }
+            if (e === '\x1b[D' || e === '\x1bOD') {
+                if (cursorIndex > 0) {
+                    cursorIndex--;
+                    term.write('\x1b[D');
+                }
+                return;
+            }
+            if (e === '\x1b[C' || e === '\x1bOC') {
+                if (cursorIndex < lineBuffer.length) {
+                    cursorIndex++;
+                    term.write('\x1b[C');
+                }
+                return;
+            }
+            if (e === '\x1b[1;3D' || e === '\x1bb') {
+                moveWordLeft();
+                return;
+            }
+            if (e === '\x1b[1;3C' || e === '\x1bf') {
+                moveWordRight();
+                return;
+            }
+            if (e === '\x1b[A' || e === '\x1bOA') {
+                const hist = C2.terminalHistory[sessionId] || [];
+                if (hist.length === 0) return;
+                historyIndex = historyIndex < 0 ? hist.length - 1 : Math.max(0, historyIndex - 1);
+                showHistoryEntry(hist[historyIndex]);
+                return;
+            }
+            if (e === '\x1b[B' || e === '\x1bOB') {
+                const hist = C2.terminalHistory[sessionId] || [];
+                if (hist.length === 0) return;
+                historyIndex = historyIndex < 0 ? -1 : Math.min(hist.length - 1, historyIndex + 1);
+                if (historyIndex < 0) showHistoryEntry('');
+                else showHistoryEntry(hist[historyIndex]);
+                return;
+            }
+            if (e === '\x1b[H' || e === '\x1bOH' || e === '\x01') {
+                if (cursorIndex > 0) {
+                    term.write('\x1b[' + cursorIndex + 'D');
+                    cursorIndex = 0;
+                }
+                return;
+            }
+            if (e === '\x1b[F' || e === '\x1bOF' || e === '\x05') {
+                const move = lineBuffer.length - cursorIndex;
+                if (move > 0) {
+                    term.write('\x1b[' + move + 'C');
+                    cursorIndex = lineBuffer.length;
+                }
+                return;
+            }
+            if (e === '\x1b[3~') {
+                if (cursorIndex < lineBuffer.length) {
+                    lineBuffer = lineBuffer.slice(0, cursorIndex) + lineBuffer.slice(cursorIndex + 1);
+                    redrawInputLine();
+                }
+                return;
+            }
+            if (e === '\x15') {
+                resetInputLine();
+                return;
+            }
+            if (e === '\x0b') {
+                lineBuffer = lineBuffer.slice(0, cursorIndex);
+                redrawInputLine();
+                return;
+            }
+            if (e === '\x17') {
+                deleteWordBeforeCursor();
+                return;
+            }
+            if (e === '\x1b\x7f') {
+                deleteWordBeforeCursor();
+                return;
+            }
+
+            const code = e.charCodeAt(0);
+            if (code === 13 || code === 10) {
+                submitCurrentLine();
+            } else if (code === 127 || code === 8) {
+                if (cursorIndex > 0) {
+                    lineBuffer = lineBuffer.slice(0, cursorIndex - 1) + lineBuffer.slice(cursorIndex);
+                    cursorIndex--;
+                    redrawInputLine();
+                }
+            } else if (e.length === 1 && code >= 32) {
+                historyIndex = -1;
+                lineBuffer = lineBuffer.slice(0, cursorIndex) + e + lineBuffer.slice(cursorIndex);
+                cursorIndex++;
+                if (cursorIndex === lineBuffer.length) {
+                    term.write(e);
+                } else {
+                    redrawInputLine();
+                }
+            }
+        });
+
+        const onTerminalPaste = function (ev) {
+            const text = ev.clipboardData && ev.clipboardData.getData('text');
+            if (!text) return;
+            ev.preventDefault();
+            handlePasteText(text);
+        };
+        if (term.element) {
+            term.element.addEventListener('paste', onTerminalPaste);
+        }
+
+        term.attachCustomKeyEventHandler(function (ev) {
+            if (ev.type !== 'keydown') return true;
+            if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && (ev.key === 'c' || ev.key === 'C')) {
+                if (term.getSelection()) return true;
+            }
+            const isPaste = (ev.ctrlKey || ev.metaKey) && !ev.shiftKey && !ev.altKey
+                && (ev.key === 'v' || ev.key === 'V');
+            if (isPaste && navigator.clipboard && navigator.clipboard.readText) {
+                ev.preventDefault();
+                navigator.clipboard.readText().then(handlePasteText).catch(function () {});
+                return false;
+            }
+            if (ev.shiftKey && ev.key === 'Insert' && navigator.clipboard && navigator.clipboard.readText) {
+                ev.preventDefault();
+                navigator.clipboard.readText().then(handlePasteText).catch(function () {});
+                return false;
+            }
+            return true;
+        });
+
+        container.addEventListener('click', function () {
+            term.focus();
+        });
+        container.setAttribute('tabindex', '0');
+
+        C2.terminalInstance = term;
+
+        if (C2.terminalResizeObserver) {
+            C2.terminalResizeObserver.disconnect();
+        }
+        C2.terminalResizeObserver = new ResizeObserver(function () {
+            C2.fitTerminal();
+        });
+        C2.terminalResizeObserver.observe(container);
+
+        setTimeout(function () {
+            try {
+                if (C2.terminalFitAddon) C2.terminalFitAddon.fit();
+                term.focus();
+            } catch (e) {}
+        }, 100);
+    };
+
+    C2.fitTerminal = function() {
+        if (C2.terminalFitAddon && C2.terminalInstance) {
+            try {
+                C2.terminalFitAddon.fit();
+            } catch (e) {}
+        }
     };
 
     C2.clearTerminal = function() {
@@ -1024,7 +1425,11 @@
             C2.terminalInstance.clear();
             C2.terminalInstance.writeln('\x1b[36m' + c2t('c2.sessions.termCleared') + '\x1b[0m');
             C2.terminalInstance.write('$ ');
+            if (C2.terminalSessionId) {
+                C2.terminalLogs[C2.terminalSessionId] = C2.serializeTerminalBuffer(C2.terminalInstance);
+            }
         }
+        C2.terminalQueue = [];
     };
 
     C2.copyTerminal = function() {
@@ -1038,10 +1443,205 @@
     // 文件管理
     // ============================================================================
 
+    C2.normalizeFilePath = function(path) {
+        var p = path == null ? '.' : String(path).trim();
+        if (!p || p === '/') return '.';
+        p = p.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/+$/, '');
+        return p || '.';
+    };
+
+    C2.joinFilePath = function(base, name) {
+        var b = C2.normalizeFilePath(base);
+        var n = String(name || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!n) return b;
+        if (b === '.' || b === '/') return n;
+        return b + '/' + n;
+    };
+
+    /** 将相对浏览路径解析为 implant 工作目录下的绝对路径 */
+    C2.resolvePathAgainstPwd = function(pwd, rel) {
+        var base = String(pwd || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
+        if (!base) base = '/';
+        if (!base.startsWith('/')) base = '/' + base;
+        var parts = String(rel || '.').replace(/\\/g, '/').split('/');
+        var stack = base === '/' ? [] : base.split('/').filter(Boolean);
+        for (var i = 0; i < parts.length; i++) {
+            var p = parts[i];
+            if (!p || p === '.') continue;
+            if (p === '..') {
+                if (stack.length) stack.pop();
+            } else {
+                stack.push(p);
+            }
+        }
+        return '/' + stack.join('/');
+    };
+
+    /** 将 /d:/path/file 转为 Windows 远程路径 d:\path\file */
+    C2.toWindowsRemotePath = function(path) {
+        var p = String(path || '').trim().replace(/\\/g, '/');
+        if (/^\/[a-zA-Z]:\//.test(p)) {
+            p = p.slice(1);
+        }
+        return p.replace(/\//g, '\\');
+    };
+
+    C2.sessionIsWindows = function(session) {
+        if (!session) return false;
+        return String(session.os || '').toLowerCase().indexOf('windows') >= 0;
+    };
+
+    C2.resolveRemotePath = function(browsePath, filename) {
+        var joined = C2.joinFilePath(browsePath || '.', filename);
+        if (!C2.implantPwd) return joined;
+        var resolved = C2.resolvePathAgainstPwd(C2.implantPwd, joined);
+        var session = null;
+        if (C2.selectedSessionId && C2.sessions) {
+            session = C2.sessions.find(function(s) { return s.id === C2.selectedSessionId; });
+        }
+        if (C2.sessionIsWindows(session)) {
+            return C2.toWindowsRemotePath(resolved);
+        }
+        return resolved;
+    };
+
+    C2.updateFileBreadcrumb = function(browsePath) {
+        var breadcrumb = document.getElementById('c2-current-path');
+        if (!breadcrumb) return;
+        var rel = C2.normalizeFilePath(browsePath || '.');
+        if (C2.implantPwd) {
+            breadcrumb.textContent = C2.resolvePathAgainstPwd(C2.implantPwd, rel);
+            breadcrumb.title = rel;
+        } else {
+            breadcrumb.textContent = rel;
+            breadcrumb.title = '';
+        }
+    };
+
+    C2.parseLsLine = function(line) {
+        var trimmed = String(line || '').trim();
+        if (!trimmed || /^total\s+\d+/i.test(trimmed)) return null;
+
+        // Beacon structured output: type\tmode\tsize\tname
+        var beaconParts = trimmed.split('\t');
+        if (beaconParts.length >= 4) {
+            var bName = beaconParts.slice(3).join('\t').trim();
+            var bMode = beaconParts[1].trim();
+            var bType = beaconParts[0].trim();
+            if (bName && bName !== '.' && bName !== '..') {
+                return {
+                    mode: bMode || bType,
+                    size: beaconParts[2].trim(),
+                    name: bName,
+                    isDir: bType.charAt(0) === 'd' || bMode.charAt(0) === 'd'
+                };
+            }
+            return null;
+        }
+
+        // Native ls -l output
+        var m = trimmed.match(/^(\S+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/);
+        if (!m) return null;
+        var name = m[9].trim();
+        var arrow = name.indexOf(' -> ');
+        if (arrow > 0) name = name.slice(0, arrow).trim();
+        if (!name || name === '.' || name === '..') return null;
+        return {
+            mode: m[1],
+            size: m[5],
+            name: name,
+            isDir: m[1].charAt(0) === 'd'
+        };
+    };
+
+    C2.isDownloadShellError = function(text) {
+        var lower = String(text || '').toLowerCase();
+        return lower.indexOf('c2_download_err:') >= 0 ||
+            lower.indexOf('no such file') >= 0 ||
+            lower.indexOf('permission denied') >= 0 ||
+            lower.indexOf('is a directory') >= 0 ||
+            lower.indexOf('cannot open') >= 0 ||
+            lower.indexOf('not a regular file') >= 0;
+    };
+
+    C2.refreshImplantPwd = function(sessionId, callback) {
+        if (!sessionId) {
+            if (callback) callback();
+            return;
+        }
+        apiRequest('POST', `${API_BASE}/tasks`, {
+            session_id: sessionId,
+            task_type: 'pwd',
+            payload: {}
+        }).then(function(data) {
+            if (data.error) {
+                if (callback) callback();
+                return;
+            }
+            var taskId = data.task && data.task.id ? data.task.id : data.task_id;
+            if (!taskId) {
+                if (callback) callback();
+                return;
+            }
+            C2.waitForImplantPwd(taskId, callback);
+        }).catch(function() {
+            if (callback) callback();
+        });
+    };
+
+    C2.waitForImplantPwd = function(taskId, callback) {
+        var attempts = 0;
+        var poll = function() {
+            if (++attempts > 30) {
+                if (callback) callback();
+                return;
+            }
+            apiRequest('GET', `${API_BASE}/tasks/${taskId}`).then(function(data) {
+                var task = data.task;
+                if (task && task.status === 'success' && task.resultText) {
+                    C2.implantPwd = String(task.resultText).trim().split('\n').pop().trim();
+                    C2.updateFileBreadcrumb(C2.currentPath);
+                    if (callback) callback();
+                } else if (task && task.status === 'failed') {
+                    if (callback) callback();
+                } else {
+                    setTimeout(poll, 300);
+                }
+            });
+        };
+        poll();
+    };
+
+    C2.getParentFilePath = function(path) {
+        var p = C2.normalizeFilePath(path);
+        if (p === '.' || p === '/') return '.';
+        var idx = p.lastIndexOf('/');
+        if (idx < 0) return '.';
+        var parent = p.slice(0, idx);
+        return parent || '.';
+    };
+
+    C2.goToParentDirectory = function() {
+        var parent = C2.getParentFilePath(C2.currentPath || '.');
+        C2.loadFileList(null, parent);
+    };
+
+    C2.openDirectory = function(name) {
+        var next = C2.joinFilePath(C2.currentPath || '.', name);
+        C2.loadFileList(null, next);
+    };
+
     C2.loadFileList = function(sessionId, path) {
+        // Compatibility for incorrect parameters: auto-correct when only path is passed (e.g. legacy loadFileList('..'))
+        if (sessionId && path == null && typeof sessionId === 'string' &&
+            (sessionId === '..' || sessionId === '.' || sessionId.indexOf('/') >= 0)) {
+            path = sessionId;
+            sessionId = null;
+        }
         if (!sessionId) sessionId = C2.selectedSessionId;
         if (!sessionId) return;
         if (!path) path = C2.currentPath || '.';
+        path = C2.normalizeFilePath(path);
 
         const container = document.getElementById('c2-file-list');
         const breadcrumb = document.getElementById('c2-current-path');
@@ -1073,9 +1673,9 @@
                 const task = data.task;
                 if (task && task.status === 'success') {
                     C2.currentPath = path;
-                    const breadcrumb = document.getElementById('c2-current-path');
-                    if (breadcrumb) breadcrumb.textContent = path;
+                    C2.updateFileBreadcrumb(path);
                     C2.renderFileList(task.resultText || '');
+                    C2.refreshImplantPwd(sessionId);
                 } else if (task && task.status === 'failed') {
                     if (container) container.innerHTML = `<div class="c2-error">${escapeHtml(task.error || c2t('c2.files.failed'))}</div>`;
                 } else {
@@ -1090,8 +1690,10 @@
         const container = document.getElementById('c2-file-list');
         if (!container) return;
 
-        const lines = output.split('\n').filter(l => l.trim());
-        if (lines.length === 0) {
+        const entries = output.split('\n')
+            .map(C2.parseLsLine)
+            .filter(function(entry) { return entry != null; });
+        if (entries.length === 0) {
             container.innerHTML = '<div class="c2-empty">' + escapeHtml(c2t('c2.files.emptyDir')) + '</div>';
             return;
         }
@@ -1107,22 +1709,19 @@
                     </tr>
                 </thead>
                 <tbody>
-                    ${lines.map(line => {
-                        const parts = line.split(/\s+/);
-                        const name = parts[parts.length - 1] || line;
-                        const isDir = line.startsWith('d') || parts[0]?.startsWith?.('d');
+                    ${entries.map(function(entry) {
                         return `
                             <tr>
                                 <td class="c2-file-name">
-                                    <span class="c2-file-icon">${isDir ? '📁' : '📄'}</span>
-                                    ${escapeHtml(name)}
+                                    <span class="c2-file-icon">${entry.isDir ? '📁' : '📄'}</span>
+                                    ${escapeHtml(entry.name)}
                                 </td>
-                                <td>${parts[parts.length - 5] || '-'}</td>
-                                <td>${parts[parts.length - 4] || '-'}</td>
+                                <td>${escapeHtml(entry.size)}</td>
+                                <td>${escapeHtml(entry.mode)}</td>
                                 <td>
-                                    ${isDir 
-                                        ? `<button class="btn-ghost btn-sm" onclick="C2.loadFileList(null, '${escapeHtml(name)}')">${escapeHtml(c2t('c2.files.open'))}</button>`
-                                        : `<button class="btn-ghost btn-sm" onclick="C2.downloadFile('${escapeHtml(name)}')">${escapeHtml(c2t('c2.files.download'))}</button>`
+                                    ${entry.isDir
+                                        ? `<button class="btn-ghost btn-sm" onclick='C2.openDirectory(${JSON.stringify(entry.name)})'>${escapeHtml(c2t('c2.files.open'))}</button>`
+                                        : `<button class="btn-ghost btn-sm" onclick='C2.downloadFile(${JSON.stringify(entry.name)})'>${escapeHtml(c2t('c2.files.download'))}</button>`
                                     }
                                 </td>
                             </tr>
@@ -1137,22 +1736,302 @@
         C2.loadFileList(null, C2.currentPath);
     };
 
+    C2.sessionTransport = function(session) {
+        if (!session || !session.metadata) return '';
+        return String(session.metadata.transport || '').toLowerCase();
+    };
+
+    C2.sessionSupportsUpload = function(session) {
+        if (!session) {
+            return { supported: false, reasonKey: 'c2.files.uploadUnsupported' };
+        }
+        if (session.implantUuid && String(session.implantUuid).indexOf('curl_') === 0) {
+            return { supported: false, reasonKey: 'c2.files.uploadCurlBeacon' };
+        }
+        var transport = C2.sessionTransport(session);
+        // Compiled Beacon: HTTP/HTTPS/TCP(CSB1) all use binary/structured protocol, supporting upload
+        if (transport === 'tcp_beacon' || transport === 'http_beacon' || transport === 'https_beacon') {
+            return { supported: true, reasonKey: '' };
+        }
+        // Classic TCP reverse shell (bash/nc, metadata.transport=tcp_reverse)
+        if (transport === 'tcp_reverse' || (session.hostname && String(session.hostname).indexOf('tcp_') === 0)) {
+            return { supported: false, reasonKey: 'c2.files.uploadTcpShell' };
+        }
+        return { supported: true, reasonKey: '' };
+    };
+
+    C2.updateFileUploadButton = function(session) {
+        if (!session && C2.selectedSessionId) {
+            session = C2.sessions.find(function(s) { return s.id === C2.selectedSessionId; });
+        }
+        var btn = document.getElementById('c2-file-upload-btn');
+        if (!btn) return;
+        var cap = C2.sessionSupportsUpload(session);
+        btn.disabled = !cap.supported || !!C2.fileUploadBusy;
+        btn.title = cap.supported ? c2t('c2.files.upload') : c2t(cap.reasonKey);
+        if (!cap.supported) {
+            btn.classList.add('is-disabled');
+        } else {
+            btn.classList.remove('is-disabled');
+        }
+        var hint = document.getElementById('c2-file-upload-hint');
+        if (hint) {
+            if (!cap.supported) {
+                hint.hidden = false;
+                hint.textContent = c2t(cap.reasonKey);
+            } else {
+                hint.hidden = true;
+                hint.textContent = '';
+            }
+        }
+    };
+
+    C2.setFileUploadProgress = function(visible, percent, filename) {
+        var row = document.getElementById('c2-file-upload-progress');
+        if (!row) return;
+        if (!visible) {
+            row.hidden = true;
+            return;
+        }
+        row.hidden = false;
+        var fill = document.getElementById('c2-file-upload-progress-fill');
+        var label = document.getElementById('c2-file-upload-progress-label');
+        if (fill) fill.style.width = Math.max(0, Math.min(100, percent || 0)) + '%';
+        if (label) {
+            label.textContent = c2t('c2.files.uploading', { name: filename || '', percent: percent || 0 });
+        }
+    };
+
+    C2.openFileUploadPicker = function() {
+        if (!C2.selectedSessionId || C2.fileUploadBusy) return;
+        var session = C2.sessions.find(function(s) { return s.id === C2.selectedSessionId; });
+        var cap = C2.sessionSupportsUpload(session);
+        if (!cap.supported) {
+            showToast(c2t(cap.reasonKey), 'warn');
+            return;
+        }
+        var inp = document.getElementById('c2-file-upload-input');
+        if (inp) inp.click();
+    };
+
+    C2.onC2FileUploadPick = function(ev) {
+        var input = ev && ev.target;
+        var file = input && input.files && input.files[0];
+        if (!file) return;
+        if (input) input.value = '';
+        C2.uploadFileToImplant(file);
+    };
+
+    C2.uploadFileToImplant = function(file) {
+        if (!C2.selectedSessionId || C2.fileUploadBusy || !file) return;
+        var sessionId = C2.selectedSessionId;
+        var remotePath = C2.resolveRemotePath(C2.currentPath || '.', file.name);
+        var uploadUrl = API_BASE + '/files/upload';
+
+        C2.fileUploadBusy = true;
+        C2.updateFileUploadButton();
+        C2.setFileUploadProgress(true, 0, file.name);
+
+        var form = new FormData();
+        form.append('session_id', sessionId);
+        form.append('remote_path', remotePath);
+        form.append('file', file);
+
+        var uploadPromise;
+        if (typeof apiUploadWithProgress === 'function') {
+            uploadPromise = apiUploadWithProgress(uploadUrl, form, {
+                onProgress: function(p) {
+                    C2.setFileUploadProgress(true, Math.min(p.percent || 0, 50), file.name);
+                }
+            });
+        } else if (typeof apiFetch === 'function') {
+            uploadPromise = apiFetch(uploadUrl, { method: 'POST', body: form });
+        } else {
+            uploadPromise = fetch(uploadUrl, { method: 'POST', body: form });
+        }
+
+        uploadPromise.then(function(res) {
+            if (!res.ok) {
+                return res.text().then(function(text) {
+                    throw new Error(text || c2t('c2.files.failed'));
+                });
+            }
+            return res.json();
+        }).then(function(uploadData) {
+            var fileId = uploadData && uploadData.file_id;
+            if (!fileId) throw new Error(c2t('c2.files.failed'));
+            C2.setFileUploadProgress(true, 55, file.name);
+            return apiRequest('POST', API_BASE + '/tasks', {
+                session_id: sessionId,
+                task_type: 'upload',
+                payload: { remote_path: remotePath, file_id: fileId }
+            });
+        }).then(function(taskData) {
+            if (taskData && taskData.error) throw new Error(taskData.error);
+            var taskId = taskData.task && taskData.task.id ? taskData.task.id : taskData.task_id;
+            if (!taskId) {
+                showToast(c2t('c2.files.uploadQueued'), 'success');
+                C2.fileUploadBusy = false;
+                C2.setFileUploadProgress(false);
+                C2.updateFileUploadButton();
+                return;
+            }
+            if (taskData.task && taskData.task.approvalStatus === 'pending') {
+                showToast(c2t('c2.files.uploadPendingApproval'), 'info');
+            }
+            C2.waitForFileUpload(taskId, file.name);
+        }).catch(function(err) {
+            showToast((err && err.message) || c2t('c2.files.failed'), 'error');
+            C2.fileUploadBusy = false;
+            C2.setFileUploadProgress(false);
+            C2.updateFileUploadButton();
+        });
+    };
+
+    C2.waitForFileUpload = function(taskId, filename) {
+        var attempts = 0;
+        var check = function() {
+            if (++attempts > 120) {
+                showToast(c2t('c2.files.timeout'), 'error');
+                C2.fileUploadBusy = false;
+                C2.setFileUploadProgress(false);
+                C2.updateFileUploadButton();
+                return;
+            }
+            apiRequest('GET', API_BASE + '/tasks/' + taskId).then(function(data) {
+                var task = data.task;
+                if (task && task.approvalStatus === 'pending' && task.status === 'queued') {
+                    C2.setFileUploadProgress(true, 60, filename);
+                    setTimeout(check, 1000);
+                    return;
+                }
+                if (task && task.status === 'success') {
+                    C2.setFileUploadProgress(true, 100, filename);
+                    showToast(c2t('c2.files.uploadOk'), 'success');
+                    C2.fileUploadBusy = false;
+                    setTimeout(function() { C2.setFileUploadProgress(false); }, 400);
+                    C2.updateFileUploadButton();
+                    C2.refreshFiles();
+                } else if (task && task.status === 'failed') {
+                    showToast(task.error || task.resultText || c2t('c2.files.failed'), 'error');
+                    C2.fileUploadBusy = false;
+                    C2.setFileUploadProgress(false);
+                    C2.updateFileUploadButton();
+                } else {
+                    var pct = 60 + Math.min(35, Math.floor(attempts / 3));
+                    C2.setFileUploadProgress(true, pct, filename);
+                    setTimeout(check, 500);
+                }
+            }).catch(function() {
+                C2.fileUploadBusy = false;
+                C2.setFileUploadProgress(false);
+                C2.updateFileUploadButton();
+            });
+        };
+        check();
+    };
+
+    C2.saveDownloadBlob = function(blob, filename) {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(a.href);
+    };
+
+    C2.saveDownloadContent = function(content, filename) {
+        const text = String(content || '');
+        if (C2.isDownloadShellError(text)) {
+            throw new Error(text.trim() || c2t('c2.files.failed'));
+        }
+        const b64 = text.replace(/\s/g, '');
+        let bytes;
+        try {
+            if (/^[A-Za-z0-9+/=]+$/.test(b64) && b64.length > 0) {
+                const binary = atob(b64);
+                bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            } else {
+                bytes = new TextEncoder().encode(text);
+            }
+        } catch (e) {
+            bytes = new TextEncoder().encode(text);
+        }
+        C2.saveDownloadBlob(new Blob([bytes], { type: 'application/octet-stream' }), filename);
+    };
+
+    C2.fetchTaskResultFile = function(taskId, filename) {
+        const url = `${API_BASE}/tasks/${taskId}/result-file`;
+        const fetchFn = (typeof apiFetch === 'function') ? apiFetch : fetch;
+        fetchFn(url).then(resp => {
+            if (!resp.ok) throw new Error('download failed: ' + resp.status);
+            return resp.blob();
+        }).then(blob => {
+            C2.saveDownloadBlob(blob, filename);
+        }).catch(err => {
+            showToast((err && err.message) || c2t('c2.files.failed'), 'error');
+        });
+    };
+
+    C2.waitForFileDownload = function(taskId, filename) {
+        let attempts = 0;
+        const check = () => {
+            if (++attempts > 120) {
+                showToast(c2t('c2.files.timeout'), 'error');
+                return;
+            }
+            apiRequest('GET', `${API_BASE}/tasks/${taskId}`).then(data => {
+                const task = data.task;
+                if (task && task.status === 'success') {
+                    if (task.resultBlobPath) {
+                        C2.fetchTaskResultFile(taskId, filename);
+                    } else if (task.resultText != null) {
+                        try {
+                            C2.saveDownloadContent(task.resultText, filename);
+                            showToast(c2t('c2.files.downloadOk'), 'success');
+                        } catch (err) {
+                            showToast((err && err.message) || c2t('c2.files.failed'), 'error');
+                        }
+                    } else {
+                        C2.saveDownloadBlob(new Blob([], { type: 'application/octet-stream' }), filename);
+                        showToast(c2t('c2.files.downloadOk'), 'success');
+                    }
+                } else if (task && task.status === 'failed') {
+                    showToast(task.error || task.resultText || c2t('c2.files.failed'), 'error');
+                } else {
+                    setTimeout(check, 500);
+                }
+            });
+        };
+        check();
+    };
+
     C2.downloadFile = function(filename) {
         if (!C2.selectedSessionId) return;
-        const remotePath = C2.currentPath === '/' ? '/' + filename : C2.currentPath + '/' + filename;
-        
+        const remotePath = C2.resolveRemotePath(C2.currentPath || '.', filename);
+
         apiRequest('POST', `${API_BASE}/tasks`, {
             session_id: C2.selectedSessionId,
             task_type: 'download',
             payload: { remote_path: remotePath }
         }).then(data => {
-            if (data.error) showToast(data.error, 'error');
-            else showToast(c2t('c2.payloads.toastDownloadQueued'), 'success');
+            if (data.error) {
+                showToast(data.error, 'error');
+                return;
+            }
+            const taskId = data.task?.id || data.task_id;
+            if (!taskId) {
+                showToast(c2t('c2.payloads.toastDownloadQueued'), 'success');
+                return;
+            }
+            C2.waitForFileDownload(taskId, filename);
         });
     };
 
     // ============================================================================
-    // 任务管理
+    // Task Management
     // ============================================================================
 
     C2.loadTasks = function(page) {
@@ -1177,7 +2056,6 @@
             C2.renderTasks();
             C2.renderTasksPagination();
             C2.syncTasksToolbar();
-            C2.updateDashboardStats();
         }).catch(err => {
             showToast(err.message || String(err), 'error');
         });
@@ -1303,7 +2181,6 @@
             const tasks = data.tasks || [];
             if (typeof data.pending_queued_count === 'number') {
                 C2.tasksPendingQueuedCount = data.pending_queued_count;
-                C2.updateDashboardStats();
             }
             
             if (!container) return;
@@ -1314,10 +2191,13 @@
             
             container.innerHTML = tasks.map(t => {
                 const rawId = t.id || '';
+                const cmd = formatTaskCommand(t);
+                const cmdShort = truncateCommand(cmd, 40);
                 return `
                 <div class="c2-task-item-compact">
                     <span class="c2-task-status-dot ${escapeHtml(t.status || '')}"></span>
                     <span class="c2-task-type">${escapeHtml(t.taskType || '')}</span>
+                    ${cmdShort ? `<span class="c2-task-command" title="${escapeHtml(cmd)}">${escapeHtml(cmdShort)}</span>` : ''}
                     <span class="c2-task-meta">${escapeHtml(taskStatusLabel(t.status))} | ${formatDuration(t.durationMs)}</span>
                     <button type="button" class="btn-secondary btn-small" data-c2-task-action="view" data-task-id="${escapeHtml(rawId)}">${escapeHtml(c2t('c2.tasks.view'))}</button>
                 </div>
@@ -1353,6 +2233,7 @@
                         <th>${escapeHtml(c2t('c2.tasks.colTask'))}</th>
                         <th>${escapeHtml(c2t('c2.tasks.colSession'))}</th>
                         <th>${escapeHtml(c2t('c2.tasks.colType'))}</th>
+                        <th>${escapeHtml(c2t('c2.tasks.colCommand'))}</th>
                         <th>${escapeHtml(c2t('c2.tasks.colStatus'))}</th>
                         <th>${escapeHtml(c2t('c2.tasks.colDuration'))}</th>
                         <th>${escapeHtml(c2t('c2.tasks.colCreated'))}</th>
@@ -1364,6 +2245,8 @@
                         const rawId = t.id || '';
                         const shortTaskId = rawId.length > 14 ? escapeHtml(rawId.substring(0, 12)) + '\u2026' : escapeHtml(rawId);
                         const sid = t.sessionId ? escapeHtml(String(t.sessionId).substring(0, 8)) + '\u2026' : '-';
+                        const cmd = formatTaskCommand(t);
+                        const cmdShort = truncateCommand(cmd, 48);
                         return `
                         <tr>
                             <td class="c2-task-table-col-check">
@@ -1374,6 +2257,7 @@
                             <td>${shortTaskId}</td>
                             <td>${sid}</td>
                             <td>${escapeHtml(t.taskType || '')}</td>
+                            <td class="c2-task-command-cell" title="${escapeHtml(cmd)}">${cmdShort ? escapeHtml(cmdShort) : '<span class="c2-muted">-</span>'}</td>
                             <td><span class="c2-status-badge ${escapeHtml(t.status || '')}">${escapeHtml(taskStatusLabel(t.status))}</span></td>
                             <td>${formatDuration(t.durationMs)}</td>
                             <td>${formatTime(t.createdAt)}</td>
@@ -1403,26 +2287,87 @@
 
         const renderTaskModal = function(t) {
             if (!t || !modal) return;
+            const cmd = formatTaskCommand(t);
+            const hasPayload = t.payload && typeof t.payload === 'object' && Object.keys(t.payload).length > 0;
+            const modalBox = modal.querySelector('.c2-modal');
+            if (modalBox) modalBox.classList.add('c2-modal--wide');
             content.innerHTML = `
-            <div class="c2-modal-header">
-                <h3>${escapeHtml(c2t('c2.tasks.modalTitle'))}</h3>
+            <div class="c2-modal-header c2-task-modal-header">
+                <div class="c2-task-modal-heading">
+                    <h3>${escapeHtml(c2t('c2.tasks.modalTitle'))}</h3>
+                    <span class="c2-status-badge ${escapeHtml(t.status || '')}">${escapeHtml(taskStatusLabel(t.status))}</span>
+                </div>
                 <button class="c2-modal-close" onclick="C2.closeModal()">&times;</button>
             </div>
             <div class="c2-modal-body">
                 <div class="c2-task-detail">
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelId'))}:</strong> ${escapeHtml(t.id || '')}</div>
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelSession'))}:</strong> ${escapeHtml(t.sessionId || '')}</div>
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelType'))}:</strong> ${escapeHtml(t.taskType || '')}</div>
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelStatus'))}:</strong> <span class="c2-status-badge ${escapeHtml(t.status || '')}">${escapeHtml(taskStatusLabel(t.status))}</span></div>
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelCreated'))}:</strong> ${formatTime(t.createdAt)}</div>
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelSent'))}:</strong> ${formatTime(t.sentAt)}</div>
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelCompleted'))}:</strong> ${formatTime(t.completedAt)}</div>
-                    <div><strong>${escapeHtml(c2t('c2.tasks.labelDuration'))}:</strong> ${formatDuration(t.durationMs)}</div>
-                    ${t.error ? `<div class="c2-task-error"><strong>${escapeHtml(c2t('c2.tasks.labelError'))}:</strong> ${escapeHtml(t.error)}</div>` : ''}
+                    <div class="c2-task-detail-grid">
+                        <div class="c2-task-kv">
+                            <span class="c2-task-kv__label">${escapeHtml(c2t('c2.tasks.labelId'))}</span>
+                            <span class="c2-task-kv__value c2-task-kv__value--mono">${escapeHtml(t.id || '-')}</span>
+                        </div>
+                        <div class="c2-task-kv">
+                            <span class="c2-task-kv__label">${escapeHtml(c2t('c2.tasks.labelSession'))}</span>
+                            <span class="c2-task-kv__value c2-task-kv__value--mono">${escapeHtml(t.sessionId || '-')}</span>
+                        </div>
+                        <div class="c2-task-kv">
+                            <span class="c2-task-kv__label">${escapeHtml(c2t('c2.tasks.labelType'))}</span>
+                            <span class="c2-task-kv__value">${escapeHtml(t.taskType || '-')}</span>
+                        </div>
+                        <div class="c2-task-kv">
+                            <span class="c2-task-kv__label">${escapeHtml(c2t('c2.tasks.labelDuration'))}</span>
+                            <span class="c2-task-kv__value c2-task-kv__value--accent">${formatDuration(t.durationMs)}</span>
+                        </div>
+                    </div>
+
+                    <div class="c2-task-timeline">
+                        <div class="c2-task-time-card">
+                            <span class="c2-task-kv__label">${escapeHtml(c2t('c2.tasks.labelCreated'))}</span>
+                            <span class="c2-task-kv__value">${formatTime(t.createdAt) || '-'}</span>
+                        </div>
+                        <div class="c2-task-time-card">
+                            <span class="c2-task-kv__label">${escapeHtml(c2t('c2.tasks.labelSent'))}</span>
+                            <span class="c2-task-kv__value">${formatTime(t.sentAt) || '-'}</span>
+                        </div>
+                        <div class="c2-task-time-card">
+                            <span class="c2-task-kv__label">${escapeHtml(c2t('c2.tasks.labelCompleted'))}</span>
+                            <span class="c2-task-kv__value">${formatTime(t.completedAt) || '-'}</span>
+                        </div>
+                    </div>
+
+                    ${cmd ? `
+                        <div class="c2-task-code-section">
+                            <div class="c2-task-code-header">
+                                <span class="c2-task-code-title">${escapeHtml(c2t('c2.tasks.labelCommand'))}</span>
+                                <button type="button" class="btn-ghost btn-sm" onclick="C2.copyTaskBlock('c2-task-cmd-pre')">${escapeHtml(c2t('common.copy'))}</button>
+                            </div>
+                            <pre class="c2-task-command-pre" id="c2-task-cmd-pre">${escapeHtml(cmd)}</pre>
+                        </div>
+                    ` : ''}
+                    ${hasPayload && !cmd ? `
+                        <div class="c2-task-code-section">
+                            <div class="c2-task-code-header">
+                                <span class="c2-task-code-title">${escapeHtml(c2t('c2.tasks.labelPayload'))}</span>
+                                <button type="button" class="btn-ghost btn-sm" onclick="C2.copyTaskBlock('c2-task-payload-pre')">${escapeHtml(c2t('common.copy'))}</button>
+                            </div>
+                            <pre class="c2-task-command-pre" id="c2-task-payload-pre">${escapeHtml(JSON.stringify(t.payload, null, 2))}</pre>
+                        </div>
+                    ` : ''}
+                    ${t.error ? `
+                        <div class="c2-task-error-section">
+                            <div class="c2-task-code-header">
+                                <span class="c2-task-code-title">${escapeHtml(c2t('c2.tasks.labelError'))}</span>
+                            </div>
+                            <div class="c2-task-error">${escapeHtml(t.error)}</div>
+                        </div>
+                    ` : ''}
                     ${t.resultText ? `
-                        <div class="c2-task-result">
-                            <strong>${escapeHtml(c2t('c2.tasks.labelResult'))}:</strong>
-                            <pre>${escapeHtml(t.resultText)}</pre>
+                        <div class="c2-task-code-section">
+                            <div class="c2-task-code-header">
+                                <span class="c2-task-code-title">${escapeHtml(c2t('c2.tasks.labelResult'))}</span>
+                                <button type="button" class="btn-ghost btn-sm" onclick="C2.copyTaskBlock('c2-task-result-pre')">${escapeHtml(c2t('common.copy'))}</button>
+                            </div>
+                            <pre class="c2-task-result-pre" id="c2-task-result-pre">${escapeHtml(t.resultText)}</pre>
                         </div>
                     ` : ''}
                 </div>
@@ -1891,7 +2836,6 @@
             showToast(`[${event.category}] ${event.message}`, event.level === 'critical' ? 'error' : 'info');
         }
 
-        C2.updateDashboardStats();
     };
 
     // ============================================================================
@@ -2026,32 +2970,21 @@
     };
 
     // ============================================================================
-    // 仪表盘
-    // ============================================================================
-
-    C2.updateDashboardStats = function() {
-        const runningListeners = C2.listeners.filter(l => l.status === 'running').length;
-        const activeSessions = C2.sessions.filter(s => s.status === 'active').length;
-        const pendingTasks = typeof C2.tasksPendingQueuedCount === 'number'
-            ? C2.tasksPendingQueuedCount
-            : C2.tasks.filter(t => t.status === 'queued' || t.status === 'pending').length;
-
-        const elListeners = document.getElementById('c2-stat-listeners');
-        const elSessions = document.getElementById('c2-stat-sessions');
-        const elPending = document.getElementById('c2-stat-pending');
-
-        if (elListeners) elListeners.textContent = runningListeners;
-        if (elSessions) elSessions.textContent = activeSessions;
-        if (elPending) elPending.textContent = pendingTasks;
-    };
-
-    // ============================================================================
     // 模态框
     // ============================================================================
 
+    C2.copyTaskBlock = function(elementId) {
+        const el = document.getElementById(elementId);
+        if (el && el.textContent) copyToClipboard(el.textContent);
+    };
+
     C2.closeModal = function() {
         const modal = document.getElementById('c2-modal');
-        if (modal) modal.style.display = 'none';
+        if (modal) {
+            modal.style.display = 'none';
+            const modalBox = modal.querySelector('.c2-modal');
+            if (modalBox) modalBox.classList.remove('c2-modal--wide');
+        }
     };
 
     // ============================================================================

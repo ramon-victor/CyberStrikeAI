@@ -49,6 +49,22 @@ func TestApplyOpenAICompat_xhighExtraField(t *testing.T) {
 	}
 }
 
+func TestApplyReasoningOff_disablesThinking(t *testing.T) {
+	cfg := &einoopenai.ChatModelConfig{}
+	oa := &config.OpenAIConfig{
+		BaseURL: "https://api.openai.com/v1",
+		Model:   "gpt-4o",
+		Reasoning: config.OpenAIReasoningConfig{
+			Mode: "off",
+		},
+	}
+	ApplyToEinoChatModelConfig(cfg, oa, nil)
+	th, ok := cfg.ExtraFields["thinking"].(map[string]any)
+	if !ok || th["type"] != "disabled" {
+		t.Fatalf("expected thinking disabled, got %#v", cfg.ExtraFields)
+	}
+}
+
 func TestApplyOpenAICompat_maxPassthrough(t *testing.T) {
 	cfg := &einoopenai.ChatModelConfig{}
 	oa := &config.OpenAIConfig{

@@ -190,6 +190,23 @@ func (c *lazySDKClient) Close() error {
 	return nil
 }
 
+// markDisconnected 在检测到传输层断连时关闭底层 session，避免 IsConnected 仍返回 true。
+func (c *lazySDKClient) markDisconnected() {
+	c.mu.Lock()
+	inner := c.inner
+	sessionCancel := c.sessionCancel
+	c.inner = nil
+	c.sessionCancel = nil
+	c.mu.Unlock()
+	if sessionCancel != nil {
+		sessionCancel()
+	}
+	if inner != nil {
+		_ = inner.Close()
+	}
+	c.setStatus("disconnected")
+}
+
 func (c *sdkClient) setStatus(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

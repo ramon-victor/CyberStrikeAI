@@ -1,0 +1,197 @@
+web/static/js/auth.js:167: * multipart POST with XMLHttpRequest so upload progress is available (fetch 无法可靠上报进度).
+web/static/js/auth.js:168: * 返回与 fetch 类似的对象：ok、status、json()、text()
+web/static/js/auth.js:289:            console.warn('刷新对话模式配置失败:', error);
+web/static/js/auth.js:300:        // 等待 i18n 首包加载完成后再插系统就绪消息，避免清除缓存后语言显示 English 气泡仍是中文
+web/static/js/auth.js:314:// 通用工具函数
+web/static/js/dashboard.js:1:// 仪表盘页面：拉取运行中任务、漏洞统计、批量任务、工具与 Skills 统计并渲染。
+web/static/js/dashboard.js:3:// 工程基础设施：
+web/static/js/dashboard.js:4://   - dashboardState 集中保存运行时状态（in-flight controller / 自动轮询 timer / 上次更新时间 /
+web/static/js/dashboard.js:5://     已被本会话忽略的告警条 reasons）；
+web/static/js/dashboard.js:6://   - 每次 refreshDashboard 入口 abort 上一个 controller，把 signal 传给所有 apiFetch，
+web/static/js/dashboard.js:7://     避免快速连点 / 自动轮询触发 race condition；
+web/static/js/dashboard.js:8://   - 自动轮询：startDashboardAutoRefresh() 每 60 秒拉一次；页面切走 / tab 隐藏时自动暂停，
+web/static/js/dashboard.js:9://     再切回时立即补一次刷新（基于 lastUpdatedAt 避免无效请求）；
+web/static/js/dashboard.js:10://   - 过期检测：updateLastUpdatedNow 记录时间戳；checkDashboardStale 每 30 秒检查，
+web/static/js/dashboard.js:11://     超过 5 分钟未刷新则在「上次更新」徽章上加 .is-stale 类（变灰 + 显示 ⚠️）。
+web/static/js/dashboard.js:18:    currentController: null,    // 当前正在进行的 fetch 的 AbortController
+web/static/js/dashboard.js:19:    pollTimer: null,            // 自动轮询的 setInterval id
+web/static/js/dashboard.js:20:    staleTimer: null,           // 过期检查的 setInterval id
+web/static/js/dashboard.js:21:    lastUpdatedAt: 0,           // 上次成功刷新的时间戳（ms）
+web/static/js/dashboard.js:22:    dismissedAlertKey: null,    // 当前会话中被用户「×」掉的告警内容指纹（同样的 reasons 不再弹）
+web/static/js/dashboard.js:23:    lastResources: null,        // 上一轮关键资源快照，用于判断是否首次有数据 / 智能 CTA
+web/static/js/dashboard.js:24:    recentFeedTab: 'vulns',     // 最近漏洞 / 近期事实 Tab
+web/static/js/dashboard.js:25:    accessTab: 'c2',            // 接入概览 Tab：c2 | webshell
+web/static/js/dashboard.js:26:    lastProjectSummary: null,   // 最近一次项目仪表盘摘要（供 Tab 切换时重绘）
+web/static/js/dashboard.js:34:    // severityTotalEl 在后续渲染逻辑中也被引用，必须在 loading 分支外声明
+web/static/js/dashboard.js:37:    // 体验优化：自动轮询 / 已经有数据时，不再把界面闪成「…」占位，
+web/static/js/dashboard.js:38:    // 直接在后台拉新数据并平滑替换；只有首次加载时才显示 loading 状态。
+web/static/js/dashboard.js:85:    // 防 race：abort 上一个仍在进行中的请求，再创建新 controller
+web/static/js/dashboard.js:93:    // 统一封装：apiFetch + abort signal + 失败/取消都返回 null（不抛错），
+web/static/js/dashboard.js:94:    // 让上层可以用解构赋值平铺读取所有结果，避免一处失败导致整个 Promise.all reject
+web/static/js/dashboard.js:102:        // /api/vulnerabilities/stats 只给出 by_severity 与 by_status 两个独立维度，
+web/static/js/dashboard.js:103:        // 无法得到「严重 × 待处理」的交叉计数。这里按四档各拉一次（limit=1，仅取 total），
+web/static/js/dashboard.js:104:        // 用真实的「待处理 × 各严重度」数量驱动告警条 / KPI 副标 / 风险概览卡的加权分，
+web/static/js/dashboard.js:105:        // 避免「全部修复后风险等级仍显示极高」这类语义冲突。
+web/static/js/dashboard.js:129:            // 中/低危的「待处理」计数：用于风险概览卡的加权风险分，使其反映"当前未处理风险"
+web/static/js/dashboard.js:132:            // 拉取 MCP 工具的「配置总数」用于「能力总览」（区别于 monitor/stats 的「有调用记录」）。
+web/static/js/dashboard.js:133:            // 仅取 total 字段，page_size=1 减少传输；total 已涵盖内部 + 外部 MCP + 直接注册的工具。
+web/static/js/dashboard.js:135:            // HITL 待审批：用于「需要立即处理」告警条 + 推荐操作
+web/static/js/dashboard.js:137:            // 通知摘要：since=0 拿最新一批，limit 控制大小；用于「最近事件」内联展示
+web/static/js/dashboard.js:139:            // External MCP 健康度
+web/static/js/dashboard.js:141:            // WebShell 已建立的连接（pentest 落地后的 foothold，对运营场景非常关键）
+web/static/js/dashboard.js:143:            // C2 仪表盘条：监听器 / 会话 / 待处理任务（任务接口含 pending_queued_count）
+web/static/js/dashboard.js:150:        // 如果在 await 期间 controller 已被 abort，说明又有新刷新启动了，丢弃本次结果
+web/static/js/dashboard.js:153:        // 运行中任务：Agent 循环任务 + 批量队列「执行中」数量统一统计，避免顶部 KPI 与运行概览不一致
+web/static/js/dashboard.js:177:        // KPI 副标：N 待执行 / 全部空闲
+web/static/js/dashboard.js:188:        // 解析「待处理」口径的真实计数（专门拉的接口）；若该接口失败则退回 by_severity
+web/static/js/dashboard.js:210:            // 优先用专门拉的「待处理」计数；若专项接口失败，则退回 by_severity（宁可误报，不可漏报）
+web/static/js/dashboard.js:233:            // 漏洞 KPI 副标：徽章/文案均使用「待处理」口径
+web/static/js/dashboard.js:243:                    // 高严重度全部已处置 → 给正反馈
+web/static/js/dashboard.js:265:        // 批量任务队列：按状态统计（优化版；running 与上方 batchRunningCount 一致）
+web/static/js/dashboard.js:281:            // 更新进度条
+web/static/js/dashboard.js:304:        // 工具调用：monitor/stats 为 { toolName: { totalCalls, successCalls, failedCalls, ... } }
+web/static/js/dashboard.js:342:        // 「能力总览 → MCP 工具」用配置总数（包含未被调用过的工具）；专项接口失败时回落到 monitor 的 names.length
+web/static/js/dashboard.js:351:        // 知识：填充能力总览中的「知识」一行
+web/static/js/dashboard.js:363:        // Skills：填充能力总览中的「Skills」一行
+web/static/js/dashboard.js:371:        // 角色 / Agents
+web/static/js/dashboard.js:373:            // /api/roles 返回 { roles: [...] } 或者数组本身
+web/static/js/dashboard.js:380:            // /api/multi-agent/markdown-agents 返回 { agents: [...] }
+web/static/js/dashboard.js:386:        // 最近漏洞列表
+web/static/js/dashboard.js:391:        // External MCP 健康度（同时拿到 down 数喂给 alert banner / 推荐操作）
+web/static/js/dashboard.js:394:        // HITL 待审批数量（喂给 alert banner / 推荐操作）
+web/static/js/dashboard.js:397:        // 「最近事件」内联展示（来自通知摘要，过滤掉已经被仪表盘其他位置覆盖的类型）
+web/static/js/dashboard.js:400:        // 接入概览（C2 + WebShell）
+web/static/js/dashboard.js:403:        // 关键提醒条：把所有可能的告警源（漏洞/HITL/失败率/MCP健康）合并展示
+web/static/js/dashboard.js:412:        // 智能 CTA：有数据时隐藏「开始你的安全之旅」
+web/static/js/dashboard.js:424:        // 「推荐操作」：基于全量当前状态智能生成
+web/static/js/dashboard.js:436:        // 更新「上次更新」时间
+web/static/js/dashboard.js:439:        // AbortError 是预期内（被新一次刷新主动取消），不视为错误
+web/static/js/dashboard.js:441:        console.warn('仪表盘拉取统计失败', e);
+web/static/js/dashboard.js:465:        // 第一次 refreshDashboard（无论成功与否）完成后即开启自动轮询 + 过期检查；
+web/static/js/dashboard.js:466:        // 重复调用是幂等的（内部判断 timer 是否已存在）。
+web/static/js/dashboard.js:471:/** 接入概览：C2 / WebShell Tab 切换；C2 禁用时仅保留 WebShell Tab */
+web/static/js/dashboard.js:542:/** C2 / WebShell Tab 切换（样式与「最近漏洞 / 近期事实」一致） */
+web/static/js/dashboard.js:573:        link.textContent = dt('dashboard.webshellGoManage', null, '进入 WebShell →');
+web/static/js/dashboard.js:577:        link.textContent = dt('dashboard.c2GoManage', null, '进入 C2 →');
+web/static/js/dashboard.js:581:/** 根据可用模块同步 Tab 可见性与默认选中项 */
+web/static/js/dashboard.js:605:/** WebShell 接入概览：最近 3 条连接摘要 */
+web/static/js/dashboard.js:668:// 翻译辅助；找不到时回退到 fallback 字符串。
+web/static/js/dashboard.js:669:// 命名为 dt 而非 t，避免覆盖 i18n.js 暴露的 window.t（同名函数声明在脚本顶层会写入 window）
+web/static/js/dashboard.js:678:// KPI 卡片副标：纯文本
+web/static/js/dashboard.js:686:// KPI 卡片副标：带状态色（pending / running / idle / warning / success / danger）
+web/static/js/dashboard.js:695:// 工具成功率徽章着色
+web/static/js/dashboard.js:712:// sessionStorage：告警条「×」忽略记录 + 最近一次**实际展示过**的 reason 片段（不含 level），
+web/static/js/dashboard.js:713:// 用于在「问题从多变少」（如审完 HITL 后只剩严重漏洞）时，避免误用更早对「仅子集」的忽略。
+web/static/js/dashboard.js:722:/** 当前 reason 片段相对上次展示的片段是否为真子集（用于清除过时的忽略） */
+web/static/js/dashboard.js:735:// 关键提醒条：根据严重情况渲染或隐藏。
+web/static/js/dashboard.js:736://   - level: danger（红） > warning（橙） > info（蓝），按 reasons 自动取最高级
+web/static/js/dashboard.js:737://   - 用户点 × 后，把当前 reasons 指纹存入 sessionStorage，本会话内再出现完全相同的内容会自动跳过
+web/static/js/dashboard.js:738://   - 当 reasons 集合发生变化（如又新增一类问题），指纹失效，banner 重新弹出，避免「忽略后永远不再提醒」
+web/static/js/dashboard.js:739://   - 若曾展示过「更多类问题」的组合，之后仅部分问题消失，即使指纹与早年忽略相同，也会清除忽略并继续提醒（见 dashboard.alertLastReasons）
+web/static/js/dashboard.js:748:    // 用 reasonKeys 算指纹（不含本地化字符串，切语言后不会让用户重新看到）
+web/static/js/dashboard.js:759:        // HITL 待审批是阻塞 Agent 流程的，独立成一条；不影响 level（除非已经是 info 升 warning）
+web/static/js/dashboard.js:772:        // External MCP 异常服务器数 > 0：影响工具可用性
+web/static/js/dashboard.js:790:    // 检查是否被本会话忽略过同样的内容；若当前仅为「上次曾展示组合」的真子集，则清除忽略（最佳实践：部分处置后仍提醒剩余项）
+web/static/js/dashboard.js:857:// External MCP 健康度：从 /api/external-mcp/stats 解析（后端字段为 total/enabled/disabled/connected），
+web/static/js/dashboard.js:858:// 决定是否在「能力总览」第 6 行显示，并把「已启用但未连接」的数量返回给 alert banner。
+web/static/js/dashboard.js:871:    // 后端用 connected 表示已连接数；兼容旧字段 running
+web/static/js/dashboard.js:878:    // 未配置任何「已启用」的外部 MCP 时不展示健康行，也不告警（与 MCP 管理页口径一致）
+web/static/js/dashboard.js:904:// HITL 待审批数量：返回 pending 项数；同时可在能力总览或 KPI 副标里使用
+web/static/js/dashboard.js:913:// 「最近事件」内联展示：取通知摘要里最重要的前 N 条
+web/static/js/dashboard.js:914:// 设计原则：
+web/static/js/dashboard.js:915://   - 不重复 alert banner / KPI 已表达的「新漏洞」通知（vulnerability_created 仍过滤）
+web/static/js/dashboard.js:916://   - HITL 待审批在推荐操作等处也会提示，但仍在此展示时间线，便于与任务完成等并列查看
+web/static/js/dashboard.js:917://   - 整个 section 在没有可显示内容时整个隐藏，避免空模块占地方
+web/static/js/dashboard.js:924:    // 过滤：去掉新漏洞类型（与「最近漏洞」等板块避免重复）；HITL 不再过滤
+web/static/js/dashboard.js:932:    // 按 level 排序：p0 > p1 > p2，再按时间倒序
+web/static/js/dashboard.js:970:// 推荐操作：基于当前数据状态智能生成「下一步该做什么」。
+web/static/js/dashboard.js:971:// 设计原则：每条都必须可点击直达对应页面，按优先级（紧急 > 维护 > 配置）排序，
+web/static/js/dashboard.js:972:// 同一时间只显示最重要的 3-5 条；没有可推荐时整个 section 隐藏。
+web/static/js/dashboard.js:980:    // 紧急类：未处理严重漏洞
+web/static/js/dashboard.js:991:    // 紧急类：HITL 待审批
+web/static/js/dashboard.js:1002:    // 维护类：External MCP 异常
+web/static/js/dashboard.js:1013:    // 维护类：高失败率
+web/static/js/dashboard.js:1024:    // 配置类：第一次运行场景
+web/static/js/dashboard.js:1063:    // 委托点击/键盘到推荐项 → switchPage
+web/static/js/dashboard.js:1073:// 智能 CTA：用户已经有任何数据（任务运行 / 漏洞 / 工具调用 / 配置过 MCP）就把
+web/static/js/dashboard.js:1074:// 「开始你的安全之旅」的 CTA 隐藏，只在真正空白的全新环境保留它当引导
+web/static/js/dashboard.js:1088:// 「上次更新」时间显示；同时记录 lastUpdatedAt 给 stale 检查使用，并清掉 stale 状态
+web/static/js/dashboard.js:1108:// 数据过期检查：超过 DASHBOARD_STALE_THRESHOLD_MS 未刷新，给徽章加 .is-stale 类，
+web/static/js/dashboard.js:1109:// 显示 ⚠️ 图标提示用户「这块数据可能已经过期，请手动刷新或检查网络」
+web/static/js/dashboard.js:1125:// 自动轮询：仪表盘活跃 + tab 可见时每 60 秒静默刷新一次。
+web/static/js/dashboard.js:1126:// 切走 / tab 隐藏时 setInterval 仍在跑，但 tick 内会检查并跳过实际刷新；
+web/static/js/dashboard.js:1127:// 重新可见时基于 lastUpdatedAt 判断是否需要立即补刷一次（>= 间隔的一半就刷）。
+web/static/js/dashboard.js:1157:// 严重度配色及中文标签
+web/static/js/dashboard.js:1167:// 友好的相对时间："5 分钟前" / "2 小时前" / "昨天" / "3 天前"
+web/static/js/dashboard.js:1180:    // 超过一周显示日期
+web/static/js/dashboard.js:1184:// 最近漏洞列表
+web/static/js/dashboard.js:1262:// 最近漏洞 / 近期事实 Tab 切换（共用列表区域，查看全部链接随 Tab 变化）
+web/static/js/dashboard.js:1302:        empty.textContent = dt('common.loading', null, '加载中…');
+web/static/js/dashboard.js:1319:        empty.textContent = dt('common.loadFailed', null, '加载失败');
+web/static/js/dashboard.js:1325:    if (c === 'confirmed') return dt('projects.confidenceConfirmed', null, '已确认');
+web/static/js/dashboard.js:1326:    if (c === 'tentative') return dt('projects.confidenceTentative', null, '待确认');
+web/static/js/dashboard.js:1335:// 按 project_id（回退 project_name）稳定映射 8 种配色，同一项目跨刷新颜色一致
+web/static/js/dashboard.js:1385:                ? dt('dashboard.noFactsDesc', null, '在绑定项目的对话中，Agent 会自动记录目标、漏洞、攻击链等事实')
+web/static/js/dashboard.js:1386:                : dt('projects.selectOrCreateHint', null, '项目用于跨对话共享「事实黑板」：目标、环境、认证等信息会在绑定项目的对话中自动注入。');
+web/static/js/dashboard.js:1388:                ? dt('dashboard.goToChat', null, '前往对话')
+web/static/js/dashboard.js:1389:                : dt('dashboard.createFirstProjectBtn', null, '创建第一个项目');
+web/static/js/dashboard.js:1392:                '<div class="dashboard-empty-title">' + esc(dt('dashboard.noFactsYet', null, '暂无近期事实')) + '</div>' +
+web/static/js/dashboard.js:1440:        // 置顶列始终占位，避免有/无图钉时后续列错位
+web/static/js/dashboard.js:1442:            (f.pinned ? (' title="' + esc(dt('projects.pinned', null, '置顶')) + '"') : '') +
+web/static/js/dashboard.js:1444:        var projectLabel = (f.project_name || '').trim() || dt('projects.defaultProjectName', null, '项目');
+web/static/js/dashboard.js:1450:        var summary = '<span class="dashboard-recent-fact-summary" title="' + esc(f.summary || '') + '">' + esc(f.summary || dt('common.untitled', null, '无标题')) + '</span>';
+web/static/js/dashboard.js:1459:// 漏洞状态映射：把 status 字符串规整到 4 类（避免脏数据）
+web/static/js/dashboard.js:1509:// 漏洞处置状态 + 修复进度面板
+web/static/js/dashboard.js:1510:// byStatus: { open, confirmed, fixed, false_positive }（任一字段缺失视作 0）
+web/static/js/dashboard.js:1511:// total: 漏洞总数（来自 stats.total）
+web/static/js/dashboard.js:1527:    // 修复率：fixed / total（不计入 false_positive 时也可，按 total 维持一致）
+web/static/js/dashboard.js:1546:// 风险概览卡：基于「待处理(open)」口径的严重度分布计算加权风险分 + 紧急徽章
+web/static/js/dashboard.js:1548:// 为什么用 open 口径而不是全量：
+web/static/js/dashboard.js:1549://   如果用全量，全部漏洞修复后 by_severity 不变，风险分仍然居高，
+web/static/js/dashboard.js:1550://   但紧急徽章（待严重/待高危）已经归零——视觉上会出现「极高 + 0 待处理」的语义冲突。
+web/static/js/dashboard.js:1551://   改成 open 口径后，修复即卸掉风险，风险等级与紧急计数完全同步。
+web/static/js/dashboard.js:1553:// bySeverityOpen: { critical, high, medium, low }（只统计 status=open 的漏洞；info 不计入）
+web/static/js/dashboard.js:1554:// totalOpen:      待处理漏洞总数（= critical + high + medium + low），仅用于"全无待处理 → safe"判断
+web/static/js/dashboard.js:1555:// recentVulnsRes: /api/vulnerabilities?limit=10 响应（用于"最近发现"时间，口径是全量，与处置状态无关）
+web/static/js/dashboard.js:1573:    // 加权分：严重 ×10、高危 ×5、中危 ×2、低危 ×0.5；信息忽略
+web/static/js/dashboard.js:1574:    // 阈值设计偏"保守"：1 个待处理严重就进"中"，2 个进"高"，≥4 个进"极高"
+web/static/js/dashboard.js:1592:    // 进度条用 0-100 线性映射：>=100 直接满格
+web/static/js/dashboard.js:1596:        // 分数保留一位小数（低危 0.5 权重可能出现非整数）；整数直接显示
+web/static/js/dashboard.js:1601:    // 紧急徽章直接复用 open 口径的 critical / high（与加权分完全同源，不会出现"风险极高 + 0 待处理"的矛盾）
+web/static/js/dashboard.js:1720:// 仪表盘 → 漏洞管理：带严重程度/状态筛选跳转
+web/static/js/dashboard.js:1731:// 漏洞严重程度分布：半环形（donut）渲染
+web/static/js/dashboard.js:1732:// 几何参数固定，便于配合 viewBox 0 0 560 320 的 SVG 容器
+web/static/js/dashboard.js:1733:// 段间分隔由 CSS 的白色 stroke 完成，不再使用 gapRad
+web/static/js/dashboard.js:1735:    // viewBox 0 0 480 260：整体保持紧凑，但环厚回到「黄金比例」附近，
+web/static/js/dashboard.js:1736:    // 让弧带本身有视觉分量，又不像最早那版那样占太多空间。
+web/static/js/dashboard.js:1737:    // 原则：rInner / rOuter ≈ 0.70，ring thickness ≈ rOuter * 0.30。
+web/static/js/dashboard.js:1741:    rInner: 115,    // 环厚 = 50（介于原 90 和上一版 35 之间，自然且有质感）
+web/static/js/dashboard.js:1746:// 三段渐变：[高光浅调, 中段饱和色, 深色边缘] —— 做出类似 3D 釉面的层次
+web/static/js/dashboard.js:1837:    // 背景轨迹（完整半环）：双层填充营造凹槽 + 高光
+web/static/js/dashboard.js:1870:    // 弧长按 value/total 计算；若严重度求和 < total（存在未分级），右侧会保留背景轨迹的空白
+web/static/js/dashboard.js:1872:    var coverage = sumVisible / total; // 半环被实际段覆盖的比例
+web/static/js/dashboard.js:1875:    // 半环可用的总弧度 = π * coverage（按比例填充），再扣除段间间隙
+web/static/js/dashboard.js:1900:        // 仅当占比 >= 5% 时显示外置标签，避免小段标签互相重叠
+web/static/js/dashboard.js:2236:// SVG 半环（背景轨迹）路径
+web/static/js/dashboard.js:2252:// 单段弧形（angleStart > angleEnd，逆时针角度递减，视觉上沿半环顶部顺时针推进）
+web/static/js/dashboard.js:2271:// 语言切换后，仪表盘上由 JS 动态渲染的部分（KPI 副标、告警条、半环图标签、
+web/static/js/dashboard.js:2272:// 状态卡、最近漏洞列表、能力总览徽章等）不会被 applyTranslations 自动重绘，
+web/static/js/dashboard.js:2273:// 需要主动重新拉取数据并以新语言重新渲染；与 tasks/vulnerability 等其他页面保持一致。
+web/static/js/dashboard.js:2288:// 页面可见性：从其他 tab 切回时，如果距离上次刷新已经过半个轮询周期，立刻补刷一次；
+web/static/js/dashboard.js:2289:// 避免后台标签页停留几小时回来时数据还是旧的，又不至于每次切回都打接口。
+web/static/js/dashboard.js:2298:        // 不需要重新拉数据，但也跑一次 stale 检查更新徽章状态
+web/static/js/dashboard.js:2303:// 关闭告警条按钮：把当前 reasons 指纹存入 sessionStorage，本会话不再弹同样的内容
+web/static/js/hitl.js:87:/** 无会话时：将免审批工具合并进服务端 config.yaml，返回更新后的全局白名单数组 */
+web/static/js/hitl.js:230: * 审批提交后原 SSE 已断开：轮询任务列表，运行中则拉取过程详情；任务结束后再整页加载会话以对齐终态。
+web/static/js/hitl.js:434:// 由 applyHitlSidebarConfig 调用，将侧栏配置同步到后端
+web/static/js/hitl.js:439:// 由 chat.js 在 loadConversation 内 await 调用；挂到 window 供其它入口显式触发
+web/static/js/i18n.js:1:// 前端国际化初始化（基于 i18next 浏览器版本）
+web/static/js/i18n.js:9:    // 供 bootstrap 等逻辑等待：避免 chat 在 t() 未就绪时用中文硬编码渲染，导致与语言标签不一致
+web/static/js/i18n.js:70:            // 仅当元素无子元素（仅文本或空）时才替换文本，避免覆盖卡片内的数字、子节点等；input/textarea 永不设置 textContent
+web/static/js/i18n.js:92:        // 对话输入框：若 value 与 placeholder 相同，清空 value 以便正确显示占位提示
+web/static/js/i18n.js:103:        // 更新 html lang 属性
+web/static/js/i18n.js:187:        // 导出全局函数供其他脚本调用（支持插值参数，如 _t('key', { count: 2 })）
+web/static/js/i18n.js:195:        // 语言切换下拉支持
+web/static/js/i18n.js:212:        // 若 chat 已在 i18n 完成前用后备中文渲染了系统就绪消息，这里按当前语言纠正一次
+web/static/js/i18n.js:223:        // i18n 初始化在 DOM Ready 后执行
+web/static/js/chat.js:998:                                console.error('解析事件数据失败:', e, line);

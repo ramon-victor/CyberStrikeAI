@@ -96,18 +96,44 @@ func (h *ConversationHandler) ListConversations(c *gin.Context) {
 	limit, _ := strconv.Atoi(limitStr)
 	offset, _ := strconv.Atoi(offsetStr)
 
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 {
 		limit = 50
 	}
+	if limit > 1000 {
+		limit = 1000
+	}
 
-	conversations, err := h.db.ListConversations(limit, offset, search)
+	excludeGrouped := strings.TrimSpace(search) == "" &&
+		(c.Query("exclude_grouped") == "true" || c.Query("exclude_grouped") == "1")
+
+	var conversations []*database.Conversation
+	var total int
+	var err error
+	if excludeGrouped {
+		conversations, err = h.db.ListUngroupedConversations(limit, offset)
+		if err == nil {
+			total, err = h.db.CountUngroupedConversations()
+		}
+	} else {
+		conversations, err = h.db.ListConversations(limit, offset, search)
+		if err == nil {
+			total, err = h.db.CountConversations(search)
+		}
+	}
 	if err != nil {
 		h.logger.Error("Failed to get conversation list", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	c.JSON(http.StatusOK, conversations)
+	if conversations == nil {
+		conversations = []*database.Conversation{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"conversations": conversations,
+		"total":         total,
+		"limit":         limit,
+		"offset":        offset,
+	})
 }
 
 // GetConversation Get conversation

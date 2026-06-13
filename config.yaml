@@ -10,7 +10,7 @@
 # ============================================
 
 # Version shown in the frontend (optional; uses the default version when empty)
-version: "v1.6.29"
+version: "v1.6.36"
 # Server settings
 server:
   host: 0.0.0.0 # Listen address; 0.0.0.0 listens on all network interfaces
@@ -65,6 +65,20 @@ openai:
     allow_client_reasoning: true # false ignores reasoning in the conversation request body and uses only the settings below
     profile: openai_compat # auto | deepseek_compat | openai_compat | output_config_effort
     # extra_request_fields: {} # Optional: administrator-defined root-level JSON fragment (advanced)
+# Vision analysis (analyze_image MCP tool; images appear only in a single VL call, the Agent context retains only a text summary)
+vision:
+  enabled: false # true and model is non-empty to register analyze_image
+  model: qwen-vl # VL model name (required when enabled)
+  api_key: "" # Leave empty to reuse openai.api_key
+  base_url: "" # Leave empty to reuse openai.base_url
+  provider: # Leave empty to reuse openai.provider (openai | claude)
+  max_image_bytes: 5242880 # Original file size limit (bytes), default 5 MB
+  max_dimension: 2048 # Long-edge scaling pixels
+  jpeg_quality: 82
+  max_payload_bytes: 524288 # Encoded payload size limit sent to VL API, default 512 KB
+  skip_preprocess_below_bytes: 2097152 # Below 2 MB and long edge <= max_dimension and <= max_payload, send the original image directly; 0 = always compress
+  detail: auto # low | high | auto (Eino ImageURLDetail)
+  timeout_seconds: 60
 # ============================================
 # Information gathering (FOFA) settings (optional)
 # ============================================
@@ -77,7 +91,7 @@ fofa:
 # Agent settings
 # When the maximum iteration count is reached, the AI automatically summarizes test results
 agent:
-  max_iterations: 12000 # Maximum iteration count; the maximum number of tool-call rounds the AI agent can run
+  max_iterations: 12000 # Maximum iteration count (single-agent / Deep / Supervisor / Plan-Execute main executor / sub-agents all follow; agents/*.md with max_iterations>0 can override individually)
   large_result_threshold: 102400 # Large-result threshold in bytes; default 50 KB; larger results are automatically saved to storage
   result_storage_dir: tmp # Result storage directory; large results are saved here
   tool_timeout_minutes: 60 # Maximum duration in minutes for one tool execution; timed-out tools are terminated automatically; 0 means unlimited (not recommended because long hangs are likely)
@@ -95,10 +109,8 @@ multi_agent:
   enabled: true
   robot_default_agent_mode: eino_single # WeCom/DingTalk/Lark robot default conversation mode: eino_single | deep | plan_execute | supervisor
   batch_use_multi_agent: false # true: each subtask in the batch task queue also uses Eino multi-agent (higher cost)
-  max_iteration: 0 # Maximum rounds for the main agent / plan_execute executor; 0 means use agent.max_iterations
-  # For plan_execute only: maximum outer execute-replan loop count; 0 means Eino default 10. The current Executor mounts pre-middlewares such as patch/reduction/tool_search.
+  # For plan_execute only: maximum outer execute-replan loop count; 0 means Eino default 10. Main/sub-agent ReAct rounds see agent.max_iterations.
   plan_execute_loop_max_iterations: 0
-  sub_agent_max_iterations: 120
   sub_agent_user_context_max_runes: 0 # Character limit for automatically injecting the original user request into sub-agent task descriptions; 0 = default 2000, negative = disabled
   without_general_sub_agent: false # false keeps Deep built-in general-purpose sub-agents
   without_write_todos: false
@@ -116,8 +128,8 @@ multi_agent:
     tool_search_enable: true # true: enables tool_search when tool count >= min; only the first N tools are always visible and the rest are unlocked on demand by regex, saving tokens and reducing wrong tool choices; false: all tools go into context
     tool_search_min_tools: 20 # Enable tool_search only at this count (avoids overhead when there are few tools); used with always_visible
     tool_search_always_visible: 12 # Number of tools always exposed directly to the model (order matches the role tool list); the remaining tools enter a dynamic pool and require tool_search to unlock
-    tool_search_always_visible_tools: [read_file, glob, grep, write_file, edit_file, execute, task, transfer_to_agent, exit, write_todos, skill, tool_search, TaskCreate, TaskGet, TaskUpdate, TaskList, record_vulnerability, list_vulnerabilities, get_vulnerability, list_knowledge_risk_types, search_knowledge_base, webshell_exec, webshell_file_list, webshell_file_read, webshell_file_write, manage_webshell_list, manage_webshell_add, manage_webshell_update, manage_webshell_delete, manage_webshell_test, batch_task_list, batch_task_get, batch_task_start, batch_task_rerun, batch_task_pause, batch_task_update_metadata, batch_task_update_schedule, batch_task_schedule_enabled, batch_task_update_task, batch_task_remove_task, batch_task_delete, batch_task_create, batch_task_add_task, http-framework-test] # Backend built-in always-visible tool whitelist (takes precedence over the always_visible count policy)
-    plantask_enable: false # true: main agent (Deep / Supervisor main) mounts TaskCreate/Get/Update/List; requires eino_skills to be usable and skills_dir to exist, otherwise it only logs and skips
+    tool_search_always_visible_tools: [read_file, glob, grep, analyze_image, write_file, edit_file, execute, task, transfer_to_agent, exit, write_todos, skill, tool_search, TaskCreate, TaskGet, TaskUpdate, TaskList, record_vulnerability, list_vulnerabilities, get_vulnerability, list_knowledge_risk_types, search_knowledge_base, webshell_exec, webshell_file_list, webshell_file_read, webshell_file_write, manage_webshell_list, manage_webshell_add, manage_webshell_update, manage_webshell_delete, manage_webshell_test, batch_task_list, batch_task_get, batch_task_start, batch_task_rerun, batch_task_pause, batch_task_update_metadata, batch_task_update_schedule, batch_task_schedule_enabled, batch_task_update_task, batch_task_remove_task, batch_task_delete, batch_task_create, batch_task_add_task, http-framework-test] # Backend built-in always-visible tool whitelist (takes precedence over the always_visible count policy)
+    plantask_enable: true # P0: main agent (Deep / Supervisor main) mounts TaskCreate/Get/Update/List structured task board; requires eino_skills to be usable and skills_dir to exist
     plantask_rel_dir: .eino/plantask # Subdirectory under skills_dir for structured task files; files are further stored by session ID subdirectory
     reduction_enable: true # true: truncates and persists large tool output to control context; depends on the same Eino local write backend as plantask and is not mounted without a backend
     reduction_max_length_for_trunc: 50000 # Truncate and persist a single tool result when it exceeds this character count in bytes (handled by reduction middleware)
@@ -131,11 +143,11 @@ multi_agent:
     plan_execute_executed_steps_budget_ratio: 0.2 # executed_steps budget ratio in plan_execute
     plan_execute_max_step_result_runes: 4000 # Maximum characters per plan_execute step result (truncated when exceeded)
     plan_execute_keep_last_steps: 8 # plan_execute keeps only the body text of the latest N steps; earlier steps are folded to titles
-    checkpoint_dir: "" # Non-empty: enable a file CheckPointStore with per-session subdirectories for adk.NewRunner to persist interrupt recovery; Resume HTTP/frontend flow requires separate integration
-    run_retry_max_attempts: 0 # >0: ADK run-loop resume attempts with exponential backoff for 429/5xx/network jitter; 0 = default 10
+    checkpoint_dir: data/eino-checkpoints # P0: auto ADK Resume after process crash/OOM in the same session; normal completion deletes .ckpt; separate from the "interrupt and continue" (last_react_*) mechanism
+    run_retry_max_attempts: 0 # >0: ADK run-loop resume attempts with exponential backoff for 429/5xx/network jitter; 0 = default 10 (complements deep_model_retry; recommended to keep default)
     run_retry_max_backoff_sec: 0 # Maximum seconds for one backoff; 0 = default 30
-    deep_output_key: "" # Non-empty: key name used to write final assistant output into the ADK session (Deep and Supervisor main agents); empty means do not write
-    deep_model_retry_max_retries: 0 # >0: Maximum framework-level retries when ChatModel calls fail (Deep and Supervisor main agents); 0: no retry
+    deep_output_key: final_answer # P0: key name for writing final assistant conclusion into Eino session (framework internal; Deep/Supervisor main/eino_single)
+    deep_model_retry_max_retries: 3 # P0: framework-level automatic retries when a single ChatModel API call fails (timeout/502 etc.); sub-agent models are not affected
     task_tool_description_prefix: "" # Non-empty: only the Deep task tool uses this custom description prefix; the sub-agent name is appended at runtime; empty uses Eino default generation logic
   # Eino callbacks + OpenTelemetry: framework-level spans aligned with Zap; by default eino_trace_* is not pushed to end-user UI (see sse_trace_to_client)
   eino_callbacks:
@@ -280,7 +292,7 @@ skills_dir: skills # Skills configuration file directory, relative to this confi
 # ============================================
 # Multi-agent sub-agents (Markdown, the single source of maintenance)
 # ============================================
-# Each .md: YAML front matter (name / id / description / tools / bind_role / max_iterations / optional kind: orchestrator) plus body as the system prompt
+# Each .md: YAML front matter (name / id / description / tools / bind_role / optional max_iterations>0 to override global / optional kind: orchestrator) plus body as the system prompt
 # Main agent: fixed filename orchestrator.md, or any filename with front matter kind: orchestrator (only one allowed in the directory); main agent is not included in the task sub-agent list
 # Advanced use: sub_agents can still be written in the multi_agent block; they are merged with this directory, and .md overrides YAML for the same id
 agents_dir: agents
@@ -298,6 +310,6 @@ roles_dir: roles # Role configuration file directory, relative to this configura
 project:
   enabled: true
   # default_project_id: "" # Optional: default project ID when robots or batch tasks create conversations
-  fact_index_max_runes: 3500
-  fact_summary_max_runes: 240
+  fact_index_max_runes: 6500
+  fact_summary_max_runes: 2400
   default_inject_deprecated: false

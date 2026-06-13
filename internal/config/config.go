@@ -37,6 +37,7 @@ type Config struct {
 	AgentsDir   string                `yaml:"agents_dir,omitempty" json:"agents_dir,omitempty"` // multi-agent sub-agent Markdown definition directory (*.md, YAML front matter)
 	MultiAgent  MultiAgentConfig      `yaml:"multi_agent,omitempty" json:"multi_agent,omitempty"`
 	Project     ProjectConfig         `yaml:"project,omitempty" json:"project,omitempty"`
+	Vision      VisionConfig          `yaml:"vision,omitempty" json:"vision,omitempty"`
 }
 
 // ProjectConfig project blackboard (cross-conversation shared facts) configuration.
@@ -71,10 +72,12 @@ type MultiAgentConfig struct {
 	BatchUseMultiAgent    bool   `yaml:"batch_use_multi_agent" json:"batch_use_multi_agent"`                           // when true, each subtask in the batch task queue uses Eino multi-agent
 	// Orchestration is deprecated and kept only for compatibility with old config.yaml; chat/WebShell request body orchestration decides the mode and defaults to deep when omitted.
 	Orchestration string `yaml:"orchestration,omitempty" json:"orchestration,omitempty"`
-	MaxIteration  int    `yaml:"max_iteration" json:"max_iteration"` // maximum reasoning iterations for the main agent / executor (Deep, Supervisor, and plan_execute Executor)
-	// PlanExecuteLoopMaxIterations plan_execute outer execute-replan loop limit in plan_execute mode; 0 uses Eino default 10.
-	PlanExecuteLoopMaxIterations int    `yaml:"plan_execute_loop_max_iterations,omitempty" json:"plan_execute_loop_max_iterations,omitempty"`
-	SubAgentMaxIterations        int    `yaml:"sub_agent_max_iterations" json:"sub_agent_max_iterations"`
+	// MaxIteration deprecated: use agent.max_iterations (YAML field kept for backward compat; not read at runtime).
+	MaxIteration int `yaml:"max_iteration,omitempty" json:"max_iteration,omitempty"`
+	// PlanExecuteLoopMaxIterations plan_execute outer execute-replan loop limit; 0 uses Eino default 10.
+	PlanExecuteLoopMaxIterations int `yaml:"plan_execute_loop_max_iterations,omitempty" json:"plan_execute_loop_max_iterations,omitempty"`
+	// SubAgentMaxIterations deprecated: sub-agents and main agent both use agent.max_iterations (Markdown max_iterations>0 overrides).
+	SubAgentMaxIterations int `yaml:"sub_agent_max_iterations,omitempty" json:"sub_agent_max_iterations,omitempty"`
 	WithoutGeneralSubAgent       bool   `yaml:"without_general_sub_agent" json:"without_general_sub_agent"`
 	WithoutWriteTodos            bool   `yaml:"without_write_todos" json:"without_write_todos"`
 	OrchestratorInstruction      string `yaml:"orchestrator_instruction" json:"orchestrator_instruction"`
@@ -237,7 +240,8 @@ type MultiAgentEinoMiddlewareConfig struct {
 	SummarizationTriggerRatio float64 `yaml:"summarization_trigger_ratio,omitempty" json:"summarization_trigger_ratio,omitempty"`
 	// SummarizationEmitInternalEvents controls middleware internal event emission (default true).
 	SummarizationEmitInternalEvents *bool `yaml:"summarization_emit_internal_events,omitempty" json:"summarization_emit_internal_events,omitempty"`
-
+	// SummarizationRetryMaxAttempts is extra retries after the first summarization Generate attempt; 0 = default 3.
+	SummarizationRetryMaxAttempts int `yaml:"summarization_retry_max_attempts,omitempty" json:"summarization_retry_max_attempts,omitempty"`
 	// PlanExecuteUserInputBudgetRatio caps planner/replanner/executor userInput prompt budget ratio (default 0.35).
 	PlanExecuteUserInputBudgetRatio float64 `yaml:"plan_execute_user_input_budget_ratio,omitempty" json:"plan_execute_user_input_budget_ratio,omitempty"`
 	// PlanExecuteExecutedStepsBudgetRatio caps executed_steps prompt budget ratio (default 0.2).

@@ -15,7 +15,7 @@ COPY . .
 
 RUN go build -o /out/cyberstrike-ai ./cmd/server/main.go
 
-FROM golang:1.26-bookworm AS tools-builder
+FROM golang:1.24-bookworm AS tools-builder
 
 ARG TARGETARCH
 

@@ -161,6 +161,7 @@ func RunDeepAgent(
 
 	// 若配置为 Claude provider，注入自动桥接 transport，对 Eino 透明走 Anthropic Messages API
 	httpClient = openai.NewEinoHTTPClient(&appCfg.OpenAI, httpClient)
+	openai.AttachSummarizationDiagTransport(httpClient, logger)
 
 	baseModelCfg := &einoopenai.ChatModelConfig{
 		APIKey:     appCfg.OpenAI.APIKey,
@@ -170,18 +171,7 @@ func RunDeepAgent(
 	}
 	reasoning.ApplyToEinoChatModelConfig(baseModelCfg, &appCfg.OpenAI, reasoningClient)
 
-	deepMaxIter := ma.MaxIteration
-	if deepMaxIter <= 0 {
-		deepMaxIter = appCfg.Agent.MaxIterations
-	}
-	if deepMaxIter <= 0 {
-		deepMaxIter = 40
-	}
-
-	subDefaultIter := ma.SubAgentMaxIterations
-	if subDefaultIter <= 0 {
-		subDefaultIter = 20
-	}
+	deepMaxIter := agentMaxIterations(appCfg)
 
 	var subAgents []adk.Agent
 	if orchMode != "plan_execute" {
@@ -230,10 +220,7 @@ func RunDeepAgent(
 				return nil, fmt.Errorf("子代理 %q eino 中间件: %w", id, err)
 			}
 
-			subMax := sub.MaxIterations
-			if subMax <= 0 {
-				subMax = subDefaultIter
-			}
+			subMax := resolveMaxIterations(appCfg, sub.MaxIterations)
 
 			subSumMw, err := newEinoSummarizationMiddleware(ctx, subModel, appCfg, &ma.EinoMiddleware, conversationID, logger)
 			if err != nil {
@@ -262,7 +249,8 @@ func RunDeepAgent(
 				subHandlers = append(subHandlers, teleMw)
 			}
 
-			subInstrFinal := injectToolNamesOnlyInstruction(ctx, instr, subTools, subToolSearchActive)
+			subInstrFinal := project.AppendVisionImageAnalysisIfReady(instr, appCfg.Vision.Ready())
+			subInstrFinal = injectToolNamesOnlyInstruction(ctx, subInstrFinal, subTools, subToolSearchActive)
 			if logger != nil {
 				subNames := collectToolNames(ctx, subTools)
 				mountedNames := collectToolNames(ctx, subToolsForCfg)
@@ -342,6 +330,7 @@ func RunDeepAgent(
 	}
 
 	orchInstruction = project.AppendSystemPromptBlock(orchInstruction, systemPromptExtra)
+	orchInstruction = project.AppendVisionImageAnalysisIfReady(orchInstruction, appCfg.Vision.Ready())
 	orchInstruction = injectToolNamesOnlyInstruction(ctx, orchInstruction, mainTools, mainToolSearchActive)
 	if logger != nil {
 		mainNames := collectToolNames(ctx, mainTools)

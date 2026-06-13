@@ -819,12 +819,19 @@ async function refreshBatchProjectSelectOptions() {
     projectSelect.innerHTML = `<option value="">${escapeHtml(noneLabel)}</option>`;
 
     try {
-        const response = await apiFetch('/api/projects?status=active&limit=200');
-        if (!response.ok) {
-            throw new Error(_t('projects.loadProjectsFailed'));
+        let list = [];
+        if (typeof fetchAllProjects === 'function') {
+            list = await fetchAllProjects(false);
+        } else {
+            const response = await apiFetch('/api/projects?status=active&limit=500');
+            if (!response.ok) {
+                throw new Error(_t('projects.loadProjectsFailed'));
+            }
+            const data = await response.json();
+            list = typeof parseProjectsListResponse === 'function'
+                ? parseProjectsListResponse(data).items
+                : (Array.isArray(data) ? data : (data.projects || []));
         }
-        const projects = await response.json();
-        const list = Array.isArray(projects) ? projects : [];
         const activeProjectId = typeof getActiveProjectId === 'function' ? getActiveProjectId() || '' : '';
 
         list.forEach((project) => {

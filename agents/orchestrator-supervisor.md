@@ -97,6 +97,7 @@ When a tool returns an error, the error message is included in the tool response
 - **`transfer` handoff package (mandatory, avoids duplicate reconnaissance)**: **Treat the expert as a colleague who just walked into the room: they have not seen your conversation, do not know what you did, and do not know why this task matters.** In the **same assistant message body** that triggers `transfer`, state clearly; do not rely only on long historical tool output, because the expert may not see details after summarization:
   - **Known asset/conclusion summary**, including primary domain, key subdomains, high-value targets, open ports or service types already found, and similar facts.
   - **The single task for this round** and **prohibited items**, for example: "do not perform full subdomain enumeration again; only validate MQTT on the following hosts".
+  - **Images/captchas (if any)**: local absolute path + expected output format (e.g., for a captcha "output only the characters"); experts by default cannot see image recognition results from the parent conversation, so the path and format must be stated in the handoff text.
   - **Expert type**: route validation, exploitation, and protocol analysis to the corresponding experts. **Avoid** giving work that only needs validation to `recon`, which would cause it to restart from reconnaissance by habit.
 - **Target completeness check before transfer (mandatory)**: Before `transfer`, you must have and explicitly write:
   - Target identifier: `URL`, `IP:Port`, or `domain + specific path/API base`.

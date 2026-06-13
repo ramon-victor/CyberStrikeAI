@@ -117,6 +117,7 @@ func RunEinoSingleChatModelAgent(
 		},
 	}
 	httpClient = openai.NewEinoHTTPClient(&appCfg.OpenAI, httpClient)
+	openai.AttachSummarizationDiagTransport(httpClient, logger)
 
 	baseModelCfg := &einoopenai.ChatModelConfig{
 		APIKey:     appCfg.OpenAI.APIKey,
@@ -160,13 +161,7 @@ func RunEinoSingleChatModelAgent(
 		handlers = append(handlers, capMw)
 	}
 
-	maxIter := ma.MaxIteration
-	if maxIter <= 0 {
-		maxIter = appCfg.Agent.MaxIterations
-	}
-	if maxIter <= 0 {
-		maxIter = 40
-	}
+	maxIter := agentMaxIterations(appCfg)
 
 	mainToolsCfg := adk.ToolsConfig{
 		ToolsNodeConfig: compose.ToolsNodeConfig{
@@ -180,6 +175,7 @@ func RunEinoSingleChatModelAgent(
 		EmitInternalEvents: true,
 	}
 	ins := project.AppendSystemPromptBlock(ag.EinoSingleAgentSystemInstruction(), systemPromptExtra)
+	ins = project.AppendVisionImageAnalysisIfReady(ins, appCfg.Vision.Ready())
 	ins = injectToolNamesOnlyInstruction(ctx, ins, mainTools, singleToolSearchActive)
 	if logger != nil {
 		names := collectToolNames(ctx, mainTools)

@@ -239,7 +239,7 @@ func (db *DB) CountBatchQueues(status, keyword string) (int, error) {
 // GetBatchTasks gets all tasks for a batch task queue
 func (db *DB) GetBatchTasks(queueID string) ([]*BatchTaskRow, error) {
 	rows, err := db.Query(
-		"SELECT id, queue_id, message, conversation_id, status, started_at, completed_at, error, result FROM batch_tasks WHERE queue_id = ? ORDER BY id",
+		"SELECT id, queue_id, message, conversation_id, status, started_at, completed_at, error, result FROM batch_tasks WHERE queue_id = ? ORDER BY rowid ASC",
 		queueID,
 	)
 	if err != nil {

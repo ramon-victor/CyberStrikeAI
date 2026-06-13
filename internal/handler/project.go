@@ -61,12 +61,40 @@ func (h *ProjectHandler) CreateProject(c *gin.Context) {
 	c.JSON(http.StatusOK, created)
 }
 
+// GetDashboardSummary GET /api/projects/dashboard-summary
+func (h *ProjectHandler) GetDashboardSummary(c *gin.Context) {
+	limit, _ := strconv.Atoi(strings.TrimSpace(c.DefaultQuery("fact_limit", "5")))
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	summary, err := h.db.GetProjectDashboardSummary(limit)
+	if err != nil {
+		h.logger.Error("获取项目仪表盘摘要失败", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if summary.RecentFacts == nil {
+		summary.RecentFacts = []database.ProjectDashboardFact{}
+	}
+	c.JSON(http.StatusOK, summary)
+}
+
 // ListProjects GET /api/projects
 func (h *ProjectHandler) ListProjects(c *gin.Context) {
 	status := c.Query("status")
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
+	search := c.Query("search")
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 	offset, _ := strconv.Atoi(c.Query("offset"))
-	list, err := h.db.ListProjects(status, limit, offset)
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	list, err := h.db.ListProjects(status, search, limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -74,7 +102,17 @@ func (h *ProjectHandler) ListProjects(c *gin.Context) {
 	if list == nil {
 		list = []*database.Project{}
 	}
-	c.JSON(http.StatusOK, list)
+	total, err := h.db.CountProjects(status, search)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"projects": list,
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
+	})
 }
 
 // GetProjectStats GET /api/projects/:id/stats
@@ -240,43 +278,6 @@ func (h *ProjectHandler) ListFacts(c *gin.Context) {
 	c.JSON(http.StatusOK, list)
 }
 
-// GetFactPreviousVersion GET /api/projects/:id/facts/:factId/previous-version
-func (h *ProjectHandler) GetFactPreviousVersion(c *gin.Context) {
-	existing, err := h.db.GetProjectFact(c.Param("factId"))
-	if err != nil || existing.ProjectID != c.Param("id") {
-		c.JSON(http.StatusNotFound, gin.H{"error": "fact does not exist"})
-		return
-	}
-	if strings.TrimSpace(existing.SupersedesFactID) == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "no previous version"})
-		return
-	}
-	v, err := h.db.GetProjectFactVersion(existing.SupersedesFactID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, v)
-}
-
-// ListFactVersions GET /api/projects/:id/facts/:factId/versions
-func (h *ProjectHandler) ListFactVersions(c *gin.Context) {
-	existing, err := h.db.GetProjectFact(c.Param("factId"))
-	if err != nil || existing.ProjectID != c.Param("id") {
-		c.JSON(http.StatusNotFound, gin.H{"error": "fact does not exist"})
-		return
-	}
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	list, err := h.db.ListProjectFactVersions(existing.ID, limit)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if list == nil {
-		list = []*database.ProjectFactVersion{}
-	}
-	c.JSON(http.StatusOK, list)
-}
 
 // CreateFact POST /api/projects/:id/facts
 func (h *ProjectHandler) CreateFact(c *gin.Context) {

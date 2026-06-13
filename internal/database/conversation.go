@@ -361,6 +361,27 @@ func (db *DB) GetConversationLite(id string) (*Conversation, error) {
 	return &conv, nil
 }
 
+// CountConversations counts conversations.
+func (db *DB) CountConversations(search string) (int, error) {
+	var count int
+	var err error
+	if search != "" {
+		searchPattern := "%" + search + "%"
+		err = db.QueryRow(
+			`SELECT COUNT(*) FROM conversations c
+			 WHERE c.title LIKE ?
+			    OR EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.content LIKE ?)`,
+			searchPattern, searchPattern,
+		).Scan(&count)
+	} else {
+		err = db.QueryRow(`SELECT COUNT(*) FROM conversations`).Scan(&count)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to count conversations: %w", err)
+	}
+	return count, nil
+}
+
 // ListConversations lists all conversations
 func (db *DB) ListConversations(limit, offset int, search string) ([]*Conversation, error) {
 	var rows *sql.Rows
@@ -430,6 +451,73 @@ func (db *DB) ListConversations(limit, offset int, search string) ([]*Conversati
 	return conversations, nil
 }
 
+const ungroupedConversationsSQL = `
+	FROM conversations c
+	WHERE NOT EXISTS (
+		SELECT 1 FROM conversation_group_mappings cgm WHERE cgm.conversation_id = c.id
+	)`
+
+// CountUngroupedConversations counts conversations not in any group.
+func (db *DB) CountUngroupedConversations() (int, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) ` + ungroupedConversationsSQL).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count ungrouped conversations: %w", err)
+	}
+	return count, nil
+}
+
+// ListUngroupedConversations lists conversations not in any group (recent conversation sidebar).
+func (db *DB) ListUngroupedConversations(limit, offset int) ([]*Conversation, error) {
+	rows, err := db.Query(
+		`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id `+
+			ungroupedConversationsSQL+`
+		 ORDER BY c.updated_at DESC
+		 LIMIT ? OFFSET ?`,
+		limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query ungrouped conversations: %w", err)
+	}
+	defer rows.Close()
+
+	var conversations []*Conversation
+	for rows.Next() {
+		var conv Conversation
+		var createdAt, updatedAt string
+		var pinned int
+		var projectID sql.NullString
+
+		if err := rows.Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &projectID); err != nil {
+			return nil, fmt.Errorf("failed to scan conversation: %w", err)
+		}
+		if projectID.Valid {
+			conv.ProjectID = strings.TrimSpace(projectID.String)
+		}
+
+		var err1, err2 error
+		conv.CreatedAt, err1 = time.Parse("2006-01-02 15:04:05.999999999-07:00", createdAt)
+		if err1 != nil {
+			conv.CreatedAt, err1 = time.Parse("2006-01-02 15:04:05", createdAt)
+		}
+		if err1 != nil {
+			conv.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		}
+
+		conv.UpdatedAt, err2 = time.Parse("2006-01-02 15:04:05.999999999-07:00", updatedAt)
+		if err2 != nil {
+			conv.UpdatedAt, err2 = time.Parse("2006-01-02 15:04:05", updatedAt)
+		}
+		if err2 != nil {
+			conv.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		}
+
+		conv.Pinned = pinned != 0
+		conversations = append(conversations, &conv)
+	}
+
+	return conversations, rows.Err()
+}
+
 // UpdateConversationTitle updates a conversation title
 func (db *DB) UpdateConversationTitle(id, title string) error {
 	// Note: do not update updated_at because renaming should not change the conversation update time.
@@ -455,18 +543,28 @@ func (db *DB) UpdateConversationTime(id string) error {
 	return nil
 }
 
-// DeleteConversation deletes a conversation and all related data
-// Because database foreign keys use ON DELETE CASCADE, deleting a conversation also deletes:
+// DeleteConversation deletes a conversation and all related data.
+// Due to ON DELETE CASCADE foreign keys, deleting a conversation also deletes:
 // - messages
 // - process_details
 // - attack_chain_nodes
 // - attack_chain_edges
-// - vulnerabilities
 // - conversation_group_mappings
-// Note: knowledge_retrieval_logs uses ON DELETE SET NULL, so records remain but conversation_id is set to NULL.
+// Vulnerability records are preserved: vulnerabilities.conversation_id uses ON DELETE SET NULL, only unbinding from the conversation.
+// Note: knowledge_retrieval_logs are explicitly cleaned up before deletion.
 func (db *DB) DeleteConversation(id string) error {
-	// Explicitly delete knowledge retrieval logs; even though the foreign key uses SET NULL, manual deletion fully cleans them up.
-	_, err := db.Exec("DELETE FROM knowledge_retrieval_logs WHERE conversation_id = ?", id)
+	// Backfill conversation title into vulnerability conversation_tag before deletion, for traceability.
+	_, err := db.Exec(`
+		UPDATE vulnerabilities
+		SET conversation_tag = COALESCE(NULLIF(TRIM(conversation_tag), ''), (SELECT title FROM conversations WHERE id = ?))
+		WHERE conversation_id = ?
+	`, id, id)
+	if err != nil {
+		db.logger.Warn("failed to update vulnerability conversation tag", zap.String("conversationId", id), zap.Error(err))
+	}
+
+	// Explicitly delete knowledge retrieval logs (FK is SET NULL, but we clean them up fully).
+	_, err = db.Exec("DELETE FROM knowledge_retrieval_logs WHERE conversation_id = ?", id)
 	if err != nil {
 		db.logger.Warn("failed to delete knowledge retrieval logs", zap.String("conversationId", id), zap.Error(err))
 		// Do not return an error; continue deleting the conversation.
@@ -477,17 +575,51 @@ func (db *DB) DeleteConversation(id string) error {
 	if err != nil {
 		return fmt.Errorf("failed to delete conversation: %w", err)
 	}
-	// Best-effort cleanup for conversation-scoped filesystem artifacts
-	// (e.g., summarization transcript, reduction/checkpoint files under conversation_artifacts/<id>).
-	if base := strings.TrimSpace(db.conversationArtifactsDir); base != "" {
-		artDir := filepath.Join(base, id)
-		if rmErr := os.RemoveAll(artDir); rmErr != nil {
-			db.logger.Warn("failed to delete conversation artifacts directory", zap.String("conversationId", id), zap.String("dir", artDir), zap.Error(rmErr))
+	db.removeConversationScopedDirs(id)
+
+	db.logger.Info("conversation deleted (vulnerability records preserved)", zap.String("conversationId", id))
+	return nil
+}
+
+func sanitizeConversationPathSegment(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "default"
+	}
+	s = strings.ReplaceAll(s, string(filepath.Separator), "-")
+	s = strings.ReplaceAll(s, "/", "-")
+	s = strings.ReplaceAll(s, "\\", "-")
+	s = strings.ReplaceAll(s, "..", "__")
+	if len(s) > 180 {
+		s = s[:180]
+	}
+	return s
+}
+
+func (db *DB) removeConversationScopedDir(base, conversationID, label string) {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return
+	}
+	dir := filepath.Join(base, sanitizeConversationPathSegment(conversationID))
+	if rmErr := os.RemoveAll(dir); rmErr != nil {
+		if db.logger != nil {
+			db.logger.Warn("failed to remove conversation scoped directory",
+				zap.String("conversationId", conversationID),
+				zap.String("kind", label),
+				zap.String("dir", dir),
+				zap.Error(rmErr))
 		}
 	}
+}
 
-	db.logger.Info("conversation and all related data deleted", zap.String("conversationId", id))
-	return nil
+func (db *DB) removeConversationScopedDirs(conversationID string) {
+	// summarization transcript, reduction files, etc.
+	db.removeConversationScopedDir(db.conversationArtifactsDir, conversationID, "conversation_artifacts")
+	// Eino plantask JSON boards (skills_dir/.eino/plantask/<id>/).
+	db.removeConversationScopedDir(db.einoPlantaskBaseDir, conversationID, "plantask")
+	// Eino ADK runner checkpoints (checkpoint_dir/<id>/).
+	db.removeConversationScopedDir(db.einoCheckpointBaseDir, conversationID, "eino_checkpoint")
 }
 
 // SaveAgentTrace saves the last agent message trace and assistant output summary.
@@ -604,7 +736,7 @@ func (db *DB) UpdateAssistantMessageFinalize(messageID, content string, mcpExecu
 // GetMessages gets all messages for a conversation
 func (db *DB) GetMessages(conversationID string) ([]Message, error) {
 	rows, err := db.Query(
-		"SELECT id, conversation_id, role, content, reasoning_content, mcp_execution_ids, created_at, updated_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+		"SELECT id, conversation_id, role, content, reasoning_content, mcp_execution_ids, created_at, updated_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
 		conversationID,
 	)
 	if err != nil {
@@ -799,7 +931,7 @@ func (db *DB) AddProcessDetail(messageID, conversationID, eventType, message str
 // GetProcessDetails gets process details for a message
 func (db *DB) GetProcessDetails(messageID string) ([]ProcessDetail, error) {
 	rows, err := db.Query(
-		"SELECT id, message_id, conversation_id, event_type, message, data, created_at FROM process_details WHERE message_id = ? ORDER BY created_at ASC",
+		"SELECT id, message_id, conversation_id, event_type, message, data, created_at FROM process_details WHERE message_id = ? ORDER BY created_at ASC, rowid ASC",
 		messageID,
 	)
 	if err != nil {
@@ -835,7 +967,7 @@ func (db *DB) GetProcessDetails(messageID string) ([]ProcessDetail, error) {
 // GetProcessDetailsByConversation gets all process details for a conversation grouped by message
 func (db *DB) GetProcessDetailsByConversation(conversationID string) (map[string][]ProcessDetail, error) {
 	rows, err := db.Query(
-		"SELECT id, message_id, conversation_id, event_type, message, data, created_at FROM process_details WHERE conversation_id = ? ORDER BY created_at ASC",
+		"SELECT id, message_id, conversation_id, event_type, message, data, created_at FROM process_details WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
 		conversationID,
 	)
 	if err != nil {

@@ -2,10 +2,12 @@ package c2
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -126,4 +128,102 @@ func TestHTTPBeaconListener_CheckInMatrix(t *testing.T) {
 			t.Fatalf("bad response: %+v", out)
 		}
 	})
+}
+
+func TestHTTPBeaconListener_HandleFileServe(t *testing.T) {
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "c2.sqlite")
+	db, err := database.NewDB(dbPath, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	lnPick, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := lnPick.Addr().(*net.TCPAddr).Port
+	_ = lnPick.Close()
+
+	keyB64, err := GenerateAESKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "test-implant-token-file"
+
+	lid := "l_testhttpfile01"
+	rec := &database.C2Listener{
+		ID:            lid,
+		Name:          "t",
+		Type:          string(ListenerTypeHTTPBeacon),
+		BindHost:      "127.0.0.1",
+		BindPort:      port,
+		EncryptionKey: keyB64,
+		ImplantToken:  token,
+		Status:        "stopped",
+		ConfigJSON:    `{"beacon_file_path":"/file/"}`,
+		CreatedAt:     time.Now(),
+	}
+	if err := db.CreateC2Listener(rec); err != nil {
+		t.Fatal(err)
+	}
+
+	store := filepath.Join(tmp, "c2store")
+	m := NewManager(db, zap.NewNop(), store)
+	m.Registry().Register(string(ListenerTypeHTTPBeacon), NewHTTPBeaconListener)
+	if _, err := m.StartListener(lid); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.StopListener(lid) })
+
+	fileID := "f_testfile123"
+	downDir := filepath.Join(store, "downstream")
+	if err := os.MkdirAll(downDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("upload-payload-bytes")
+	if err := os.WriteFile(filepath.Join(downDir, fileID+".bin"), want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := "http://127.0.0.1:" + strconv.Itoa(port)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	for _, path := range []string{"/file/" + fileID, "/file/" + fileID + ".bin"} {
+		t.Run(path, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodGet, base+path, nil)
+			req.Header.Set("X-Implant-Token", token)
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				b, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status=%d body=%q", resp.StatusCode, b)
+			}
+			raw, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plain, err := DecryptAESGCM(keyB64, string(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out struct {
+				FileData string `json:"file_data"`
+			}
+			if err := json.Unmarshal(plain, &out); err != nil {
+				t.Fatal(err)
+			}
+			got, err := base64.StdEncoding.DecodeString(out.FileData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("got %q want %q", got, want)
+			}
+		})
+	}
 }
