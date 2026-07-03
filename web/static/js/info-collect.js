@@ -338,45 +338,47 @@ function showFofaParseModal(nlText, parsed) {
     const explanation = parsed?.explanation != null ? String(parsed.explanation) : '';
 
     const warningsHtml = warnings.length
-        ? `<ul style="margin: 8px 0 0 18px;">${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul>`
-        : '<div class="muted" style="margin-top: 8px;">' + _t('infoCollect.none') + '</div>';
+        ? `<ul class="info-collect-parse-warnings-list">${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul>`
+        : '<div class="muted info-collect-parse-warnings-empty">' + _t('infoCollect.none') + '</div>';
 
     const modal = document.createElement('div');
     modal.id = 'fofa-parse-modal';
     modal.className = 'modal';
-    modal.style.display = 'block';
+    document.body.appendChild(modal);
+    openAppModal(modal, { focus: false });
+    deferModalContent(function () {
     modal.innerHTML = `
-        <div class="modal-content" style="max-width: 900px;">
+        <div class="modal-content info-collect-parse-modal-content" style="max-width: 900px;">
             <div class="modal-header">
                 <h2>${_t('infoCollect.parseResultTitle')}</h2>
                 <span class="modal-close" id="fofa-parse-modal-close" title="${_t('common.close')}">&times;</span>
             </div>
-            <div style="padding: 18px 28px; overflow: auto;">
+            <div class="info-collect-parse-modal-body">
                 <div class="form-group">
                     <label>${_t('infoCollect.naturalLanguageLabel')}</label>
-                    <div class="muted" style="margin-top: 6px; white-space: pre-wrap;">${safeNL || '-'}</div>
+                    <div class="muted info-collect-parse-nl-text">${safeNL || '-'}</div>
                 </div>
 
-                <div class="form-group" style="margin-top: 14px;">
+                <div class="form-group info-collect-parse-form-group">
                     <label for="fofa-parse-query">${_t('infoCollect.fofaQueryEditable')}</label>
                     <textarea id="fofa-parse-query" class="info-collect-query-input" rows="2" placeholder="${_t('infoCollect.queryPlaceholder')}"></textarea>
                     <small class="form-hint">${_t('infoCollect.confirmBeforeQuery')}</small>
                 </div>
 
-                <div class="form-group" style="margin-top: 14px;">
+                <div class="form-group info-collect-parse-form-group">
                     <label>${_t('infoCollect.reminder')}</label>
-                    <div style="background: #fff8e1; border: 1px solid #ffe8a3; border-radius: 10px; padding: 10px 12px;">
+                    <div class="info-collect-parse-warnings">
                         ${warningsHtml}
                     </div>
                 </div>
 
                 ${explanation ? `
-                <div class="form-group" style="margin-top: 14px;">
+                <div class="form-group info-collect-parse-form-group">
                     <label>${_t('infoCollect.explanation')}</label>
-                    <pre style="margin-top: 8px; white-space: pre-wrap; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 12px; font-size: 13px;">${escapeHtml(explanation)}</pre>
+                    <pre class="info-collect-parse-explanation">${escapeHtml(explanation)}</pre>
                 </div>` : ''}
             </div>
-            <div class="modal-footer" style="padding: 18px 28px;">
+            <div class="modal-footer info-collect-parse-modal-footer">
                 <button class="btn-secondary" type="button" id="fofa-parse-cancel">${_t('infoCollect.parseModalCancel')}</button>
                 <button class="btn-secondary" type="button" id="fofa-parse-apply">${_t('infoCollect.parseModalApply')}</button>
                 <button class="btn-primary" type="button" id="fofa-parse-apply-run">${_t('infoCollect.parseModalApplyRun')}</button>
@@ -384,24 +386,24 @@ function showFofaParseModal(nlText, parsed) {
         </div>
     `;
 
-    document.body.appendChild(modal);
-
     const queryTextarea = document.getElementById('fofa-parse-query');
     if (queryTextarea) {
         queryTextarea.value = (parsed?.query || '').trim();
-        setTimeout(() => {
-            try { queryTextarea.focus(); } catch (e) { /* ignore */ }
-        }, 0);
+        queryTextarea.focus();
     }
 
-    const close = () => modal.remove();
-    modal.addEventListener('click', (e) => {
+    const close = function () {
+        closeAppModal(modal);
+        modal.remove();
+        syncAppModalBodyLock();
+    };
+    modal.addEventListener('click', function (e) {
         if (e.target === modal) close();
     });
     document.getElementById('fofa-parse-modal-close')?.addEventListener('click', close);
     document.getElementById('fofa-parse-cancel')?.addEventListener('click', close);
 
-    const applyToQuery = (run) => {
+    const applyToQuery = function (run) {
         const els = getFofaFormElements();
         const q = (queryTextarea?.value || '').trim();
         if (!q) {
@@ -435,6 +437,7 @@ function showFofaParseModal(nlText, parsed) {
         }
     };
     document.addEventListener('keydown', onKey);
+    });
 }
 
 function setFofaMeta(text) {
@@ -1091,8 +1094,13 @@ function showCellDetailModal(field, fullText) {
     `;
 
     document.body.appendChild(modal);
+    openAppModal(modal);
 
-    const close = () => modal.remove();
+    const close = function () {
+        closeAppModal(modal);
+        modal.remove();
+        syncAppModalBodyLock();
+    };
     modal.addEventListener('click', (e) => {
         if (e.target === modal) close();
     });

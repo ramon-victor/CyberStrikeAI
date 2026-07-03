@@ -1,13 +1,14 @@
 <!DOCTYPE html>
-<html lang="en-US">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title data-i18n="apiDocs.pageTitle">API Docs - CyberStrikeAI</title>
+    <title data-i18n="apiDocs.pageTitle">API 文档 - CyberStrikeAI</title>
     <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="stylesheet" href="/static/css/style.css">
+    <script src="/static/js/theme.js"></script>
     <style>
-        /* Override overflow limits of main CSS, allow API docs page to scroll */
+        /* 覆盖主CSS的overflow限制，允许API文档页面滚动 */
         body {
             overflow: auto !important;
             height: auto !important;
@@ -25,7 +26,22 @@
             position: relative;
             margin-bottom: 32px;
             padding-bottom: 24px;
+            padding-right: 280px;
             border-bottom: 2px solid var(--border-color);
+        }
+
+        .api-docs-header-actions {
+            position: absolute;
+            top: 0;
+            right: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .api-docs-header-actions .theme-toggle-btn,
+        .api-docs-header-actions .lang-switcher-btn {
+            min-height: 36px;
         }
         
         .api-docs-header h1 {
@@ -241,7 +257,7 @@
             margin-bottom: 16px;
         }
         
-        /* Ensure table displays correctly on mobile devices */
+        /* 确保表格在移动设备上也能正常显示 */
         @media (max-width: 768px) {
             .api-params-table {
                 font-size: 0.8125rem;
@@ -252,7 +268,7 @@
                 padding: 8px;
             }
             
-            /* Description column can be wider on mobile devices */
+            /* 移动设备上描述列可以更宽 */
             .api-params-table th:nth-child(3),
             .api-params-table td:nth-child(3) {
                 min-width: 150px;
@@ -318,7 +334,7 @@
             margin: 4px 0;
         }
         
-        /* Markdown styles */
+        /* Markdown样式 */
         .api-description-detail .md-h1 {
             font-size: 1.5rem;
             font-weight: 600;
@@ -486,7 +502,7 @@
             vertical-align: top;
         }
         
-        /* Set column widths */
+        /* 设置列宽 */
         .api-params-table th:nth-child(1),
         .api-params-table td:nth-child(1) {
             width: 15%;
@@ -517,7 +533,7 @@
             min-width: 150px;
         }
         
-        /* Parameter name, type, and required columns do not wrap */
+        /* 参数名、类型、必需列不换行 */
         .api-params-table th:nth-child(1),
         .api-params-table td:nth-child(1),
         .api-params-table th:nth-child(2),
@@ -529,7 +545,7 @@
             text-overflow: ellipsis;
         }
         
-        /* Example column allows wrapping, displays fully */
+        /* 示例列允许换行，完整显示 */
         .api-params-table th:nth-child(5),
         .api-params-table td:nth-child(5) {
             white-space: normal;
@@ -538,7 +554,7 @@
             overflow: visible;
         }
         
-        /* Ensure code tags in example column display fully */
+        /* 确保示例列中的code标签也能完整显示 */
         .api-params-table td:nth-child(5) code {
             white-space: normal;
             word-wrap: break-word;
@@ -547,7 +563,7 @@
             max-width: 100%;
         }
         
-        /* Description column allows wrapping, but keeps horizontal */
+        /* 描述列允许换行，但保持水平方向 */
         .api-params-table th:nth-child(3),
         .api-params-table td:nth-child(3) {
             white-space: normal;
@@ -561,7 +577,7 @@
             max-width: none;
         }
         
-        /* Ensure content in description cell displays correctly */
+        /* 确保描述单元格内的内容正常显示 */
         .api-params-table td:nth-child(3) * {
             display: inline;
             writing-mode: horizontal-tb !important;
@@ -691,7 +707,7 @@
             background: var(--bg-secondary);
         }
         
-        /* Copy curl button - yellow theme */
+        /* 复制curl按钮 - 黄色主题 */
         .api-test-btn.copy-curl {
             background: #ffc107;
             color: white;
@@ -710,7 +726,7 @@
             box-shadow: 0 1px 4px rgba(255, 193, 7, 0.2);
         }
         
-        /* Clear result button - red/orange theme */
+        /* 清除结果按钮 - 红色/橙色主题 */
         .api-test-btn.clear-result {
             background: #ff6b6b;
             color: white;
@@ -822,6 +838,114 @@
         .empty-state p {
             font-size: 0.875rem;
         }
+
+        html[data-theme="dark"] body {
+            background: var(--bg-secondary);
+        }
+
+        html[data-theme="dark"] .api-docs-container {
+            background: var(--bg-secondary);
+        }
+
+        html[data-theme="dark"] .api-docs-sidebar,
+        html[data-theme="dark"] .auth-info-section,
+        html[data-theme="dark"] .api-endpoint,
+        html[data-theme="dark"] .api-endpoint-header,
+        html[data-theme="dark"] .api-test-form,
+        html[data-theme="dark"] .api-response-example,
+        html[data-theme="dark"] .api-description pre,
+        html[data-theme="dark"] .api-description-detail .code-block,
+        html[data-theme="dark"] .api-description-detail .inline-code,
+        html[data-theme="dark"] .api-description code {
+            background: #111827;
+            border-color: #263244;
+        }
+
+        html[data-theme="dark"] .api-endpoint:hover {
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38);
+        }
+
+        html[data-theme="dark"] .api-group-link:hover {
+            background: rgba(96, 165, 250, 0.1);
+            color: var(--accent-hover);
+        }
+
+        html[data-theme="dark"] .api-group-link.active {
+            background: rgba(96, 165, 250, 0.16);
+            color: var(--accent-hover);
+        }
+
+        html[data-theme="dark"] .api-params-table th {
+            background: #0f172a;
+        }
+
+        html[data-theme="dark"] .api-test-input-group input,
+        html[data-theme="dark"] .api-test-input-group textarea {
+            background: #0f172a;
+            border-color: #2b374b;
+            color: var(--text-primary);
+        }
+
+        html[data-theme="dark"] .api-test-input-group input:focus,
+        html[data-theme="dark"] .api-test-input-group textarea:focus {
+            box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.16);
+        }
+
+        html[data-theme="dark"] .api-test-result.success {
+            background: rgba(52, 211, 153, 0.14);
+            color: #6ee7b7;
+            border-color: rgba(52, 211, 153, 0.28);
+        }
+
+        html[data-theme="dark"] .api-test-result.error {
+            background: rgba(248, 113, 113, 0.14);
+            color: #fca5a5;
+            border-color: rgba(248, 113, 113, 0.28);
+        }
+
+        html[data-theme="dark"] .api-test-btn.secondary {
+            background: #111827;
+            border-color: #2b374b;
+            color: var(--text-primary);
+        }
+
+        html[data-theme="dark"] .api-test-btn.secondary:hover {
+            background: #1f2937;
+            border-color: var(--accent-color);
+        }
+
+        html[data-theme="dark"] .api-docs-header-actions .theme-toggle-btn,
+        html[data-theme="dark"] .api-docs-header-actions .lang-switcher-btn {
+            background: #111827;
+            border-color: #2b374b;
+            color: var(--text-primary);
+        }
+
+        html[data-theme="dark"] .api-docs-header-actions .theme-toggle-btn:hover,
+        html[data-theme="dark"] .api-docs-header-actions .lang-switcher-btn:hover {
+            background: #1f2937;
+            border-color: var(--accent-color);
+        }
+
+        html[data-theme="dark"] #token-status {
+            background: rgba(96, 165, 250, 0.12) !important;
+            border-left-color: var(--accent-color) !important;
+        }
+
+        @media (max-width: 768px) {
+            .api-docs-header {
+                padding-right: 0;
+                padding-bottom: 72px;
+            }
+
+            .api-docs-header-actions {
+                top: auto;
+                bottom: 16px;
+                left: 0;
+                right: 0;
+                justify-content: flex-end;
+            }
+        }
     </style>
 </head>
 <body>
@@ -834,17 +958,31 @@
                     <line x1="16" y1="13" x2="8" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                     <line x1="16" y1="17" x2="8" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
-                <span data-i18n="apiDocs.title">API Docs</span>
+                <span data-i18n="apiDocs.title">API 文档</span>
             </h1>
-            <p data-i18n="apiDocs.subtitle">CyberStrikeAI Platform API documentation, supports online testing</p>
-            <div class="api-docs-lang-switcher" style="position: absolute; top: 24px; right: 24px;">
+            <p data-i18n="apiDocs.subtitle">CyberStrikeAI 平台 API 接口文档，支持在线测试</p>
+            <div class="api-docs-header-actions">
+                <button id="theme-toggle-btn" class="theme-toggle-btn btn-secondary" type="button" onclick="window.cycleThemePreference && window.cycleThemePreference()" data-i18n="theme.toggle" data-i18n-attr="title" title="切换主题" aria-label="切换主题">
+                    <svg class="theme-toggle-icon theme-toggle-icon--system" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+                        <rect x="3" y="4" width="18" height="13" rx="2" stroke="currentColor" stroke-width="2"/>
+                        <path d="M8 21h8M12 17v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                    <svg class="theme-toggle-icon theme-toggle-icon--light" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/>
+                        <path d="M12 2v2M12 20v2M4 12H2M22 12h-2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                    <svg class="theme-toggle-icon theme-toggle-icon--dark" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M21 14.5A8.5 8.5 0 0 1 9.5 3a7 7 0 1 0 11.5 11.5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                    </svg>
+                    <span id="theme-toggle-label">跟随系统</span>
+                </button>
                 <div class="lang-switcher">
-                    <button type="button" class="btn-secondary lang-switcher-btn" onclick="typeof toggleLangDropdown === 'function' && toggleLangDropdown()" title="Interface Language">
+                    <button type="button" class="btn-secondary lang-switcher-btn" onclick="typeof toggleLangDropdown === 'function' && toggleLangDropdown()" title="界面语言">
                         <span class="lang-switcher-icon">🌐</span>
-                        <span id="current-lang-label">Chinese</span>
+                        <span id="current-lang-label">中文</span>
                     </button>
                     <div id="lang-dropdown" class="lang-dropdown" style="display: none;">
-                        <div class="lang-option" data-lang="zh-CN" onclick="typeof onLanguageSelect === \'function\' && onLanguageSelect(\'zh-CN\')">Chinese</div>
+                        <div class="lang-option" data-lang="zh-CN" onclick="typeof onLanguageSelect === 'function' && onLanguageSelect('zh-CN')">中文</div>
                         <div class="lang-option" data-lang="en-US" onclick="typeof onLanguageSelect === 'function' && onLanguageSelect('en-US')">English</div>
                     </div>
                 </div>
@@ -859,17 +997,17 @@
                             <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
                             <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                         </svg>
-                        <h3 style="margin: 0; font-size: 1rem; font-weight: 600; color: var(--text-primary);" data-i18n="apiDocs.authTitle">API Authentication Instructions</h3>
+                        <h3 style="margin: 0; font-size: 1rem; font-weight: 600; color: var(--text-primary);" data-i18n="apiDocs.authTitle">API 认证说明</h3>
                     </div>
                     <svg id="auth-info-arrow" class="auth-info-arrow" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="transition: transform 0.2s ease;">
                         <polyline points="6 9 12 15 18 9"/>
                     </svg>
                 </div>
                 <div id="auth-info-body" class="auth-info-body" style="display: none; color: var(--text-secondary); font-size: 0.875rem; line-height: 1.6; margin-top: 16px;">
-                    <p style="margin: 0 0 12px 0;"><strong data-i18n="apiDocs.authAllNeedToken">All API endpoints require Token authentication.</strong></p>
+                    <p style="margin: 0 0 12px 0;"><strong data-i18n="apiDocs.authAllNeedToken">所有 API 接口都需要 Token 认证。</strong></p>
                     <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; margin-bottom: 12px;">
-                        <p style="margin: 0 0 8px 0; font-weight: 500;" data-i18n="apiDocs.authGetToken">1. Get Token:</p>
-                        <p style="margin: 0 0 8px 0;" data-i18n="apiDocs.authGetTokenDesc">After logging in on the frontend page, Token will be saved automatically. You can also get it via:</p>
+                        <p style="margin: 0 0 8px 0; font-weight: 500;" data-i18n="apiDocs.authGetToken">1. 获取 Token：</p>
+                        <p style="margin: 0 0 8px 0;" data-i18n="apiDocs.authGetTokenDesc">在前端页面登录后，Token 会自动保存。您也可以通过以下方式获取：</p>
                         <pre style="background: var(--bg-primary); padding: 8px; border-radius: 4px; margin: 8px 0; overflow-x: auto; font-size: 0.8125rem;"><code>POST /api/auth/login
 Content-Type: application/json
 
@@ -877,21 +1015,21 @@ Content-Type: application/json
   "password": "your_password"
 }
 
-Response: { 
+响应: { 
   "token": "eyJhbGc...", 
   "expires_at": "2026-01-27T...",
   "session_duration_hr": 24
 }</code></pre>
                     </div>
                     <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; margin-bottom: 12px;">
-                        <p style="margin: 0 0 8px 0; font-weight: 500;" data-i18n="apiDocs.authUseToken">2. Use Token:</p>
-                        <p style="margin: 0 0 8px 0;" data-i18n="apiDocs.authUseTokenDesc">Add Authorization field in request header:</p>
+                        <p style="margin: 0 0 8px 0; font-weight: 500;" data-i18n="apiDocs.authUseToken">2. 使用 Token：</p>
+                        <p style="margin: 0 0 8px 0;" data-i18n="apiDocs.authUseTokenDesc">在请求头中添加 Authorization 字段：</p>
                         <pre style="background: var(--bg-primary); padding: 8px; border-radius: 4px; margin: 8px 0; overflow-x: auto; font-size: 0.8125rem;"><code>Authorization: Bearer your_token_here</code></pre>
-                        <p style="margin: 8px 0 0 0; font-size: 0.8125rem; color: var(--text-muted);" data-i18n="apiDocs.authTip">💡 Tip: This page will automatically use your logged-in Token, no manual entry required.</p>
+                        <p style="margin: 8px 0 0 0; font-size: 0.8125rem; color: var(--text-muted);" data-i18n="apiDocs.authTip">💡 提示：本页面会自动使用您已登录的 Token，无需手动填写。</p>
                     </div>
                     <div id="token-status" style="display: none; background: rgba(0, 102, 255, 0.1); padding: 8px 12px; border-radius: 6px; border-left: 3px solid var(--accent-color);">
                         <p style="margin: 0; font-size: 0.8125rem; color: var(--accent-color);" data-i18n="apiDocs.tokenDetected">
-                            <strong>✓ Token detected</strong> - You can test the API directly
+                            <strong>✓ 已检测到 Token</strong> - 您可以直接测试 API 接口
                         </p>
                     </div>
                 </div>
@@ -912,10 +1050,10 @@ Response: {
         
         <div class="api-docs-content">
             <div class="api-docs-sidebar">
-                <h3 data-i18n="apiDocs.sidebarGroupTitle">API Groups</h3>
+                <h3 data-i18n="apiDocs.sidebarGroupTitle">API 分组</h3>
                 <ul class="api-group-list" id="api-group-list">
                     <li class="api-group-item">
-                        <a href="#" class="api-group-link active" data-group="all" data-i18n="apiDocs.allApis">All APIs</a>
+                        <a href="#" class="api-group-link active" data-group="all" data-i18n="apiDocs.allApis">全部接口</a>
                     </li>
                 </ul>
             </div>
@@ -927,14 +1065,14 @@ Response: {
                         <line x1="12" y1="8" x2="12" y2="12"/>
                         <line x1="12" y1="16" x2="12.01" y2="16"/>
                     </svg>
-                    <h3 data-i18n="apiDocs.loading">Loading...</h3>
-                    <p data-i18n="apiDocs.loadingDesc">Loading API documentation</p>
+                    <h3 data-i18n="apiDocs.loading">加载中...</h3>
+                    <p data-i18n="apiDocs.loadingDesc">正在加载 API 文档</p>
                 </div>
             </div>
         </div>
     </div>
     
-    <script src="https://cdn.jsdelivr.net/npm/i18next@23.11.5/i18next.min.js"></script>
+    <script src="/static/vendor/i18next.min.js"></script>
     <script src="/static/js/i18n.js"></script>
     <script src="/static/js/api-docs.js"></script>
 </body>

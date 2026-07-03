@@ -28,8 +28,8 @@ func TestDedupeByNormalizedContent(t *testing.T) {
 }
 
 func TestEffectivePrefetchTopK(t *testing.T) {
-	if g := EffectivePrefetchTopK(5, nil); g != 5 {
-		t.Fatalf("got %d", g)
+	if g := EffectivePrefetchTopK(5, nil); g != 20 {
+		t.Fatalf("default prefetch got %d want 20", g)
 	}
 	if g := EffectivePrefetchTopK(5, &config.PostRetrieveConfig{PrefetchTopK: 50}); g != 50 {
 		t.Fatalf("got %d", g)

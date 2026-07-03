@@ -12,11 +12,17 @@ import (
 	"go.uber.org/zap"
 )
 
-// ConversationHandler Conversation handler
+// ConversationTaskStopper cancels in-flight agent work when a conversation is removed.
+type ConversationTaskStopper interface {
+	CancelRunningTaskForConversation(conversationID string)
+}
+
+// ConversationHandler 对话处理器
 type ConversationHandler struct {
-	db     *database.DB
-	logger *zap.Logger
-	audit  *audit.Service
+	db          *database.DB
+	logger      *zap.Logger
+	audit       *audit.Service
+	taskStopper ConversationTaskStopper
 }
 
 // SetAudit wires platform audit logging.
@@ -24,7 +30,12 @@ func (h *ConversationHandler) SetAudit(s *audit.Service) {
 	h.audit = s
 }
 
-// NewConversationHandler creates a new conversation handler
+// SetTaskStopper wires cancellation of in-flight agent tasks on conversation delete.
+func (h *ConversationHandler) SetTaskStopper(stopper ConversationTaskStopper) {
+	h.taskStopper = stopper
+}
+
+// NewConversationHandler 创建新的对话处理器
 func NewConversationHandler(db *database.DB, logger *zap.Logger) *ConversationHandler {
 	return &ConversationHandler{
 		db:     db,
@@ -32,18 +43,18 @@ func NewConversationHandler(db *database.DB, logger *zap.Logger) *ConversationHa
 	}
 }
 
-// CreateConversationRequest create conversation request
+// CreateConversationRequest 创建对话请求
 type CreateConversationRequest struct {
 	Title     string `json:"title"`
 	ProjectID string `json:"projectId,omitempty"`
 }
 
-// SetConversationProjectRequest set conversation project
+// SetConversationProjectRequest 设置对话所属项目
 type SetConversationProjectRequest struct {
-	ProjectID string `json:"projectId"` // empty string means unbind
+	ProjectID string `json:"projectId"` // 空字符串表示解除绑定
 }
 
-// CreateConversation Create new conversation
+// CreateConversation 创建新对话
 func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 	var req CreateConversationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -53,14 +64,14 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 
 	title := req.Title
 	if title == "" {
-		title = "New conversation"
+		title = "新对话"
 	}
 
 	meta := audit.ConversationCreateMetaFromGin(c, "api")
 	meta.ProjectID = strings.TrimSpace(req.ProjectID)
 	conv, err := h.db.CreateConversation(title, meta)
 	if err != nil {
-		h.logger.Error("Failed to create conversation", zap.Error(err))
+		h.logger.Error("创建对话失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -68,7 +79,7 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, conv)
 }
 
-// SetConversationProject Set or clear the project bound to a conversation
+// SetConversationProject 设置或清除对话绑定的项目
 func (h *ConversationHandler) SetConversationProject(c *gin.Context) {
 	id := c.Param("id")
 	var req SetConversationProjectRequest
@@ -77,7 +88,7 @@ func (h *ConversationHandler) SetConversationProject(c *gin.Context) {
 		return
 	}
 	if _, err := h.db.GetConversation(id); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Conversation does not exist"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
 		return
 	}
 	if err := h.db.SetConversationProjectID(id, req.ProjectID); err != nil {
@@ -87,11 +98,12 @@ func (h *ConversationHandler) SetConversationProject(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "projectId": strings.TrimSpace(req.ProjectID)})
 }
 
-// ListConversations List conversations
+// ListConversations 列出对话
 func (h *ConversationHandler) ListConversations(c *gin.Context) {
 	limitStr := c.DefaultQuery("limit", "50")
 	offsetStr := c.DefaultQuery("offset", "0")
-	search := c.Query("search") // Get search parameter
+	search := c.Query("search") // 获取搜索参数
+	projectID := strings.TrimSpace(c.Query("project_id"))
 
 	limit, _ := strconv.Atoi(limitStr)
 	offset, _ := strconv.Atoi(offsetStr)
@@ -103,25 +115,26 @@ func (h *ConversationHandler) ListConversations(c *gin.Context) {
 		limit = 1000
 	}
 
-	excludeGrouped := strings.TrimSpace(search) == "" &&
+	excludeGrouped := strings.TrimSpace(search) == "" && projectID == "" &&
 		(c.Query("exclude_grouped") == "true" || c.Query("exclude_grouped") == "1")
+	sortBy := strings.TrimSpace(c.Query("sort_by"))
 
 	var conversations []*database.Conversation
 	var total int
 	var err error
 	if excludeGrouped {
-		conversations, err = h.db.ListUngroupedConversations(limit, offset)
+		conversations, err = h.db.ListUngroupedConversations(limit, offset, sortBy, projectID)
 		if err == nil {
-			total, err = h.db.CountUngroupedConversations()
+			total, err = h.db.CountUngroupedConversations(projectID)
 		}
 	} else {
-		conversations, err = h.db.ListConversations(limit, offset, search)
+		conversations, err = h.db.ListConversations(limit, offset, search, sortBy, projectID)
 		if err == nil {
-			total, err = h.db.CountConversations(search)
+			total, err = h.db.CountConversations(search, projectID)
 		}
 	}
 	if err != nil {
-		h.logger.Error("Failed to get conversation list", zap.Error(err))
+		h.logger.Error("获取对话列表失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -136,12 +149,12 @@ func (h *ConversationHandler) ListConversations(c *gin.Context) {
 	})
 }
 
-// GetConversation Get conversation
+// GetConversation 获取对话
 func (h *ConversationHandler) GetConversation(c *gin.Context) {
 	id := c.Param("id")
 
-	// Lightweight load by default; fetch details on demand only when the user expands them
-	// include_process_details=1/true returns full processDetails for backward compatibility
+	// 默认轻量加载，只有用户需要展开详情时再按需拉取
+	// include_process_details=1/true 时返回全量 processDetails（兼容旧行为）
 	includeStr := c.DefaultQuery("include_process_details", "0")
 	include := includeStr == "1" || includeStr == "true" || includeStr == "yes"
 
@@ -155,15 +168,18 @@ func (h *ConversationHandler) GetConversation(c *gin.Context) {
 		conv, err = h.db.GetConversationLite(id)
 	}
 	if err != nil {
-		h.logger.Error("Failed to get conversation", zap.Error(err))
-		c.JSON(http.StatusNotFound, gin.H{"error": "Conversation not found"})
+		h.logger.Error("获取对话失败", zap.Error(err))
+		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
 		return
 	}
 
 	c.JSON(http.StatusOK, conv)
 }
 
-// GetMessageProcessDetails Get process details for the specified message on demand
+// GetMessageProcessDetails 获取指定消息的过程详情（按需加载）
+// 查询参数：
+//   - summary=1：仅返回摘要（total / iterationCount / maxIteration）
+//   - limit + offset：分页返回 processDetails（未指定 limit 时保持全量兼容）
 func (h *ConversationHandler) GetMessageProcessDetails(c *gin.Context) {
 	messageID := c.Param("id")
 	if messageID == "" {
@@ -171,22 +187,70 @@ func (h *ConversationHandler) GetMessageProcessDetails(c *gin.Context) {
 		return
 	}
 
+	summaryStr := strings.TrimSpace(c.Query("summary"))
+	if summaryStr == "1" || strings.EqualFold(summaryStr, "true") || strings.EqualFold(summaryStr, "yes") {
+		summary, err := h.db.GetProcessDetailsSummary(messageID)
+		if err != nil {
+			h.logger.Error("获取过程详情摘要失败", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"summary": summary})
+		return
+	}
+
+	limitStr := strings.TrimSpace(c.Query("limit"))
+	if limitStr != "" {
+		limit, err := strconv.Atoi(limitStr)
+		if err != nil || limit <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+			return
+		}
+		if limit > 500 {
+			limit = 500
+		}
+		offset, _ := strconv.Atoi(strings.TrimSpace(c.Query("offset")))
+		if offset < 0 {
+			offset = 0
+		}
+
+		details, total, err := h.db.GetProcessDetailsPage(messageID, limit, offset)
+		if err != nil {
+			h.logger.Error("分页获取过程详情失败", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		details = database.DedupeConsecutiveProcessDetails(details)
+		out := processDetailsToJSON(h.logger, details)
+		c.JSON(http.StatusOK, gin.H{
+			"processDetails": out,
+			"total":          total,
+			"offset":         offset,
+			"limit":          limit,
+			"hasMore":        offset+len(out) < total,
+		})
+		return
+	}
+
 	details, err := h.db.GetProcessDetails(messageID)
 	if err != nil {
-		h.logger.Error("Failed to get process details", zap.Error(err))
+		h.logger.Error("获取过程详情失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	details = database.DedupeConsecutiveProcessDetails(details)
+	out := processDetailsToJSON(h.logger, details)
+	c.JSON(http.StatusOK, gin.H{"processDetails": out, "total": len(out)})
+}
 
-	// Convert to the JSON structure expected by the frontend, matching processDetails in GetConversation
+func processDetailsToJSON(logger *zap.Logger, details []database.ProcessDetail) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(details))
 	for _, d := range details {
 		var data interface{}
 		if d.Data != "" {
 			if err := json.Unmarshal([]byte(d.Data), &data); err != nil {
-				h.logger.Warn("Failed to parse process detail data", zap.Error(err))
+				logger.Warn("解析过程详情数据失败", zap.Error(err))
 			}
 		}
 		out = append(out, map[string]interface{}{
@@ -199,16 +263,15 @@ func (h *ConversationHandler) GetMessageProcessDetails(c *gin.Context) {
 			"createdAt":      d.CreatedAt,
 		})
 	}
-
-	c.JSON(http.StatusOK, gin.H{"processDetails": out})
+	return out
 }
 
-// UpdateConversationRequest update conversation request
+// UpdateConversationRequest 更新对话请求
 type UpdateConversationRequest struct {
 	Title string `json:"title"`
 }
 
-// UpdateConversation Update conversation
+// UpdateConversation 更新对话
 func (h *ConversationHandler) UpdateConversation(c *gin.Context) {
 	id := c.Param("id")
 
@@ -219,20 +282,20 @@ func (h *ConversationHandler) UpdateConversation(c *gin.Context) {
 	}
 
 	if req.Title == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Title cannot be empty"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "标题不能为空"})
 		return
 	}
 
 	if err := h.db.UpdateConversationTitle(id, req.Title); err != nil {
-		h.logger.Error("Failed to update conversation", zap.Error(err))
+		h.logger.Error("更新对话失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Return updated conversation
+	// 返回更新后的对话
 	conv, err := h.db.GetConversation(id)
 	if err != nil {
-		h.logger.Error("Failed to get updated conversation", zap.Error(err))
+		h.logger.Error("获取更新后的对话失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -240,12 +303,16 @@ func (h *ConversationHandler) UpdateConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, conv)
 }
 
-// DeleteConversation Delete conversation
+// DeleteConversation 删除对话
 func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
 	id := c.Param("id")
 
+	if h.taskStopper != nil {
+		h.taskStopper.CancelRunningTaskForConversation(id)
+	}
+
 	if err := h.db.DeleteConversation(id); err != nil {
-		h.logger.Error("Failed to delete conversation", zap.Error(err))
+		h.logger.Error("删除对话失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -257,19 +324,19 @@ func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
 			Result:       "success",
 			ResourceType: "conversation",
 			ResourceID:   id,
-			Message:      "Deleted conversation",
+			Message:      "删除对话",
 		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Deleted successfully"})
+	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
 }
 
-// DeleteTurnRequest delete one conversation turn (POST /api/conversations/:id/delete-turn)
+// DeleteTurnRequest 删除一轮对话（POST /api/conversations/:id/delete-turn）
 type DeleteTurnRequest struct {
 	MessageID string `json:"messageId"`
 }
 
-// DeleteConversationTurn deletes the turn containing the anchor message, from that turn's user message to before the next user message, and clears last_react_*.
+// DeleteConversationTurn 删除锚点消息所在轮次（从该轮 user 到下一轮 user 之前），并清空 last_react_*。
 func (h *ConversationHandler) DeleteConversationTurn(c *gin.Context) {
 	conversationID := c.Param("id")
 	if conversationID == "" {
@@ -284,13 +351,13 @@ func (h *ConversationHandler) DeleteConversationTurn(c *gin.Context) {
 	}
 
 	if _, err := h.db.GetConversation(conversationID); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Conversation not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
 		return
 	}
 
 	deletedIDs, err := h.db.DeleteConversationTurn(conversationID, req.MessageID)
 	if err != nil {
-		h.logger.Warn("Failed to delete conversation turn",
+		h.logger.Warn("删除对话轮次失败",
 			zap.String("conversationId", conversationID),
 			zap.String("messageId", req.MessageID),
 			zap.Error(err),
@@ -300,7 +367,7 @@ func (h *ConversationHandler) DeleteConversationTurn(c *gin.Context) {
 	}
 
 	if h.audit != nil {
-		h.audit.RecordOK(c, "conversation", "delete_turn", "Delete conversation turn", "conversation", conversationID, map[string]interface{}{
+		h.audit.RecordOK(c, "conversation", "delete_turn", "删除对话轮次", "conversation", conversationID, map[string]interface{}{
 			"message_id": req.MessageID,
 			"deleted":    len(deletedIDs),
 		})

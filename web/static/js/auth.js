@@ -72,7 +72,7 @@ function showLoginOverlay(message = '') {
     if (!overlay) {
         return;
     }
-    overlay.style.display = 'flex';
+    openAppModal('login-overlay', { focus: false });
     if (errorBox) {
         if (message) {
             errorBox.textContent = message;
@@ -82,7 +82,7 @@ function showLoginOverlay(message = '') {
             errorBox.style.display = 'none';
         }
     }
-    setTimeout(() => {
+    setTimeout(function () {
         if (passwordInput) {
             passwordInput.focus();
         }
@@ -93,9 +93,7 @@ function hideLoginOverlay() {
     const overlay = document.getElementById('login-overlay');
     const errorBox = document.getElementById('login-error');
     const passwordInput = document.getElementById('login-password');
-    if (overlay) {
-        overlay.style.display = 'none';
-    }
+    closeAppModal('login-overlay');
     if (errorBox) {
         errorBox.textContent = '';
         errorBox.style.display = 'none';

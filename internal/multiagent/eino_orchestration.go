@@ -7,6 +7,7 @@ import (
 
 	"cyberstrike-ai/internal/agent"
 	"cyberstrike-ai/internal/config"
+	"cyberstrike-ai/internal/database"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
@@ -16,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// PlanExecuteRootArgs contains the parameters required to build the Eino adk/prebuilt/planexecute root Agent.
+// PlanExecuteRootArgs 构建 Eino adk/prebuilt/planexecute 根 Agent 所需参数。
 type PlanExecuteRootArgs struct {
 	MainToolCallingModel *openai.ChatModel
 	ExecModel            *openai.ChatModel
@@ -24,38 +25,40 @@ type PlanExecuteRootArgs struct {
 	ToolsCfg             adk.ToolsConfig
 	ExecMaxIter          int
 	LoopMaxIter          int
-	// AppCfg / Logger attach the same Eino summarization middleware used by Deep/Supervisor to the Executor when non-nil.
+	// AppCfg / Logger 非空时为 Executor 挂载与 Deep/Supervisor 一致的 Eino summarization 中间件。
 	AppCfg *config.Config
 	MwCfg  *config.MultiAgentEinoMiddlewareConfig
 	// ConversationID is used for transcript/isolation paths in middleware.
 	ConversationID string
+	DB             *database.DB
+	ProjectID      string
 	Logger         *zap.Logger
 	// ModelName is used for model input token estimation logs.
 	ModelName string
-	// ExecPreMiddlewares are prepended middlewares built by prependEinoMiddlewares (patchtoolcalls, reduction, toolsearch, plantask),
-	// consistent with mainOrchestratorPre for the Deep/Supervisor main agent.
+	// ExecPreMiddlewares 是由 prependEinoMiddlewares 构建的前置中间件（patchtoolcalls, reduction, toolsearch, plantask），
+	// 与 Deep/Supervisor 主代理的 mainOrchestratorPre 一致。
 	ExecPreMiddlewares []adk.ChatModelAgentMiddleware
-	// SkillMiddleware is the official Eino skill progressive-disclosure middleware; optional.
+	// SkillMiddleware 是 Eino 官方 skill 渐进式披露中间件（可选）。
 	SkillMiddleware adk.ChatModelAgentMiddleware
-	// FilesystemMiddleware is the Eino filesystem middleware, providing local file read/write and shell capabilities when eino_skills.filesystem_tools is enabled; optional.
+	// FilesystemMiddleware 是 Eino filesystem 中间件，当 eino_skills.filesystem_tools 启用时提供本机文件读写与 Shell 能力（可选）。
 	FilesystemMiddleware adk.ChatModelAgentMiddleware
 	// PlannerReplannerRewriteHandlers applies BeforeModelRewriteState pipeline for planner/replanner input.
 	PlannerReplannerRewriteHandlers []adk.ChatModelAgentMiddleware
-	// ModelFacingTrace is optional: the end of the Executor Handlers chain writes to it so last_react aligns with context after summarization.
+	// ModelFacingTrace 可选：由 Executor Handlers 链末尾写入，供 last_react 与 summarization 后上下文对齐。
 	ModelFacingTrace *modelFacingTraceHolder
 }
 
-// NewPlanExecuteRoot returns the preset plan -> execute -> replan orchestration root node, alongside Deep / Supervisor.
+// NewPlanExecuteRoot 返回 plan → execute → replan 预置编排根节点（与 Deep / Supervisor 并列）。
 func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.ResumableAgent, error) {
 	if a == nil {
-		return nil, fmt.Errorf("plan_execute: args is nil")
+		return nil, fmt.Errorf("plan_execute: args 为空")
 	}
 	if a.MainToolCallingModel == nil || a.ExecModel == nil {
-		return nil, fmt.Errorf("plan_execute: model is nil")
+		return nil, fmt.Errorf("plan_execute: 模型为空")
 	}
 	tcm, ok := interface{}(a.MainToolCallingModel).(model.ToolCallingChatModel)
 	if !ok {
-		return nil, fmt.Errorf("plan_execute: main model must implement ToolCallingChatModel")
+		return nil, fmt.Errorf("plan_execute: 主模型需实现 ToolCallingChatModel")
 	}
 	plannerCfg := &planexecute.PlannerConfig{
 		ToolCallingChatModel: tcm,
@@ -77,38 +80,9 @@ func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.Resuma
 		return nil, fmt.Errorf("plan_execute replanner: %w", err)
 	}
 
-	// Assemble the executor handler stack in the same order as the Deep/Supervisor main agent (outermost first).
-	var execHandlers []adk.ChatModelAgentMiddleware
-	// 1. patchtoolcalls, reduction, toolsearch, plantask from prependEinoMiddlewares.
-	if len(a.ExecPreMiddlewares) > 0 {
-		execHandlers = append(execHandlers, a.ExecPreMiddlewares...)
-	}
-	// 2. filesystem middleware; optional.
-	if a.FilesystemMiddleware != nil {
-		execHandlers = append(execHandlers, a.FilesystemMiddleware)
-	}
-	// 3. skill middleware; optional.
-	if a.SkillMiddleware != nil {
-		execHandlers = append(execHandlers, a.SkillMiddleware)
-	}
-	// 4. summarization last, consistent with Deep/Supervisor.
-	if a.AppCfg != nil {
-		sumMw, sumErr := newEinoSummarizationMiddleware(ctx, a.ExecModel, a.AppCfg, a.MwCfg, a.ConversationID, a.Logger)
-		if sumErr != nil {
-			return nil, fmt.Errorf("plan_execute executor summarization: %w", sumErr)
-		}
-		execHandlers = append(execHandlers, sumMw)
-	}
-	// 5. Orphan tool-message fallback: it must run after all history-rewriting middleware (summarization/reduction/skill)
-	//    and before telemetry, ensuring the message sequence sent to ChatModel has complete tool_call <-> tool_result pairs.
-	execHandlers = append(execHandlers, newOrphanToolPrunerMiddleware(a.Logger, "plan_execute_executor"))
-	if teleMw := newEinoModelInputTelemetryMiddleware(a.Logger, a.ModelName, a.ConversationID, "plan_execute_executor"); teleMw != nil {
-		execHandlers = append(execHandlers, teleMw)
-	}
-	if a.ModelFacingTrace != nil {
-		if capMw := newModelFacingTraceMiddleware(a.ModelFacingTrace); capMw != nil {
-			execHandlers = append(execHandlers, capMw)
-		}
+	execHandlers, err := buildPlanExecuteExecutorHandlers(ctx, a)
+	if err != nil {
+		return nil, err
 	}
 	executor, err := newPlanExecuteExecutor(ctx, &planexecute.ExecutorConfig{
 		Model:         a.ExecModel,
@@ -131,8 +105,41 @@ func NewPlanExecuteRoot(ctx context.Context, a *PlanExecuteRootArgs) (adk.Resuma
 	})
 }
 
-// planExecutePlannerGenInput injects the orchestrator instruction as a SystemMessage into planner input.
-// When it returns nil, Eino uses the built-in default planner prompt.
+// buildPlanExecuteExecutorHandlers 组装 Executor 中间件栈（outermost first），与 Deep/Supervisor 主代理对齐：
+// ExecPreMiddlewares（patch / reduction / toolsearch / plantask）→ filesystem → skill → summarization tail。
+func buildPlanExecuteExecutorHandlers(ctx context.Context, a *PlanExecuteRootArgs) ([]adk.ChatModelAgentMiddleware, error) {
+	if a == nil {
+		return nil, fmt.Errorf("plan_execute: args 为空")
+	}
+	var execHandlers []adk.ChatModelAgentMiddleware
+	if len(a.ExecPreMiddlewares) > 0 {
+		execHandlers = append(execHandlers, a.ExecPreMiddlewares...)
+	}
+	if a.FilesystemMiddleware != nil {
+		execHandlers = append(execHandlers, a.FilesystemMiddleware)
+	}
+	if a.SkillMiddleware != nil {
+		execHandlers = append(execHandlers, a.SkillMiddleware)
+	}
+	if a.AppCfg != nil {
+		sumMw, sumErr := newEinoSummarizationMiddleware(ctx, a.ExecModel, a.AppCfg, a.MwCfg, a.ConversationID, a.DB, a.ProjectID, a.Logger)
+		if sumErr != nil {
+			return nil, fmt.Errorf("plan_execute executor summarization: %w", sumErr)
+		}
+		execHandlers = appendEinoChatModelTailMiddlewares(execHandlers, einoChatModelTailConfig{
+			logger:         a.Logger,
+			phase:          "plan_execute_executor",
+			summarization:  sumMw,
+			modelName:      a.ModelName,
+			conversationID: a.ConversationID,
+			trace:          a.ModelFacingTrace,
+		})
+	}
+	return execHandlers, nil
+}
+
+// planExecutePlannerGenInput 将 orchestrator instruction 作为 SystemMessage 注入 planner 输入。
+// 返回 nil 时 Eino 使用内置默认 planner prompt。
 func planExecutePlannerGenInput(
 	orchInstruction string,
 	appCfg *config.Config,
@@ -202,8 +209,8 @@ func planExecuteFormatExecutedSteps(results []planexecute.ExecutedStep, appCfg *
 	return renderPlanExecuteStepsByBudget(capped, appCfg, mwCfg)
 }
 
-// planExecuteReplannerGenInput matches Eino's default Replanner input, but writes capped executed_steps into the prompt
-// and prepends a SystemMessage when orchInstruction is non-empty so the replanner also receives global instructions.
+// planExecuteReplannerGenInput 与 Eino 默认 Replanner 输入一致，但 executed_steps 经 cap 后再写入 prompt，
+// 且在 orchInstruction 非空时 prepend SystemMessage 使 replanner 也能接收全局指令。
 func planExecuteReplannerGenInput(
 	orchInstruction string,
 	appCfg *config.Config,
@@ -383,7 +390,7 @@ func renderPlanExecuteStepsByBudget(steps []planexecute.ExecutedStep, appCfg *co
 	return sb.String()
 }
 
-// planExecuteStreamsMainAssistant maps assistant streaming output from planning, execution, and replanning stages to the main conversation area.
+// planExecuteStreamsMainAssistant 将规划/执行/重规划各阶段助手流式输出映射到主对话区。
 func planExecuteStreamsMainAssistant(agent string) bool {
 	if agent == "" {
 		return true

@@ -74,7 +74,7 @@ func TestBuildUserContextSupplement_DisabledByNegative(t *testing.T) {
 func TestBuildUserContextSupplement_CustomMaxRunes(t *testing.T) {
 	msg := strings.Repeat("A", 200)
 	result := buildUserContextSupplement(msg, nil, 50)
-	header := "\n\n## Session Context (auto-appended to ensure you understand the user's full intent)\n"
+	header := userContextSupplementHeader
 	body := strings.TrimPrefix(result, header)
 	if len([]rune(body)) > 50 {
 		t.Errorf("body should be capped at 50 runes, got %d", len([]rune(body)))
@@ -89,7 +89,7 @@ func TestBuildUserContextSupplement_TruncateKeepsFirstAndLast(t *testing.T) {
 		history = append(history, agent.ChatMessage{Role: "user", Content: strings.Repeat("B", 500)})
 	}
 	last := "最后一条指令"
-	result := buildUserContextSupplement(last, history, 0)
+	result := buildUserContextSupplement(last, history, 800)
 	if !strings.Contains(result, "http://target.com") {
 		t.Error("first message (target URL) should survive truncation")
 	}

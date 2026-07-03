@@ -19,8 +19,6 @@ import (
 	"cyberstrike-ai/internal/mcp/builtin"
 	"cyberstrike-ai/internal/openai"
 
-	"cyberstrike-ai/internal/storage"
-
 	"go.uber.org/zap"
 )
 
@@ -33,25 +31,11 @@ type Agent struct {
 	externalMCPMgr        *mcp.ExternalMCPManager // 外部MCP管理器
 	logger                *zap.Logger
 	maxIterations         int
-	resultStorage         ResultStorage     // 结果存储
-	largeResultThreshold  int               // 大结果阈值（字节）
 	mu                    sync.RWMutex      // 添加互斥锁以支持并发更新
 	toolNameMapping       map[string]string // 工具名称映射：OpenAI格式 -> 原始格式（用于外部MCP工具）
 	currentConversationID string            // 当前对话ID（用于自动传递给工具）
 	promptBaseDir         string            // 解析 system_prompt_path 时相对路径的基准目录（通常为 config.yaml 所在目录）
 	toolDescriptionMode   string            // 工具描述模式: "short" | "full"，默认 short
-}
-
-// ResultStorage 结果存储接口（直接使用 storage 包的类型）
-type ResultStorage interface {
-	SaveResult(executionID string, toolName string, result string) error
-	GetResult(executionID string) (string, error)
-	GetResultPage(executionID string, page int, limit int) (*storage.ResultPage, error)
-	SearchResult(executionID string, keyword string, useRegex bool) ([]string, error)
-	FilterResult(executionID string, filter string, useRegex bool) ([]string, error)
-	GetResultMetadata(executionID string) (*storage.ResultMetadata, error)
-	GetResultPath(executionID string) string
-	DeleteResult(executionID string) error
 }
 
 type agentConversationIDKey struct{}
@@ -84,26 +68,6 @@ func NewAgent(cfg *config.OpenAIConfig, agentCfg *config.AgentConfig, mcpServer 
 		maxIterations = 30
 	}
 
-	// 设置大结果阈值，默认50KB
-	largeResultThreshold := 50 * 1024
-	if agentCfg != nil && agentCfg.LargeResultThreshold > 0 {
-		largeResultThreshold = agentCfg.LargeResultThreshold
-	}
-
-	// 设置结果存储目录，默认tmp
-	resultStorageDir := "tmp"
-	if agentCfg != nil && agentCfg.ResultStorageDir != "" {
-		resultStorageDir = agentCfg.ResultStorageDir
-	}
-
-	// 初始化结果存储
-	var resultStorage ResultStorage
-	if resultStorageDir != "" {
-		// 导入storage包（避免循环依赖，使用接口）
-		// 这里需要在实际使用时初始化
-		// 暂时设为nil，在需要时初始化
-	}
-
 	// 配置HTTP Transport，优化连接管理和超时设置
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
@@ -134,18 +98,9 @@ func NewAgent(cfg *config.OpenAIConfig, agentCfg *config.AgentConfig, mcpServer 
 		externalMCPMgr:       externalMCPMgr,
 		logger:               logger,
 		maxIterations:        maxIterations,
-		resultStorage:        resultStorage,
-		largeResultThreshold: largeResultThreshold,
 		toolNameMapping:      make(map[string]string), // 初始化工具名称映射
 		toolDescriptionMode:  "short",
 	}
-}
-
-// SetResultStorage 设置结果存储（用于避免循环依赖）
-func (a *Agent) SetResultStorage(storage ResultStorage) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.resultStorage = storage
 }
 
 // SetPromptBaseDir 设置单代理 system_prompt_path 相对路径的基准目录（一般为 config.yaml 所在目录）。
@@ -323,7 +278,7 @@ func (fc *FunctionCall) UnmarshalJSON(data []byte) error {
 // ProgressCallback 进度回调函数类型
 type ProgressCallback func(eventType, message string, data interface{})
 
-// EinoSingleAgentSystemInstruction returns the instruction used by Eino adk.ChatModelAgent, including system_prompt_path support.
+// EinoSingleAgentSystemInstruction 供 Eino adk.ChatModelAgent.Instruction 使用（含 system_prompt_path）。
 func (a *Agent) EinoSingleAgentSystemInstruction() string {
 	systemPrompt := DefaultSingleAgentSystemPrompt()
 	if a.agentConfig != nil {
@@ -336,7 +291,7 @@ func (a *Agent) EinoSingleAgentSystemInstruction() string {
 				path = filepath.Join(base, path)
 			}
 			if b, err := os.ReadFile(path); err != nil {
-				a.logger.Warn("Failed to read single-agent system_prompt_path, using built-in prompt", zap.String("path", path), zap.Error(err))
+				a.logger.Warn("读取单代理 system_prompt_path 失败，使用内置提示", zap.String("path", path), zap.Error(err))
 			} else if s := strings.TrimSpace(string(b)); s != "" {
 				systemPrompt = s
 			}
@@ -394,7 +349,7 @@ func (a *Agent) getAvailableTools(roleTools []string) []Tool {
 		externalTools, err := a.externalMCPMgr.GetAllTools(ctx)
 		extMap := make(map[string]string)
 		if err != nil {
-			a.logger.Warn("Failed to get external MCP tools", zap.Error(err))
+			a.logger.Warn("获取外部MCP工具失败", zap.Error(err))
 		} else {
 			// 获取外部MCP配置，用于检查工具启用状态
 			externalMCPConfigs := a.externalMCPMgr.GetConfigs()
@@ -550,7 +505,7 @@ func (a *Agent) convertToOpenAIType(configType string) string {
 	}
 }
 
-// ToolExecutionResult is the MCP tool execution result used by the Eino bridge and monitoring persistence.
+// ToolExecutionResult MCP 工具执行结果（供 Eino 桥与监控落库使用）。
 type ToolExecutionResult struct {
 	Result      string
 	ExecutionID string
@@ -560,12 +515,12 @@ type ToolExecutionResult struct {
 // executeToolViaMCP 通过MCP执行工具
 // 即使工具执行失败，也返回结果而不是错误，让AI能够处理错误情况
 func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map[string]interface{}) (*ToolExecutionResult, error) {
-	a.logger.Info("Executing tool via MCP",
+	a.logger.Info("通过MCP执行工具",
 		zap.String("tool", toolName),
 		zap.Any("args", args),
 	)
 
-	// If record_vulnerability tool, auto-add conversation_id
+	// 如果是record_vulnerability工具，自动添加conversation_id
 	if toolName == builtin.ToolRecordVulnerability {
 		conversationID := agentConversationIDFromContext(ctx)
 		if conversationID == "" {
@@ -576,11 +531,11 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 
 		if conversationID != "" {
 			args["conversation_id"] = conversationID
-			a.logger.Debug("Auto-added conversation_id to record_vulnerability tool",
+			a.logger.Debug("自动添加conversation_id到record_vulnerability工具",
 				zap.String("conversation_id", conversationID),
 			)
 		} else {
-			a.logger.Warn("conversation_id empty when calling record_vulnerability tool")
+			a.logger.Warn("record_vulnerability工具调用时conversation_id为空")
 		}
 	}
 
@@ -608,14 +563,14 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 	a.mu.RUnlock()
 
 	if isExternalTool && a.externalMCPMgr != nil {
-		// Call external MCP tool using original name
-		a.logger.Debug("Calling external MCP tool",
+		// 使用原始工具名称调用外部MCP工具
+		a.logger.Debug("调用外部MCP工具",
 			zap.String("openAIName", toolName),
 			zap.String("originalName", originalToolName),
 		)
 		result, executionID, err = a.externalMCPMgr.CallTool(toolCtx, originalToolName, args)
 	} else {
-		// Call internal MCP tool
+		// 调用内部MCP工具
 		result, executionID, err = a.mcpServer.CallTool(toolCtx, toolName, args)
 	}
 
@@ -623,31 +578,31 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 	if err != nil {
 		detail := err.Error()
 		if errors.Is(err, context.Canceled) {
-			detail = "Tool call was manually terminated (MCP monitor page). The agent will continue with this result; the entire task is not stopped."
+			detail = "工具调用已被手动终止（MCP 监控页）。智能体将携带此结果继续后续步骤，整条任务不会因此被停止。"
 		} else if errors.Is(err, context.DeadlineExceeded) {
 			min := 10
 			if a.agentConfig != nil && a.agentConfig.ToolTimeoutMinutes > 0 {
 				min = a.agentConfig.ToolTimeoutMinutes
 			}
-			detail = fmt.Sprintf("Tool execution exceeded %d minutes and was auto-terminated (adjust agent.tool_timeout_minutes in config.yaml)", min)
+			detail = fmt.Sprintf("工具执行超过 %d 分钟被自动终止（可在 config.yaml 的 agent.tool_timeout_minutes 中调整）", min)
 		}
-		errorMsg := fmt.Sprintf(`Tool call failed
+		errorMsg := fmt.Sprintf(`工具调用失败
 
-Tool name: %s
-Error type: System error
-Error details: %s
+工具名称: %s
+错误类型: 系统错误
+错误详情: %s
 
-Possible causes:
-- Tool "%s" does not exist or is not enabled
-- Single execution timeout (agent.tool_timeout_minutes)
-- System configuration issue
-- Network or permission issue
+可能的原因：
+- 工具 "%s" 不存在或未启用
+- 单次执行超时（agent.tool_timeout_minutes）
+- 系统配置问题
+- 网络或权限问题
 
-Suggestions:
-- Check if the tool name is correct
-- Increase agent.tool_timeout_minutes if more execution time is needed
-- Try alternative tools
-- If this is a required tool, explain the situation to the user`, toolName, detail, toolName)
+建议：
+- 检查工具名称是否正确
+- 若需更长执行时间，可适当增大 agent.tool_timeout_minutes
+- 尝试使用其他替代工具
+- 如果这是必需的工具，请向用户说明情况`, toolName, detail, toolName)
 
 		return &ToolExecutionResult{
 			Result:      errorMsg,
@@ -664,46 +619,6 @@ Suggestions:
 	}
 
 	resultStr := resultText.String()
-	resultSize := len(resultStr)
-
-	// 检测大结果并保存
-	a.mu.RLock()
-	threshold := a.largeResultThreshold
-	storage := a.resultStorage
-	a.mu.RUnlock()
-
-	if resultSize > threshold && storage != nil {
-		// 异步保存大结果
-		go func() {
-			if err := storage.SaveResult(executionID, toolName, resultStr); err != nil {
-				a.logger.Warn("保存大结果失败",
-					zap.String("executionID", executionID),
-					zap.String("toolName", toolName),
-					zap.Error(err),
-				)
-			} else {
-				a.logger.Info("Large result saved",
-					zap.String("executionID", executionID),
-					zap.String("toolName", toolName),
-					zap.Int("size", resultSize),
-				)
-			}
-		}()
-
-		// 返回最小化通知
-		lines := strings.Split(resultStr, "\n")
-		filePath := ""
-		if storage != nil {
-			filePath = storage.GetResultPath(executionID)
-		}
-		notification := a.formatMinimalNotification(executionID, toolName, resultSize, len(lines), filePath)
-
-		return &ToolExecutionResult{
-			Result:      notification,
-			ExecutionID: executionID,
-			IsError:     result != nil && result.IsError,
-		}, nil
-	}
 
 	return &ToolExecutionResult{
 		Result:      resultStr,
@@ -712,64 +627,13 @@ Suggestions:
 	}, nil
 }
 
-// formatMinimalNotification formats a minimal notification for large result storage
-func (a *Agent) formatMinimalNotification(executionID string, toolName string, size int, lineCount int, filePath string) string {
-	var sb strings.Builder
-
-	sb.WriteString(fmt.Sprintf("Tool execution completed. Result saved (ID: %s).\n\n", executionID))
-	sb.WriteString("Result info:\n")
-	sb.WriteString(fmt.Sprintf("  - Tool: %s\n", toolName))
-	sb.WriteString(fmt.Sprintf("  - Size: %d bytes (%.2f KB)\n", size, float64(size)/1024))
-	sb.WriteString(fmt.Sprintf("  - Lines: %d\n", lineCount))
-	if filePath != "" {
-		sb.WriteString(fmt.Sprintf("  - File path: %s\n", filePath))
-	}
-	sb.WriteString("\n")
-	sb.WriteString("Recommended: use query_execution_result tool to query full results:\n")
-	sb.WriteString(fmt.Sprintf("  - Query first page: query_execution_result(execution_id=\"%s\", page=1, limit=100)\n", executionID))
-	sb.WriteString(fmt.Sprintf("  - Search keyword: query_execution_result(execution_id=\"%s\", search=\"keyword\")\n", executionID))
-	sb.WriteString(fmt.Sprintf("  - Filter: query_execution_result(execution_id=\"%s\", filter=\"error\")\n", executionID))
-	sb.WriteString(fmt.Sprintf("  - Regex match: query_execution_result(execution_id=\"%s\", search=\"\\\\d+\\\\.\\\\d+\\\\.\\\\d+\\\\.\\\\d+\", use_regex=true)\n", executionID))
-	sb.WriteString("\n")
-	if filePath != "" {
-		sb.WriteString("If query_execution_result doesn't meet your needs, use other tools:\n")
-		sb.WriteString("\n")
-		sb.WriteString("**Segmented read examples:**\n")
-		sb.WriteString(fmt.Sprintf("  - View first 100 lines: exec(command=\"head\", args=[\"-n\", \"100\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - View last 100 lines: exec(command=\"tail\", args=[\"-n\", \"100\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - View lines 50-150: exec(command=\"sed\", args=[\"-n\", \"50,150p\", \"%s\"])\n", filePath))
-		sb.WriteString("\n")
-		sb.WriteString("**Search and regex examples:**\n")
-		sb.WriteString(fmt.Sprintf("  - Search keyword: exec(command=\"grep\", args=[\"keyword\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - Regex match IP addresses: exec(command=\"grep\", args=[\"-E\", \"\\\\d+\\\\.\\\\d+\\\\.\\\\d+\\\\.\\\\d+\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - Case-insensitive search: exec(command=\"grep\", args=[\"-i\", \"keyword\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - Show matching line numbers: exec(command=\"grep\", args=[\"-n\", \"keyword\", \"%s\"])\n", filePath))
-		sb.WriteString("\n")
-		sb.WriteString("**Filter and statistics examples:**\n")
-		sb.WriteString(fmt.Sprintf("  - Count total lines: exec(command=\"wc\", args=[\"-l\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - Filter lines containing error: exec(command=\"grep\", args=[\"error\", \"%s\"])\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - Exclude empty lines: exec(command=\"grep\", args=[\"-v\", \"^$\", \"%s\"])\n", filePath))
-		sb.WriteString("\n")
-		sb.WriteString("**Full read (not recommended for large files):**\n")
-		sb.WriteString(fmt.Sprintf("  - Using cat tool: cat(file=\"%s\")\n", filePath))
-		sb.WriteString(fmt.Sprintf("  - Using exec tool: exec(command=\"cat\", args=[\"%s\"])\n", filePath))
-		sb.WriteString("\n")
-		sb.WriteString("**Note:**\n")
-		sb.WriteString("  - Reading large files directly may trigger the result save mechanism again\n")
-		sb.WriteString("  - Prefer segmented reading and search to avoid loading entire file at once\n")
-		sb.WriteString("  - Regex syntax follows standard POSIX regex specification\n")
-	}
-
-	return sb.String()
-}
-
 // UpdateConfig 更新OpenAI配置
 func (a *Agent) UpdateConfig(cfg *config.OpenAIConfig) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.config = cfg
 
-	a.logger.Info("Agent config updated",
+	a.logger.Info("Agent配置已更新",
 		zap.String("base_url", cfg.BaseURL),
 		zap.String("model", cfg.Model),
 	)
@@ -781,7 +645,7 @@ func (a *Agent) UpdateMaxIterations(maxIterations int) {
 	defer a.mu.Unlock()
 	if maxIterations > 0 {
 		a.maxIterations = maxIterations
-		a.logger.Info("Agent max iterations updated", zap.Int("max_iterations", maxIterations))
+		a.logger.Info("Agent最大迭代次数已更新", zap.Int("max_iterations", maxIterations))
 	}
 }
 
@@ -915,13 +779,43 @@ func (a *Agent) ExecuteMCPToolForConversation(ctx context.Context, conversationI
 	return a.executeToolViaMCP(ctx, toolName, args)
 }
 
-// RecordLocalToolExecution 将非 CallTool 路径完成的工具调用写入 MCP 监控库（与 CallTool 落库一致），返回 executionId。
-// 用于 Eino filesystem execute 等场景，使助手气泡「渗透测试详情」与常规 MCP 一致可点进监控。
-func (a *Agent) RecordLocalToolExecution(toolName string, args map[string]interface{}, resultText string, invokeErr error) string {
+// BeginLocalToolExecution 在非 CallTool 路径工具开始时写入 running 状态，供 MCP 监控页展示「执行中」。
+func (a *Agent) BeginLocalToolExecution(toolName string, args map[string]interface{}) string {
 	if a == nil || a.mcpServer == nil {
 		return ""
 	}
-	return a.mcpServer.RecordCompletedToolInvocation(toolName, args, resultText, invokeErr)
+	return a.mcpServer.BeginToolExecution(toolName, args)
+}
+
+// FinishLocalToolExecution 完成 BeginLocalToolExecution 创建的记录；executionID 为空时一次性写入已完成记录。
+func (a *Agent) FinishLocalToolExecution(executionID, toolName string, args map[string]interface{}, resultText string, invokeErr error) string {
+	if a == nil || a.mcpServer == nil {
+		return ""
+	}
+	return a.mcpServer.FinishToolExecution(executionID, toolName, args, resultText, invokeErr)
+}
+
+// RecordLocalToolExecution 将非 CallTool 路径完成的工具调用写入 MCP 监控库（与 CallTool 落库一致），返回 executionId。
+// 用于 Eino filesystem execute 等场景，使助手气泡「渗透测试详情」与常规 MCP 一致可点进监控。
+func (a *Agent) RecordLocalToolExecution(toolName string, args map[string]interface{}, resultText string, invokeErr error) string {
+	return a.FinishLocalToolExecution("", toolName, args, resultText, invokeErr)
+}
+
+// UpdateMCPExecutionDisplayResult 将监控库中的工具结果更新为送入模型的展示正文（reduction 后）。
+func (a *Agent) UpdateMCPExecutionDisplayResult(executionID, resultText string) {
+	if a == nil || strings.TrimSpace(executionID) == "" {
+		return
+	}
+	text := resultText
+	if strings.TrimSpace(text) == "" {
+		text = "（无输出）"
+	}
+	tr := &mcp.ToolResult{
+		Content: []mcp.Content{{Type: "text", Text: text}},
+	}
+	if a.mcpServer != nil {
+		_ = a.mcpServer.UpdateToolExecutionResult(executionID, tr)
+	}
 }
 
 // CancelMCPToolExecutionWithNote 取消一次进行中的 MCP 工具（先内部后外部），与监控页「终止工具」一致；note 非空时合并进返回给模型的文本。

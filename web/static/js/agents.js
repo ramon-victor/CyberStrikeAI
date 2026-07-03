@@ -105,45 +105,48 @@ function showAddMarkdownAgentModal() {
     document.getElementById('agent-md-bind-role').value = '';
     document.getElementById('agent-md-max-iter').value = '0';
     document.getElementById('agent-md-instruction').value = '';
-    if (modal) modal.style.display = 'flex';
+    openAppModal('agent-md-modal');
 }
 
 async function editMarkdownAgent(filename) {
     if (!filename) return;
-    const modal = document.getElementById('agent-md-modal');
     const title = document.getElementById('agent-md-modal-title');
     const row = document.getElementById('agent-md-filename-row');
     markdownAgentsEditingFilename = null;
     markdownAgentsEditingIsOrchestrator = false;
     if (title) title.textContent = _agentsT('agentsPage.editTitle');
     if (row) row.style.display = 'none';
+    document.getElementById('agent-md-instruction').value = '';
+    openAppModal('agent-md-modal', { focus: false });
     try {
         const r = await apiFetch('/api/multi-agent/markdown-agents/' + encodeURIComponent(filename));
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || r.statusText);
         markdownAgentsEditingFilename = data.filename || filename;
         markdownAgentsEditingIsOrchestrator = !!data.is_orchestrator;
-        document.getElementById('agent-md-filename-current').value = data.filename || filename;
-        document.getElementById('agent-md-filename').value = data.filename || filename;
-        document.getElementById('agent-md-filename').disabled = true;
-        var roleEl2 = document.getElementById('agent-md-role');
-        if (roleEl2) roleEl2.value = data.is_orchestrator ? 'orchestrator' : 'sub';
-        document.getElementById('agent-md-id').value = data.id || '';
-        document.getElementById('agent-md-name').value = data.name || '';
-        document.getElementById('agent-md-description').value = data.description || '';
-        document.getElementById('agent-md-tools').value = Array.isArray(data.tools) ? data.tools.join(', ') : '';
-        document.getElementById('agent-md-bind-role').value = data.bind_role || '';
-        document.getElementById('agent-md-max-iter').value = String(data.max_iterations != null ? data.max_iterations : 0);
-        document.getElementById('agent-md-instruction').value = data.instruction || '';
-        if (modal) modal.style.display = 'flex';
+        deferModalContent(function () {
+            document.getElementById('agent-md-filename-current').value = data.filename || filename;
+            document.getElementById('agent-md-filename').value = data.filename || filename;
+            document.getElementById('agent-md-filename').disabled = true;
+            var roleEl2 = document.getElementById('agent-md-role');
+            if (roleEl2) roleEl2.value = data.is_orchestrator ? 'orchestrator' : 'sub';
+            document.getElementById('agent-md-id').value = data.id || '';
+            document.getElementById('agent-md-name').value = data.name || '';
+            document.getElementById('agent-md-description').value = data.description || '';
+            document.getElementById('agent-md-tools').value = Array.isArray(data.tools) ? data.tools.join(', ') : '';
+            document.getElementById('agent-md-bind-role').value = data.bind_role || '';
+            document.getElementById('agent-md-max-iter').value = String(data.max_iterations != null ? data.max_iterations : 0);
+            document.getElementById('agent-md-instruction').value = data.instruction || '';
+            document.getElementById('agent-md-name')?.focus();
+        });
     } catch (e) {
+        closeMarkdownAgentModal();
         showNotification(_agentsT('agentsPage.loadOneFailed') + ': ' + e.message, 'error');
     }
 }
 
 function closeMarkdownAgentModal() {
-    const modal = document.getElementById('agent-md-modal');
-    if (modal) modal.style.display = 'none';
+    closeAppModal('agent-md-modal');
     markdownAgentsEditingFilename = null;
     markdownAgentsEditingIsOrchestrator = false;
 }

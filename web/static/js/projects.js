@@ -1,16 +1,19 @@
 /**
- * Project management and fact board
+ * 项目管理与事实黑板
  */
 let projectsCache = [];
 let projectsCacheAll = [];
 const PROJECTS_LIST_PAGE_SIZE_KEY = 'cyberstrike.projects_list_page_size';
 let currentProjectId = null;
+let currentProjectUpdatedAt = null;
 let currentProjectTab = 'facts';
 const projectNameById = {};
 let _projectsListReady = false;
 let _projectsFetchPromise = null;
 
 const PROJECT_ACTIVE_KEY = 'cyberstrike.activeProjectId';
+const PROJECT_DESCRIPTION_MAX_LENGTH = 4000;
+const PROJECT_NAME_MAX_LENGTH = 200;
 
 function tp(key, opts) {
     if (typeof window.t === 'function') return window.t(key, opts);
@@ -23,22 +26,22 @@ function tpFmt(key, fallback, opts) {
     return text;
 }
 
-/** Aligned with backend internal/project/fact_template.go */
-const FACT_ATTACK_CHAIN_BODY_TEMPLATE = `## Conclusion (verifiable, one sentence)
-<Do not only write "vulnerability exists"; specify type + location + trigger condition>
+/** 与后端 internal/project/fact_template.go 对齐 */
+const FACT_ATTACK_CHAIN_BODY_TEMPLATE = `## 结论（可验证，一句话）
+<勿仅写「存在漏洞」；写明类型 + 位置 + 触发条件>
 
-## Target and entry point
-- Target: <URL / IP:Port / hostname>
-- Entry: <path / endpoint / parameter>
-- Preconditions: <anonymous / role / Cookie / other dependencies>
+## 目标与入口
+- 目标: <URL / IP:Port / 主机名>
+- 入口: <路径 / 接口 / 参数>
+- 前置条件: <匿名 / 角色 / Cookie / 其他依赖>
 
-## Attack chain (step-by-step reproducible)
-1. <Recon/discovery>
-2. <Exploit/trigger>
-3. <Impact proof (file read, RCE echo, unauthorized data, etc.)>
+## 攻击链（逐步可复现）
+1. <侦察/发现>
+2. <利用/触发>
+3. <影响证明（读文件、RCE 回显、越权数据等）>
 
 ## Exploit / POC
-### Request
+### 请求
 \`\`\`http
 <METHOD> <path> HTTP/1.1
 Host: ...
@@ -47,35 +50,37 @@ Host: ...
 <body>
 \`\`\`
 
-### Response / observation
-<Key response fragment, status code, differences>
+### 响应 / 现象
+<关键响应片段、状态码、差异点>
 
-### Command / script (if any)
+### 命令 / 脚本（如有）
 \`\`\`bash
 <command>
 \`\`\`
 
-## Key evidence
-- <Tool output summary / screenshot path / conversation or message ID>
+## 关键证据
+- <工具输出摘要 / 截图路径 / 会话或消息 ID>
 
-## Links
-- related_vulnerability_id: <optional>
-- Dependent facts: <fact_key, such as auth/session_cookie>
+## 关联
+- related_vulnerability_id: <可选>
+- 依赖事实: <fact_key，如 auth/session_cookie>
+  - 结构化关系边（自动同步；links 文本格式 type: source_fact_key）:
+  - discovered_on: target/primary_domain
 
-## Notes and uncertainty
-<Hypotheses to verify, environment differences, bypass attempts>`;
+## 备注与不确定性
+<待验证假设、环境差异、绕过尝试记录>`;
 
-const FACT_ENV_BODY_TEMPLATE = `## Summary
-<Core finding for this fact>
+const FACT_ENV_BODY_TEMPLATE = `## 摘要
+<该事实的核心认知>
 
-## Details
-<Ports/versions/paths/credential traits/business rules/etc.>
+## 细节
+<端口/版本/路径/凭据特征/业务规则等>
 
-## Source and evidence
-<Command output, response fragments, discovery time>
+## 来源与证据
+<命令输出、响应片段、发现时间>
 
-## Links
-- related fact_key: <optional>`;
+## 关联
+- 相关 fact_key: <可选>`;
 
 const FACT_ATTACK_CHAIN_PREFIXES = ['finding/', 'chain/', 'exploit/', 'poc/'];
 const FACT_ATTACK_CHAIN_CATEGORIES = new Set(['finding', 'chain', 'exploit', 'poc', 'vuln']);
@@ -93,8 +98,8 @@ function isSparseFactBody(category, factKey, body) {
     if (!text) return true;
     const lower = text.toLowerCase();
     const hasSteps =
-        lower.includes('Attack chain') ||
-        lower.includes('## Attack') ||
+        lower.includes('攻击链') ||
+        lower.includes('## 攻击') ||
         lower.includes('## exploit') ||
         lower.includes('## poc');
     const hasHTTP =
@@ -103,7 +108,7 @@ function isSparseFactBody(category, factKey, body) {
         lower.includes('curl ') ||
         lower.includes('get ') ||
         lower.includes('post ');
-    const hasReq = lower.includes('Request') || lower.includes('Response') || lower.includes('payload');
+    const hasReq = lower.includes('请求') || lower.includes('响应') || lower.includes('payload');
     return !(hasSteps || hasHTTP || hasReq);
 }
 
@@ -168,6 +173,65 @@ function rebuildProjectNameMap(list) {
     });
 }
 
+function rememberProjectsInNameMap(list) {
+    (list || []).forEach((p) => {
+        if (p && p.id) projectNameById[p.id] = p.name || p.id;
+    });
+}
+
+/** 与后端 projectListSearchPattern 对齐：name / description / id 子串匹配（忽略大小写） */
+function matchProjectSearchQuery(project, query) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return true;
+    const name = String(project.name || '').toLowerCase();
+    const desc = String(project.description || '').toLowerCase();
+    const id = String(project.id || '').toLowerCase();
+    return name.includes(q) || desc.includes(q) || id.includes(q);
+}
+
+function sortProjectsForPicker(projects) {
+    return [...projects].sort((a, b) => {
+        const ap = a.pinned ? 1 : 0;
+        const bp = b.pinned ? 1 : 0;
+        if (bp !== ap) return bp - ap;
+        const au = a.updated_at || a.updatedAt || '';
+        const bu = b.updated_at || b.updatedAt || '';
+        return String(bu).localeCompare(String(au));
+    });
+}
+
+/** 从已加载列表中筛选活跃项目（对话选择器 / 项目筛选下拉） */
+function filterActiveProjectsLocal(projects, query) {
+    const list = (projects || []).filter((p) => p && p.id && p.status !== 'archived');
+    const q = String(query || '').trim();
+    const filtered = q ? list.filter((p) => matchProjectSearchQuery(p, q)) : list;
+    return sortProjectsForPicker(filtered);
+}
+
+async function searchActiveProjects(query, opts = {}) {
+    const params = new URLSearchParams();
+    params.set('status', opts.status || 'active');
+    params.set('limit', String(opts.limit ?? (String(query || '').trim() ? PROJECT_PICKER_SEARCH_LIMIT : PROJECT_PICKER_INITIAL_LIMIT)));
+    params.set('offset', String(opts.offset ?? 0));
+    const q = String(query || '').trim();
+    if (q) params.set('search', q);
+    const res = await apiFetch(`/api/projects?${params}`);
+    if (!res.ok) throw new Error(tp('projects.loadProjectsFailed'));
+    const parsed = parseProjectsListResponse(await res.json());
+    rememberProjectsInNameMap(parsed.items);
+    return parsed;
+}
+
+async function fetchProjectSummary(projectId) {
+    const id = String(projectId || '').trim();
+    if (!id) return null;
+    const res = await apiFetch(`/api/projects/${encodeURIComponent(id)}`);
+    if (!res.ok) return null;
+    const project = await res.json();
+    if (project && project.id) rememberProjectsInNameMap([project]);
+    return project;
+}
+
 function getProjectsListPageSize() {
     try {
         const saved = parseInt(localStorage.getItem(PROJECTS_LIST_PAGE_SIZE_KEY), 10);
@@ -215,15 +279,15 @@ function parseProjectsListResponse(data) {
 
 async function resolveProjectsListTotal(params, parsed, pageSize, offset) {
     const serverTotal = parsed.total;
-    // Server total is clearly greater than the end of the current page → trust directly
+    // 服务端 total 明确大于当前页末尾 → 直接信任
     if (!parsed.isLegacyArray && serverTotal > offset + parsed.items.length) {
         return serverTotal;
     }
-    // Less than a page → already the last page
+    // 不足一页 → 已是最后一页
     if (parsed.items.length < pageSize) {
         return Math.max(serverTotal, offset + parsed.items.length);
     }
-    // Full page but total might be miscalculated as items.length → probe the next page
+    // 满页但 total 可能被误算为 items.length → 探测下一页
     const probe = new URLSearchParams(params);
     probe.set('offset', String(offset + pageSize));
     probe.set('limit', '1');
@@ -279,7 +343,7 @@ async function fetchProjectsList(includeArchived, opts = {}) {
     return projectsCache;
 }
 
-/** Project selector on chat page etc.: ensure the full list has been fetched (dedup concurrent requests) */
+/** 对话页等项目选择器：确保全量列表已拉取（去重并发请求） */
 async function ensureProjectsLoaded(force) {
     if (!force && _projectsListReady) return projectsCacheAll;
     if (!force && _projectsFetchPromise) return _projectsFetchPromise;
@@ -288,6 +352,9 @@ async function ensureProjectsLoaded(force) {
             projectsCacheAll = list;
             rebuildProjectNameMap(projectsCacheAll);
             _projectsListReady = true;
+            if (typeof window.refreshConversationProjectFilter === 'function') {
+                window.refreshConversationProjectFilter();
+            }
             return projectsCacheAll;
         })
         .catch((e) => {
@@ -300,27 +367,21 @@ async function ensureProjectsLoaded(force) {
     return _projectsFetchPromise;
 }
 
+function isProjectsCacheReady() {
+    return _projectsListReady;
+}
+
 function prefetchProjectsForChat() {
+    const id = (resolveChatProjectSelection() || '').trim();
+    if (id && !projectNameById[id]) {
+        fetchProjectSummary(id).catch(() => {});
+    }
     ensureProjectsLoaded().catch(() => {});
 }
 
-/** Internal UI state handling. */
+/** 新对话时默认不绑定项目；用户需主动选择后才写入共享黑板 */
 async function ensureDefaultActiveProjectForNewChat() {
-    try {
-        await ensureProjectsLoaded();
-        const cur = getActiveProjectId();
-        if (cur && isActiveChatProjectId(cur)) return cur;
-        const source = projectsCacheAll.length ? projectsCacheAll : projectsCache;
-        const first =
-            source.find((p) => p.pinned && p.status !== 'archived') ||
-            source.find((p) => p.status !== 'archived');
-        if (first) {
-            setActiveProjectId(first.id);
-            return first.id;
-        }
-    } catch (e) {
-        console.warn(e);
-    }
+    setActiveProjectId('');
     return '';
 }
 
@@ -343,7 +404,9 @@ async function initProjectsPage() {
     const page = document.getElementById('page-projects');
     if (!page || page.style.display === 'none') return;
     initProjectsModalEscape();
-    syncProjectsModalBodyLock();
+    if (typeof syncAppModalBodyLock === 'function') {
+        syncAppModalBodyLock();
+    }
     updateProjectsDetailVisibility();
     projectsListPagination.pageSize = getProjectsListPageSize();
     renderProjectsPagination();
@@ -378,6 +441,9 @@ async function loadProjectsList() {
     if (typeof refreshVulnerabilityProjectFilter === 'function') {
         refreshVulnerabilityProjectFilter();
     }
+    if (typeof window.refreshAllProjectFilterSelects === 'function') {
+        await window.refreshAllProjectFilterSelects();
+    }
 }
 
 function projectInitial(name) {
@@ -400,7 +466,7 @@ function updateProjectsListCount() {
     if (el) el.textContent = String(projectsListPagination.total || projectsCache.length);
 }
 
-/** Internal UI state handling. */
+/** 事实分类 → 徽章样式（与 fact_template.go 常量对齐） */
 const FACT_CATEGORY_BADGE = {
     target: 'projects-category--target',
     auth: 'projects-category--auth',
@@ -611,9 +677,39 @@ function renderProjectsSidebar() {
                 <div class="projects-list-item-name">${escapeHtml(p.name)}${badges}</div>
                 <div class="projects-list-item-meta">${formatProjectTime(p.updated_at)}</div>
             </div>
+            <button type="button" class="projects-list-item-menu" title="${escapeHtml(tp('projects.projectActions'))}" aria-label="${escapeHtml(tp('projects.projectActions'))}" onclick="showProjectListActionMenu(event, '${escapeHtml(p.id)}')">⋯</button>
         </div>`;
     }).join('');
     updateProjectsDetailVisibility();
+}
+
+function clampProjectDescription(text) {
+    const s = (text || '').trim();
+    if (s.length <= PROJECT_DESCRIPTION_MAX_LENGTH) return s;
+    return s.slice(0, PROJECT_DESCRIPTION_MAX_LENGTH);
+}
+
+function renderProjectDetailTitle(name) {
+    const titleEl = document.getElementById('projects-detail-title');
+    if (!titleEl) return;
+    const text = (name || '').trim() || tp('projects.defaultProjectName');
+    titleEl.textContent = text;
+    titleEl.title = text;
+}
+
+function renderProjectDetailDesc(desc) {
+    const descEl = document.getElementById('projects-detail-desc');
+    if (!descEl) return;
+    const text = (desc || '').trim();
+    if (!text) {
+        descEl.hidden = true;
+        descEl.textContent = '';
+        descEl.removeAttribute('title');
+        return;
+    }
+    descEl.textContent = text;
+    descEl.title = text;
+    descEl.hidden = false;
 }
 
 function updateProjectStatusPill(status) {
@@ -622,6 +718,27 @@ function updateProjectStatusPill(status) {
     const archived = status === 'archived';
     el.textContent = archived ? tp('projects.statusArchived') : tp('projects.statusActive');
     el.className = 'projects-status-pill ' + (archived ? 'projects-status-pill--archived' : 'projects-status-pill--active');
+}
+
+function renderProjectDetailMeta(updatedAt) {
+    const metaEl = document.getElementById('projects-detail-meta');
+    const timeEl = document.getElementById('projects-detail-meta-time');
+    if (!metaEl || !timeEl) return;
+    const time = formatProjectTime(updatedAt);
+    const full = tpFmt('projects.updatedPrefix', `Updated ${time}`, { time });
+    timeEl.textContent = time;
+    metaEl.title = full;
+}
+
+function refreshProjectDetailMetaI18n() {
+    if (!currentProjectId) return;
+    let updatedAt = currentProjectUpdatedAt;
+    if (updatedAt == null) {
+        const source = projectsCacheAll.length ? projectsCacheAll : projectsCache;
+        const p = source.find((x) => x.id === currentProjectId);
+        updatedAt = p?.updated_at;
+    }
+    renderProjectDetailMeta(updatedAt);
 }
 
 function updateProjectStats(stats) {
@@ -669,8 +786,7 @@ async function selectProject(id) {
         const res = await apiFetch(`/api/projects/${id}`);
         if (!res.ok) throw new Error(tp('projects.projectNotFound'));
         const p = await res.json();
-        const titleEl = document.getElementById('projects-detail-title');
-        if (titleEl) titleEl.textContent = p.name || tp('projects.defaultProjectName');
+        renderProjectDetailTitle(p.name);
         document.getElementById('project-edit-name').value = p.name || '';
         document.getElementById('project-edit-description').value = p.description || '';
         document.getElementById('project-edit-scope').value = p.scope_json || '';
@@ -679,19 +795,9 @@ async function selectProject(id) {
         const pinEl = document.getElementById('project-edit-pinned');
         if (pinEl) pinEl.checked = !!p.pinned;
         updateProjectStatusPill(p.status || 'active');
-        const metaEl = document.getElementById('projects-detail-meta');
-        if (metaEl) metaEl.textContent = tpFmt('projects.updatedPrefix', `Updated ${formatProjectTime(p.updated_at)}`, { time: formatProjectTime(p.updated_at) });
-        const descEl = document.getElementById('projects-detail-desc');
-        if (descEl) {
-            const desc = (p.description || '').trim();
-            if (desc) {
-                descEl.textContent = desc;
-                descEl.hidden = false;
-            } else {
-                descEl.textContent = '';
-                descEl.hidden = true;
-            }
-        }
+        currentProjectUpdatedAt = p.updated_at;
+        renderProjectDetailMeta(currentProjectUpdatedAt);
+        renderProjectDetailDesc(p.description);
         projectNameById[p.id] = p.name || p.id;
     } catch (e) {
         console.warn(e);
@@ -702,20 +808,316 @@ async function selectProject(id) {
 
 function switchProjectTab(tab) {
     currentProjectTab = tab;
-    ['facts', 'conversations', 'vulns', 'settings'].forEach((t) => {
+    ['facts', 'graph', 'conversations', 'vulns', 'settings'].forEach((t) => {
         const btn = document.getElementById(`project-tab-${t}`);
         const panel = document.getElementById(`project-panel-${t}`);
         if (btn) btn.classList.toggle('is-active', t === tab);
         if (panel) panel.hidden = t !== tab;
     });
     if (tab === 'facts') loadProjectFacts();
+    if (tab === 'graph') loadProjectFactGraph();
     if (tab === 'conversations') loadProjectConversations();
     if (tab === 'vulns') loadProjectVulnerabilities();
+}
+
+let _selectedGraphFactKey = null;
+let _selectedGraphEdgeId = null;
+let _currentGraphData = null;
+let _graphConnectMode = false;
+let _graphConnectSource = null;
+
+function toggleProjectFactGraphConnectMode() {
+    _graphConnectMode = !_graphConnectMode;
+    _graphConnectSource = null;
+    const btn = document.getElementById('project-graph-connect-btn');
+    if (btn) {
+        btn.classList.toggle('is-active', _graphConnectMode);
+        btn.textContent = _graphConnectMode ? tp('projects.graphConnectActive') : tp('projects.graphConnect');
+        btn.classList.toggle('projects-graph-action-btn--connect-active', _graphConnectMode);
+    }
+    if (typeof ProjectFactGraph !== 'undefined') {
+        ProjectFactGraph.setConnectMode(_graphConnectMode, handleGraphConnectNodePick);
+    }
+}
+
+async function handleGraphConnectNodePick(factKey) {
+    if (!factKey || String(factKey).startsWith('vuln:')) return;
+    if (!_graphConnectSource) {
+        _graphConnectSource = factKey;
+        if (typeof showNotification === 'function') {
+            showNotification(tpFmt('projects.graphConnectPickTarget', `已选源节点 ${factKey}，请点击目标节点`, { source: factKey }), 'info');
+        }
+        return;
+    }
+    if (_graphConnectSource === factKey) return;
+    const edgeType = window.prompt(tp('projects.graphEdgeTypePrompt'), 'leads_to');
+    if (!edgeType) {
+        _graphConnectSource = null;
+        return;
+    }
+    const res = await apiFetch(`/api/projects/${currentProjectId}/fact-edges`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            source_fact_key: _graphConnectSource,
+            target_fact_key: factKey,
+            edge_type: edgeType.trim(),
+        }),
+    });
+    _graphConnectSource = null;
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return alert(err.error || tp('projects.graphConnectFailed'));
+    }
+    if (typeof showNotification === 'function') showNotification(tp('projects.graphConnectSuccess'), 'success');
+    loadProjectFactGraph();
+    loadProjectFacts();
+}
+
+function formatIncomingLinksForModal(links) {
+    if (!links || !links.length) return '';
+    return links
+        .map((e) => `${e.edge_type || e.type}: ${e.source_fact_key || e.from}`)
+        .join('\n');
+}
+
+
+async function loadProjectFactGraph() {
+    const container = document.getElementById('project-fact-graph-container');
+    const statsEl = document.getElementById('project-fact-graph-stats');
+    if (!container || !currentProjectId) return;
+    container.innerHTML = `<div class="loading-spinner">${escapeHtml(tp('common.loading'))}</div>`;
+    closeProjectFactGraphSidebar();
+    const view = document.getElementById('project-graph-view')?.value || 'path';
+    const hideDeprecated = document.getElementById('project-facts-filter-hide-deprecated')?.checked !== false;
+    const params = new URLSearchParams({ view });
+    if (!hideDeprecated) params.set('exclude_deprecated', '0');
+    try {
+        const res = await apiFetch(`/api/projects/${currentProjectId}/fact-graph?${params}`);
+        if (!res.ok) throw new Error(tp('common.loadFailed'));
+        const data = await res.json();
+        _currentGraphData = data;
+        if (typeof ProjectFactGraph !== 'undefined') {
+            ProjectFactGraph.render(container, data, {
+                emptyText: tp('projects.graphEmpty'),
+                emptyTitle: tp('projects.graphEmptyTitle'),
+                emptySteps: [
+                    tp('projects.graphEmptyStep1'),
+                    tp('projects.graphEmptyStep2'),
+                    tp('projects.graphEmptyStep3'),
+                ],
+                emptyActionLabel: tp('projects.graphEmptyCta'),
+                onEmptyAction: () => showAddFactModal(),
+                onNodeSelect: (factKey) => showProjectFactGraphNode(factKey, _currentGraphData),
+                onEdgeSelect: (edgeId) => showProjectFactGraphEdge(edgeId, _currentGraphData),
+            });
+        }
+        const nodeCount = (data.nodes || []).length;
+        const edgeCount = (data.edges || []).length;
+        if (statsEl) {
+            statsEl.innerHTML =
+                `<span class="projects-graph-stat-badge"><strong>${nodeCount}</strong> ${escapeHtml(tp('projects.graphStatsNodes'))}</span>` +
+                `<span class="projects-graph-stat-badge"><strong>${edgeCount}</strong> ${escapeHtml(tp('projects.graphStatsEdges'))}</span>`;
+        }
+    } catch (e) {
+        container.innerHTML = `<div class="error-message">${escapeHtml(e.message || tp('common.loadFailed'))}</div>`;
+        if (statsEl) statsEl.textContent = '';
+    }
+}
+
+function filterProjectFactGraph() {
+    const q = document.getElementById('project-graph-search')?.value || '';
+    if (typeof ProjectFactGraph !== 'undefined') {
+        ProjectFactGraph.filterBySearch(q);
+    }
+}
+
+function centerProjectFactGraph() {
+    if (typeof ProjectFactGraph !== 'undefined') ProjectFactGraph.center();
+}
+
+function closeProjectFactGraphSidebar() {
+    _selectedGraphFactKey = null;
+    _selectedGraphEdgeId = null;
+    if (typeof ProjectFactGraph !== 'undefined') ProjectFactGraph.clearEdgeSelection();
+    const sidebar = document.getElementById('project-fact-graph-sidebar');
+    if (sidebar) sidebar.hidden = true;
+}
+
+function isSyntheticGraphEdge(edge) {
+    if (!edge) return true;
+    const id = String(edge.id || '');
+    const type = String(edge.type || '');
+    return id.startsWith('vuln-link:') || type === 'links_vuln';
+}
+
+function getGraphEdgesForFact(factKey, graphData) {
+    if (!factKey || !graphData?.edges) return [];
+    return graphData.edges.filter((e) => e.source === factKey || e.target === factKey);
+}
+
+function renderGraphEdgesListHtml(factKey, graphData, selectedEdgeId) {
+    const edges = getGraphEdgesForFact(factKey, graphData);
+    if (!edges.length) {
+        return `<p class="project-fact-graph-edges-empty">${escapeHtml(tp('projects.graphEdgesEmpty'))}</p>`;
+    }
+    return edges
+        .map((e) => {
+            const isOut = e.source === factKey;
+            const dirLabel = isOut ? tp('projects.graphEdgeFromSelf') : tp('projects.graphEdgeToSelf');
+            const src = e.source || '';
+            const tgt = e.target || '';
+            const selected = e.id === selectedEdgeId ? ' is-selected' : '';
+            const synthetic = isSyntheticGraphEdge(e);
+            const deleteBtn = synthetic
+                ? `<span class="project-fact-graph-edge-synthetic" title="${escapeHtml(tp('projects.graphEdgeSynthetic'))}">—</span>`
+                : `<button type="button" class="project-fact-graph-edge-delete" data-edge-id="${escapeHtml(e.id)}" onclick="event.stopPropagation(); deleteProjectFactEdge(this.dataset.edgeId)" title="${escapeHtml(tp('projects.graphDeleteEdge'))}">×</button>`;
+            return `<div class="project-fact-graph-edge-item${selected}" data-edge-id="${escapeHtml(e.id)}" onclick="focusProjectFactGraphEdge(${JSON.stringify(e.id)})">
+                <span class="project-fact-graph-edge-dir">${escapeHtml(dirLabel)}</span>
+                <span class="project-fact-graph-edge-type">${escapeHtml(e.type || '')}</span>
+                <span class="project-fact-graph-edge-peer" title="${escapeHtml(src + ' → ' + tgt)}">${escapeHtml(src)} → ${escapeHtml(tgt)}</span>
+                ${deleteBtn}
+            </div>`;
+        })
+        .join('');
+}
+
+function renderProjectFactGraphEdges(factKey, graphData, selectedEdgeId) {
+    const wrap = document.getElementById('project-fact-graph-edges-wrap');
+    const list = document.getElementById('project-fact-graph-edges-list');
+    if (!wrap || !list) return;
+    const edges = getGraphEdgesForFact(factKey, graphData);
+    wrap.hidden = false;
+    list.innerHTML = renderGraphEdgesListHtml(factKey, graphData, selectedEdgeId);
+    if (selectedEdgeId) {
+        const selectedEl = list.querySelector('[data-edge-id="' + String(selectedEdgeId).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]');
+        if (selectedEl) selectedEl.scrollIntoView({ block: 'nearest' });
+    }
+    if (!edges.length) wrap.hidden = false;
+}
+
+function graphVulnIdFromKey(factKey) {
+    const key = String(factKey || '');
+    if (!key.startsWith('vuln:')) return null;
+    return key.slice(5);
+}
+
+function showProjectFactGraphNode(factKey, graphData, selectedEdgeId) {
+    if (!factKey) {
+        closeProjectFactGraphSidebar();
+        return;
+    }
+    _selectedGraphFactKey = factKey;
+    _selectedGraphEdgeId = selectedEdgeId || null;
+    const node = (graphData?.nodes || []).find((n) => n.fact_key === factKey || n.id === factKey);
+    const vulnId = graphVulnIdFromKey(factKey);
+    const isVulnNode = !!vulnId;
+    const sidebar = document.getElementById('project-fact-graph-sidebar');
+    const titleEl = document.getElementById('project-fact-graph-node-title');
+    const metaEl = document.getElementById('project-fact-graph-node-meta');
+    const categoryEl = document.getElementById('project-fact-graph-node-category');
+    const detailBtn = document.getElementById('project-fact-graph-detail-btn');
+    const editBtn = document.getElementById('project-fact-graph-edit-btn');
+    if (!sidebar || !titleEl || !metaEl) return;
+    titleEl.textContent = isVulnNode ? vulnId : factKey;
+    titleEl.title = isVulnNode ? vulnId : factKey;
+    if (categoryEl) {
+        const visualType =
+            typeof ProjectFactGraph !== 'undefined' && ProjectFactGraph.resolveGraphNodeType
+                ? ProjectFactGraph.resolveGraphNodeType(node)
+                : node?.type || node?.category || 'note';
+        const theme =
+            typeof ProjectFactGraph !== 'undefined' && ProjectFactGraph.nodeTheme
+                ? ProjectFactGraph.nodeTheme(visualType)
+                : { typeEn: String(visualType).toUpperCase(), typeLabel: visualType };
+        categoryEl.textContent = theme.typeEn || String(visualType).toUpperCase();
+        categoryEl.hidden = false;
+        categoryEl.className = 'project-fact-graph-node-category project-fact-graph-node-category--' + visualType;
+        categoryEl.title = theme.typeLabel || visualType;
+    }
+    const conf = node?.confidence || '';
+    const summary = (node?.summary || node?.label || '').trim();
+    if (summary || conf || isVulnNode) {
+        const parts = [];
+        if (summary) {
+            parts.push(`<span class="project-fact-graph-node-summary">${escapeHtml(summary)}</span>`);
+        }
+        if (isVulnNode) {
+            parts.push(
+                `<span class="project-fact-graph-node-vuln-hint">${escapeHtml(tp('projects.graphVulnSidebarHint'))}</span>`,
+            );
+        }
+        if (conf) {
+            parts.push(formatConfidenceBadge(conf));
+        }
+        metaEl.innerHTML = parts.join('');
+    } else {
+        metaEl.textContent = '';
+    }
+    if (detailBtn) {
+        detailBtn.textContent = isVulnNode ? tp('projects.viewVulnerability') : tp('projects.details');
+    }
+    if (editBtn) {
+        editBtn.hidden = isVulnNode;
+    }
+    renderProjectFactGraphEdges(factKey, graphData, _selectedGraphEdgeId);
+    if (_selectedGraphEdgeId && typeof ProjectFactGraph !== 'undefined') {
+        ProjectFactGraph.selectEdge(_selectedGraphEdgeId);
+    } else if (typeof ProjectFactGraph !== 'undefined') {
+        ProjectFactGraph.clearEdgeSelection();
+    }
+    sidebar.hidden = false;
+}
+
+function showProjectFactGraphEdge(edgeId, graphData) {
+    const edge = (graphData?.edges || []).find((e) => e.id === edgeId);
+    if (!edge) return;
+    const anchorKey = edge.source && !String(edge.source).startsWith('vuln:') ? edge.source : edge.target;
+    showProjectFactGraphNode(anchorKey, graphData, edgeId);
+}
+
+function focusProjectFactGraphEdge(edgeId) {
+    if (!edgeId || !_currentGraphData) return;
+    showProjectFactGraphEdge(edgeId, _currentGraphData);
+}
+
+async function deleteProjectFactEdge(edgeId) {
+    if (!edgeId || !currentProjectId) return;
+    const edge = (_currentGraphData?.edges || []).find((e) => e.id === edgeId);
+    if (isSyntheticGraphEdge(edge)) return;
+    if (!confirm(tp('projects.confirmDeleteGraphEdge'))) return;
+    const res = await apiFetch(`/api/projects/${currentProjectId}/fact-edges/${encodeURIComponent(edgeId)}`, {
+        method: 'DELETE',
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return alert(err.error || tp('projects.graphEdgeDeleteFailed'));
+    }
+    if (typeof showNotification === 'function') showNotification(tp('projects.graphEdgeDeleteSuccess'), 'success');
+    const keepKey = _selectedGraphFactKey;
+    await loadProjectFactGraph();
+    if (keepKey) showProjectFactGraphNode(keepKey, _currentGraphData);
+    loadProjectFacts();
+}
+
+function openSelectedGraphFactDetail() {
+    if (!_selectedGraphFactKey) return;
+    const vulnId = graphVulnIdFromKey(_selectedGraphFactKey);
+    if (vulnId) {
+        openVulnerabilityDetail(vulnId);
+        return;
+    }
+    viewProjectFactBody(_selectedGraphFactKey);
+}
+
+function editSelectedGraphFact() {
+    if (_selectedGraphFactKey) showEditFactModal(_selectedGraphFactKey);
 }
 
 function buildProjectFactsQueryParams() {
     const params = new URLSearchParams();
     params.set('limit', '200');
+    params.set('include_link_counts', 'true');
     const search = document.getElementById('project-facts-search')?.value?.trim();
     const category = document.getElementById('project-facts-filter-category')?.value?.trim();
     const confidence = document.getElementById('project-facts-filter-confidence')?.value?.trim();
@@ -740,11 +1142,11 @@ function debouncedLoadProjectFacts() {
 async function loadProjectFacts() {
     const tbody = document.getElementById('project-facts-tbody');
     if (!tbody || !currentProjectId) return;
-    tbody.innerHTML = `<tr class="is-empty-row"><td colspan="7">${escapeHtml(tp('common.loading'))}</td></tr>`;
+    tbody.innerHTML = `<tr class="is-empty-row"><td colspan="8">${escapeHtml(tp('common.loading'))}</td></tr>`;
     const qs = buildProjectFactsQueryParams().toString();
     const res = await apiFetch(`/api/projects/${currentProjectId}/facts?${qs}`);
     if (!res.ok) {
-        tbody.innerHTML = `<tr class="is-empty-row"><td colspan="7">${escapeHtml(tp('common.loadFailed'))}</td></tr>`;
+        tbody.innerHTML = `<tr class="is-empty-row"><td colspan="8">${escapeHtml(tp('common.loadFailed'))}</td></tr>`;
         return;
     }
     const facts = await res.json();
@@ -754,7 +1156,7 @@ async function loadProjectFacts() {
             document.getElementById('project-facts-filter-category')?.value ||
             document.getElementById('project-facts-filter-confidence')?.value ||
             document.getElementById('project-facts-filter-sparse')?.checked;
-        tbody.innerHTML = `<tr class="is-empty-row"><td colspan="7">${
+        tbody.innerHTML = `<tr class="is-empty-row"><td colspan="8">${
             hasFilter ? tp('projects.noMatchingFacts') : tp('projects.noFacts')
         }</td></tr>`;
         refreshProjectHeaderStats();
@@ -769,10 +1171,16 @@ async function loadProjectFacts() {
         const pinBadge = f.pinned
             ? `<span class="projects-list-item-badge" title="${escapeHtml(tp('projects.pinned'))}">${escapeHtml(tp('projects.pinned'))}</span>`
             : '';
+        const lc = f.link_counts || {};
+        const linkBadge =
+            lc.outgoing || lc.incoming
+                ? `<span class="projects-fact-link-badge" title="${escapeHtml(tp('projects.linkCountsTitle'))}">↑${lc.outgoing || 0} ↓${lc.incoming || 0}</span>`
+                : '<span class="projects-fact-link-badge projects-fact-link-badge--empty">—</span>';
         return `<tr>
             <td class="cell-fact-key"><code class="projects-fact-key-chip" title="${keyEsc}">${keyEsc}</code>${pinBadge}${vulnLink}</td>
             <td class="cell-fact-category">${formatCategoryBadge(f.category)}</td>
             <td class="cell-summary" title="${escapeHtml(f.summary)}">${escapeHtml(f.summary)}</td>
+            <td class="cell-fact-links">${linkBadge}</td>
             <td>${formatFactBodyBadge(f)}</td>
             <td>${formatConfidenceBadge(f.confidence)}</td>
             <td>${formatProjectTime(f.updated_at, f.created_at)}</td>
@@ -821,6 +1229,7 @@ async function loadProjectConversations() {
             <td class="col-actions">
                 <div class="projects-table-actions">
                     <button type="button" class="projects-action-btn projects-action-btn--view" data-conv-id="${idEsc}" onclick="openProjectConversation(this.dataset.convId)">${escapeHtml(tp('projects.open'))}</button>
+                    <button type="button" class="projects-action-btn" data-conv-id="${idEsc}" onclick="promoteConversationAttackChain(this.dataset.convId)" title="${escapeHtml(tp('projects.promoteAttackChainTitle'))}">${escapeHtml(tp('projects.promoteAttackChain'))}</button>
                     <button type="button" class="projects-action-btn projects-action-btn--mute" data-conv-id="${idEsc}" onclick="unbindConversationFromProject(this.dataset.convId)" title="${escapeHtml(tp('projects.unbindProjectTitle'))}">${escapeHtml(tp('projects.unbind'))}</button>
                 </div>
             </td>
@@ -841,6 +1250,32 @@ function openProjectConversation(conversationId) {
     }, 200);
 }
 
+async function promoteConversationAttackChain(conversationId) {
+    if (!currentProjectId || !conversationId) return;
+    if (!confirm(tp('projects.confirmPromoteAttackChain'))) return;
+    const res = await apiFetch(
+        `/api/projects/${currentProjectId}/promote-attack-chain/${encodeURIComponent(conversationId)}`,
+        { method: 'POST' },
+    );
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        return alert(err.error || tp('projects.promoteAttackChainFailed'));
+    }
+    const data = await res.json();
+    if (typeof showNotification === 'function') {
+        showNotification(
+            tpFmt(
+                'projects.promoteAttackChainSuccess',
+                `已沉淀 ${data.facts_created || 0} 新 / ${data.facts_updated || 0} 更新 / ${data.edges_created || 0} 边`,
+                data,
+            ),
+            'success',
+        );
+    }
+    loadProjectFacts();
+    if (currentProjectTab === 'graph') loadProjectFactGraph();
+}
+
 async function unbindConversationFromProject(conversationId) {
     if (!conversationId || !confirm(tp('projects.confirmUnbindConversation'))) return;
     const res = await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}/project`, {
@@ -858,38 +1293,52 @@ let _factDetailFact = null;
 let _projectFactsFilterDebounce = null;
 
 async function viewProjectFactBody(factKey) {
-    const res = await apiFetch(`/api/projects/${currentProjectId}/facts?fact_key=${encodeURIComponent(factKey)}`);
-    if (!res.ok) return alert(tp('common.loadFailed'));
-    const f = await res.json();
-    _factDetailKey = f.fact_key;
-    _factDetailFact = f;
-    document.getElementById('fact-detail-title').textContent = `[${f.fact_key}]`;
-    const metaParts = [
-        tpFmt('projects.factMetaCategory', `Category: ${f.category}`, { value: f.category }),
-        tpFmt('projects.factMetaConfidence', `Confidence: ${f.confidence}`, { value: f.confidence }),
-        tpFmt('projects.factMetaUpdated', `Updated: ${formatProjectTime(f.updated_at, f.created_at)}`, {
-            time: formatProjectTime(f.updated_at, f.created_at),
-        }),
-    ];
-    if (f.related_vulnerability_id) metaParts.push(tpFmt('projects.factMetaRelatedVuln', `Related vulnerability: ${f.related_vulnerability_id}`, { value: f.related_vulnerability_id }));
-    if (f.source_conversation_id) metaParts.push(tpFmt('projects.factMetaSourceConversation', `Source conversation: ${f.source_conversation_id}`, { value: f.source_conversation_id }));
-    document.getElementById('fact-detail-meta').textContent = metaParts.join(' · ');
-    document.getElementById('fact-detail-body').textContent = f.body || tp('projects.emptyBody');
+    document.getElementById('fact-detail-title').textContent = factKey;
+    document.getElementById('fact-detail-meta').textContent = '…';
+    document.getElementById('fact-detail-body').textContent = '';
     const warnEl = document.getElementById('fact-detail-sparse-warn');
     if (warnEl) {
-        if (isSparseFactBody(f.category, f.fact_key, f.body)) {
-            warnEl.hidden = false;
-            warnEl.textContent = tp('projects.factSparseWarn');
-        } else {
-            warnEl.hidden = true;
-            warnEl.textContent = '';
-        }
+        warnEl.hidden = true;
+        warnEl.textContent = '';
     }
     const linkBtn = document.getElementById('fact-detail-link-vuln-btn');
     const createBtn = document.getElementById('fact-detail-create-vuln-btn');
-    if (linkBtn) linkBtn.hidden = false;
-    if (createBtn) createBtn.hidden = false;
-    openProjectsOverlay('fact-detail-modal');
+    if (linkBtn) linkBtn.hidden = true;
+    if (createBtn) createBtn.hidden = true;
+    openProjectsOverlay('fact-detail-modal', { focus: false });
+    const res = await apiFetch(`/api/projects/${currentProjectId}/facts?fact_key=${encodeURIComponent(factKey)}`);
+    if (!res.ok) {
+        closeFactDetailModal();
+        return alert(tp('common.loadFailed'));
+    }
+    const f = await res.json();
+    _factDetailKey = f.fact_key;
+    _factDetailFact = f;
+    deferModalContent(() => {
+        document.getElementById('fact-detail-title').textContent = `[${f.fact_key}]`;
+        const metaParts = [
+            tpFmt('projects.factMetaCategory', `Category: ${f.category}`, { value: f.category }),
+            tpFmt('projects.factMetaConfidence', `Confidence: ${f.confidence}`, { value: f.confidence }),
+            tpFmt('projects.factMetaUpdated', `Updated: ${formatProjectTime(f.updated_at, f.created_at)}`, {
+                time: formatProjectTime(f.updated_at, f.created_at),
+            }),
+        ];
+        if (f.related_vulnerability_id) metaParts.push(tpFmt('projects.factMetaRelatedVuln', `Related vulnerability: ${f.related_vulnerability_id}`, { value: f.related_vulnerability_id }));
+        if (f.source_conversation_id) metaParts.push(tpFmt('projects.factMetaSourceConversation', `Source conversation: ${f.source_conversation_id}`, { value: f.source_conversation_id }));
+        document.getElementById('fact-detail-meta').textContent = metaParts.join(' · ');
+        document.getElementById('fact-detail-body').textContent = f.body || tp('projects.emptyBody');
+        if (warnEl) {
+            if (isSparseFactBody(f.category, f.fact_key, f.body)) {
+                warnEl.hidden = false;
+                warnEl.textContent = tp('projects.factSparseWarn');
+            } else {
+                warnEl.hidden = true;
+                warnEl.textContent = '';
+            }
+        }
+        if (linkBtn) linkBtn.hidden = false;
+        if (createBtn) createBtn.hidden = false;
+    });
 }
 
 function editFactFromDetail() {
@@ -1144,41 +1593,16 @@ async function viewFactsForVulnerability(vulnId) {
     else loadProjectFacts();
 }
 
-function openProjectsOverlay(id) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.style.display = 'flex';
-    syncProjectsModalBodyLock();
-    const focusTarget = el.querySelector('input.form-input, textarea.form-input, select.form-input');
-    if (focusTarget) {
-        setTimeout(() => focusTarget.focus(), 80);
-    }
+function openProjectsOverlay(id, opts) {
+    openAppModal(id, opts);
 }
 
 function isProjectsOverlayVisible(id) {
-    const el = document.getElementById(id);
-    if (!el) return false;
-    const style = window.getComputedStyle(el);
-    return style.display !== 'none' && style.visibility !== 'hidden';
-}
-
-function hasVisibleProjectsOverlay() {
-    const overlays = document.querySelectorAll('.projects-modal-overlay');
-    return Array.from(overlays).some((el) => {
-        const style = window.getComputedStyle(el);
-        return style.display !== 'none' && style.visibility !== 'hidden';
-    });
-}
-
-function syncProjectsModalBodyLock() {
-    if (hasVisibleProjectsOverlay()) document.body.classList.add('projects-modal-open');
-    else document.body.classList.remove('projects-modal-open');
+    return isAppModalOpen(id);
 }
 
 function closeProjectsOverlay(id) {
-    const el = document.getElementById(id);
-    if (el) el.style.display = 'none';
-    syncProjectsModalBodyLock();
+    closeAppModal(id);
 }
 
 function showNewProjectModal() {
@@ -1193,7 +1617,43 @@ function showNewProjectModal() {
     openProjectsOverlay('project-modal');
 }
 
-/** Internal UI state handling. */
+async function showEditProjectModal(projectId) {
+    if (!projectId) return;
+    window._projectModalFromChat = false;
+    window._projectModalEditId = projectId;
+    document.getElementById('project-modal-title').textContent = tp('projects.modalEditTitle');
+    const sub = document.getElementById('project-modal-subtitle');
+    if (sub) sub.textContent = tp('projects.modalEditSubtitle');
+    const submitBtn = document.getElementById('project-modal-submit-btn');
+    if (submitBtn) submitBtn.textContent = tp('projects.saveChanges');
+    const nameEl = document.getElementById('project-modal-name');
+    const descEl = document.getElementById('project-modal-description');
+    if (nameEl) nameEl.value = '';
+    if (descEl) descEl.value = '';
+    openProjectsOverlay('project-modal', { focus: false });
+    let p = findProjectById(projectId);
+    if (!p) {
+        try {
+            const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`);
+            if (!res.ok) throw new Error(tp('projects.projectNotFound'));
+            p = await res.json();
+        } catch (e) {
+            closeProjectModal();
+            alert(e.message || tp('projects.projectNotFound'));
+            window._projectModalEditId = null;
+            return;
+        }
+    }
+    const name = (p.name || '').slice(0, PROJECT_NAME_MAX_LENGTH);
+    const description = clampProjectDescription(p.description || '');
+    deferModalContent(() => {
+        if (nameEl) nameEl.value = name;
+        if (descEl) descEl.value = description;
+        nameEl?.focus();
+    });
+}
+
+/** 从对话区「选择项目」面板打开新建项目，创建成功后自动绑定当前对话 */
 function showNewProjectModalFromChat() {
     closeChatProjectPanel();
     window._projectModalFromChat = true;
@@ -1201,11 +1661,11 @@ function showNewProjectModalFromChat() {
 }
 
 async function saveProjectModal() {
-    const name = document.getElementById('project-modal-name').value.trim();
+    const name = document.getElementById('project-modal-name').value.trim().slice(0, PROJECT_NAME_MAX_LENGTH);
     if (!name) return alert(tp('projects.enterProjectName'));
     const body = {
         name,
-        description: document.getElementById('project-modal-description').value.trim(),
+        description: clampProjectDescription(document.getElementById('project-modal-description').value),
     };
     const editId = window._projectModalEditId;
     const res = editId
@@ -1217,12 +1677,18 @@ async function saveProjectModal() {
         return;
     }
     const fromChat = !!window._projectModalFromChat;
+    const fromWebshellConnId = window._projectModalFromWebshellConnId || '';
     window._projectModalFromChat = false;
+    window._projectModalFromWebshellConnId = '';
     closeProjectModal();
     const saved = await res.json();
     await loadProjectsList();
     if (saved.id) {
-        if (fromChat && !editId) {
+        if (fromWebshellConnId && !editId) {
+            if (typeof applyWebshellAiProjectSelection === 'function') {
+                await applyWebshellAiProjectSelection(saved.id);
+            }
+        } else if (fromChat && !editId) {
             await applyChatProjectSelection(saved.id);
         } else {
             await selectProject(saved.id);
@@ -1232,6 +1698,7 @@ async function saveProjectModal() {
 
 function closeProjectModal() {
     window._projectModalFromChat = false;
+    window._projectModalEditId = null;
     closeProjectsOverlay('project-modal');
 }
 
@@ -1272,7 +1739,7 @@ async function saveProjectSettings() {
     }
     const body = {
         name: document.getElementById('project-edit-name').value.trim(),
-        description: document.getElementById('project-edit-description').value.trim(),
+        description: clampProjectDescription(document.getElementById('project-edit-description').value),
         scope_json: scopeRaw,
         status: document.getElementById('project-edit-status')?.value || 'active',
         pinned: !!document.getElementById('project-edit-pinned')?.checked,
@@ -1288,30 +1755,112 @@ async function saveProjectSettings() {
     alert(tp('projects.saved'));
 }
 
-async function archiveCurrentProject() {
-    if (!currentProjectId) return;
-    const statusEl = document.getElementById('project-edit-status');
-    const cur = statusEl?.value || 'active';
+function findProjectById(projectId) {
+    return projectsCache.find((p) => p.id === projectId) || projectsCacheAll.find((p) => p.id === projectId);
+}
+
+let _projectListMenuTargetId = null;
+let _projectListMenuDocClickBound = false;
+
+function closeProjectListActionMenu() {
+    const menu = document.getElementById('projects-list-action-menu');
+    if (!menu) return;
+    menu.style.display = 'none';
+    _projectListMenuTargetId = null;
+}
+
+function positionProjectListActionMenu(event) {
+    const menu = document.getElementById('projects-list-action-menu');
+    if (!menu) return;
+    menu.style.display = 'block';
+    menu.style.visibility = 'visible';
+    menu.style.opacity = '1';
+    void menu.offsetHeight;
+    const menuRect = menu.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    let left = event.clientX;
+    let top = event.clientY;
+    if (left + menuRect.width > viewportWidth) {
+        left = Math.max(8, event.clientX - menuRect.width);
+    }
+    if (top + menuRect.height > viewportHeight) {
+        top = Math.max(8, event.clientY - menuRect.height);
+    }
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+}
+
+function showProjectListActionMenu(event, projectId) {
+    event.stopPropagation();
+    event.preventDefault();
+    const menu = document.getElementById('projects-list-action-menu');
+    if (!menu) return;
+    if (_projectListMenuTargetId === projectId && menu.style.display === 'block') {
+        closeProjectListActionMenu();
+        return;
+    }
+    closeProjectListActionMenu();
+    const p = findProjectById(projectId);
+    if (!p) return;
+    _projectListMenuTargetId = projectId;
+    const editText = document.getElementById('projects-list-menu-edit-text');
+    const archiveText = document.getElementById('projects-list-menu-archive-text');
+    const deleteText = document.getElementById('projects-list-menu-delete-text');
+    if (editText) editText.textContent = tp('projects.editProject');
+    if (archiveText) {
+        archiveText.textContent = p.status === 'archived'
+            ? tp('projects.restoreProjectActive')
+            : tp('projects.archiveProject');
+    }
+    if (deleteText) deleteText.textContent = tp('projects.deleteProject');
+    positionProjectListActionMenu(event);
+}
+
+function initProjectListActionMenu() {
+    if (_projectListMenuDocClickBound) return;
+    _projectListMenuDocClickBound = true;
+    document.addEventListener('click', (event) => {
+        const menu = document.getElementById('projects-list-action-menu');
+        if (!menu || menu.style.display === 'none') return;
+        if (menu.contains(event.target)) return;
+        if (event.target.closest('.projects-list-item-menu')) return;
+        closeProjectListActionMenu();
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') closeProjectListActionMenu();
+    });
+}
+
+async function toggleProjectArchiveById(projectId) {
+    const p = findProjectById(projectId);
+    if (!p) return;
+    const cur = p.status || 'active';
     const next = cur === 'archived' ? 'active' : 'archived';
     if (!confirm(next === 'archived' ? tp('projects.confirmArchiveProject') : tp('projects.confirmRestoreProjectActive'))) return;
-    const res = await apiFetch(`/api/projects/${currentProjectId}`, {
+    const res = await apiFetch(`/api/projects/${projectId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: next }),
     });
     if (!res.ok) return alert(tp('projects.operationFailed'));
     await loadProjectsList();
-    await selectProject(currentProjectId);
+    if (currentProjectId === projectId && projectsCache.some((item) => item.id === projectId)) {
+        await selectProject(projectId);
+    } else if (currentProjectId === projectId) {
+        currentProjectId = null;
+        updateProjectsDetailVisibility();
+        if (projectsCache.length) await selectProject(projectsCache[0].id);
+    }
 }
 
-async function deleteCurrentProject() {
-    if (!currentProjectId || !confirm(tp('projects.confirmDeleteProject'))) return;
-    const deletedId = currentProjectId;
-    const deletedIndex = projectsCache.findIndex((p) => p.id === deletedId);
-    const res = await apiFetch(`/api/projects/${deletedId}`, { method: 'DELETE' });
+async function deleteProjectById(projectId) {
+    if (!projectId || !confirm(tp('projects.confirmDeleteProject'))) return;
+    const deletedIndex = projectsCache.findIndex((p) => p.id === projectId);
+    const res = await apiFetch(`/api/projects/${projectId}`, { method: 'DELETE' });
     if (!res.ok) return alert(tp('projects.deleteFailed'));
-    if (getActiveProjectId() === deletedId) setActiveProjectId('');
-    currentProjectId = null;
+    if (getActiveProjectId() === projectId) setActiveProjectId('');
+    if (currentProjectId === projectId) currentProjectId = null;
     await loadProjectsList();
     if (projectsCache.length) {
         const nextIndex = Math.min(deletedIndex >= 0 ? deletedIndex : 0, projectsCache.length - 1);
@@ -1319,6 +1868,37 @@ async function deleteCurrentProject() {
     } else {
         updateProjectsDetailVisibility();
     }
+}
+
+async function toggleProjectArchiveFromListMenu() {
+    const projectId = _projectListMenuTargetId;
+    closeProjectListActionMenu();
+    if (!projectId) return;
+    await toggleProjectArchiveById(projectId);
+}
+
+function editProjectFromListMenu() {
+    const projectId = _projectListMenuTargetId;
+    closeProjectListActionMenu();
+    if (!projectId) return;
+    showEditProjectModal(projectId);
+}
+
+async function deleteProjectFromListMenu() {
+    const projectId = _projectListMenuTargetId;
+    closeProjectListActionMenu();
+    if (!projectId) return;
+    await deleteProjectById(projectId);
+}
+
+async function archiveCurrentProject() {
+    if (!currentProjectId) return;
+    await toggleProjectArchiveById(currentProjectId);
+}
+
+async function deleteCurrentProject() {
+    if (!currentProjectId) return;
+    await deleteProjectById(currentProjectId);
 }
 
 function resetFactModalForm() {
@@ -1336,6 +1916,10 @@ function resetFactModalForm() {
     if (pinEl) pinEl.checked = false;
     const rel = document.getElementById('fact-modal-related-vuln');
     if (rel) rel.value = '';
+    const linksEl = document.getElementById('fact-modal-links');
+    if (linksEl) linksEl.value = '';
+    const incomingWrap = document.getElementById('fact-modal-incoming-links-wrap');
+    if (incomingWrap) incomingWrap.hidden = true;
     updateFactFormHints();
 }
 
@@ -1367,6 +1951,8 @@ function fillFactModalForm(f) {
     }
     const rel = document.getElementById('fact-modal-related-vuln');
     if (rel) rel.value = f.related_vulnerability_id || '';
+    const linksEl = document.getElementById('fact-modal-links');
+    if (linksEl) linksEl.value = formatIncomingLinksForModal(f.incoming_links);
     const pinEl = document.getElementById('fact-modal-pinned');
     if (pinEl) pinEl.checked = !!f.pinned;
     updateFactFormHints();
@@ -1380,14 +1966,20 @@ function showAddFactModal() {
 
 async function showEditFactModal(factKey) {
     if (!currentProjectId) return alert(tp('projects.selectProjectFirst'));
-    const res = await apiFetch(
-        `/api/projects/${currentProjectId}/facts?fact_key=${encodeURIComponent(factKey)}`,
-    );
-    if (!res.ok) return alert(tp('projects.loadFactFailed'));
-    const f = await res.json();
     resetFactModalForm();
-    fillFactModalForm(f);
-    openProjectsOverlay('fact-modal');
+    openProjectsOverlay('fact-modal', { focus: false });
+    const res = await apiFetch(
+        `/api/projects/${currentProjectId}/facts?fact_key=${encodeURIComponent(factKey)}&include_links=true`,
+    );
+    if (!res.ok) {
+        closeFactModal();
+        return alert(tp('projects.loadFactFailed'));
+    }
+    const f = await res.json();
+    deferModalContent(() => {
+        fillFactModalForm(f);
+        document.getElementById('fact-modal-key')?.focus();
+    });
 }
 
 function closeFactModal() {
@@ -1415,6 +2007,7 @@ async function saveFactModal() {
         confidence: document.getElementById('fact-modal-confidence').value,
         pinned: !!document.getElementById('fact-modal-pinned')?.checked,
         related_vulnerability_id: document.getElementById('fact-modal-related-vuln')?.value?.trim() || '',
+        links_text: document.getElementById('fact-modal-links')?.value || '',
     };
     const editId = window._factModalEditId;
     const res = editId
@@ -1434,12 +2027,14 @@ async function saveFactModal() {
     }
     closeFactModal();
     loadProjectFacts();
+    if (currentProjectTab === 'graph') loadProjectFactGraph();
 }
 
 async function deleteProjectFact(id) {
     if (!confirm(tp('projects.confirmDeleteFact'))) return;
     await apiFetch(`/api/projects/${currentProjectId}/facts/${id}`, { method: 'DELETE' });
     loadProjectFacts();
+    if (currentProjectTab === 'graph') loadProjectFactGraph();
 }
 
 function parseProjectDate(t) {
@@ -1507,27 +2102,20 @@ function getChatProjectSelection() {
     return getActiveProjectId();
 }
 
-function isActiveChatProjectId(id) {
-    if (!id) return false;
-    const source = projectsCacheAll.length ? projectsCacheAll : projectsCache;
-    return source.some((p) => p.id === id && p.status !== 'archived');
-}
-
-/** Internal UI state handling. */
+/** 用于 UI：返回当前选中的项目 ID（有效性由 normalizeStaleChatProjectSelection 异步校验） */
 function resolveChatProjectSelection() {
-    const raw = getChatProjectSelection();
-    if (!raw) return '';
-    if (!_projectsListReady) return raw;
-    return isActiveChatProjectId(raw) ? raw : '';
+    return getChatProjectSelection() || '';
 }
 
 let _normalizingStaleProject = false;
 
-/** Internal UI state handling. */
+/** 清除 localStorage 或对话上残留的失效项目 ID */
 async function normalizeStaleChatProjectSelection() {
-    if (!_projectsListReady || _normalizingStaleProject) return;
-    const raw = getChatProjectSelection();
-    if (!raw || isActiveChatProjectId(raw)) return;
+    if (_normalizingStaleProject) return;
+    const raw = (getChatProjectSelection() || '').trim();
+    if (!raw) return;
+    const project = await fetchProjectSummary(raw);
+    if (project && project.id && project.status !== 'archived') return;
 
     _normalizingStaleProject = true;
     try {
@@ -1554,6 +2142,171 @@ async function normalizeStaleChatProjectSelection() {
     }
 }
 
+const PROJECT_PICKER_DEBOUNCE_MS = 100;
+const projectPickerPanelState = {
+    chat: { seq: 0, timer: null },
+    webshell: { seq: 0, timer: null },
+};
+
+function appendChatProjectPanelItem(list, project, selectedId, onSelect, tFn) {
+    const t = tFn || tp;
+    const isNone = !project.id;
+    const isSelected = isNone ? !selectedId : selectedId === project.id;
+    const desc = isNone
+        ? (project.description || '')
+        : (project.description || '').trim().slice(0, 80) || t('projects.sharedFactBoard');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'role-selection-item-main' + (isSelected ? ' selected' : '');
+    btn.setAttribute('role', 'option');
+    btn.onclick = () => onSelect(project.id || '');
+    btn.innerHTML = `
+        <div class="role-selection-item-icon-main">${isNone ? '—' : '📁'}</div>
+        <div class="role-selection-item-content-main">
+            <div class="role-selection-item-name-main">${escapeHtml(project.name || t('common.untitled'))}</div>
+            <div class="role-selection-item-description-main">${escapeHtml(desc)}</div>
+        </div>
+        ${isSelected ? '<div class="role-selection-checkmark-main">✓</div>' : ''}
+    `;
+    list.appendChild(btn);
+}
+
+function appendChatProjectPanelMessage(list, className, text) {
+    const el = document.createElement('div');
+    el.className = className;
+    el.textContent = text;
+    list.appendChild(el);
+    return el;
+}
+
+function pickerMessage(t, key, fallback) {
+    const value = t(key);
+    if (!value || value === key) return fallback;
+    return value;
+}
+
+async function renderProjectPickerPanel(panelKey, config) {
+    const state = projectPickerPanelState[panelKey];
+    const list = document.getElementById(config.listId);
+    if (!list || !state) return;
+    const query = (document.getElementById(config.searchInputId)?.value || '').trim();
+    const seq = ++state.seq;
+    const selectedId = config.getSelectedId();
+    const t = config.t || tp;
+
+    const renderPinned = () => {
+        appendChatProjectPanelItem(
+            list,
+            {
+                id: '',
+                name: t('projects.noProject'),
+                description: t('projects.noProjectDescription'),
+            },
+            selectedId,
+            config.onSelect,
+            t
+        );
+    };
+
+    const needsFetch = !isProjectsCacheReady();
+    let loadingEl = null;
+    if (needsFetch) {
+        list.innerHTML = '';
+        renderPinned();
+        loadingEl = appendChatProjectPanelMessage(
+            list,
+            'chat-project-panel-loading',
+            pickerMessage(t, 'common.loading', '加载中…')
+        );
+    }
+
+    try {
+        const all = await ensureProjectsLoaded();
+        if (seq !== state.seq) return;
+
+        list.innerHTML = '';
+        renderPinned();
+        const projects = filterActiveProjectsLocal(all, query);
+        projects.forEach((p) => {
+            appendChatProjectPanelItem(list, p, selectedId, config.onSelect, t);
+        });
+
+        if (query && projects.length === 0) {
+            appendChatProjectPanelMessage(
+                list,
+                'chat-project-panel-empty',
+                pickerMessage(t, 'chat.filterProjectSearchEmpty', '没有匹配的项目')
+            );
+        }
+    } catch (e) {
+        if (seq !== state.seq) return;
+        list.innerHTML = '';
+        renderPinned();
+        appendChatProjectPanelMessage(
+            list,
+            'chat-project-panel-empty',
+            pickerMessage(t, 'chat.filterProjectSearchFailed', '加载项目失败，请重试')
+        );
+    } finally {
+        if (loadingEl && loadingEl.parentNode) loadingEl.remove();
+    }
+}
+
+function initProjectPickerPanelSearch(panelKey, searchInputId, onSearch) {
+    const input = document.getElementById(searchInputId);
+    if (!input || input.dataset.pickerBound === panelKey) return;
+    input.dataset.pickerBound = panelKey;
+    input.addEventListener('input', onSearch);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            if (panelKey === 'chat' && typeof closeChatProjectPanel === 'function') {
+                closeChatProjectPanel();
+            } else if (panelKey === 'webshell' && typeof wsCloseProjectPanel === 'function') {
+                wsCloseProjectPanel();
+            }
+        }
+    });
+}
+
+function clearProjectPickerPanelSearch(panelKey, searchInputId) {
+    const state = projectPickerPanelState[panelKey];
+    if (!state) return;
+    state.seq += 1;
+    if (state.timer) {
+        clearTimeout(state.timer);
+        state.timer = null;
+    }
+    const input = document.getElementById(searchInputId);
+    if (input) input.value = '';
+}
+
+function scheduleProjectPickerPanelSearch(panelKey, loadFn) {
+    const state = projectPickerPanelState[panelKey];
+    if (!state) return;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = setTimeout(() => {
+        state.timer = null;
+        loadFn();
+    }, PROJECT_PICKER_DEBOUNCE_MS);
+}
+
+async function loadChatProjectPanelList() {
+    await renderProjectPickerPanel('chat', {
+        listId: 'chat-project-list',
+        searchInputId: 'chat-project-search',
+        getSelectedId: resolveChatProjectSelection,
+        onSelect: (projectId) => selectChatProject(projectId),
+    });
+}
+
+async function ensureChatProjectButtonLabel() {
+    const id = (resolveChatProjectSelection() || '').trim();
+    if (id && !projectNameById[id]) {
+        await fetchProjectSummary(id);
+    }
+    updateChatProjectButtonLabel();
+}
+
 function updateChatProjectButtonLabel() {
     const textEl = document.getElementById('chat-project-text');
     if (!textEl) return;
@@ -1561,56 +2314,13 @@ function updateChatProjectButtonLabel() {
     textEl.textContent = id && projectNameById[id] ? projectNameById[id] : tp('projects.noProject');
 }
 
-function renderChatProjectPanelList() {
-    const list = document.getElementById('chat-project-list');
-    if (!list) return;
-    const selected = resolveChatProjectSelection();
-    const source = projectsCacheAll.length ? projectsCacheAll : projectsCache;
-    const activeProjects = source.filter((p) => p.status !== 'archived');
-    const items = [{ id: '', name: tp('projects.noProject'), description: tp('projects.noProjectDescription') }, ...activeProjects];
-    if (!items.length) {
-        list.innerHTML = `<div class="chat-project-panel-empty">${escapeHtml(tp('projects.noProjectsClickCreate'))}</div>`;
-        return;
-    }
-    list.innerHTML = '';
-    items.forEach((p) => {
-        const isNone = !p.id;
-        const isSelected = isNone ? !selected : selected === p.id;
-        const desc = isNone
-            ? (p.description || '')
-            : (p.description || '').trim().slice(0, 80) || tp('projects.sharedFactBoard');
-        const projectId = p.id || '';
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'role-selection-item-main' + (isSelected ? ' selected' : '');
-        btn.setAttribute('role', 'option');
-        btn.onclick = () => {
-            selectChatProject(projectId);
-        };
-        btn.innerHTML = `
-                <div class="role-selection-item-icon-main">${isNone ? '—' : '📁'}</div>
-                <div class="role-selection-item-content-main">
-                    <div class="role-selection-item-name-main">${escapeHtml(p.name || tp('common.untitled'))}</div>
-                    <div class="role-selection-item-description-main">${escapeHtml(desc)}</div>
-                </div>
-                ${isSelected ? '<div class="role-selection-checkmark-main">✓</div>' : ''}
-            `;
-        list.appendChild(btn);
-    });
-}
-
 async function renderChatProjectPanel() {
-    const list = document.getElementById('chat-project-list');
-    if (!list) return;
-    list.innerHTML = `<div class="chat-project-panel-loading">${escapeHtml(tp('common.loading'))}</div>`;
-    try {
-        await ensureProjectsLoaded();
-    } catch (e) {
-        console.warn(e);
-        list.innerHTML = `<div class="chat-project-panel-empty">${escapeHtml(tp('projects.loadFailedRetry'))}</div>`;
-        return;
-    }
-    renderChatProjectPanelList();
+    initProjectPickerPanelSearch('chat', 'chat-project-search', () => {
+        scheduleProjectPickerPanelSearch('chat', () => loadChatProjectPanelList());
+    });
+    clearProjectPickerPanelSearch('chat', 'chat-project-search');
+    await loadChatProjectPanelList();
+    requestAnimationFrame(() => document.getElementById('chat-project-search')?.focus());
 }
 
 function closeChatProjectPanel() {
@@ -1621,6 +2331,7 @@ function closeChatProjectPanel() {
         btn.classList.remove('active');
         btn.setAttribute('aria-expanded', 'false');
     }
+    clearProjectPickerPanelSearch('chat', 'chat-project-search');
 }
 
 async function toggleChatProjectPanel() {
@@ -1679,26 +2390,28 @@ async function applyChatProjectSelection(projectId) {
         setActiveProjectId(projectId);
     }
     updateChatProjectButtonLabel();
+    if (typeof window.onConversationProjectBindingChanged === 'function') {
+        window.onConversationProjectBindingChanged(projectId);
+    }
 }
 
-/** Internal UI state handling. */
+/** 对话页项目选择器：同步按钮文案；若浮层已打开则刷新列表 */
 async function refreshChatProjectSelector() {
     if (!document.getElementById('chat-project-btn')) return;
     try {
-        await ensureProjectsLoaded();
         await normalizeStaleChatProjectSelection();
+        await ensureChatProjectButtonLabel();
     } catch (e) {
         console.warn(e);
     }
-    updateChatProjectButtonLabel();
     const panel = document.getElementById('chat-project-panel');
     if (panel && panel.style.display === 'flex') {
-        renderChatProjectPanelList();
+        await loadChatProjectPanelList();
     }
 }
 
 async function onChatProjectChange() {
-    /* Internal UI state handling. */
+    /* 兼容旧调用；新 UI 使用 selectChatProject */
     await applyChatProjectSelection(getChatProjectSelection());
 }
 
@@ -1712,8 +2425,12 @@ function initChatProjectSelector() {
             renderProjectsPagination();
             updateChatProjectButtonLabel();
             const panel = document.getElementById('chat-project-panel');
-            if (panel && panel.style.display === 'flex') renderChatProjectPanelList();
+            if (panel && panel.style.display === 'flex') loadChatProjectPanelList();
             if (currentProjectId) {
+                refreshProjectDetailMetaI18n();
+                const source = projectsCacheAll.length ? projectsCacheAll : projectsCache;
+                const p = source.find((x) => x.id === currentProjectId);
+                if (p) updateProjectStatusPill(p.status || 'active');
                 refreshProjectHeaderStats().catch(() => {});
                 switchProjectTab(currentProjectTab || 'facts');
             }
@@ -1731,13 +2448,18 @@ function initChatProjectSelector() {
 }
 
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initChatProjectSelector);
+    document.addEventListener('DOMContentLoaded', () => {
+        initChatProjectSelector();
+        initProjectListActionMenu();
+    });
 } else {
     initChatProjectSelector();
+    initProjectListActionMenu();
 }
 
 window.initProjectsPage = initProjectsPage;
 window.showNewProjectModal = showNewProjectModal;
+window.showEditProjectModal = showEditProjectModal;
 window.showNewProjectModalFromChat = showNewProjectModalFromChat;
 window.saveProjectModal = saveProjectModal;
 window.closeProjectModal = closeProjectModal;
@@ -1752,11 +2474,20 @@ window.closeFactDetailModal = closeFactDetailModal;
 window.saveProjectSettings = saveProjectSettings;
 window.archiveCurrentProject = archiveCurrentProject;
 window.deleteCurrentProject = deleteCurrentProject;
+window.showProjectListActionMenu = showProjectListActionMenu;
+window.editProjectFromListMenu = editProjectFromListMenu;
+window.toggleProjectArchiveFromListMenu = toggleProjectArchiveFromListMenu;
+window.deleteProjectFromListMenu = deleteProjectFromListMenu;
 window.refreshChatProjectSelector = refreshChatProjectSelector;
 window.onChatProjectChange = onChatProjectChange;
 window.toggleChatProjectPanel = toggleChatProjectPanel;
 window.closeChatProjectPanel = closeChatProjectPanel;
 window.selectChatProject = selectChatProject;
+window.renderProjectPickerPanel = renderProjectPickerPanel;
+window.initProjectPickerPanelSearch = initProjectPickerPanelSearch;
+window.clearProjectPickerPanelSearch = clearProjectPickerPanelSearch;
+window.scheduleProjectPickerPanelSearch = scheduleProjectPickerPanelSearch;
+window.loadChatProjectPanelList = loadChatProjectPanelList;
 window.prefetchProjectsForChat = prefetchProjectsForChat;
 window.ensureDefaultActiveProjectForNewChat = ensureDefaultActiveProjectForNewChat;
 window.getActiveProjectId = getActiveProjectId;
@@ -1782,5 +2513,21 @@ window.viewFactsForVulnerability = viewFactsForVulnerability;
 window.openProjectConversation = openProjectConversation;
 window.unbindConversationFromProject = unbindConversationFromProject;
 window.loadProjectConversations = loadProjectConversations;
+window.loadProjectFactGraph = loadProjectFactGraph;
+window.filterProjectFactGraph = filterProjectFactGraph;
+window.centerProjectFactGraph = centerProjectFactGraph;
+window.closeProjectFactGraphSidebar = closeProjectFactGraphSidebar;
+window.openSelectedGraphFactDetail = openSelectedGraphFactDetail;
+window.editSelectedGraphFact = editSelectedGraphFact;
+window.promoteConversationAttackChain = promoteConversationAttackChain;
+window.deleteProjectFactEdge = deleteProjectFactEdge;
+window.focusProjectFactGraphEdge = focusProjectFactGraphEdge;
+window.toggleProjectFactGraphConnectMode = toggleProjectFactGraphConnectMode;
 window.rebuildProjectNameMap = rebuildProjectNameMap;
+window.rememberProjectsInNameMap = rememberProjectsInNameMap;
+window.searchActiveProjects = searchActiveProjects;
+window.filterActiveProjectsLocal = filterActiveProjectsLocal;
+window.fetchProjectSummary = fetchProjectSummary;
 window.projectNameById = projectNameById;
+window.ensureProjectsLoaded = ensureProjectsLoaded;
+window.isProjectsCacheReady = isProjectsCacheReady;

@@ -58,7 +58,7 @@ function initRouter() {
         const hashParts = hash.split('?');
         let pageId = hashParts[0];
         if (pageId === 'c2') pageId = 'c2-listeners';
-        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'projects', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
+        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'projects', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'workflows', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
                 scheduleChatConversationFromHash(500);
@@ -350,7 +350,9 @@ async function initPage(pageId) {
             }
             break;
         case 'hitl':
-            if (typeof refreshHitlPending === 'function') {
+            if (typeof refreshHitlActivePanel === 'function') {
+                refreshHitlActivePanel();
+            } else if (typeof refreshHitlPending === 'function') {
                 refreshHitlPending();
             }
             break;
@@ -370,6 +372,9 @@ async function initPage(pageId) {
             // Initialize monitoring panel
             if (typeof refreshMonitorPanel === 'function') {
                 refreshMonitorPanel();
+            }
+            if (typeof startMonitorPoll === 'function') {
+                startMonitorPoll();
             }
             break;
         case 'mcp-management':
@@ -459,6 +464,11 @@ async function initPage(pageId) {
                 });
             }
             break;
+        case 'workflows':
+            if (typeof refreshWorkflows === 'function') {
+                refreshWorkflows();
+            }
+            break;
         case 'skills-monitor':
             // Initialize Skills status monitoring page
             if (typeof loadSkillsMonitor === 'function') {
@@ -520,7 +530,7 @@ document.addEventListener('DOMContentLoaded', function() {
         let pageId = hashParts[0];
         
         if (pageId === 'c2') pageId = 'c2-listeners';
-        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'tasks', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
+        if (pageId && ['dashboard', 'chat', 'hitl', 'info-collect', 'projects', 'tasks', 'workflows', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
                 scheduleChatConversationFromHash(200);
@@ -579,4 +589,3 @@ function initConversationSidebarState() {
 
 // Export functions for other scripts (consistent with early binding above, for external script detection)
 window.currentPage = function() { return currentPage; };
-

@@ -1,11 +1,11 @@
 # Eino 多代理改造说明（DeepAgent）
 
-This document records the change scope, progress, and follow-up items for the **Eino single-agent (ADK)** and **multi-agent** (CloudWeGo Eino `adk/prebuilt`) paths. The native ReAct execution path has been removed.
+本文档记录 **Eino 单代理（ADK）** 与 **多 Agent（CloudWeGo Eino `adk/prebuilt`）** 的改造范围、进度与后续事项。原生 ReAct 执行路径已移除。
 
 ## 总体结论
 
 - **改造已可用于生产试验**：流式对话、MCP 工具桥接、配置开关、前端模式切换均已落地。
-- **Entry strategy**: **single-agent** uses `/api/eino-agent/stream`; multi-agent modes (**Deep / Plan-Execute / Supervisor**) use `/api/multi-agent/stream`, with the request body **`orchestration`** selecting the orchestration. Robots default to `robot_default_agent_mode: eino_single`; batch queues default to `eino_single`, and multi-agent modes require `multi_agent.enabled`.
+- **入口策略**：**单代理** 走 `/api/eino-agent/stream`；多代理（**Deep / Plan-Execute / Supervisor**）走 `/api/multi-agent/stream`，请求体 **`orchestration`** 指定编排。机器人默认 `robot_default_agent_mode: eino_single`；批量队列默认 `eino_single`，多代理模式需 `multi_agent.enabled`。
 
 ## 已完成项
 
@@ -18,15 +18,15 @@ This document records the change scope, progress, and follow-up items for the **
 | 编排 | `internal/multiagent/runner.go`：`deep.New` + 子 `ChatModelAgent` + `adk.NewRunner`（`EnableStreaming: true`，可选 `CheckPointStore`），事件映射为现有 SSE `tool_call` / `response_delta` 等。 |
 | HTTP | `POST /api/multi-agent`（非流式）、`POST /api/multi-agent/stream`（SSE）；路由**常注册**，是否可用由运行时 `multi_agent.enabled` 决定（流式未启用时 SSE 内 `error` + `done`）。 |
 | 会话准备 | `internal/handler/multi_agent_prepare.go`：`prepareMultiAgentSession`（含 **WebShell** `CreateConversationWithWebshell`、工具白名单与单代理一致）。 |
-| Single Agent | `internal/agent` is the MCP/tool layer (`ToolsForRole`, `ExecuteMCPToolForConversation`); single-agent orchestration uses `RunEinoSingleChatModelAgent` (`/api/eino-agent*`). |
-| Frontend | Main chat / WebShell: **Eino single-agent** (`/api/eino-agent/stream`) and **Deep / Plan-Execute / Supervisor** (`/api/multi-agent/stream` + `orchestration`); `multi_agent.enabled` controls whether multi-agent options are shown. |
-| Streaming compatibility | Eino single-agent/multi-agent paths share `handleStreamEvent` with the Web UI: `conversation`, `progress`, `response_start` / `response_delta`, `thinking` / `thinking_stream_*`, `tool_*`, `response`, `done`, and related events. |
+| 单 Agent | `internal/agent` 为 MCP/工具层（`ToolsForRole`、`ExecuteMCPToolForConversation`）；单代理编排走 `RunEinoSingleChatModelAgent`（`/api/eino-agent*`）。 |
+| 前端 | 主聊天 / WebShell：**Eino 单代理**（`/api/eino-agent/stream`）与 **Deep / Plan-Execute / Supervisor**（`/api/multi-agent/stream` + `orchestration`）；`multi_agent.enabled` 控制多代理选项是否展示。 |
+| 流式兼容 | Eino 单/多代理与 Web UI 共用 `handleStreamEvent`：`conversation`、`progress`、`response_start` / `response_delta`、`thinking` / `thinking_stream_*`、`tool_*`、`response`、`done` 等。 |
 | 批量任务 | 队列 `agentMode` 为 `deep` / `plan_execute` / `supervisor` 时子任务带对应 `orchestration` 调用 `RunDeepAgent`；旧值 `multi` 与「`agentMode` 为空且 `batch_use_multi_agent: true`」均按 `deep`。 |
 | 配置 API | `GET /api/config` 返回 `multi_agent: { enabled, robot_use_multi_agent, sub_agent_count }`；`PUT /api/config` 可更新 `enabled`、`robot_use_multi_agent`（不覆盖 `sub_agents`）。 |
 | OpenAPI | 多代理路径说明已更新（流式未启用为 SSE 错误事件）。 |
-| Robots | `ProcessMessageForRobot` calls `RunEinoSingleChatModelAgent` or `RunDeepAgent` according to `robot_default_agent_mode` (default `eino_single`). |
+| 机器人 | `ProcessMessageForRobot` 按 `robot_default_agent_mode`（默认 `eino_single`）调用 `RunEinoSingleChatModelAgent` 或 `RunDeepAgent`。 |
 | 预置编排 | 聊天 / WebShell：`POST /api/multi-agent*` 请求体 `orchestration`：`deep` \| `plan_execute` \| `supervisor`（缺省 `deep`）。`plan_execute` 不构建 YAML/Markdown 子代理；`plan_execute_loop_max_iterations` 仍来自配置。`supervisor` 至少需一个子代理。 |
-| Eino 中间件 | `multi_agent.eino_middleware`（可选）：`patchtoolcalls`（默认开）、`toolsearch`（按阈值拆分 MCP 工具列表）、`plantask`（需 `eino_skills`）、`reduction`（大工具输出截断/落盘）、`checkpoint_dir`（Runner 断点）、`deep_output_key` / `deep_model_retry_max_retries` / `task_tool_description_prefix`（Deep 与 supervisor 主代理共享其中模型重试与 OutputKey）。`plan_execute` 的 Executor 无 Handlers：仅继承 **ToolsConfig** 侧效果（如 `tool_search` 列表拆分），不挂载 patch/plantask/reduction 中间件。 |
+| Eino 中间件 | `multi_agent.eino_middleware`（可选）：`patchtoolcalls`（默认开）、`toolsearch`（按阈值拆分 MCP 工具列表）、`plantask`（需 `eino_skills`）、`reduction`（大工具输出截断/落盘）、`checkpoint_dir`（Runner 断点）、`deep_output_key` / `deep_model_retry_max_retries` / `task_tool_description_prefix`（Deep 与 supervisor 主代理共享其中模型重试与 OutputKey）。**`plan_execute`**：`runner.go` 将 `prependEinoMiddlewares(einoMWMain)` 产物作为 `ExecPreMiddlewares` 挂到 **Executor**（与 Deep/Supervisor 主代理同序：patch → reduction → toolsearch → plantask → filesystem → skill → summarization tail）；Planner/Replanner 仅 summarization tail + prompt 预算截断，不跑 MCP 工具链。 |
 
 ## 进行中 / 待办（ backlog ）
 
@@ -37,7 +37,8 @@ This document records the change scope, progress, and follow-up items for the **
 
 ## 关键文件索引
 
-- `internal/multiagent/runner.go` — DeepAgent 组装与事件循环  
+- `internal/multiagent/runner.go` — DeepAgent / plan_execute / supervisor 组装与事件循环  
+- `internal/multiagent/eino_orchestration.go` — PlanExecute 根节点与 Executor 中间件栈（`buildPlanExecuteExecutorHandlers`）  
 - `internal/handler/multi_agent.go` — SSE 与（同步）HTTP  
 - `internal/handler/multi_agent_prepare.go` — 会话准备（含 WebShell）  
 - `internal/einomcp/` — MCP → Eino Tool  
@@ -59,4 +60,5 @@ This document records the change scope, progress, and follow-up items for the **
 | 2026-03-22 | `orchestrator.md` / `kind: orchestrator` 主代理、列表主/子标记、与 `orchestrator_instruction` 优先级。 |
 | 2026-04-19 | 主聊天「对话模式」：原生 ReAct 与 Deep / Plan-Execute / Supervisor；`POST /api/multi-agent*` 请求体 `orchestration` 与界面一致；`config.yaml` / 设置页不再维护预置编排字段（机器人/批量默认 `deep`）。 |
 | 2026-04-21 | 移除角色 `skills` 与 `/api/roles/skills/list`；`bind_role` 仅继承 tools；Skills 仅通过 Eino `skill` 工具按需加载。 |
-| 2026-06-02 | **Removed native ReAct**: deleted the `/api/agent-loop*` execution entrypoints and `AgentLoopWithProgress`; standardized on Eino ADK (single-agent `/api/eino-agent*`, multi-agent `/api/multi-agent*`); task cancel/tasks APIs are retained. |
+| 2026-07-02 | **plan_execute Executor 中间件对齐**：`ExecPreMiddlewares` 与 Deep 主代理同源；`buildPlanExecuteExecutorHandlers` + 回归测试；文档更正。 |
+| 2026-06-02 | **移除原生 ReAct**：删除 `/api/agent-loop*` 执行入口与 `AgentLoopWithProgress`；统一 Eino ADK（单代理 `/api/eino-agent*`，多代理 `/api/multi-agent*`）；任务 cancel/tasks API 保留。 |

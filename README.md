@@ -35,7 +35,18 @@ CyberStrikeAI is an **AI-native security testing platform** built in Go. It inte
 
 ### System Dashboard Overview
 
-<img src="./images/dashboard.png" alt="System Dashboard" width="100%">
+<table>
+<tr>
+<td width="50%" align="center">
+<strong>Light Mode</strong><br/>
+<img src="./images/dashboard.png" alt="System Dashboard (Light)" width="100%">
+</td>
+<td width="50%" align="center">
+<strong>Dark Mode</strong><br/>
+<img src="./images/dark.png" alt="System Dashboard (Dark)" width="100%">
+</td>
+</tr>
+</table>
 
 *The dashboard provides a comprehensive overview of system runtime status, security vulnerabilities, tool usage, and knowledge base, helping users quickly understand the platform's core features and current state.*
 
@@ -110,12 +121,13 @@ CyberStrikeAI is an **AI-native security testing platform** built in Go. It inte
 - 📄 Large-result pagination, compression, and searchable archives
 - 🔗 Attack-chain graph, risk scoring, and step-by-step replay
 - 🔒 Password-protected web UI, audit logs, and SQLite persistence
-- 📚 Knowledge base (RAG) with embedding-based vector retrieval (cosine similarity), optional **Eino Compose** indexing pipeline, and configurable post-retrieval budgets / reranking hooks
+- 📚 Knowledge base (RAG): **Eino MultiQuery** query rewrite + multi-path vector retrieval + **HTTP rerank** (DashScope `gte-rerank` / Cohere-compatible) + post-processing (dedupe, budget); **Eino Compose** indexing pipeline
 - 📁 Conversation grouping with pinning, rename, and batch management
-- 📂 **Project management**: group conversations and vulnerabilities by project; **shared facts** (project blackboard) persist cross-session context (targets, env, auth notes) with auto-injection for agents and MCP tools (`upsert_project_fact`, `get_project_fact`, …)
+- 📂 **Project management**: shared facts (blackboard) across sessions, `upsert_project_fact` + `links` to chain paths; attack-chain and project fact graph views
 - 🛡️ Vulnerability management with CRUD operations, severity tracking, status workflow, and statistics
 - 📋 Batch task management: create task queues, add multiple tasks, and execute them sequentially
 - 🎭 Role-based testing: predefined security testing roles (Penetration Testing, CTF, Web App Scanning, etc.) with custom prompts and tool restrictions
+- 🔀 **Graph orchestration**: visual workflow editor (Start / Agent / Tool / Condition / HITL / Output) with `{{previous.output}}` and `{{outputs.variable_name}}` for inter-node data passing; bind a graph to a role for automatic execution on chat. See [Graph orchestration guide](docs/workflow-graph_en.md)
 - 🧩 **Agent orchestration (CloudWeGo Eino)**: **single-agent** via **`/api/eino-agent/stream`** (Eino ADK `ChatModelAgent`); **multi-agent** via **`/api/multi-agent/stream`** with **`deep`** (coordinator + `task` sub-agents), **`plan_execute`**, or **`supervisor`** (`orchestration` in the request body). ADK **summarization** compresses long contexts; pre-compaction **transcripts** land at `data/conversation_artifacts/<conversation-id>/summarization/transcript.txt` (full user/assistant/tool turns; static system omitted). Markdown under `agents/`: `orchestrator.md`, `orchestrator-plan-execute.md`, `orchestrator-supervisor.md`, plus sub-agent `*.md` (see [Multi-agent doc](docs/MULTI_AGENT_EINO.md))
 - 🖼️ **Vision analysis (`analyze_image`)**: separate VL model (e.g. `qwen-vl-max`) via MCP for local screenshots, captchas, and UI; image bytes stay out of agent history (text summaries only). Configure `vision` in `config.yaml`; see [docs/VISION.md](docs/VISION.md)
 - 🎯 **Skills (refactored for Eino)**: packs under `skills_dir` follow **Agent Skills** layout (`SKILL.md` + optional files); **multi-agent** sessions use the official Eino ADK **`skill`** tool for **progressive disclosure** (load by name), with optional **host filesystem / shell** via `multi_agent.eino_skills`; optional **`eino_middleware`** adds patchtoolcalls, tool_search, **plantask** (`TaskCreate` / `TaskList` boards under `skills_dir/.eino/plantask/`), reduction, file **checkpoints** (`checkpoint_dir`), ChatModel **retries**, session **output key**, and Deep tuning—20+ sample domains (SQLi, XSS, API security, …) ship under `skills/`
@@ -263,6 +275,7 @@ Requirements / tips:
 - **Conversation testing** – Natural-language prompts trigger toolchains with streaming SSE output.
 - **Single vs multi-agent** – Chat UI switches between **Eino single-agent** (`/api/eino-agent/stream`) and **multi-agent** (`/api/multi-agent/stream` with `orchestration`: `deep` | `plan_execute` | `supervisor`). Multi mode requires `multi_agent.enabled: true`. MCP tools are bridged the same way for both paths.
 - **Role-based testing** – Select from predefined security testing roles (Penetration Testing, CTF, Web App Scanning, API Security Testing, etc.) to customize AI behavior and tool availability. Each role applies custom system prompts and can restrict available tools for focused testing scenarios.
+- **Graph orchestration** – Design flows on the **Graph Orchestration** page (drag nodes, connect edges, save); bind `workflow_id` on a role to run the graph on chat (Agent, MCP tools, condition branches). Use `{{outputs.variable_name}}` to pass data across non-adjacent nodes. See [Graph orchestration guide](docs/workflow-graph_en.md).
 - **Tool monitor** – Inspect running jobs, execution logs, and large-result attachments.
 - **History & audit** – Every conversation and tool invocation is stored in SQLite with replay.
 - **Conversation groups** – Organize conversations into groups, pin important groups, rename or delete groups via context menu.
@@ -331,7 +344,7 @@ Requirements / tips:
 ### Tool Orchestration & Extensions
 - **YAML recipes** in `tools/*.yaml` describe commands, arguments, prompts, and metadata.
 - **Directory hot-reload** – pointing `security.tools_dir` to a folder is usually enough; inline definitions in `config.yaml` remain supported for quick experiments.
-- **Large-result pagination** – outputs beyond 200 KB are stored as artifacts retrievable through the `query_execution_result` tool with paging, filters, and regex search.
+- **Large tool outputs** – outputs beyond `reduction_max_length_for_trunc` are summarized via Eino reduction with full content persisted under `tmp/reduction/`; use `read_file` on the path in `<persisted-output>`.
 - **Result compression** – multi-megabyte logs can be summarized or losslessly compressed before persisting to keep SQLite lean.
 
 **Creating a custom tool (typical flow)**
@@ -474,15 +487,11 @@ A test SSE MCP server is available at `cmd/test-sse-mcp-server/` for validation 
 
 ### Knowledge Base
 - **Vector search** – AI agent can automatically search the knowledge base for relevant security knowledge during conversations using the `search_knowledge_base` tool.
-- **Vector retrieval** – cosine similarity over stored embeddings, aligned with Eino `retriever.Retriever` usage.
-- **Auto-indexing** – scans the `knowledge_base/` directory for Markdown files and automatically indexes them with embeddings.
-- **Web management** – create, update, delete knowledge items through the web UI, with category-based organization.
+- **RAG pipeline (always on)** – **MultiQuery** (LLM query rewrite) → vector prefetch & fusion → **HTTP rerank** (DashScope `gte-rerank` or Cohere-compatible `/v1/rerank`) → post-processing (normalized dedupe, char/token budget, final top_k). Rerank failures degrade to fusion order without breaking search.
+- **Vector retrieval** – cosine similarity over stored embeddings with configurable threshold, aligned with Eino `retriever.Retriever` usage.
+- **Auto-indexing** – scans the `knowledge_base/` directory for Markdown files and automatically indexes them with embeddings (Markdown header split + recursive chunking via Eino).
+- **Web management** – create, update, delete knowledge items through the web UI, with category-based organization; settings page exposes MultiQuery / rerank / prefetch options.
 - **Retrieval logs** – tracks all knowledge retrieval operations for audit and debugging.
-
-**Quick Start (Using Pre-built Knowledge Base):**
-1. **Download the knowledge database** – Download the pre-built knowledge database file from [GitHub Releases](https://github.com/Ed1s0nZ/CyberStrikeAI/releases).
-2. **Extract and place** – Extract the downloaded knowledge database file (`knowledge.db`) and place it in the project's `data/` directory.
-3. **Restart the service** – Restart the CyberStrikeAI service, and the knowledge base will be ready to use immediately without rebuilding the index.
 
 **Setting up the knowledge base:**
 1. **Enable in config** – set `knowledge.enabled: true` in `config.yaml`:
@@ -498,6 +507,17 @@ A test SSE MCP server is available at `cmd/test-sse-mcp-server/` for validation 
      retrieval:
        top_k: 5
        similarity_threshold: 0.7
+       multi_query:
+         max_queries: 4        # LLM rewrite variants (always on)
+       rerank:                 # always on; empty fields inherit openai/embedding credentials
+         provider: ""          # auto: dashscope | cohere from base_url
+         model: ""             # empty: gte-rerank (DashScope) or rerank-multilingual-v3.0 (Cohere)
+         base_url: ""
+         api_key: ""
+       post_retrieve:
+         prefetch_top_k: 20    # vector candidates per MultiQuery variant; 0 = max(top_k×4, 20)
+         max_context_chars: 0
+         max_context_tokens: 0
    ```
 2. **Add knowledge files** – place Markdown files in `knowledge_base/` directory, organized by category (e.g., `knowledge_base/SQL Injection/README.md`).
 3. **Scan and index** – use the web UI to scan the knowledge base directory, which will automatically import files and build vector embeddings.
@@ -558,6 +578,17 @@ knowledge:
   retrieval:
     top_k: 5  # Number of top results to return
     similarity_threshold: 0.7  # Minimum cosine similarity (0-1)
+    multi_query:
+      max_queries: 4  # MultiQuery rewrite variants (always on)
+    rerank:  # HTTP rerank (always on); empty fields inherit openai/embedding credentials
+      provider: ""
+      model: ""
+      base_url: ""
+      api_key: ""
+    post_retrieve:
+      prefetch_top_k: 20  # per MultiQuery variant; 0 = max(top_k×4, 20)
+      max_context_chars: 0
+      max_context_tokens: 0
 roles_dir: "roles"  # Role configuration directory (relative to config file)
 skills_dir: "skills"  # Skills directory (relative to config file)
 agents_dir: "agents"  # Multi-agent Markdown definitions (orchestrator + sub-agents)
@@ -570,6 +601,11 @@ multi_agent:
   # orchestrator_instruction_plan_execute / orchestrator_instruction_supervisor optional
   # eino_skills: { disable: false, filesystem_tools: true, skill_tool_name: skill }
   # eino_middleware: plantask_enable, checkpoint_dir, deep_model_retry_max_retries, deep_output_key, ...
+project:
+  enabled: true              # Enable project blackboard & fact MCP tools
+  fact_index_max_runes: 65000
+  fact_summary_max_runes: 24000
+  default_inject_deprecated: false
 ```
 
 ### Tool Definition Example (`tools/nmap.yaml`)
@@ -615,6 +651,7 @@ enabled: true
 ## Related documentation
 
 - [Multi-agent mode (Eino)](docs/MULTI_AGENT_EINO.md): **Deep**, **Plan-Execute**, **Supervisor**, `agents/*.md`, `eino_skills` / `eino_middleware`, APIs, and chat/stream behavior.
+- [Graph orchestration guide](docs/workflow-graph_en.md): visual workflow design, node configuration, `previous` / `outputs` variable passing, and role binding.
 - [Robot / Chatbot guide (DingTalk & Lark)](docs/robot_en.md): Full setup, commands, and troubleshooting for using CyberStrikeAI from DingTalk or Lark on your phone. **Follow this doc to avoid common pitfalls.**
 
 ## Project Layout
@@ -667,8 +704,6 @@ CyberStrikeAI has joined [404Starlink](https://github.com/knownsec/404StarLink)
   </a>
 </div>
 
-## Stargazers over time
-![Stargazers over time](https://starchart.cc/Ed1s0nZ/CyberStrikeAI.svg)
 
 
 ---

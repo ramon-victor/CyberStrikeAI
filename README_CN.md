@@ -34,7 +34,18 @@ CyberStrikeAI 是一款 **AI 原生安全测试平台**，基于 Go 构建，集
 
 ### 系统仪表盘概览
 
-<img src="./images/dashboard.png" alt="系统仪表盘" width="100%">
+<table>
+<tr>
+<td width="50%" align="center">
+<strong>浅色模式</strong><br/>
+<img src="./images/dashboard.png" alt="系统仪表盘（浅色）" width="100%">
+</td>
+<td width="50%" align="center">
+<strong>深色模式</strong><br/>
+<img src="./images/dark.png" alt="系统仪表盘（深色）" width="100%">
+</td>
+</tr>
+</table>
 
 *仪表盘提供系统运行状态、安全漏洞、工具使用情况和知识库的全面概览，帮助用户快速了解平台核心功能和当前状态。*
 
@@ -109,12 +120,13 @@ CyberStrikeAI 是一款 **AI 原生安全测试平台**，基于 Go 构建，集
 - 📄 大结果分页、压缩与全文检索
 - 🔗 攻击链可视化、风险打分与步骤回放
 - 🔒 Web 登录保护、审计日志、SQLite 持久化
-- 📚 知识库（RAG）：向量嵌入与余弦相似度检索（与 Eino `retriever.Retriever` 语义一致），可选 **Eino Compose** 索引流水线及检索后处理（预算、重排等配置项）
+- 📚 知识库（RAG）：**Eino MultiQuery** 查询改写 + 多路向量检索 + **HTTP 精排**（DashScope `gte-rerank` / Cohere 兼容）+ 后处理（去重、预算）；索引侧为 **Eino Compose** 流水线
 - 📁 对话分组管理：支持分组创建、置顶、重命名、删除等操作
-- 📂 **项目管理**：按项目归类对话与漏洞；**共享事实**（项目黑板）在多会话间沉淀目标/环境/认证等认知，自动注入 Agent 上下文，支持 MCP 工具读写（`upsert_project_fact`、`get_project_fact` 等）
+- 📂 **项目管理**：共享事实（黑板）跨会话沉淀认知，`upsert_project_fact` + `links` 串联攻击路径；聊天攻击链与项目事实图可视化
 - 🛡️ 漏洞管理功能：完整的漏洞 CRUD 操作，支持严重程度分级、状态流转、按对话/严重程度/状态过滤，以及统计看板
 - 📋 批量任务管理：创建任务队列，批量添加任务，依次顺序执行，支持任务编辑与状态跟踪
 - 🎭 角色化测试：预设安全测试角色（渗透测试、CTF、Web 应用扫描等），支持自定义提示词和工具限制
+- 🔀 **图编排**：可视化流程编排（开始 / Agent / 工具 / 条件 / 审批 / 输出），节点间用 `{{previous.output}}` 或 `{{outputs.变量名}}` 传参；绑定角色后对话自动按图执行。详见 [图编排使用说明](docs/workflow-graph.md)
 - 🧩 **Agent 编排（CloudWeGo Eino）**：**单代理** `POST /api/eino-agent/stream`（Eino ADK）；**多代理** `POST /api/multi-agent/stream`，`orchestration` 选 **`deep`** / **`plan_execute`** / **`supervisor`**。ADK **Summarization** 在上下文过长时压缩历史；压缩前将可恢复 **转录** 写入 `data/conversation_artifacts/<会话ID>/summarization/transcript.txt`（保留完整 user/assistant/tool 轮次，省略静态 system）。`agents/` 下主代理与子代理 Markdown 见 [多代理说明](docs/MULTI_AGENT_EINO.md)
 - 🖼️ **视觉分析（`analyze_image`）**：独立 Vision 模型（如 `qwen-vl-max`），MCP 工具分析本地截图/验证码/UI；图片仅在单次 VL 调用中出现，对话上下文只保留文字摘要。配置见 `config.yaml` → `vision` 与 [视觉分析说明](docs/VISION.md)
 - 🎯 **Skills（面向 Eino 重构）**：技能包放在 **`skills_dir`**，遵循 **Agent Skills** 目录规范（`SKILL.md` + 可选文件）；**多代理** 下通过 Eino 官方 **`skill`** 工具 **渐进式披露**（按 name 加载）。**`multi_agent.eino_skills`** 控制是否启用、本机文件/Shell 工具、工具名覆盖；**`eino_middleware`** 可选 patch、tool_search、**plantask**（`TaskCreate` / `TaskList` 任务板，落在 `skills_dir/.eino/plantask/`）、reduction、文件型 **checkpoint**（`checkpoint_dir`）、ChatModel **重试**、会话 **输出键** 及 Deep 调参。20+ 领域示例仍可绑定角色
@@ -261,6 +273,7 @@ docker compose up -d --build
 - **对话测试**：自然语言触发多步工具编排，SSE 实时输出。
 - **单代理 / 多代理**：聊天可选 **Eino 单代理**（`/api/eino-agent/stream`）与 **多代理**（`/api/multi-agent/stream` + `orchestration`）。多代理需 `multi_agent.enabled: true`。MCP 工具桥接一致。
 - **角色化测试**：从预设的安全测试角色（渗透测试、CTF、Web 应用扫描、API 安全测试等）中选择，自定义 AI 行为和可用工具。每个角色可应用自定义系统提示词，并可限制可用工具列表，实现聚焦的测试场景。
+- **图编排**：在 **图编排** 页拖拽节点、连线并保存流程；在角色中绑定 `workflow_id` 后，该角色对话将按图执行（Agent、MCP 工具、条件分支等）。跨节点传参优先用 `{{outputs.变量名}}`。详见 [图编排使用说明](docs/workflow-graph.md)。
 - **工具监控**：查看任务队列、执行日志、大文件附件。
 - **会话历史**：所有对话与工具调用保存在 SQLite，可随时重放。
 - **对话分组**：将对话按项目或主题组织到不同分组，支持置顶、重命名、删除等操作，所有数据持久化存储。
@@ -329,7 +342,7 @@ docker compose up -d --build
 ### 工具编排与扩展
 - `tools/*.yaml` 定义命令、参数、提示词与元数据，可热加载。
 - `security.tools_dir` 指向目录即可批量启用；仍支持在主配置里内联定义。
-- **大结果分页**：超过 200KB 的输出会保存为附件，可通过 `query_execution_result` 工具分页、过滤、正则检索。
+- **大工具输出**：超过 `reduction_max_length_for_trunc` 时由 Eino reduction 摘要，完整内容落盘至 `tmp/reduction/`；按 `<persisted-output>` 中的路径用 `read_file` 读取。
 - **结果压缩/摘要**：多兆字节日志可先压缩或生成摘要再写入 SQLite，减小档案体积。
 
 **自定义工具的一般步骤**
@@ -472,15 +485,11 @@ CyberStrikeAI 支持通过三种传输模式连接外部 MCP 服务器：
 
 ### 知识库功能
 - **向量检索**：AI 智能体在对话过程中可自动调用 `search_knowledge_base` 工具搜索知识库中的安全知识。
-- **向量检索**：基于嵌入余弦相似度与相似度阈值过滤（与 Eino `retriever.Retriever` 语义一致）。
-- **自动索引**：扫描 `knowledge_base/` 目录下的 Markdown 文件，自动构建向量嵌入索引。
-- **Web 管理**：通过 Web 界面创建、更新、删除知识项，支持分类管理。
+- **RAG 管线（始终启用）**：**MultiQuery**（LLM 查询改写）→ 向量预取与融合 → **HTTP 精排**（DashScope `gte-rerank` 或 Cohere 兼容 `/v1/rerank`）→ 后处理（规范化去重、字符/token 预算、最终 top_k）。精排失败时自动降级为融合排序，检索仍可用。
+- **向量相似度**：基于嵌入余弦相似度与相似度阈值过滤（与 Eino `retriever.Retriever` 语义一致）。
+- **自动索引**：扫描 `knowledge_base/` 目录下的 Markdown 文件，自动构建向量嵌入索引（Eino Markdown 标题切分 + 递归分块）。
+- **Web 管理**：通过 Web 界面创建、更新、删除知识项，支持分类管理；设置页可配置 MultiQuery / 精排 / 预取候选数。
 - **检索日志**：记录所有知识检索操作，便于审计与调试。
-
-**快速开始（使用预构建知识库）：**
-1. **下载知识数据库**：从 [GitHub Releases](https://github.com/Ed1s0nZ/CyberStrikeAI/releases) 下载预构建的知识数据库文件。
-2. **解压并放置**：将下载的知识数据库文件（`knowledge.db`）解压后放到项目的 `data/` 目录下。
-3. **重启服务**：重启 CyberStrikeAI 服务，知识库即可直接使用，无需重新构建索引。
 
 **知识库配置步骤：**
 1. **启用功能**：在 `config.yaml` 中设置 `knowledge.enabled: true`：
@@ -496,6 +505,17 @@ CyberStrikeAI 支持通过三种传输模式连接外部 MCP 服务器：
      retrieval:
        top_k: 5
        similarity_threshold: 0.7
+       multi_query:
+         max_queries: 4        # LLM 改写变体上限（始终启用）
+       rerank:                 # 精排始终启用；留空则继承 openai/embedding 凭据
+         provider: ""          # 空=按 base_url 推断 dashscope | cohere
+         model: ""             # 空=DashScope→gte-rerank，Cohere→rerank-multilingual-v3.0
+         base_url: ""
+         api_key: ""
+       post_retrieve:
+         prefetch_top_k: 20    # 每条 MultiQuery 变体的向量候选数；0=max(top_k×4, 20)
+         max_context_chars: 0
+         max_context_tokens: 0
    ```
 2. **添加知识文件**：将 Markdown 文件放入 `knowledge_base/` 目录，按分类组织（如 `knowledge_base/SQL注入/README.md`）。
 3. **扫描索引**：在 Web 界面中点击"扫描知识库"，系统会自动导入文件并构建向量索引。
@@ -556,6 +576,17 @@ knowledge:
   retrieval:
     top_k: 5  # 检索返回的 Top-K 结果数量
     similarity_threshold: 0.7  # 余弦相似度阈值（0-1），低于此值的结果将被过滤
+    multi_query:
+      max_queries: 4  # MultiQuery 改写变体上限（始终启用）
+    rerank:  # HTTP 精排（始终启用）；留空则继承 openai/embedding 凭据
+      provider: ""
+      model: ""
+      base_url: ""
+      api_key: ""
+    post_retrieve:
+      prefetch_top_k: 20  # 每条 MultiQuery 变体；0=max(top_k×4, 20)
+      max_context_chars: 0
+      max_context_tokens: 0
 roles_dir: "roles"  # 角色配置文件目录（相对于配置文件所在目录）
 skills_dir: "skills"  # Skills 目录（相对于配置文件所在目录）
 agents_dir: "agents"  # 多代理 Markdown（主代理 orchestrator.md + 子代理 *.md）
@@ -568,6 +599,11 @@ multi_agent:
   # orchestrator_instruction_plan_execute / orchestrator_instruction_supervisor 可选
   # eino_skills: { disable: false, filesystem_tools: true, skill_tool_name: skill }
   # eino_middleware: plantask_enable、checkpoint_dir、deep_model_retry_max_retries、deep_output_key 等
+project:
+  enabled: true              # 启用项目黑板与事实 MCP 工具
+  fact_index_max_runes: 65000
+  fact_summary_max_runes: 24000
+  default_inject_deprecated: false
 ```
 
 ### 工具模版示例（`tools/nmap.yaml`）
@@ -613,6 +649,7 @@ enabled: true
 ## 相关文档
 
 - [多代理模式（Eino）](docs/MULTI_AGENT_EINO.md)：**Deep**、**Plan-Execute**、**Supervisor**、`agents/*.md`、`eino_skills` / `eino_middleware`、接口与流式说明。
+- [图编排使用说明](docs/workflow-graph.md)：可视化流程搭建、节点配置、`previous` / `outputs` 变量传参与角色绑定。
 - [机器人使用说明（钉钉 / 飞书）](docs/robot.md)：在手机端通过钉钉、飞书与 CyberStrikeAI 对话的完整配置步骤、命令与排查说明，**建议按该文档操作以避免走弯路**。
 
 ## 项目结构
@@ -664,8 +701,6 @@ CyberStrikeAI 现已加入 [404星链计划](https://github.com/knownsec/404Star
   </a>
 </div>
 
-## Stargazers over time
-![Stargazers over time](https://starchart.cc/Ed1s0nZ/CyberStrikeAI.svg)
 
 ---
 

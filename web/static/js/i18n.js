@@ -154,6 +154,9 @@
         }
         applyTranslations(document);
         updateLangLabel();
+        if (typeof window.refreshThemeToggleLabel === 'function') {
+            window.refreshThemeToggleLabel();
+        }
         try {
             window.__locale = lang;
         } catch (e) { /* ignore */ }
@@ -180,6 +183,9 @@
         await loadLanguageResources(initialLang);
         applyTranslations(document);
         updateLangLabel();
+        if (typeof window.refreshThemeToggleLabel === 'function') {
+            window.refreshThemeToggleLabel();
+        }
         try {
             window.__locale = i18next.language || initialLang;
         } catch (e) { /* ignore */ }
