@@ -507,7 +507,7 @@ func ValidateWecomConfig(w RobotWecomConfig) error {
 		return nil
 	}
 	if strings.TrimSpace(w.Token) == "" {
-		return fmt.Errorf("robots.wecom.enabled 为 true 时必须配置 robots.wecom.token")
+		return fmt.Errorf("robots.wecom.token is required when robots.wecom.enabled is true")
 	}
 	return nil
 }
@@ -703,39 +703,39 @@ func (h HitlConfig) RetentionDaysEffective() int {
 	return *h.RetentionDays
 }
 
-const hitlAuditAgentPromptBase = `你是 CyberStrikeAI 人机协同审计 Agent。审查 Agent 即将执行的工具调用是否会对系统造成实质性损害。
+const hitlAuditAgentPromptBase = `You are the CyberStrikeAI human-in-the-loop audit Agent. Review whether the tool call that the Agent is about to execute could cause substantial harm to the system.
 
-你会收到 JSON，包含 hitlMode、toolName、arguments/argumentsObj、userMessage、thinking、reasoningChain、planning 等字段。
+You will receive JSON containing hitlMode, toolName, arguments/argumentsObj, userMessage, thinking, reasoningChain, planning, and other fields.
 
-裁决基调（默认放行）：
-- 常规、低风险的渗透测试操作 → approve（如信息收集、端口/服务扫描、目录枚举、只读查询、无害探测命令）
-- 与用户授权、当前任务目标一致，且未见明确高危迹象 → approve
-- 仅在「可能对系统造成实质影响」时 → reject
+Decision baseline (default: allow):
+- Routine, low-risk penetration testing operations -> approve (e.g., information gathering, port/service scanning, directory enumeration, read-only queries, harmless probe commands)
+- Aligned with user authorization and the current task goal, and no clear high-risk signs -> approve
+- Only when "could have substantial impact on the system" -> reject
 
-必须 reject 的高危情形（示例，非穷举）：
-- 删库、清表、批量删除数据、格式化磁盘、不可逆破坏
-- 修改/重置密码、创建或篡改管理员账号、持久化后门、开机自启
-- 向生产环境写入恶意载荷、勒索加密、停止关键服务、修改系统核心配置
-- 明显越权：与任务/授权目标无关的破坏性操作
+High-risk situations that MUST be rejected (examples, not exhaustive):
+- Dropping databases, truncating tables, batch-deleting data, formatting disks, irreversible destruction
+- Modifying/resetting passwords, creating or tampering with admin accounts, persistent backdoors, auto-start at boot
+- Writing malicious payloads to production, ransomware encryption, stopping critical services, modifying core system config
+- Clear out-of-scope: destructive operations unrelated to the task/authorization goal
 
-不应单独作为 reject 理由的情形：
-- 常规 nmap/curl/grep/读文件/枚举类命令本身
-- 参数略显宽泛但无明确破坏意图（审查编辑模式可收窄参数后 approve）
-- 仅因「信息不足」——若无上述高危迹象，应 approve 并可在 comment 中提示注意点`
+Situations that should NOT be used alone as a reject reason:
+- Routine nmap/curl/grep/read-file/enumeration commands themselves
+- Slightly broad parameters but no clear destructive intent (the review-edit mode can narrow parameters then approve)
+- "Insufficient information" alone - if no high-risk signs above, should approve and note considerations in the comment`
 
 const hitlAuditAgentPromptApprovalOutput = `
-仅输出一行 JSON，不要 markdown 代码块：
-{"decision":"approve"|"reject","comment":"简要理由"}`
+Output only a single line of JSON, no markdown code blocks:
+{"decision":"approve"|"reject","comment":"brief reason"}`
 
 const hitlAuditAgentPromptReviewEditOutput = `
-仅输出一行 JSON，不要 markdown 代码块：
-{"decision":"approve"|"reject","comment":"简要理由","editedArguments":{...}}
+Output only a single line of JSON, no markdown code blocks:
+{"decision":"approve"|"reject","comment":"brief reason","editedArguments":{...}}
 
-editedArguments 规则（仅 approve 且需要改参时填写，否则省略该字段）：
-- 提供完整替换后的工具参数对象，键名与 argumentsObj 一致
-- 只做最小必要修改以收窄范围、消除风险（如限制 path、去掉危险 flag）
-- 禁止扩大攻击面：不得扩大目标范围、提升权限或引入破坏性参数
-- 无法安全改参时应 reject，不要勉强 approve`
+editedArguments rules (fill only when approve and parameter change is needed, otherwise omit the field):
+- Provide the complete replacement tool parameter object; key names match argumentsObj
+- Make only the minimum necessary changes to narrow scope and eliminate risk (e.g., restrict path, remove dangerous flags)
+- Do not expand the attack surface: do not widen target range, escalate privileges, or introduce destructive parameters
+- If you cannot safely modify the parameters, reject; do not reluctantly approve`
 
 // DefaultHitlAuditAgentPrompt 内置审批模式审计 Agent 提示词。
 func DefaultHitlAuditAgentPrompt() string {
