@@ -64,7 +64,7 @@ func isEinoIterationLimitError(err error) bool {
 		strings.Contains(msg, "maximum iteration") ||
 		strings.Contains(msg, "maximum iterations") ||
 		strings.Contains(msg, "iteration limit") ||
-		strings.Contains(msg, "达到最大迭代")
+		strings.Contains(msg, "reached max iterations")
 }
 
 // einoADKRunLoopArgs 将 Eino adk.Runner 事件循环从 RunDeepAgent / RunEinoSingleChatModelAgent 中抽出复用。
@@ -109,7 +109,7 @@ type einoADKRunLoopArgs struct {
 
 func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs []adk.Message) (*RunResult, error) {
 	if args == nil || args.DA == nil {
-		return nil, fmt.Errorf("eino run loop: args 或 Agent 为空")
+		return nil, fmt.Errorf("eino run loop: args or Agent is empty")
 	}
 	if args.McpIDs == nil {
 		s := []string{}
@@ -154,7 +154,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 				logger.Error("eino runner panic recovered", zap.Any("recover", r), zap.Stack("stack"))
 			}
 			if progress != nil {
-				progress("error", fmt.Sprintf("Internal error: %v / 内部错误: %v", r, r), map[string]interface{}{
+				progress("error", fmt.Sprintf("Internal error: %v", r), map[string]interface{}{
 					"conversationId": conversationID,
 					"source":         "eino",
 				})
@@ -171,7 +171,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 	emptyHint := strings.TrimSpace(args.EmptyResponseMessage)
 	if emptyHint == "" {
 		emptyHint = "(Eino session completed but no assistant text was captured. Check process details or logs.) " +
-			"（Eino 会话已完成，但未捕获到助手文本输出。请查看过程详情或日志。）"
+			"(Eino session has completed, but no assistant text output was captured. Please check the process details or logs.)"
 	}
 
 	lastAssistant = ""
@@ -266,7 +266,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 			if strings.TrimSpace(toolName) == "" {
 				toolName = "unknown"
 			}
-			progress("tool_result", fmt.Sprintf("工具结果 (%s)", toolName), map[string]interface{}{
+			progress("tool_result", fmt.Sprintf("tool result (%s)", toolName), map[string]interface{}{
 				"toolName":       toolName,
 				"success":        false,
 				"isError":        true,
@@ -297,7 +297,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 		executeStdoutDupMu.Unlock()
 	}
 
-	var toolResultSent sync.Map // toolCallID -> struct{}；ADK Tool 事件去重（权威正文来自 reduction 处理后的 agent 上下文）
+	var toolResultSent sync.Map // toolCallID -> struct{}; ADK Tool event dedup (authoritative body comes from the agent context after reduction processing)
 	tryEmitToolResultProgress := func(toolName, content, toolCallID string, isErr bool, agentName string) {
 		// 仅由 ADK schema.Tool 事件调用；MCP/execute 桥在 reduction 前的 ToolInvokeNotify 不得推送 tool_result，
 		// 否则全量输出会先占位并触发 toolResultSent 去重，导致 UI/监控展示与 agent 实际收到的截断正文不一致。
@@ -318,7 +318,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 			"isError":        isErr,
 			"result":         content,
 			"resultPreview":  preview,
-			"agentFacing":    true, // 与 reduction 后送入 ChatModel 的正文一致，供前端展示
+			"agentFacing":    true, // consistent with the post-reduction body sent to ChatModel; for frontend display
 			"conversationId": conversationID,
 			"einoAgent":      agentName,
 			"einoRole":       einoRoleTag(agentName),
@@ -351,7 +351,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 				args.FilesystemMonitorAgent.UpdateMCPExecutionDisplayResult(execID, content)
 			}
 		}
-		progress("tool_result", fmt.Sprintf("工具结果 (%s)", toolName), data)
+		progress("tool_result", fmt.Sprintf("tool result (%s)", toolName), data)
 	}
 
 	if args.EinoCallbacks != nil {
@@ -405,7 +405,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 			}
 		} else if existed {
 			if progress != nil {
-				progress("progress", "检测到断点，正在从中断节点恢复执行...", map[string]interface{}{
+				progress("progress", "Checkpoint detected, resuming execution from interrupt point...", map[string]interface{}{
 					"conversationId": conversationID,
 					"source":         "eino",
 					"orchestration":  orchMode,
@@ -425,7 +425,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 						zap.Error(resumeErr))
 				}
 				if progress != nil {
-					progress("progress", "断点恢复失败，已回退为全新执行。", map[string]interface{}{
+					progress("progress", "Checkpoint resume failed, fell back to a fresh execution.", map[string]interface{}{
 						"conversationId": conversationID,
 						"source":         "eino",
 						"orchestration":  orchMode,
@@ -525,7 +525,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 				zap.Duration("backoff", backoff))
 		}
 		if progress != nil {
-			progress("eino_run_retry", fmt.Sprintf("遇到临时错误（限流或网络波动），%d 秒后第 %d/%d 次重试…", int(backoff.Seconds()), attemptNo, maxAttempts), map[string]interface{}{
+			progress("eino_run_retry", fmt.Sprintf("transient error (rate limit or network), retrying in %d seconds (attempt %d/%d)...", int(backoff.Seconds()), attemptNo, maxAttempts), map[string]interface{}{
 				"conversationId": conversationID,
 				"source":         "eino",
 				"orchestration":  orchMode,
@@ -534,7 +534,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 				"maxAttempts":    maxAttempts,
 				"backoffSec":     int(backoff.Seconds()),
 			})
-			progress("eino_run_retry", "已恢复上下文，正在重试…", map[string]interface{}{
+			progress("eino_run_retry", "context restored, retrying...", map[string]interface{}{
 				"conversationId": conversationID,
 				"source":         "eino",
 				"orchestration":  orchMode,
@@ -572,7 +572,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 			flushAllPendingAsFailed(iterCtxErr)
 			if progress != nil {
 				if isInterruptContinue(ctx) {
-					progress("progress", "已暂停当前输出，正在合并用户补充并继续…", map[string]interface{}{
+						progress("progress", "current output paused, merging user supplement and continuing...", map[string]interface{}{
 						"conversationId": conversationID,
 						"source":         "eino",
 						"kind":           "interrupt_continue",
@@ -594,7 +594,7 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 				flushAllPendingAsFailed(ctxErr)
 				if progress != nil {
 					if isInterruptContinue(ctx) {
-						progress("progress", "已暂停当前输出，正在合并用户补充并继续…", map[string]interface{}{
+					progress("progress", "current output paused, merging user supplement and continuing...", map[string]interface{}{
 							"conversationId": conversationID,
 							"source":         "eino",
 							"kind":           "interrupt_continue",
@@ -664,9 +664,9 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 				} else if einoLastAgent != "" {
 					needBump := false
 					if !streamsMainAssistant(einoLastAgent) {
-						needBump = true // 子代理 → 主代理
+						needBump = true // sub-agent -> main agent
 					} else if einoLastAgent != ev.AgentName {
-						needBump = true // plan_execute：planner ↔ executor 等主代理切换
+						needBump = true // plan_execute: planner <-> executor and other main-agent switches
 					}
 					if needBump {
 						einoMainRound++
@@ -731,9 +731,9 @@ func runEinoADKAgentLoop(ctx context.Context, args *einoADKRunLoopArgs, baseMsgs
 			var mainAssistantBuf string
 			// 已通过 response_delta 推到前端的正文（与 monitor.js normalizeStreamingDeltaJs 累积一致）
 			var mainAssistWireAccum string
-			var mainAssistDupTarget string // 非空表示本段主助手流需缓冲至 EOF，与 execute 输出比对去重
+			var mainAssistDupTarget string // non-empty means this main assistant stream segment should be buffered to EOF for dedup comparison against execute output
 			var reasoningBuf string
-			var prevReasoningDisplay string // UI 用：剥离 Claude 内部 signature 尾缀后的累计展示
+			var prevReasoningDisplay string // for UI: cumulative display after stripping Claude's internal signature suffix
 			var streamRecvErr error
 			type streamMsg struct {
 				chunk *schema.Message
@@ -1105,7 +1105,7 @@ func persistTraceSource(args *einoADKRunLoopArgs, fallback []adk.Message) []adk.
 }
 
 func einoPartialRunLastOutputHint() string {
-	return "[执行未正常结束（用户停止、超时或异常）。续跑时请基于上文已产生的工具与结果继续，勿重复已完成步骤。]\n" +
+	return "[Execution did not end normally (user stop, timeout, or error). When resuming, continue based on the tools and results produced above; do not repeat already-completed steps.]\n" +
 		"[Run ended abnormally; continue from the trace above without repeating completed steps.]"
 }
 
@@ -1128,7 +1128,7 @@ func friendlyEinoExecuteInvokeTail(invokeErr error) string {
 	if strings.Contains(invokeErr.Error(), "shell inactivity timeout") {
 		return ""
 	}
-	return "[执行未正常结束] " + invokeErr.Error()
+	return "[Execution did not end normally] " + invokeErr.Error()
 }
 
 // einoToolResultIsError 统一判断 Eino 工具结果是否应标记为错误（与 MCP exec 的 IsError 对齐）。
@@ -1255,7 +1255,7 @@ func buildEinoRunResultFromAccumulated(
 	// 防止超长响应导致 JSON 序列化慢或 OOM（多代理拼接大量工具输出时可能触发）。
 	const maxResponseRunes = 100000
 	if rs := []rune(cleaned); len(rs) > maxResponseRunes {
-		cleaned = string(rs[:maxResponseRunes]) + "\n\n... (response truncated / 响应已截断)"
+		cleaned = string(rs[:maxResponseRunes]) + "\n\n... (response truncated)"
 	}
 	lastOut := cleaned
 	resp := cleaned
