@@ -223,12 +223,13 @@ function wsRenderRoleList() {
     var html = '';
     // 默认角色
     var defSelected = !cur ? ' selected' : '';
-    html += '<button type="button" class="role-selection-item-main' + defSelected + '" onclick="wsSelectRole(\'\')">' +
+    var defDesc = wsTOr('roles.defaultRoleDescription', '默认角色，不额外携带用户提示词，使用所有工具');
+    html += '<button type="button" class="role-selection-item-main' + defSelected + '" data-selection-detail="' + escapeHtmlAttr(defDesc) + '" onclick="wsSelectRole(\'\')">' +
         '<div class="role-selection-item-icon-main">\ud83d\udd35</div>' +
         '<div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' +
         (wsTOr('chat.defaultRole', '默认')) +
         '</div><div class="role-selection-item-description-main">' +
-        (wsTOr('roles.defaultRoleDescription', '默认角色，不额外携带用户提示词，使用所有工具')) +
+        escapeHtml(defDesc) +
         '</div></div>' +
         (defSelected ? '<div class="role-selection-checkmark-main">\u2713</div>' : '') +
         '</button>';
@@ -238,10 +239,11 @@ function wsRenderRoleList() {
             if (!r.enabled) continue;
             if (r.name === '默认') continue; // 已在上方硬编码默认角色，跳过 API 返回的默认项
             var sel = (r.name === cur) ? ' selected' : '';
-            html += '<button type="button" class="role-selection-item-main' + sel + '" onclick="wsSelectRole(\'' + r.name.replace(/'/g, "\\'") + '\')">' +
-                '<div class="role-selection-item-icon-main">' + (r.icon || '\ud83d\udd35') + '</div>' +
-                '<div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + r.name + '</div>' +
-                '<div class="role-selection-item-description-main">' + (r.description || '').substring(0, 60) + '</div></div>' +
+            var desc = r.description || '';
+            html += '<button type="button" class="role-selection-item-main' + sel + '" data-selection-detail="' + escapeHtmlAttr(desc) + '" onclick="wsSelectRole(\'' + r.name.replace(/'/g, "\\'") + '\')">' +
+                '<div class="role-selection-item-icon-main">' + escapeHtml(r.icon || '\ud83d\udd35') + '</div>' +
+                '<div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + escapeHtml(r.name) + '</div>' +
+                '<div class="role-selection-item-description-main">' + escapeHtml(desc.substring(0, 60)) + '</div></div>' +
                 (sel ? '<div class="role-selection-checkmark-main">\u2713</div>' : '') +
                 '</button>';
         }
@@ -1134,6 +1136,10 @@ function escapeHtml(s) {
     const div = document.createElement('div');
     div.textContent = s;
     return div.innerHTML;
+}
+
+function escapeHtmlAttr(s) {
+    return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function escapeSingleQuotedShellArg(value) {
@@ -2260,10 +2266,10 @@ function selectWebshell(id, stateReady) {
         '<button type="button" class="role-selection-panel-close" onclick="wsCloseAgentModePanel()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>' +
         '</div>' +
         '<div class="agent-mode-options">' +
-        '<button type="button" class="role-selection-item-main agent-mode-option ws-agent-mode-option" data-value="eino_single" role="option" onclick="wsSelectAgentMode(\'eino_single\')"><div class="role-selection-item-icon-main">\u26a1</div><div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + (wsT('chat.agentModeEinoSingle') || 'Eino 单代理（ADK）') + '</div><div class="role-selection-item-description-main">' + (wsT('chat.agentModeEinoSingleHint') || 'Eino ChatModelAgent + Runner') + '</div></div><div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="eino_single">\u2713</div></button>' +
-        '<button type="button" class="role-selection-item-main agent-mode-option ws-agent-mode-option" data-value="deep" role="option" onclick="wsSelectAgentMode(\'deep\')"><div class="role-selection-item-icon-main">\ud83e\udde9</div><div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + (wsT('chat.agentModeDeep') || 'Deep（DeepAgent）') + '</div><div class="role-selection-item-description-main">' + (wsT('chat.agentModeDeepHint') || 'Eino DeepAgent，task 调度子代理') + '</div></div><div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="deep">\u2713</div></button>' +
-        '<button type="button" class="role-selection-item-main agent-mode-option ws-agent-mode-option" data-value="plan_execute" role="option" onclick="wsSelectAgentMode(\'plan_execute\')"><div class="role-selection-item-icon-main">\ud83d\udccb</div><div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + (wsT('chat.agentModePlanExecuteLabel') || 'Plan-Execute') + '</div><div class="role-selection-item-description-main">' + (wsT('chat.agentModePlanExecuteHint') || '规划 → 执行 → 重规划') + '</div></div><div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="plan_execute">\u2713</div></button>' +
-        '<button type="button" class="role-selection-item-main agent-mode-option ws-agent-mode-option" data-value="supervisor" role="option" onclick="wsSelectAgentMode(\'supervisor\')"><div class="role-selection-item-icon-main">\ud83c\udfaf</div><div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + (wsT('chat.agentModeSupervisorLabel') || 'Supervisor') + '</div><div class="role-selection-item-description-main">' + (wsT('chat.agentModeSupervisorHint') || '监督者协调，transfer 委派子代理') + '</div></div><div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="supervisor">\u2713</div></button>' +
+        '<button type="button" class="role-selection-item-main agent-mode-option ws-agent-mode-option" data-value="eino_single" role="option" onclick="wsSelectAgentMode(\'eino_single\')" data-agent-mode-detail="' + escapeHtmlAttr(wsT('chat.agentModeEinoSingleHint') || 'Eino ChatModelAgent + Runner') + '"><div class="role-selection-item-icon-main">\u26a1</div><div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + (wsT('chat.agentModeEinoSingle') || 'Eino 单代理（ADK）') + '</div><div class="role-selection-item-description-main">' + (wsT('chat.agentModeEinoSingleHint') || 'Eino ChatModelAgent + Runner') + '</div></div><div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="eino_single">\u2713</div></button>' +
+        '<button type="button" class="role-selection-item-main agent-mode-option ws-agent-mode-option" data-value="deep" role="option" onclick="wsSelectAgentMode(\'deep\')" data-agent-mode-detail="' + escapeHtmlAttr(wsT('chat.agentModeDeepHint') || 'Eino DeepAgent，适合复杂安全测试、多阶段 task 子代理委派与汇总') + '"><div class="role-selection-item-icon-main">\ud83e\udde9</div><div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + (wsT('chat.agentModeDeep') || 'Deep（DeepAgent）') + '</div><div class="role-selection-item-description-main">' + (wsT('chat.agentModeDeepHint') || 'Eino DeepAgent，适合复杂安全测试、多阶段 task 子代理委派与汇总') + '</div></div><div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="deep">\u2713</div></button>' +
+        '<button type="button" class="role-selection-item-main agent-mode-option ws-agent-mode-option" data-value="plan_execute" role="option" onclick="wsSelectAgentMode(\'plan_execute\')" data-agent-mode-detail="' + escapeHtmlAttr(wsT('chat.agentModePlanExecuteHint') || '规划 → 执行 → 重规划') + '"><div class="role-selection-item-icon-main">\ud83d\udccb</div><div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + (wsT('chat.agentModePlanExecuteLabel') || 'Plan-Execute') + '</div><div class="role-selection-item-description-main">' + (wsT('chat.agentModePlanExecuteHint') || '规划 → 执行 → 重规划') + '</div></div><div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="plan_execute">\u2713</div></button>' +
+        '<button type="button" class="role-selection-item-main agent-mode-option ws-agent-mode-option" data-value="supervisor" role="option" onclick="wsSelectAgentMode(\'supervisor\')" data-agent-mode-detail="' + escapeHtmlAttr(wsT('chat.agentModeSupervisorHint') || '专家路由场景：监督者通过 transfer 动态分派多个专业子代理') + '"><div class="role-selection-item-icon-main">\ud83c\udfaf</div><div class="role-selection-item-content-main"><div class="role-selection-item-name-main">' + (wsT('chat.agentModeSupervisorLabel') || 'Supervisor（专家路由）') + '</div><div class="role-selection-item-description-main">' + (wsT('chat.agentModeSupervisorHint') || '专家路由场景：监督者通过 transfer 动态分派多个专业子代理') + '</div></div><div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="supervisor">\u2713</div></button>' +
         '</div></div></div>' +
         '<input type="hidden" id="ws-agent-mode-select" value="eino_single" autocomplete="off" />' +
         '</div>' +

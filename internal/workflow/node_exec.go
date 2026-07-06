@@ -18,12 +18,21 @@ func executeNode(ctx context.Context, args RunArgs, runID string, node graphNode
 		label = node.ID
 	}
 	nodeRunID := uuid.NewString()
+	startedAt := time.Now()
+	incomingCount := 0
+	if rt := workflowRuntimeFrom(ctx); rt != nil && rt.idx != nil {
+		incomingCount = len(rt.idx.incoming[node.ID])
+	}
 	input := map[string]any{
 		"nodeId":   node.ID,
 		"nodeType": node.Type,
 		"label":    label,
 		"inputs":   state.Inputs,
 		"previous": state.LastOutput,
+		"join": map[string]any{
+			"strategy": joinStrategy(node),
+			"incoming": incomingCount,
+		},
 	}
 	inputJSON, _ := json.Marshal(input)
 	if err := args.DB.CreateWorkflowNodeRun(&database.WorkflowNodeRun{
@@ -32,7 +41,7 @@ func executeNode(ctx context.Context, args RunArgs, runID string, node graphNode
 		NodeID:    node.ID,
 		Status:    "running",
 		InputJSON: string(inputJSON),
-		StartedAt: time.Now(),
+		StartedAt: startedAt,
 	}); err != nil {
 		return nil, false, err
 	}
@@ -47,6 +56,18 @@ func executeNode(ctx context.Context, args RunArgs, runID string, node graphNode
 	}
 
 	result, proceed, status, errText := runBuiltinNode(ctx, args, node, state)
+	duration := time.Since(startedAt)
+	if result == nil {
+		result = map[string]any{}
+	}
+	result["duration_ms"] = duration.Milliseconds()
+	result["finished_at"] = time.Now().Format(time.RFC3339Nano)
+	result["status"] = status
+	accumulateWorkflowMetric(state, "node_count", 1)
+	accumulateWorkflowMetric(state, "duration_ms", duration.Milliseconds())
+	if strings.EqualFold(node.Type, "tool") {
+		accumulateWorkflowMetric(state, "tool_call_count", 1)
+	}
 	outputJSON, _ := json.Marshal(result)
 	if err := args.DB.FinishWorkflowNodeRun(nodeRunID, status, string(outputJSON), errText); err != nil {
 		return nil, false, err
@@ -64,6 +85,7 @@ func executeNode(ctx context.Context, args RunArgs, runID string, node graphNode
 			"nodeType":      node.Type,
 			"label":         label,
 			"status":        status,
+			"durationMs":    duration.Milliseconds(),
 			"output":        result,
 		}
 		progressMsg := fmt.Sprintf("节点完成：%s（%s）", label, status)

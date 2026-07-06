@@ -175,10 +175,10 @@
                     </div>
                     <div class="nav-item" data-page="hitl">
                         <div class="nav-item-content" data-title="人机协同" onclick="switchPage('hitl')">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                 <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path>
                                 <circle cx="9" cy="7" r="4"></circle>
-                                <polyline points="16 11 18 13 22 9"></polyline>
+                                <path d="m16 11 2 2 4-4"></path>
                             </svg>
                             <span data-i18n="nav.hitl">人机协同</span>
                         </div>
@@ -1146,7 +1146,7 @@
                                                 </button>
                                             </div>
                                             <div class="agent-mode-options">
-                                                <button type="button" class="role-selection-item-main agent-mode-option" data-value="eino_single" role="option" onclick="selectAgentMode('eino_single')">
+                                                <button type="button" class="role-selection-item-main agent-mode-option" data-value="eino_single" role="option" onclick="selectAgentMode('eino_single')" data-agent-mode-detail="CloudWeGo Eino ChatModelAgent + Runner，MCP 工具（/api/eino-agent）" data-i18n="chat.agentModeEinoSingleHint" data-i18n-attr="data-agent-mode-detail" data-i18n-skip-text="true">
                                                     <div class="role-selection-item-icon-main" aria-hidden="true">⚡</div>
                                                     <div class="role-selection-item-content-main">
                                                         <div class="role-selection-item-name-main" data-i18n="chat.agentModeEinoSingle">Eino 单代理（ADK）</div>
@@ -1154,15 +1154,15 @@
                                                     </div>
                                                     <div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="eino_single">✓</div>
                                                 </button>
-                                                <button type="button" class="role-selection-item-main agent-mode-option" data-value="deep" role="option" onclick="selectAgentMode('deep')">
+                                                <button type="button" class="role-selection-item-main agent-mode-option" data-value="deep" role="option" onclick="selectAgentMode('deep')" data-agent-mode-detail="Eino DeepAgent，适合复杂安全测试、多阶段 task 子代理委派与汇总" data-i18n="chat.agentModeDeepHint" data-i18n-attr="data-agent-mode-detail" data-i18n-skip-text="true">
                                                     <div class="role-selection-item-icon-main" aria-hidden="true">🧩</div>
                                                     <div class="role-selection-item-content-main">
                                                         <div class="role-selection-item-name-main" data-i18n="chat.agentModeDeep">Deep（DeepAgent）</div>
-                                                        <div class="role-selection-item-description-main" data-i18n="chat.agentModeDeepHint">Eino DeepAgent，task 调度子代理</div>
+                                                        <div class="role-selection-item-description-main" data-i18n="chat.agentModeDeepHint">Eino DeepAgent，适合复杂安全测试、多阶段 task 子代理委派与汇总</div>
                                                     </div>
                                                     <div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="deep">✓</div>
                                                 </button>
-                                                <button type="button" class="role-selection-item-main agent-mode-option" data-value="plan_execute" role="option" onclick="selectAgentMode('plan_execute')">
+                                                <button type="button" class="role-selection-item-main agent-mode-option" data-value="plan_execute" role="option" onclick="selectAgentMode('plan_execute')" data-agent-mode-detail="规划 → 执行 → 重规划（单执行器工具链）" data-i18n="chat.agentModePlanExecuteHint" data-i18n-attr="data-agent-mode-detail" data-i18n-skip-text="true">
                                                     <div class="role-selection-item-icon-main" aria-hidden="true">📋</div>
                                                     <div class="role-selection-item-content-main">
                                                         <div class="role-selection-item-name-main" data-i18n="chat.agentModePlanExecuteLabel">Plan-Execute</div>
@@ -1170,11 +1170,11 @@
                                                     </div>
                                                     <div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="plan_execute">✓</div>
                                                 </button>
-                                                <button type="button" class="role-selection-item-main agent-mode-option" data-value="supervisor" role="option" onclick="selectAgentMode('supervisor')">
+                                                <button type="button" class="role-selection-item-main agent-mode-option" data-value="supervisor" role="option" onclick="selectAgentMode('supervisor')" data-agent-mode-detail="专家路由场景：监督者通过 transfer 动态分派多个专业子代理" data-i18n="chat.agentModeSupervisorHint" data-i18n-attr="data-agent-mode-detail" data-i18n-skip-text="true">
                                                     <div class="role-selection-item-icon-main" aria-hidden="true">🎯</div>
                                                     <div class="role-selection-item-content-main">
-                                                        <div class="role-selection-item-name-main" data-i18n="chat.agentModeSupervisorLabel">Supervisor</div>
-                                                        <div class="role-selection-item-description-main" data-i18n="chat.agentModeSupervisorHint">监督者协调，transfer 委派子代理</div>
+                                                        <div class="role-selection-item-name-main" data-i18n="chat.agentModeSupervisorLabel">Supervisor（专家路由）</div>
+                                                        <div class="role-selection-item-description-main" data-i18n="chat.agentModeSupervisorHint">专家路由场景：监督者通过 transfer 动态分派多个专业子代理</div>
                                                     </div>
                                                     <div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="supervisor">✓</div>
                                                 </button>
@@ -2593,6 +2593,7 @@
                                     <button class="btn-secondary btn-small" type="button" onclick="toggleWorkflowConnectMode()" id="workflow-connect-btn" data-i18n="workflows.connect">连线</button>
                                     <button class="btn-secondary btn-small" type="button" onclick="deleteWorkflowSelection()" data-i18n="workflows.deleteSelected">删除选中</button>
                                     <button class="btn-secondary btn-small" type="button" onclick="layoutWorkflowGraph()" data-i18n="workflows.autoLayout">自动布局</button>
+                                    <button class="btn-secondary btn-small" type="button" onclick="dryRunWorkflowDraft()" data-i18n="workflows.dryRun">试运行</button>
                                     <button class="btn-secondary btn-small" onclick="deleteCurrentWorkflow()" data-i18n="common.delete">删除</button>
                                     <button class="btn-primary btn-small" onclick="saveWorkflowDraft()" data-i18n="common.save">保存</button>
                                 </div>
@@ -2631,6 +2632,12 @@
                                     <button type="button" class="btn-secondary btn-small" onclick="addWorkflowCustomField()" data-i18n="workflows.addField">添加字段</button>
                                 </div>
                                 <div id="workflow-custom-fields" class="workflow-custom-fields"></div>
+                            </div>
+                            <div id="workflow-dry-run-panel" class="workflow-property-form" hidden>
+                                <div class="workflow-custom-fields-head">
+                                    <span data-i18n="workflows.dryRunTrace">试运行轨迹</span>
+                                </div>
+                                <div id="workflow-dry-run-output" class="workflow-property-empty workflow-property-empty--compact"></div>
                             </div>
                         </aside>
                     </div>
@@ -3300,8 +3307,106 @@
                                     <p class="settings-description" data-i18n="settings.robots.description">配置企业微信、钉钉、飞书等机器人，在手机端直接与 CyberStrikeAI 对话，无需在服务器上打开网页。</p>
                                 </div>
 
+                                <div class="robot-manager">
+                                    <div class="robot-manager-toolbar">
+                                        <div>
+                                            <h4 data-i18n="settings.robots.managerTitle">机器人管理</h4>
+                                            <p data-i18n="settings.robots.managerDesc">先选择机器人类型，再进入对应配置；已配置的平台会显示连接状态。</p>
+                                        </div>
+                                        <button type="button" class="btn-primary" onclick="openRobotCreateModal()" data-i18n="settings.robots.newBot">新建机器人</button>
+                                    </div>
+
+                                    <div class="robot-card-grid">
+                                        <button type="button" class="robot-card" data-robot-card="wechat" onclick="openRobotEditor('wechat')">
+                                            <span class="robot-card-main">
+                                                <span class="robot-card-title" data-i18n="settings.robots.wechat.title">微信 / iLink</span>
+                                                <span class="robot-card-desc" data-i18n="settings.robots.wechat.subtitle">扫码绑定个人微信，在手机端直接与 CyberStrikeAI 对话</span>
+                                            </span>
+                                            <span class="robot-card-meta">
+                                                <span id="robot-card-wechat-status" class="robot-status-pill robot-status-pill--idle" data-i18n="settings.robots.statusNotConfigured">未配置</span>
+                                                <span class="robot-card-action" data-i18n="settings.robots.configure">配置</span>
+                                            </span>
+                                        </button>
+                                        <button type="button" class="robot-card" data-robot-card="wecom" onclick="openRobotEditor('wecom')">
+                                            <span class="robot-card-main">
+                                                <span class="robot-card-title" data-i18n="settings.robots.wecom.title">企业微信</span>
+                                                <span class="robot-card-desc" data-i18n="settings.robots.wecom.subtitle">HTTP 回调模式，适合企业内部应用机器人</span>
+                                            </span>
+                                            <span class="robot-card-meta">
+                                                <span id="robot-card-wecom-status" class="robot-status-pill robot-status-pill--idle" data-i18n="settings.robots.statusNotConfigured">未配置</span>
+                                                <span class="robot-card-action" data-i18n="settings.robots.configure">配置</span>
+                                            </span>
+                                        </button>
+                                        <button type="button" class="robot-card" data-robot-card="dingtalk" onclick="openRobotEditor('dingtalk')">
+                                            <span class="robot-card-main">
+                                                <span class="robot-card-title" data-i18n="settings.robots.dingtalk.title">钉钉</span>
+                                                <span class="robot-card-desc" data-i18n="settings.robots.dingtalk.subtitle">企业内部应用机器人，使用 Stream 长连接</span>
+                                            </span>
+                                            <span class="robot-card-meta">
+                                                <span id="robot-card-dingtalk-status" class="robot-status-pill robot-status-pill--idle" data-i18n="settings.robots.statusNotConfigured">未配置</span>
+                                                <span class="robot-card-action" data-i18n="settings.robots.configure">配置</span>
+                                            </span>
+                                        </button>
+                                        <button type="button" class="robot-card" data-robot-card="lark" onclick="openRobotEditor('lark')">
+                                            <span class="robot-card-main">
+                                                <span class="robot-card-title" data-i18n="settings.robots.lark.title">飞书 (Lark)</span>
+                                                <span class="robot-card-desc" data-i18n="settings.robots.lark.subtitle">飞书企业应用机器人，支持单聊与群聊 @</span>
+                                            </span>
+                                            <span class="robot-card-meta">
+                                                <span id="robot-card-lark-status" class="robot-status-pill robot-status-pill--idle" data-i18n="settings.robots.statusNotConfigured">未配置</span>
+                                                <span class="robot-card-action" data-i18n="settings.robots.configure">配置</span>
+                                            </span>
+                                        </button>
+                                        <button type="button" class="robot-card" data-robot-card="telegram" onclick="openRobotEditor('telegram')">
+                                            <span class="robot-card-main">
+                                                <span class="robot-card-title" data-i18n="settings.robots.telegram.title">Telegram</span>
+                                                <span class="robot-card-desc" data-i18n="settings.robots.telegram.subtitle">Bot API 长轮询，私聊与群聊 @</span>
+                                            </span>
+                                            <span class="robot-card-meta">
+                                                <span id="robot-card-telegram-status" class="robot-status-pill robot-status-pill--idle" data-i18n="settings.robots.statusNotConfigured">未配置</span>
+                                                <span class="robot-card-action" data-i18n="settings.robots.configure">配置</span>
+                                            </span>
+                                        </button>
+                                        <button type="button" class="robot-card" data-robot-card="slack" onclick="openRobotEditor('slack')">
+                                            <span class="robot-card-main">
+                                                <span class="robot-card-title" data-i18n="settings.robots.slack.title">Slack</span>
+                                                <span class="robot-card-desc" data-i18n="settings.robots.slack.subtitle">Socket Mode，无需公网回调</span>
+                                            </span>
+                                            <span class="robot-card-meta">
+                                                <span id="robot-card-slack-status" class="robot-status-pill robot-status-pill--idle" data-i18n="settings.robots.statusNotConfigured">未配置</span>
+                                                <span class="robot-card-action" data-i18n="settings.robots.configure">配置</span>
+                                            </span>
+                                        </button>
+                                        <button type="button" class="robot-card" data-robot-card="discord" onclick="openRobotEditor('discord')">
+                                            <span class="robot-card-main">
+                                                <span class="robot-card-title" data-i18n="settings.robots.discord.title">Discord</span>
+                                                <span class="robot-card-desc" data-i18n="settings.robots.discord.subtitle">Gateway WebSocket，私聊与服务器 @</span>
+                                            </span>
+                                            <span class="robot-card-meta">
+                                                <span id="robot-card-discord-status" class="robot-status-pill robot-status-pill--idle" data-i18n="settings.robots.statusNotConfigured">未配置</span>
+                                                <span class="robot-card-action" data-i18n="settings.robots.configure">配置</span>
+                                            </span>
+                                        </button>
+                                        <button type="button" class="robot-card" data-robot-card="qq" onclick="openRobotEditor('qq')">
+                                            <span class="robot-card-main">
+                                                <span class="robot-card-title" data-i18n="settings.robots.qq.title">QQ 机器人</span>
+                                                <span class="robot-card-desc" data-i18n="settings.robots.qq.subtitle">QQ 开放平台 WebSocket，C2C 与群 @</span>
+                                            </span>
+                                            <span class="robot-card-meta">
+                                                <span id="robot-card-qq-status" class="robot-status-pill robot-status-pill--idle" data-i18n="settings.robots.statusNotConfigured">未配置</span>
+                                                <span class="robot-card-action" data-i18n="settings.robots.configure">配置</span>
+                                            </span>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div id="robot-editor-empty" class="robot-editor-empty">
+                                    <h4 data-i18n="settings.robots.emptyTitle">选择一个机器人开始配置</h4>
+                                    <p data-i18n="settings.robots.emptyDesc">从上方列表点击已有平台，或点击“新建机器人”按类型创建。</p>
+                                </div>
+
                                 <!-- 微信 / iLink -->
-                                <div class="settings-subsection robot-wechat-card" id="robot-wechat-subsection">
+                                <div class="settings-subsection robot-editor-panel robot-wechat-card" id="robot-wechat-subsection" data-robot-editor="wechat" hidden>
                                     <div class="robot-wechat-header">
                                         <div class="robot-wechat-header-text">
                                             <h4 data-i18n="settings.robots.wechat.title">微信 / iLink</h4>
@@ -3375,7 +3480,7 @@
                                 </div>
 
                                 <!-- 企业微信 -->
-                                <div class="settings-subsection">
+                                <div class="settings-subsection robot-editor-panel" data-robot-editor="wecom" hidden>
                                     <h4 data-i18n="settings.robots.wecom.title">企业微信</h4>
                                     <div class="settings-form">
                                         <div class="form-group">
@@ -3409,7 +3514,7 @@
                                 </div>
 
                                 <!-- 钉钉 -->
-                                <div class="settings-subsection">
+                                <div class="settings-subsection robot-editor-panel" data-robot-editor="dingtalk" hidden>
                                     <h4 data-i18n="settings.robots.dingtalk.title">钉钉</h4>
                                     <div class="settings-form">
                                         <div class="form-group">
@@ -3432,7 +3537,7 @@
                                 </div>
 
                                 <!-- 飞书 -->
-                                <div class="settings-subsection">
+                                <div class="settings-subsection robot-editor-panel" data-robot-editor="lark" hidden>
                                     <h4 data-i18n="settings.robots.lark.title">飞书 (Lark)</h4>
                                     <div class="settings-form">
                                         <div class="form-group">
@@ -3457,42 +3562,212 @@
                                     </div>
                                 </div>
 
-                                <div class="settings-subsection">
-                                    <h4 data-i18n="settingsRobotsExtra.botCommandsTitle">机器人命令说明</h4>
-                                    <p class="settings-description" data-i18n="settingsRobotsExtra.botCommandsDesc">在对话中可发送以下命令（支持中英文）：</p>
+                                <!-- Telegram -->
+                                <div class="settings-subsection robot-editor-panel" data-robot-editor="telegram" hidden>
+                                    <h4 data-i18n="settings.robots.telegram.title">Telegram</h4>
+                                    <div class="settings-form">
+                                        <div class="form-group">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="robot-telegram-enabled" class="modern-checkbox" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settings.robots.telegram.enabled">启用 Telegram 机器人</span>
+                                            </label>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="robot-telegram-bot-token" data-i18n="settings.robots.telegram.botToken">Bot Token</label>
+                                            <input type="password" id="robot-telegram-bot-token" autocomplete="off" placeholder="从 @BotFather 获取" />
+                                            <small class="form-hint" data-i18n="settings.robots.telegram.botTokenHint">通过 getUpdates 长轮询收消息，无需公网回调</small>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="robot-telegram-bot-username" data-i18n="settings.robots.telegram.botUsername">Bot Username（可选）</label>
+                                            <input type="text" id="robot-telegram-bot-username" autocomplete="off" placeholder="不含 @，留空则自动 getMe" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="robot-telegram-allow-group" class="modern-checkbox" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settings.robots.telegram.allowGroup">允许群聊（仅响应 @ 机器人）</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
 
-                                    <p class="robot-cmd-category" data-i18n="settingsRobotsExtra.botCmdCategoryGeneral">通用</p>
-                                    <ul class="robot-cmd-list">
-                                        <li><code>帮助</code> <code>help</code> — <span data-i18n="settingsRobotsExtra.botCmdHelp">显示本帮助 | Show this help</span></li>
-                                        <li><code>版本</code> <code>version</code> — <span data-i18n="settingsRobotsExtra.botCmdVersion">显示当前版本号 | Show version</span></li>
-                                    </ul>
+                                <!-- Slack -->
+                                <div class="settings-subsection robot-editor-panel" data-robot-editor="slack" hidden>
+                                    <h4 data-i18n="settings.robots.slack.title">Slack</h4>
+                                    <div class="settings-form">
+                                        <div class="form-group">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="robot-slack-enabled" class="modern-checkbox" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settings.robots.slack.enabled">启用 Slack 机器人</span>
+                                            </label>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="robot-slack-bot-token" data-i18n="settings.robots.slack.botToken">Bot Token (xoxb-)</label>
+                                            <input type="password" id="robot-slack-bot-token" autocomplete="off" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="robot-slack-app-token" data-i18n="settings.robots.slack.appToken">App-Level Token (xapp-)</label>
+                                            <input type="password" id="robot-slack-app-token" autocomplete="off" />
+                                            <small class="form-hint" data-i18n="settings.robots.slack.appTokenHint">需 connections:write 权限，用于 Socket Mode</small>
+                                        </div>
+                                    </div>
+                                </div>
 
-                                    <p class="robot-cmd-category" data-i18n="settingsRobotsExtra.botCmdCategoryConversation">对话</p>
-                                    <ul class="robot-cmd-list">
-                                        <li><code>列表</code> <code>list</code> — <span data-i18n="settingsRobotsExtra.botCmdList">列出所有对话标题与 ID | List conversations</span></li>
-                                        <li><code>切换 &lt;ID&gt;</code> <code>switch &lt;ID&gt;</code> — <span data-i18n="settingsRobotsExtra.botCmdSwitch">指定对话继续 | Switch to conversation</span></li>
-                                        <li><code>新对话</code> <code>new</code> — <span data-i18n="settingsRobotsExtra.botCmdNew">开启新对话 | Start new conversation</span></li>
-                                        <li><code>清空</code> <code>clear</code> — <span data-i18n="settingsRobotsExtra.botCmdClear">清空当前上下文 | Clear context</span></li>
-                                        <li><code>当前</code> <code>current</code> — <span data-i18n="settingsRobotsExtra.botCmdCurrent">显示当前对话、角色与项目 | Show current conversation</span></li>
-                                        <li><code>停止</code> <code>stop</code> — <span data-i18n="settingsRobotsExtra.botCmdStop">中断当前任务 | Stop running task</span></li>
-                                        <li><code>删除 &lt;ID&gt;</code> <code>delete &lt;ID&gt;</code> — <span data-i18n="settingsRobotsExtra.botCmdDelete">删除指定对话 | Delete conversation</span></li>
-                                    </ul>
+                                <!-- Discord -->
+                                <div class="settings-subsection robot-editor-panel" data-robot-editor="discord" hidden>
+                                    <h4 data-i18n="settings.robots.discord.title">Discord</h4>
+                                    <div class="settings-form">
+                                        <div class="form-group">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="robot-discord-enabled" class="modern-checkbox" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settings.robots.discord.enabled">启用 Discord 机器人</span>
+                                            </label>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="robot-discord-bot-token" data-i18n="settings.robots.discord.botToken">Bot Token</label>
+                                            <input type="password" id="robot-discord-bot-token" autocomplete="off" />
+                                            <small class="form-hint" data-i18n="settings.robots.discord.botTokenHint">开发者门户创建 Bot，开启 Message Content Intent</small>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="robot-discord-allow-guild" class="modern-checkbox" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settings.robots.discord.allowGuild">允许服务器频道（仅响应 @ 机器人）</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
 
-                                    <p class="robot-cmd-category" data-i18n="settingsRobotsExtra.botCmdCategoryRole">角色</p>
-                                    <ul class="robot-cmd-list">
-                                        <li><code>角色</code> <code>roles</code> — <span data-i18n="settingsRobotsExtra.botCmdRoles">列出所有可用角色 | List roles</span></li>
-                                        <li><code>角色 &lt;名&gt;</code> <code>role &lt;name&gt;</code> — <span data-i18n="settingsRobotsExtra.botCmdRole">切换当前角色 | Switch role</span></li>
-                                    </ul>
+                                <!-- QQ -->
+                                <div class="settings-subsection robot-editor-panel" data-robot-editor="qq" hidden>
+                                    <h4 data-i18n="settings.robots.qq.title">QQ 机器人</h4>
+                                    <div class="settings-form">
+                                        <div class="form-group">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="robot-qq-enabled" class="modern-checkbox" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settings.robots.qq.enabled">启用 QQ 机器人</span>
+                                            </label>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="robot-qq-app-id" data-i18n="settings.robots.qq.appId">App ID</label>
+                                            <input type="text" id="robot-qq-app-id" autocomplete="off" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="robot-qq-client-secret" data-i18n="settings.robots.qq.clientSecret">Client Secret</label>
+                                            <input type="password" id="robot-qq-client-secret" autocomplete="off" />
+                                            <small class="form-hint" data-i18n="settings.robots.qq.secretHint">从 QQ 机器人开放平台获取；上线前可勾选沙箱</small>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="checkbox-label">
+                                                <input type="checkbox" id="robot-qq-sandbox" class="modern-checkbox" />
+                                                <span class="checkbox-custom"></span>
+                                                <span class="checkbox-text" data-i18n="settings.robots.qq.sandbox">沙箱环境</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
 
-                                    <p class="robot-cmd-category" data-i18n="settingsRobotsExtra.botCmdCategoryProject">项目</p>
-                                    <ul class="robot-cmd-list">
-                                        <li><code>项目</code> <code>projects</code> — <span data-i18n="settingsRobotsExtra.botCmdProjects">列出所有项目 | List projects</span></li>
-                                        <li><code>新建项目 &lt;名称&gt;</code> <code>new project &lt;name&gt;</code> — <span data-i18n="settingsRobotsExtra.botCmdNewProject">创建项目并绑定当前对话 | Create &amp; bind project</span></li>
-                                        <li><code>绑定项目 &lt;ID或名称&gt;</code> <code>bind project &lt;ID|name&gt;</code> — <span data-i18n="settingsRobotsExtra.botCmdBindProject">将当前对话绑定到项目 | Bind conversation</span></li>
-                                        <li><code>解除项目</code> <code>unbind project</code> — <span data-i18n="settingsRobotsExtra.botCmdUnbindProject">解除当前对话的项目绑定 | Unbind project</span></li>
-                                    </ul>
+                                <div id="robot-create-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="robot-create-title">
+                                    <div class="modal-content robot-create-modal-content">
+                                        <div class="modal-header">
+                                            <h2 id="robot-create-title" data-i18n="settings.robots.createTitle">新建机器人</h2>
+                                            <button type="button" class="modal-close" onclick="closeRobotCreateModal()" aria-label="Close"></button>
+                                        </div>
+                                        <div class="modal-body">
+                                            <p class="settings-description" data-i18n="settings.robots.createDesc">选择机器人类型后进入专属配置。当前版本每个平台支持一个内置机器人配置。</p>
+                                            <div class="robot-type-grid">
+                                                <button type="button" class="robot-type-option" onclick="selectRobotType('wechat')">
+                                                    <span data-i18n="settings.robots.wechat.title">微信 / iLink</span>
+                                                    <small data-i18n="settings.robots.wechat.subtitle">扫码绑定个人微信</small>
+                                                </button>
+                                                <button type="button" class="robot-type-option" onclick="selectRobotType('wecom')">
+                                                    <span data-i18n="settings.robots.wecom.title">企业微信</span>
+                                                    <small data-i18n="settings.robots.wecom.subtitle">HTTP 回调模式</small>
+                                                </button>
+                                                <button type="button" class="robot-type-option" onclick="selectRobotType('dingtalk')">
+                                                    <span data-i18n="settings.robots.dingtalk.title">钉钉</span>
+                                                    <small data-i18n="settings.robots.dingtalk.subtitle">Stream 长连接</small>
+                                                </button>
+                                                <button type="button" class="robot-type-option" onclick="selectRobotType('lark')">
+                                                    <span data-i18n="settings.robots.lark.title">飞书 (Lark)</span>
+                                                    <small data-i18n="settings.robots.lark.subtitle">企业应用机器人</small>
+                                                </button>
+                                                <button type="button" class="robot-type-option" onclick="selectRobotType('telegram')">
+                                                    <span data-i18n="settings.robots.telegram.title">Telegram</span>
+                                                    <small data-i18n="settings.robots.telegram.subtitle">Bot API 长轮询</small>
+                                                </button>
+                                                <button type="button" class="robot-type-option" onclick="selectRobotType('slack')">
+                                                    <span data-i18n="settings.robots.slack.title">Slack</span>
+                                                    <small data-i18n="settings.robots.slack.subtitle">Socket Mode</small>
+                                                </button>
+                                                <button type="button" class="robot-type-option" onclick="selectRobotType('discord')">
+                                                    <span data-i18n="settings.robots.discord.title">Discord</span>
+                                                    <small data-i18n="settings.robots.discord.subtitle">Gateway WebSocket</small>
+                                                </button>
+                                                <button type="button" class="robot-type-option" onclick="selectRobotType('qq')">
+                                                    <span data-i18n="settings.robots.qq.title">QQ 机器人</span>
+                                                    <small data-i18n="settings.robots.qq.subtitle">QQ 开放平台</small>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
 
-                                    <p class="settings-description robot-cmd-footer" data-i18n="settingsRobotsExtra.botCommandsFooter">除以上命令外，直接输入内容将发送给 AI 进行渗透测试/安全分析。Otherwise, send any text for AI penetration testing / security analysis.</p>
+                                <div id="robot-commands-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="robot-commands-title">
+                                    <div class="modal-content robot-commands-modal-content">
+                                        <div class="modal-header">
+                                            <h2 id="robot-commands-title" data-i18n="settingsRobotsExtra.botCommandsTitle">机器人命令说明</h2>
+                                            <button type="button" class="modal-close" onclick="closeRobotCommandsModal()" aria-label="Close"></button>
+                                        </div>
+                                        <div class="modal-body robot-commands-modal-body">
+                                            <p class="settings-description" data-i18n="settingsRobotsExtra.botCommandsDesc">在对话中可发送以下命令（支持中英文）：</p>
+
+                                            <p class="robot-cmd-category" data-i18n="settingsRobotsExtra.botCmdCategoryGeneral">通用</p>
+                                            <ul class="robot-cmd-list">
+                                                <li><code>帮助</code> <code>help</code> — <span data-i18n="settingsRobotsExtra.botCmdHelp">显示本帮助 | Show this help</span></li>
+                                                <li><code>版本</code> <code>version</code> — <span data-i18n="settingsRobotsExtra.botCmdVersion">显示当前版本号 | Show version</span></li>
+                                            </ul>
+
+                                            <p class="robot-cmd-category" data-i18n="settingsRobotsExtra.botCmdCategoryConversation">对话</p>
+                                            <ul class="robot-cmd-list">
+                                                <li><code>列表</code> <code>list</code> — <span data-i18n="settingsRobotsExtra.botCmdList">列出所有对话标题与 ID | List conversations</span></li>
+                                                <li><code>切换 &lt;ID&gt;</code> <code>switch &lt;ID&gt;</code> — <span data-i18n="settingsRobotsExtra.botCmdSwitch">指定对话继续 | Switch to conversation</span></li>
+                                                <li><code>新对话</code> <code>new</code> — <span data-i18n="settingsRobotsExtra.botCmdNew">开启新对话 | Start new conversation</span></li>
+                                                <li><code>清空</code> <code>clear</code> — <span data-i18n="settingsRobotsExtra.botCmdClear">清空当前上下文 | Clear context</span></li>
+                                                <li><code>当前</code> <code>current</code> — <span data-i18n="settingsRobotsExtra.botCmdCurrent">显示当前对话、角色与项目 | Show current conversation</span></li>
+                                                <li><code>停止</code> <code>stop</code> — <span data-i18n="settingsRobotsExtra.botCmdStop">中断当前任务 | Stop running task</span></li>
+                                                <li><code>删除 &lt;ID&gt;</code> <code>delete &lt;ID&gt;</code> — <span data-i18n="settingsRobotsExtra.botCmdDelete">删除指定对话 | Delete conversation</span></li>
+                                            </ul>
+
+                                            <p class="robot-cmd-category" data-i18n="settingsRobotsExtra.botCmdCategoryRole">角色</p>
+                                            <ul class="robot-cmd-list">
+                                                <li><code>角色</code> <code>roles</code> — <span data-i18n="settingsRobotsExtra.botCmdRoles">列出所有可用角色 | List roles</span></li>
+                                                <li><code>角色 &lt;名&gt;</code> <code>role &lt;name&gt;</code> — <span data-i18n="settingsRobotsExtra.botCmdRole">切换当前角色 | Switch role</span></li>
+                                            </ul>
+
+                                            <p class="robot-cmd-category" data-i18n="settingsRobotsExtra.botCmdCategoryProject">项目</p>
+                                            <ul class="robot-cmd-list">
+                                                <li><code>项目</code> <code>projects</code> — <span data-i18n="settingsRobotsExtra.botCmdProjects">列出所有项目 | List projects</span></li>
+                                                <li><code>新建项目 &lt;名称&gt;</code> <code>new project &lt;name&gt;</code> — <span data-i18n="settingsRobotsExtra.botCmdNewProject">创建项目并绑定当前对话 | Create &amp; bind project</span></li>
+                                                <li><code>绑定项目 &lt;ID或名称&gt;</code> <code>bind project &lt;ID|name&gt;</code> — <span data-i18n="settingsRobotsExtra.botCmdBindProject">将当前对话绑定到项目 | Bind conversation</span></li>
+                                                <li><code>解除项目</code> <code>unbind project</code> — <span data-i18n="settingsRobotsExtra.botCmdUnbindProject">解除当前对话的项目绑定 | Unbind project</span></li>
+                                            </ul>
+
+                                            <p class="settings-description robot-cmd-footer" data-i18n="settingsRobotsExtra.botCommandsFooter">除以上命令外，直接输入内容将发送给 AI 进行渗透测试/安全分析。Otherwise, send any text for AI penetration testing / security analysis.</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="settings-subsection robot-command-entry">
+                                    <div class="robot-command-entry-copy">
+                                        <h4 data-i18n="settingsRobotsExtra.botCommandsTitle">机器人命令说明</h4>
+                                        <p class="settings-description" data-i18n="settingsRobotsExtra.botCommandsEntryDesc">查看机器人对话中可用的中英文命令，包括对话、角色、项目等常用操作。</p>
+                                    </div>
+                                    <button type="button" class="btn-secondary" onclick="openRobotCommandsModal()" data-i18n="settingsRobotsExtra.viewAllCommands">查看全部命令</button>
                                 </div>
 
                                 <div class="settings-actions">
@@ -3796,6 +4071,10 @@
                 <div class="form-group">
                     <label for="external-mcp-json"><span data-i18n="externalMcpModal.configJson">配置JSON</span> <span style="color: red;">*</span></label>
                     <textarea id="external-mcp-json" rows="15" data-i18n="externalMcpModal.placeholder" data-i18n-attr="placeholder" style="font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 0.875rem; line-height: 1.5;"></textarea>
+                    <div class="form-actions" style="justify-content: flex-start; margin-top: 0;">
+                        <button type="button" class="btn-secondary" onclick="formatExternalMCPJSON()" data-i18n="externalMcpModal.formatJson">格式化JSON</button>
+                        <button type="button" class="btn-secondary" onclick="loadExternalMCPExample()" data-i18n="externalMcpModal.loadExample">加载示例</button>
+                    </div>
                     <div class="password-hint">
                         <strong data-i18n="externalMcpModal.formatLabel">配置格式：</strong><span data-i18n="externalMcpModal.formatDesc">JSON对象，key为配置名称，value为配置内容。状态通过"启动/停止"按钮控制，无需在JSON中配置。</span><br>
                         <strong data-i18n="externalMcpModal.configExample">配置示例：</strong><br>
@@ -3824,10 +4103,6 @@
 }</code>
                     </div>
                     <div id="external-mcp-json-error" class="error-message" style="display: none; margin-top: 8px; padding: 8px; background: rgba(220, 53, 69, 0.1); border: 1px solid rgba(220, 53, 69, 0.3); border-radius: 4px; color: var(--error-color); font-size: 0.875rem;"></div>
-                </div>
-                <div class="form-group">
-                    <button type="button" class="btn-secondary" onclick="formatExternalMCPJSON()" style="margin-top: 8px;" data-i18n="externalMcpModal.formatJson">格式化JSON</button>
-                    <button type="button" class="btn-secondary" onclick="loadExternalMCPExample()" style="margin-top: 8px; margin-left: 8px;" data-i18n="externalMcpModal.loadExample">加载示例</button>
                 </div>
             </div>
             <div class="modal-footer">

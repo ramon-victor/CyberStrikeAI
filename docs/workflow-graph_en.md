@@ -27,9 +27,10 @@ Saved workflows can be bound to a role under **Role Management**. When `workflow
 | Select | Click a node or edge; properties appear in the right panel |
 | Delete selected | Remove the current node or edge |
 | Auto layout | Rearrange node positions |
+| Dry run | Safely simulate data flow; Tool, Agent, and HITL nodes are not executed for real |
 | Delete workflow | Remove the entire workflow definition |
 
-**Requirements:** Every workflow needs at least **one Start node** and **one Output node**. Start nodes must not have incoming edges; Output nodes must not have outgoing edges.
+**Hard requirements:** Every workflow needs at least **one Start node** and **one Output node**. Start nodes must not have incoming edges; Output / End nodes must not have outgoing edges. Both frontend and backend run strict validation before save.
 
 ---
 
@@ -45,6 +46,7 @@ During a run, the engine keeps internal state. Template expressions `{{...}}` re
 | `lastOutput` | `{{previous.xxx}}` | Output of the **most recently executed** node |
 | `outputs` | `{{outputs.xxx}}` | Global **named variable pool** (written by nodes with an output key) |
 | `nodeOutputs` | `{{nodeId.xxx}}` | Full output object of a specific node ID |
+| `metrics` | available in run details | Node duration, tool call count, and usage/cost metrics when reported |
 
 ### 3.1 What is `previous`?
 
@@ -68,6 +70,15 @@ Start → Agent A → Condition → Agent B
 ```
 
 For Agent B, `{{previous.output}}` = the **condition node** output (`true` / `false`), **not** Agent A’s result.
+
+If a node has **multiple upstream nodes**, `previous` is built by that node’s **join strategy** first:
+
+| Join strategy | Meaning | Use case |
+|---------------|---------|----------|
+| `all_merge` | Merge all upstream outputs; `previous.output` is an array | Default; aggregate multiple results |
+| `last_by_canvas` | Use the last upstream output by canvas order | Explicitly use one branch |
+| `first_non_empty` | Use the first non-empty output | Fallback chains |
+| `fail_fast` | Stop the node if any upstream failed | Critical gates, approval prechecks, safety checks |
 
 ### 3.2 What is `outputs`?
 
@@ -135,21 +146,55 @@ Allowed characters in paths: letters, digits, underscore, dot, hyphen. Examples:
 | `{{previous.matched}}` | Match result of the previous condition node (`true` / `false`) |
 | `{{outputs.variable_name}}` | Named output registered by a node |
 | `{{nodeId.output}}` | `output` field of the node with that ID |
+| `{{previous.kind}}` | Previous node output kind, e.g. `agent` / `tool` / `condition` |
+| `{{previous.status}}` | Previous node status, e.g. `completed` / `failed` / `simulated` |
+
+Node outputs keep compatibility fields such as `output` and `matched`, and also include a structured envelope:
+
+```json
+{
+  "kind": "agent",
+  "node_id": "node-2",
+  "node_type": "agent",
+  "status": "completed",
+  "output": "..."
+}
+```
 
 ### 4.3 Condition expressions
 
-Condition nodes and edge conditions support simple comparisons:
+Condition nodes and edge conditions support comparisons, text matching, regex, logical operators, and safe JSONPath/JQ path reads:
 
 ```text
 {{outputs.agent_result1}} != ""
 {{previous.output}} == "ok"
-{{outputs.count}} == "100"
+{{outputs.count}} >= 100
+{{previous.output}} contains "success"
+{{previous.output}} matches "^ok"
+{{outputs.risk_score}} >= 8 && {{previous.output}} != ""
+jsonpath({{previous.output}}, "$.status") == "ok"
+jq({{outputs.scan}}, ".severity") == "high"
 ```
 
 Rules:
 
-- Use `==` or `!=` for string comparison (leading/trailing spaces and quotes are trimmed)
+- Operators: `==`, `!=`, `>`, `>=`, `<`, `<=`
+- `contains` checks substrings; `matches` checks regular expressions
+- Simple `&&` / `||` is supported
+- `jsonpath(value, "$.path")` and `jq(value, ".path")` support a **safe path-only subset**; no arbitrary script execution
+- Leading/trailing spaces and quotes are trimmed before comparison
 - Without a comparator, non-empty values that are not `false`, `0`, or `null` are treated as true
+- Expressions, regexes, and JSONPath/JQ paths are statically validated before save
+
+### 4.4 Nested field binding
+
+Field bindings can read ordinary fields such as `output` or `message`, and also JSONPath/JQ-style paths:
+
+| Binding | Meaning |
+|---------|---------|
+| `from=previous, field=$.status` | Read `status` from previous output |
+| `from=outputs, field=$.scan.severity` | Read a nested field from named outputs |
+| `from=node-1, field=.output.items[0]` | Read an array element from a specific node output |
 
 ---
 
@@ -175,6 +220,7 @@ Runs an LLM Agent task. Supports multiple modes.
 | Input source | Template for upstream data | `{{previous.output}}` |
 | Node instruction | Task description for this node | empty |
 | Output variable name | Key written into `outputs` | `agent_result` |
+| Join strategy | How to build `previous` when multiple upstreams enter this node | `all_merge` |
 
 **Message assembly:**
 
@@ -186,6 +232,7 @@ After execution:
 
 - `previous.output` becomes this node’s response text  
 - If **Output variable name** is set, the value is also stored in `outputs[variable_name]`
+- In the Eino graph, the Agent node is split into `prepare → execute → finalize` for clearer trace and future checkpointing
 
 ### 5.3 Tool
 
@@ -196,6 +243,7 @@ Calls an enabled MCP tool.
 | MCP tool | Tool name (required) | — |
 | Argument template | JSON with `{{...}}` templates | `{}` |
 | Timeout (seconds) | Optional | empty |
+| Join strategy | How to build `previous` when multiple upstreams enter this node | `all_merge` |
 
 Example argument template:
 
@@ -212,6 +260,7 @@ Evaluates an expression and outputs `matched` (`true` / `false`).
 | Field | Description | Default |
 |-------|-------------|---------|
 | Expression | Supports `{{...}}` and `==` / `!=` | `{{previous.output}} != ""` |
+| Join strategy | How to build `previous` when multiple upstreams enter this node | `all_merge` |
 
 **Branching rules:**
 
@@ -229,12 +278,21 @@ Edge condition examples (select an edge, configure in the right panel):
 
 ### 5.5 HITL (human-in-the-loop)
 
-Human approval checkpoint (currently record-only; marks `approved: true` and continues).
+Human approval checkpoint. The run pauses before this node through Eino interrupt/checkpoint and resumes after approval via API or the monitor panel.
 
 | Field | Description | Default |
 |-------|-------------|---------|
 | Prompt | Supports templates | `Please approve before continuing` |
+| Prompt binding | If prompt text is empty, read approval text from a bound field | `previous.output` |
 | Reviewer | `human` / `audit_agent` | `human` |
+| Join strategy | How to build `previous` when multiple upstreams enter this node | `all_merge` |
+
+Pending HITL metadata records:
+
+- `checkpointId`
+- interrupt `beforeNodes`
+- resume target / address / path
+- resume payload schema (`approved`, `comment`)
 
 ### 5.6 Output
 
@@ -244,6 +302,8 @@ Writes the final workflow result into `outputs` for summary and chat display.
 |-------|-------------|---------|
 | Output variable name | Required key for the final result | `result` |
 | Variable source | Template deciding what to write | `{{previous.output}}` |
+| Static output value | Optional; overrides variable source when set | empty |
+| Join strategy | How to build `previous` when multiple upstreams enter this node | `all_merge` |
 
 **Note:** Output nodes are workflow exits and must not have outgoing edges.
 
@@ -254,6 +314,7 @@ Optional node for an end summary template (less common in role-bound flows).
 | Field | Description | Default |
 |-------|-------------|---------|
 | Result template | Supports `{{outputs.xxx}}` | `{{outputs.result}}` |
+| Join strategy | How to build `previous` when multiple upstreams enter this node | `all_merge` |
 
 ---
 
@@ -353,7 +414,80 @@ If no Output node is reached or no branch matches, `outputs` may be empty and th
 
 ---
 
-## 9. Validation before save
+## 9. Debugging, dry-run, and replay
+
+### 9.1 Safe dry-run
+
+Click **Dry run** on the canvas toolbar and enter a test message to simulate the workflow.
+
+Dry-run safety rules:
+
+- `start` / `condition` / `output` / `end` use real logic
+- `tool` does not call MCP; it returns `[dry-run] tool call skipped`
+- `agent` does not call the model; it returns `[dry-run] agent execution skipped`
+- `hitl` does not pause; it simulates approval
+
+API:
+
+```http
+POST /api/workflows/dry-run
+```
+
+Request:
+
+```json
+{
+  "graph": { "nodes": [], "edges": [], "config": {} },
+  "inputs": { "message": "ping" }
+}
+```
+
+Response includes:
+
+- `outputs`
+- `nodeOutputs`
+- `trace`
+- `metrics`
+- `replayScript`
+
+### 9.2 Run details and replay
+
+Query full node execution traces after a run:
+
+```http
+GET /api/workflows/runs/{runId}
+```
+
+The response contains `run` and `nodeRuns`. Each node run records:
+
+- input snapshot
+- output snapshot
+- status / error
+- started_at / finished_at
+- `duration_ms`
+
+Replay API:
+
+```http
+GET /api/workflows/runs/{runId}/replay
+```
+
+This generates replay steps from saved `nodeRuns`; it does not re-execute tools or Agents.
+
+### 9.3 Metrics
+
+The workflow accumulates, when available:
+
+- `node_count`
+- `duration_ms`
+- `tool_call_count`
+- Agent progress usage such as `prompt_tokens` / `completion_tokens` / `total_tokens` / `cost`
+
+Token and cost metrics depend on whether the underlying model/Agent events report usage.
+
+---
+
+## 10. Validation before save
 
 On save, the system checks:
 
@@ -363,13 +497,20 @@ On save, the system checks:
 | Output node required | At least one `output` node with an output variable name |
 | Valid edges | Source and target exist; no self-loops |
 | Start has no incoming edges | Start must not be targeted |
-| Output has no outgoing edges | Nothing after Output |
-| Tool nodes | MCP tool must be selected |
-| Condition nodes | Expression required; ideally 1–2 outgoing edges (yes/no) |
+| Output / End has no outgoing edges | Nothing after Output / End |
+| Non-start nodes must have incoming edges | Prevent orphan nodes |
+| Non-output/end nodes must have outgoing edges | Prevent dead ends |
+| No cycles | Workflow orchestration must be a DAG |
+| Reachability | Every node must be reachable from Start and eventually reach output/end |
+| Tool nodes | MCP tool required; argument JSON must be valid; timeout must be a positive integer |
+| Agent nodes | Must have node instruction or input binding; output variable name required |
+| Condition nodes | Expression required; 1–2 outgoing edges; branches must be yes/no and unique |
+| Edge conditions | Expressions, regexes, and JSONPath/JQ paths must pass static validation |
+| Join strategy | Must be `all_merge` / `last_by_canvas` / `first_non_empty` / `fail_fast` |
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
@@ -379,25 +520,34 @@ On save, the system checks:
 | No final output | Output node branch not reached | Verify condition wiring; ensure every path reaches an **Output** node |
 | Role chat does not run workflow | Role not bound or disabled | Check `workflow_id`, `workflow_policy: auto`, workflow `enabled: true` |
 | Tool node fails | Invalid JSON in arguments or tool disabled | Fix argument template; enable the tool in MCP settings |
+| Save fails with invalid branch | Condition outgoing edges are not marked yes/no, or are duplicated | Select the edge and set branch to `true` or `false` |
+| Multi-upstream result is unexpected | Join strategy does not match the workflow | Switch between `all_merge`, `first_non_empty`, `last_by_canvas`, and `fail_fast` |
+| Nested field is empty | JSONPath/JQ path is outside the safe subset | Use `$.a.b[0]` or `.a.b[0]`; avoid wildcards, recursion, or expressions |
 
 ---
 
-## 11. Best practices
+## 12. Best practices
 
 1. **Meaningful names**: Use descriptive output variable names (`scan_result`, `parsed_targets`) instead of reusing `agent_result` everywhere.  
 2. **Prefer `outputs` for cross-node data**: If a condition, tool, or HITL node might sit in between, use named variables.  
 3. **Use `previous` only for direct links**: `A → B` with nothing in between is the ideal case for `{{previous.output}}`.  
 4. **Conditions should reference source data**: When testing Agent output, use `{{outputs.xxx}}` unless the condition immediately follows that Agent.  
 5. **Every path needs an exit**: Ensure both yes and no branches eventually reach an **Output** node (or your intended end).  
-6. **Validate with a simple run**: Use fixed-string outputs to verify data flow before swapping in real business logic.
+6. **Choose join strategy explicitly for multi-upstream nodes**: Use `all_merge` for aggregation, `first_non_empty` for fallback, and `fail_fast` for critical gates.  
+7. **Use JSONPath/JQ safe paths for nested JSON**: e.g. `jsonpath({{previous.output}}, "$.status") == "ok"`.  
+8. **Dry-run before real execution**: Validate data flow and branches with a simple message before binding the workflow to a role.
 
 ---
 
-## 12. Code references (for developers)
+## 13. Code references (for developers)
 
 | Module | Path |
 |--------|------|
 | Execution engine | `internal/workflow/runner.go` |
+| Eino compile / checkpoint / HITL | `internal/workflow/eino_compile.go` |
+| Graph validation | `internal/workflow/validation.go` |
+| Expressions / JSONPath / joins | `internal/workflow/expression.go`, `jsonpath.go`, `join.go` |
+| Dry-run / replay data | `internal/workflow/dry_run.go`, `internal/handler/workflow_run.go` |
 | Canvas UI | `web/static/js/workflows.js` |
 | Workflow API | `internal/handler/workflow.go` |
 | Role binding | `internal/config/config.go` (`workflow_id` field) |

@@ -3331,7 +3331,11 @@ async function attachRunningTaskEventStream(conversationId) {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
+            let replaySawDone = false;
             const dispatchTaskEvent = function (eventData) {
+                if (eventData && eventData.type === 'done') {
+                    replaySawDone = true;
+                }
                 handleStreamEvent(eventData, null, progressId, getAssistantIdFn, setAssistantIdFn, function () { return mcpIds; }, function (ids) { mcpIds = mergeMcpExecutionIDLists(mcpIds, ids || []); });
             };
             while (true) {
@@ -3351,14 +3355,14 @@ async function attachRunningTaskEventStream(conversationId) {
             if (window.csTaskReplay && window.csTaskReplay.progressId === progressId) {
                 clearCsTaskReplay();
             }
-            if (progressTaskState.has(progressId)) {
+            if (replaySawDone && progressTaskState.has(progressId)) {
                 finalizeProgressTask(progressId, typeof window.t === 'function' ? window.t('tasks.statusCompleted') : '已完成');
             }
             if (window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.onTaskEventStreamEnd === 'function') {
                 window.CyberStrikeChatScroll.onTaskEventStreamEnd();
             }
             if (typeof loadActiveTasks === 'function') loadActiveTasks();
-            if (typeof window.loadConversation === 'function' && window.currentConversationId === conversationId) {
+            if (replaySawDone && typeof window.loadConversation === 'function' && window.currentConversationId === conversationId) {
                 await window.loadConversation(conversationId);
             }
             return true;
@@ -4373,6 +4377,8 @@ function buildMcpTimelineSvg(points, rangeKey) {
     const maxVal = Math.max(1, ...points.map((p) => p.total || 0));
     const hasFailed = points.some((p) => (p.failed || 0) > 0);
     const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
+    const barGap = points.length > 48 ? 1 : 2;
+    const barW = Math.max(1.6, Math.min(8, (plotW / Math.max(1, points.length)) - barGap));
 
     const coords = points.map((p, i) => {
         const x = padL + (points.length <= 1 ? plotW / 2 : (i / (points.length - 1)) * plotW);
@@ -4429,6 +4435,21 @@ function buildMcpTimelineSvg(points, rangeKey) {
             data-failed="${c.p.failed || 0}" />`;
     }).join('');
 
+    const bars = coords.map((c) => {
+        const total = c.p.total || 0;
+        const failed = c.p.failed || 0;
+        const h = total > 0 ? Math.max(3, (total / maxVal) * plotH) : 1;
+        const y = baseY - h;
+        const failedH = failed > 0 ? Math.max(2, (failed / maxVal) * plotH) : 0;
+        const tipTime = formatMcpTimelineLabel(c.p.t, rangeKey, locale);
+        return `<g class="mcp-stats-timeline-bar-group">
+            <rect class="mcp-stats-timeline-bar${total > 0 ? ' is-active' : ''}" x="${(c.x - barW / 2).toFixed(2)}" y="${y.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}" rx="1.6"
+                data-time="${escapeHtml(tipTime)}" data-total="${total}" data-failed="${failed}" />
+            ${failedH > 0 ? `<rect class="mcp-stats-timeline-bar-fail" x="${(c.x - barW / 2).toFixed(2)}" y="${(baseY - failedH).toFixed(2)}" width="${barW.toFixed(2)}" height="${failedH.toFixed(2)}" rx="1.6"
+                data-time="${escapeHtml(tipTime)}" data-total="${total}" data-failed="${failed}" />` : ''}
+        </g>`;
+    }).join('');
+
     const peakC = coords[peakIdx];
     const peakMarker = (peakC.p.total || 0) > 0
         ? `<circle class="mcp-stats-timeline-peak-glow" cx="${peakC.x.toFixed(2)}" cy="${peakC.y.toFixed(2)}" r="5" />`
@@ -4449,6 +4470,7 @@ function buildMcpTimelineSvg(points, rangeKey) {
         </defs>
         ${yLines}
         <path class="mcp-stats-timeline-area" d="${areaPath}" fill="url(#mcpTimelineAreaFill)" />
+        ${bars}
         ${peakMarker}
         <path class="mcp-stats-timeline-line" d="${linePath}" stroke="url(#mcpTimelineLineStroke)" />
         ${hasFailed ? `<path class="mcp-stats-timeline-line mcp-stats-timeline-line--fail" d="${failPath}" />` : ''}
@@ -4480,14 +4502,17 @@ function bindMcpStatsTimelineEvents() {
     }
 
     root.addEventListener('mousemove', function (e) {
-        const dot = e.target.closest('.mcp-stats-timeline-dot');
+        const dot = e.target.closest('.mcp-stats-timeline-dot, .mcp-stats-timeline-bar, .mcp-stats-timeline-bar-fail');
         if (!dot || !mcpTimelineTooltipEl) {
             root.querySelectorAll('.mcp-stats-timeline-dot.is-active').forEach((d) => d.classList.remove('is-active'));
+            root.querySelectorAll('.mcp-stats-timeline-bar.is-hover, .mcp-stats-timeline-bar-fail.is-hover').forEach((d) => d.classList.remove('is-hover'));
             mcpTimelineTooltipEl.style.display = 'none';
             return;
         }
         root.querySelectorAll('.mcp-stats-timeline-dot.is-active').forEach((d) => d.classList.remove('is-active'));
+        root.querySelectorAll('.mcp-stats-timeline-bar.is-hover, .mcp-stats-timeline-bar-fail.is-hover').forEach((d) => d.classList.remove('is-hover'));
         dot.classList.add('is-active');
+        dot.classList.add('is-hover');
         const time = dot.getAttribute('data-time') || '';
         const total = dot.getAttribute('data-total') || '0';
         const failed = dot.getAttribute('data-failed') || '0';
@@ -4503,6 +4528,7 @@ function bindMcpStatsTimelineEvents() {
         if (!e.target.closest || !e.target.closest('.mcp-stats-combined__timeline, .mcp-stats-timeline')) return;
         if (e.relatedTarget && root.contains(e.relatedTarget)) return;
         root.querySelectorAll('.mcp-stats-timeline-dot.is-active').forEach((d) => d.classList.remove('is-active'));
+        root.querySelectorAll('.mcp-stats-timeline-bar.is-hover, .mcp-stats-timeline-bar-fail.is-hover').forEach((d) => d.classList.remove('is-hover'));
         if (mcpTimelineTooltipEl) mcpTimelineTooltipEl.style.display = 'none';
     });
 
@@ -4562,6 +4588,37 @@ function buildTimelineSparseHint(points, timeline) {
         : formatMcpTimelineLabel(points[peakIdx].t, rangeKey, locale);
     return mcpMonitorT('timelineSparseHint', { peak, peakTime })
         || `该时段多数时间为 0，峰值 ${peak} 次出现在 ${peakTime}`;
+}
+
+function renderMcpTimelineActiveMoments(points, rangeKey) {
+    if (!Array.isArray(points) || points.length === 0) return '';
+    const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
+    const active = points
+        .map((p, i) => ({ ...p, i }))
+        .filter((p) => (p.total || 0) > 0)
+        .sort((a, b) => (b.total || 0) - (a.total || 0) || b.i - a.i)
+    const shown = active.slice(0, 4);
+    const hiddenCount = Math.max(0, active.length - shown.length);
+    if (!active.length) return '';
+    const label = mcpMonitorT('timelineActiveMoments') || monitorFallback('活跃时段', 'Active moments');
+    const moreLabel = mcpMonitorT('timelineMoreMoments', { n: hiddenCount }) || `+${hiddenCount}`;
+    const chips = shown.map((p) => {
+        const time = formatMcpTimelineLabel(p.t, rangeKey, locale);
+        const failed = p.failed || 0;
+        const failedLabel = mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`;
+        return `<span class="mcp-stats-timeline-moment" title="${escapeHtml(time)}">
+            <span class="mcp-stats-timeline-moment__time">${escapeHtml(time)}</span>
+            <span class="mcp-stats-timeline-moment__count">${p.total || 0}</span>
+            ${failed > 0 ? `<span class="mcp-stats-timeline-moment__fail">${escapeHtml(failedLabel)}</span>` : ''}
+        </span>`;
+    }).join('');
+    const moreChip = hiddenCount > 0
+        ? `<span class="mcp-stats-timeline-moment mcp-stats-timeline-moment--more" title="${escapeHtml(mcpMonitorT('timelineMoreMomentsTitle', { n: hiddenCount }) || `还有 ${hiddenCount} 个活跃时段`)}">${escapeHtml(moreLabel)}</span>`
+        : '';
+    return `<div class="mcp-stats-timeline-moments">
+        <span class="mcp-stats-timeline-moments__label">${escapeHtml(label)}</span>
+        <div class="mcp-stats-timeline-moments__list">${chips}${moreChip}</div>
+    </div>`;
 }
 
 async function setMcpMonitorTimelineRange(range) {
@@ -4639,12 +4696,14 @@ function renderMcpStatsTimelineBody(timeline, timelineError, compactEmpty, loadi
     const failLegend = mcpMonitorT('timelineFailedLegend') || '失败';
     const hasFailed = points.some((p) => (p.failed || 0) > 0);
     const sparseHint = buildTimelineSparseHint(points, timeline);
+    const momentsHtml = renderMcpTimelineActiveMoments(points, rangeKey);
     const sparseHtml = sparseHint
         ? `<p class="mcp-stats-timeline__sparse-hint">${escapeHtml(sparseHint)}</p>`
         : '';
 
     return `
         <p class="mcp-stats-timeline__inline-meta">${escapeHtml(hint)} · ${escapeHtml(summaryText)}</p>
+        ${momentsHtml}
         <div class="mcp-stats-timeline__chart-wrap">${chartSvg}</div>
         ${sparseHtml}
         <div class="mcp-stats-timeline__legend">
@@ -5290,10 +5349,6 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
     const caption = mcpMonitorT('rankingSummary', { n: MCP_STATS_TOP_N, pct: topNSharePct, total: totals.total })
         || `Top ${MCP_STATS_TOP_N} 占 ${topNSharePct}% · 共 ${totals.total} 次`;
     const unknownToolLabel = mcpMonitorT('unknownTool') || '未知工具';
-    const colTool = mcpMonitorT('columnTool') || '工具';
-    const colCalls = mcpMonitorT('columnCalls') || '调用';
-    const colShare = mcpMonitorT('columnShare') || '占比';
-    const colRate = mcpMonitorT('columnSuccessRate') || '成功率';
     const distAria = mcpMonitorT('distTitle') || '调用分布';
 
     const stackedHtml = segments.map((s) => {
@@ -5332,20 +5387,27 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
         const failNote = failed > 0
             ? `<span class="mcp-stats-tool-item__fail">${escapeHtml(mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`)}</span>`
             : '';
+        const successLabel = mcpMonitorT('successCount', { n: success }) || `成功 ${success}`;
+        const failedLabel = mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`;
         return `<li class="mcp-stats-tool-item${isActive ? ' is-active' : ''}"
             data-tool-name="${escapeHtml(rawName)}" tabindex="0" role="button"
             aria-label="${escapeHtml(rowAria)}" aria-pressed="${isActive ? 'true' : 'false'}">
-            <span class="mcp-stats-tool-item__rank mcp-stats-rank${rankClass}">${index + 1}</span>
-            <span class="mcp-stats-tool-item__dot" style="background:${color}" aria-hidden="true"></span>
-            <div class="mcp-stats-tool-item__body">
+            <div class="mcp-stats-tool-item__top">
+                <span class="mcp-stats-tool-item__rank mcp-stats-rank${rankClass}">${index + 1}</span>
+                <span class="mcp-stats-tool-item__dot" style="background:${color}" aria-hidden="true"></span>
                 <span class="mcp-stats-tool-item__name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                <span class="mcp-stats-tool-item__share">${sharePct}%</span>
+            </div>
+            <div class="mcp-stats-tool-item__middle">
+                <strong class="mcp-stats-tool-item__calls">${total}</strong>
+                <span class="mcp-stats-tool-item__calls-label">${escapeHtml(mcpMonitorT('columnCalls') || '调用')}</span>
                 <span class="mcp-stats-tool-item__track" aria-hidden="true">
                     <span class="mcp-stats-tool-item__fill" style="width:${barPct}%;background:${color}"></span>
                 </span>
             </div>
-            <div class="mcp-stats-tool-item__metrics">
-                <span class="mcp-stats-tool-item__share">${sharePct}%</span>
-                <span class="mcp-stats-tool-item__calls">${total}</span>
+            <div class="mcp-stats-tool-item__bottom">
+                <span class="mcp-stats-tool-item__pill is-success">${escapeHtml(successLabel)}</span>
+                <span class="mcp-stats-tool-item__pill${failed > 0 ? ' is-danger' : ''}">${escapeHtml(failedLabel)}</span>
                 <span class="mcp-stats-tool-item__rate ${rateClass}">${toolRate}%${failNote}</span>
             </div>
         </li>`;
@@ -5359,16 +5421,6 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
                     <span class="mcp-stats-scope-badge mcp-stats-scope-badge--cumulative mcp-stats-scope-badge--inline">${escapeHtml(mcpMonitorT('scopeCumulative') || '累计')}</span>
                     ${escapeHtml(caption)}
                 </p>
-            </div>
-            <div class="mcp-stats-tools-panel__list-head" aria-hidden="true">
-                <span>#</span>
-                <span></span>
-                <span>${escapeHtml(colTool)}</span>
-                <span class="mcp-stats-tool-item__metrics-head">
-                    <span>${escapeHtml(colShare)}</span>
-                    <span>${escapeHtml(colCalls)}</span>
-                    <span>${escapeHtml(colRate)}</span>
-                </span>
             </div>
             <ol class="mcp-stats-tools-panel__list">${listHtml}</ol>
         </div>`;

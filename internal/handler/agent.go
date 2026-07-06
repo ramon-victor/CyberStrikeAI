@@ -1529,6 +1529,10 @@ func (h *AgentHandler) SubscribeAgentTaskEvents(c *gin.Context) {
 
 	flusher, _ := c.Writer.(http.Flusher)
 	ctx := c.Request.Context()
+	var writeMu sync.Mutex
+	stopKeepalive := make(chan struct{})
+	go sseKeepalive(c, stopKeepalive, &writeMu)
+	defer close(stopKeepalive)
 
 	for {
 		select {
@@ -1538,12 +1542,15 @@ func (h *AgentHandler) SubscribeAgentTaskEvents(c *gin.Context) {
 			if !ok {
 				return
 			}
+			writeMu.Lock()
 			if _, err := c.Writer.Write(chunk); err != nil {
+				writeMu.Unlock()
 				return
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
+			writeMu.Unlock()
 		}
 	}
 }

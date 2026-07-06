@@ -189,6 +189,7 @@ func RunRoleBoundWorkflow(ctx context.Context, args RunArgs) (*RunResult, error)
 		"workflowRunId":   runID,
 		"status":          "completed",
 		"outputs":         state.Outputs,
+		"metrics":         state.Metrics,
 		"executedNodes":   state.Executed,
 		"skippedNodes":    state.Skipped,
 		"engine":          "eino_workflow",
@@ -204,6 +205,7 @@ func RunRoleBoundWorkflow(ctx context.Context, args RunArgs) (*RunResult, error)
 			"workflowRunId": runID,
 			"workflowId":    wf.ID,
 			"outputs":       state.Outputs,
+			"metrics":       state.Metrics,
 			"response":      response,
 			"engine":        "eino_workflow",
 		})

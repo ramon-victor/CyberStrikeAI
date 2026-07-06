@@ -62,10 +62,13 @@ func extractAwaitingHITL(err error, art *compiledArtifact, runID string, args Ru
 	label := firstNonEmpty(node.Label, nodeID)
 	if args.DB != nil {
 		pending := map[string]any{
-			"nodeId":   nodeID,
-			"label":    label,
-			"prompt":   prompt,
-			"reviewer": cfgString(node.Config, "reviewer"),
+			"nodeId":        nodeID,
+			"label":         label,
+			"prompt":        prompt,
+			"reviewer":      cfgString(node.Config, "reviewer"),
+			"checkpointId":  runID,
+			"interrupt":     workflowInterruptMetadata(info),
+			"resumePayload": map[string]any{"approved": "bool", "comment": "string"},
 		}
 		pendingJSON, _ := json.Marshal(pending)
 		_ = args.DB.SetWorkflowRunAwaitingHITL(runID, nodeID, string(pendingJSON))
@@ -88,6 +91,30 @@ func extractAwaitingHITL(err error, art *compiledArtifact, runID string, args Ru
 		Prompt:    prompt,
 		Reviewer:  cfgString(node.Config, "reviewer"),
 	}
+}
+
+func workflowInterruptMetadata(info *compose.InterruptInfo) map[string]any {
+	if info == nil {
+		return map[string]any{}
+	}
+	before := append([]string(nil), info.BeforeNodes...)
+	return map[string]any{
+		"beforeNodes":  before,
+		"resumeTarget": firstString(before),
+		"address": map[string]any{
+			"kind":        "compose_interrupt",
+			"beforeNodes": before,
+			"path":        strings.Join(before, "/"),
+		},
+		"raw": fmt.Sprintf("%+v", info),
+	}
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 func nextHITLNodeID(info *compose.InterruptInfo, hitlIDs []string) string {
@@ -176,9 +203,9 @@ func ResumeWorkflowRun(ctx context.Context, args RunArgs, runID string, approved
 	if err != nil {
 		if IsAwaitingHITL(err) {
 			return &RunResult{
-				RunID:       runID,
-				Status:      "awaiting_hitl",
-				Response:    fmt.Sprintf("工作流在节点「%s」等待下一次人工确认。", err.(*AwaitingHITLError).NodeID),
+				RunID:        runID,
+				Status:       "awaiting_hitl",
+				Response:     fmt.Sprintf("工作流在节点「%s」等待下一次人工确认。", err.(*AwaitingHITLError).NodeID),
 				AwaitingHITL: true,
 			}, nil
 		}
@@ -194,6 +221,7 @@ func ResumeWorkflowRun(ctx context.Context, args RunArgs, runID string, approved
 		"workflowRunId":   runID,
 		"status":          "completed",
 		"outputs":         state.Outputs,
+		"metrics":         state.Metrics,
 		"executedNodes":   state.Executed,
 		"skippedNodes":    state.Skipped,
 		"engine":          "eino_workflow",
@@ -206,6 +234,7 @@ func ResumeWorkflowRun(ctx context.Context, args RunArgs, runID string, approved
 			"workflowRunId": runID,
 			"workflowId":    wf.ID,
 			"outputs":       state.Outputs,
+			"metrics":       state.Metrics,
 			"response":      response,
 			"engine":        "eino_workflow",
 		})

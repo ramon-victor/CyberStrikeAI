@@ -453,13 +453,17 @@ type MultiAgentAPIUpdate struct {
 	ToolSearchAlwaysVisibleTools *[]string `json:"tool_search_always_visible_tools,omitempty"`
 }
 
-// RobotsConfig 机器人配置（企业微信、钉钉、飞书、微信 iLink 等）
+// RobotsConfig 机器人配置（企业微信、钉钉、飞书、微信 iLink、Telegram、Slack、Discord、QQ 等）
 type RobotsConfig struct {
-	Session  RobotSessionConfig  `yaml:"session,omitempty" json:"session,omitempty"`   // 机器人会话隔离策略
-	Wechat   RobotWechatConfig   `yaml:"wechat,omitempty" json:"wechat,omitempty"`     // 微信（iLink 扫码绑定）
-	Wecom    RobotWecomConfig    `yaml:"wecom,omitempty" json:"wecom,omitempty"`       // 企业微信
-	Dingtalk RobotDingtalkConfig `yaml:"dingtalk,omitempty" json:"dingtalk,omitempty"` // 钉钉
-	Lark     RobotLarkConfig     `yaml:"lark,omitempty" json:"lark,omitempty"`         // 飞书
+	Session  RobotSessionConfig  `yaml:"session,omitempty" json:"session,omitempty"`     // 机器人会话隔离策略
+	Wechat   RobotWechatConfig   `yaml:"wechat,omitempty" json:"wechat,omitempty"`       // 微信（iLink 扫码绑定）
+	Wecom    RobotWecomConfig    `yaml:"wecom,omitempty" json:"wecom,omitempty"`         // 企业微信
+	Dingtalk RobotDingtalkConfig `yaml:"dingtalk,omitempty" json:"dingtalk,omitempty"`   // 钉钉
+	Lark     RobotLarkConfig     `yaml:"lark,omitempty" json:"lark,omitempty"`           // 飞书
+	Telegram RobotTelegramConfig `yaml:"telegram,omitempty" json:"telegram,omitempty"`   // Telegram
+	Slack    RobotSlackConfig    `yaml:"slack,omitempty" json:"slack,omitempty"`         // Slack
+	Discord  RobotDiscordConfig  `yaml:"discord,omitempty" json:"discord,omitempty"`     // Discord
+	QQ       RobotQQConfig       `yaml:"qq,omitempty" json:"qq,omitempty"`               // QQ 机器人
 }
 
 // RobotWechatConfig 微信 iLink 机器人配置（个人微信 ClawBot / iLink 协议）
@@ -523,6 +527,37 @@ type RobotLarkConfig struct {
 	AppSecret           string `yaml:"app_secret" json:"app_secret"`                         // 应用 App Secret
 	VerifyToken         string `yaml:"verify_token" json:"verify_token"`                     // 事件订阅 Verification Token（可选）
 	AllowChatIDFallback bool   `yaml:"allow_chat_id_fallback" json:"allow_chat_id_fallback"` // 用户 ID 缺失时是否允许回退到 chat_id
+}
+
+// RobotTelegramConfig Telegram 机器人配置（Bot API 长轮询）
+type RobotTelegramConfig struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	BotToken           string `yaml:"bot_token" json:"bot_token"`
+	BotUsername        string `yaml:"bot_username,omitempty" json:"bot_username,omitempty"` // 可选，用于群聊 @ 识别；留空则启动时 getMe
+	AllowGroupMessages bool   `yaml:"allow_group_messages" json:"allow_group_messages"`     // 群聊中仅响应 @ 机器人
+	UpdateOffset       int64  `yaml:"update_offset,omitempty" json:"update_offset,omitempty"`
+}
+
+// RobotSlackConfig Slack 机器人配置（Socket Mode，无需公网回调）
+type RobotSlackConfig struct {
+	Enabled   bool   `yaml:"enabled" json:"enabled"`
+	BotToken  string `yaml:"bot_token" json:"bot_token"`   // xoxb-
+	AppToken  string `yaml:"app_token" json:"app_token"`   // xapp-（connections:write）
+}
+
+// RobotDiscordConfig Discord 机器人配置（Gateway WebSocket）
+type RobotDiscordConfig struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	BotToken           string `yaml:"bot_token" json:"bot_token"`
+	AllowGuildMessages bool   `yaml:"allow_guild_messages" json:"allow_guild_messages"` // 服务器频道中仅响应 @ 机器人
+}
+
+// RobotQQConfig QQ 机器人配置（QQ 开放平台 WebSocket）
+type RobotQQConfig struct {
+	Enabled      bool   `yaml:"enabled" json:"enabled"`
+	AppID        string `yaml:"app_id" json:"app_id"`
+	ClientSecret string `yaml:"client_secret" json:"client_secret"`
+	Sandbox      bool   `yaml:"sandbox" json:"sandbox"` // 沙箱环境（上线前测试）
 }
 
 type ServerConfig struct {

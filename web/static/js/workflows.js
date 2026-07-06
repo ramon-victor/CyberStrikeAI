@@ -44,6 +44,11 @@
     }
 
     const AGENT_MODES = ['eino_single', 'deep', 'plan_execute', 'supervisor'];
+    const JOIN_STRATEGIES = ['all_merge', 'last_by_canvas', 'first_non_empty', 'fail_fast'];
+    const NODE_DEFAULT_SIZE = { w: 150, h: 52 };
+    const NODE_TYPE_SIZES = { condition: { w: 118, h: 86 } };
+    const NODE_PLACEMENT_GAP = 48;
+    const NODE_PLACEMENT_PADDING = 20;
 
     const WORKFLOW_EDIT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
 
@@ -105,17 +110,17 @@
             case 'start':
                 return { input_keys: 'message, conversationId, projectId' };
             case 'tool':
-                return { tool_name: '', arguments: '{}', timeout_seconds: '' };
+                return { tool_name: '', arguments: '{}', timeout_seconds: '', join_strategy: 'all_merge' };
             case 'agent':
-                return { agent_mode: 'eino_single', input_binding: { from: 'previous', field: 'output' }, instruction: '', output_key: 'agent_result' };
+                return { agent_mode: 'eino_single', input_binding: { from: 'previous', field: 'output' }, instruction: '', output_key: 'agent_result', join_strategy: 'all_merge' };
             case 'condition':
-                return { expression: '{{previous.output}} != ""' };
+                return { expression: '{{previous.output}} != ""', join_strategy: 'all_merge' };
             case 'hitl':
-                return { prompt: _t('workflows.defaultHitlPrompt'), prompt_binding: { from: 'previous', field: 'output' }, reviewer: 'human' };
+                return { prompt: _t('workflows.defaultHitlPrompt'), prompt_binding: { from: 'previous', field: 'output' }, reviewer: 'human', join_strategy: 'all_merge' };
             case 'output':
-                return { output_key: 'result', source_binding: { from: 'previous', field: 'output' } };
+                return { output_key: 'result', source_binding: { from: 'previous', field: 'output' }, join_strategy: 'all_merge' };
             case 'end':
-                return { result_binding: { from: 'outputs', field: 'result' } };
+                return { result_binding: { from: 'outputs', field: 'result' }, join_strategy: 'all_merge' };
             default:
                 return {};
         }
@@ -274,6 +279,15 @@
                     style: {
                         'border-width': 4,
                         'border-color': '#fbbf24'
+                    }
+                },
+                {
+                    selector: 'node.just-added',
+                    style: {
+                        'border-width': 4,
+                        'border-color': '#fbbf24',
+                        'border-opacity': 1,
+                        'z-index': 999
                     }
                 }
             ],
@@ -561,6 +575,41 @@
         `;
     }
 
+    function joinStrategyHtml(cfg) {
+        const selected = cfg.join_strategy || 'all_merge';
+        return `
+            <div class="form-group">
+                <label for="workflow-join-strategy">${esc(_t('workflows.config.joinStrategy') || '汇聚策略')}</label>
+                <select id="workflow-join-strategy" onchange="updateWorkflowTypedConfig()">
+                    ${JOIN_STRATEGIES.map(strategy => `<option value="${strategy}" ${strategy === selected ? 'selected' : ''}>${strategy}</option>`).join('')}
+                </select>
+                <p class="workflow-config-hint">${esc(_t('workflows.config.joinStrategyHint') || '多个上游进入同一节点时如何生成 previous。')}</p>
+            </div>
+        `;
+    }
+
+    function conditionExpressionGuideHtml() {
+        const examples = [
+            '{{previous.output}} != ""',
+            '{{outputs.risk_score}} >= 8',
+            '{{previous.output}} contains "success"',
+            '{{previous.output}} matches "^ok"',
+            'jsonpath({{previous.output}}, "$.status") == "ok"',
+            'jq({{outputs.scan}}, ".severity") == "high"'
+        ];
+        return `
+            <div class="workflow-config-hint workflow-condition-guide">
+                <div><strong>${esc(_t('workflows.config.conditionGuideTitle'))}</strong></div>
+                <div>${esc(_t('workflows.config.conditionGuideVars'))}</div>
+                <div>${esc(_t('workflows.config.conditionGuideOps'))}</div>
+                <div>${esc(_t('workflows.config.conditionGuideJson'))}</div>
+                <div class="workflow-example-chips">
+                    ${examples.map(expr => `<button type="button" class="btn-secondary btn-small" onclick="useWorkflowConditionExample(this.dataset.expression)" data-expression="${esc(expr)}">${esc(expr)}</button>`).join('')}
+                </div>
+            </div>
+        `;
+    }
+
     function renderTypedConfig(ele) {
         const wrap = document.getElementById('workflow-typed-config');
         if (!wrap || !ele) return;
@@ -572,7 +621,17 @@
                 : _t('workflows.config.edgeConditionHintExample');
             wrap.innerHTML = `
                 ${typedField('workflow-edge-condition', _t('workflows.config.edgeCondition'), cfg.condition || '', edgeHint)}
-                ${sourceType === 'condition' ? '<p class="workflow-config-hint">' + esc(_t('workflows.config.edgeBranchHint')) + '</p>' : ''}
+                ${sourceType === 'condition' ? `
+                    <div class="form-group">
+                        <label for="workflow-edge-branch">${esc(_t('workflows.config.edgeBranch') || '条件分支')}</label>
+                        <select id="workflow-edge-branch" onchange="updateWorkflowTypedConfig()">
+                            <option value="">${esc(_t('workflows.config.selectBranch') || '请选择')}</option>
+                            <option value="true" ${cfg.branch === 'true' ? 'selected' : ''}>true / 是</option>
+                            <option value="false" ${cfg.branch === 'false' ? 'selected' : ''}>false / 否</option>
+                        </select>
+                    </div>
+                    <p class="workflow-config-hint">${esc(_t('workflows.config.edgeBranchHint'))}</p>
+                ` : ''}
             `;
             return;
         }
@@ -583,6 +642,7 @@
                 break;
             case 'tool':
                 wrap.innerHTML = `
+                    ${joinStrategyHtml(cfg)}
                     <div class="form-group">
                         <label for="workflow-tool-name">${esc(_t('workflows.config.mcpTool'))}</label>
                         <select id="workflow-tool-name" onchange="updateWorkflowTypedConfig()">
@@ -601,6 +661,7 @@
                 break;
             case 'agent':
                 wrap.innerHTML = `
+                    ${joinStrategyHtml(cfg)}
                     <div class="form-group">
                         <label for="workflow-agent-mode">${esc(_t('workflows.config.agentMode'))}</label>
                         <select id="workflow-agent-mode" onchange="updateWorkflowTypedConfig()">
@@ -614,12 +675,15 @@
                 break;
             case 'condition':
                 wrap.innerHTML = `
+                    ${joinStrategyHtml(cfg)}
                     ${typedField('workflow-condition-expression', _t('workflows.config.conditionExpression'), cfg.expression, '{{previous.output}} != ""')}
                     <p class="workflow-config-hint">${_t('workflows.config.conditionHint')}</p>
+                    ${conditionExpressionGuideHtml()}
                 `;
                 break;
             case 'hitl':
                 wrap.innerHTML = `
+                    ${joinStrategyHtml(cfg)}
                     ${typedTextarea('workflow-hitl-prompt', _t('workflows.config.hitlPrompt'), cfg.prompt, _t('workflows.config.hitlPromptPlaceholder'))}
                     ${bindingFieldHtml('workflow-hitl-prompt-binding', 'workflows.config.promptBinding', bindingFromConfig(cfg, 'prompt_binding', 'previous', 'output'), 'workflows.config.promptBindingHint')}
                     <p class="workflow-config-hint">${_t('workflows.config.hitlInteractiveHint')}</p>
@@ -634,13 +698,14 @@
                 break;
             case 'output':
                 wrap.innerHTML = `
+                    ${joinStrategyHtml(cfg)}
                     ${typedField('workflow-output-key', _t('workflows.config.outputKey'), cfg.output_key, 'result')}
                     ${bindingFieldHtml('workflow-output-source', 'workflows.config.sourceBinding', bindingFromConfig(cfg, 'source_binding', 'previous', 'output'), 'workflows.config.sourceBindingHint')}
                     ${typedField('workflow-output-static', _t('workflows.config.staticValue'), cfg.static_value || '', _t('workflows.config.optional'))}
                 `;
                 break;
             case 'end':
-                wrap.innerHTML = bindingFieldHtml('workflow-end-result', 'workflows.config.resultBinding', bindingFromConfig(cfg, 'result_binding', 'outputs', 'result'), 'workflows.config.resultBindingHint');
+                wrap.innerHTML = joinStrategyHtml(cfg) + bindingFieldHtml('workflow-end-result', 'workflows.config.resultBinding', bindingFromConfig(cfg, 'result_binding', 'outputs', 'result'), 'workflows.config.resultBindingHint');
                 break;
             default:
                 wrap.innerHTML = '';
@@ -677,9 +742,13 @@
     function readTypedConfig(ele) {
         if (!ele) return {};
         if (!ele.isNode()) {
-            return { condition: (document.getElementById('workflow-edge-condition') || {}).value || '' };
+            const cfg = { condition: (document.getElementById('workflow-edge-condition') || {}).value || '' };
+            const branchEl = document.getElementById('workflow-edge-branch');
+            if (branchEl) cfg.branch = branchEl.value || '';
+            return cfg;
         }
         const type = ele.data('type') || 'tool';
+        const join_strategy = (document.getElementById('workflow-join-strategy') || {}).value || 'all_merge';
         switch (type) {
             case 'start':
                 return { input_keys: (document.getElementById('workflow-start-input-keys') || {}).value || '' };
@@ -687,31 +756,35 @@
                 return {
                     tool_name: (document.getElementById('workflow-tool-name') || {}).value || '',
                     arguments: (document.getElementById('workflow-tool-arguments') || {}).value || '{}',
-                    timeout_seconds: (document.getElementById('workflow-tool-timeout') || {}).value || ''
+                    timeout_seconds: (document.getElementById('workflow-tool-timeout') || {}).value || '',
+                    join_strategy
                 };
             case 'agent':
                 return {
                     agent_mode: (document.getElementById('workflow-agent-mode') || {}).value || 'eino_single',
                     input_binding: readBinding('workflow-agent-input'),
                     instruction: (document.getElementById('workflow-agent-instruction') || {}).value || '',
-                    output_key: (document.getElementById('workflow-agent-output-key') || {}).value || 'agent_result'
+                    output_key: (document.getElementById('workflow-agent-output-key') || {}).value || 'agent_result',
+                    join_strategy
                 };
             case 'condition':
-                return { expression: (document.getElementById('workflow-condition-expression') || {}).value || '' };
+                return { expression: (document.getElementById('workflow-condition-expression') || {}).value || '', join_strategy };
             case 'hitl':
                 return {
                     prompt: (document.getElementById('workflow-hitl-prompt') || {}).value || '',
                     prompt_binding: readBinding('workflow-hitl-prompt-binding'),
-                    reviewer: (document.getElementById('workflow-hitl-reviewer') || {}).value || 'human'
+                    reviewer: (document.getElementById('workflow-hitl-reviewer') || {}).value || 'human',
+                    join_strategy
                 };
             case 'output':
                 return {
                     output_key: (document.getElementById('workflow-output-key') || {}).value || 'result',
                     source_binding: readBinding('workflow-output-source'),
-                    static_value: (document.getElementById('workflow-output-static') || {}).value || ''
+                    static_value: (document.getElementById('workflow-output-static') || {}).value || '',
+                    join_strategy
                 };
             case 'end':
-                return { result_binding: readBinding('workflow-end-result') };
+                return { result_binding: readBinding('workflow-end-result'), join_strategy };
             default:
                 return {};
         }
@@ -774,6 +847,100 @@
         connectSourceId = '';
     }
 
+    function nodeSizeForType(type) {
+        return NODE_TYPE_SIZES[type] || NODE_DEFAULT_SIZE;
+    }
+
+    function viewportCenterPosition() {
+        const pan = cy.pan();
+        const zoom = cy.zoom();
+        const container = cy.container();
+        return {
+            x: (container.clientWidth / 2 - pan.x) / zoom,
+            y: (container.clientHeight / 2 - pan.y) / zoom
+        };
+    }
+
+    function positionOverlaps(x, y, width, height, excludeId) {
+        const pad = NODE_PLACEMENT_PADDING;
+        const hw = width / 2 + pad;
+        const hh = height / 2 + pad;
+        return cy.nodes().some(node => {
+            if (excludeId && node.id() === excludeId) return false;
+            const p = node.position();
+            const bb = node.boundingBox();
+            return Math.abs(p.x - x) < hw + bb.w / 2 && Math.abs(p.y - y) < hh + bb.h / 2;
+        });
+    }
+
+    function findOpenPosition(anchor, type) {
+        const size = nodeSizeForType(type);
+        const step = 36;
+        for (let i = 0; i < 20; i++) {
+            const x = anchor.x + (i % 5) * step;
+            const y = anchor.y + Math.floor(i / 5) * step;
+            if (!positionOverlaps(x, y, size.w, size.h)) {
+                return { x, y };
+            }
+        }
+        return anchor;
+    }
+
+    function anchorFromSelection(type) {
+        if (selectedElement && selectedElement.length && selectedElement.isNode()) {
+            const p = selectedElement.position();
+            const srcBb = selectedElement.boundingBox();
+            const size = nodeSizeForType(type);
+            const gap = NODE_PLACEMENT_GAP;
+            const candidates = [
+                { x: p.x + srcBb.w / 2 + gap + size.w / 2, y: p.y },
+                { x: p.x, y: p.y + srcBb.h / 2 + gap + size.h / 2 },
+                { x: p.x - srcBb.w / 2 - gap - size.w / 2, y: p.y },
+                { x: p.x, y: p.y - srcBb.h / 2 - gap - size.h / 2 }
+            ];
+            for (let i = 0; i < candidates.length; i++) {
+                const c = candidates[i];
+                if (!positionOverlaps(c.x, c.y, size.w, size.h)) {
+                    return c;
+                }
+            }
+            return findOpenPosition(candidates[0], type);
+        }
+        return viewportCenterPosition();
+    }
+
+    function defaultNodePosition(type) {
+        return findOpenPosition(anchorFromSelection(type), type);
+    }
+
+    function isPositionInViewport(x, y, padding) {
+        const extent = cy.extent();
+        const pad = padding == null ? 40 : padding;
+        return x >= extent.x1 + pad && x <= extent.x2 - pad &&
+            y >= extent.y1 + pad && y <= extent.y2 - pad;
+    }
+
+    function highlightNewNode(node) {
+        if (!node || !node.length) return;
+        if (typeof node.flashClass === 'function') {
+            node.flashClass('just-added', 650);
+        } else {
+            node.addClass('just-added');
+            setTimeout(function () {
+                if (node.nonempty()) node.removeClass('just-added');
+            }, 650);
+        }
+    }
+
+    function revealWorkflowNode(node) {
+        if (!node || !node.length) return;
+        const p = node.position();
+        if (!isPositionInViewport(p.x, p.y)) {
+            cy.animate({ center: { eles: node }, duration: 200 });
+        }
+        highlightNewNode(node);
+    }
+
     function addNode(type, position) {
         initCy();
         if (!cy) return;
@@ -785,10 +952,15 @@
                 label: wfNodeLabel(type),
                 config: defaultConfigForType(type)
             },
-            position: position || { x: 180 + cy.nodes().length * 28, y: 160 + cy.nodes().length * 28 }
+            position: position || defaultNodePosition(type)
         });
         selectWorkflowElement(node);
         updateEmptyState();
+        if (position) {
+            highlightNewNode(node);
+        } else {
+            revealWorkflowNode(node);
+        }
     }
 
     window.refreshWorkflows = async function () {
@@ -805,7 +977,7 @@
             } else if (workflows.length) {
                 fillWorkflowForm(workflows[0]);
             } else {
-                newWorkflowDraft();
+                newWorkflowDraft({ openMeta: false });
                 return;
             }
             renderWorkflowList();
@@ -815,7 +987,8 @@
         }
     };
 
-    window.newWorkflowDraft = function () {
+    window.newWorkflowDraft = function (options) {
+        const shouldOpenMeta = !options || options.openMeta !== false;
         currentWorkflowId = '';
         fillWorkflowForm({
             id: '',
@@ -825,7 +998,9 @@
             graph_json: defaultGraph()
         });
         syncWorkflowMetaIdField(false, '');
-        openWorkflowMetaModal();
+        if (shouldOpenMeta) {
+            openWorkflowMetaModal();
+        }
     };
 
     window.selectWorkflow = function (id) {
@@ -934,6 +1109,7 @@
         const ids = new Set(nodes.map(node => node.id));
         const starts = nodes.filter(node => node.type === 'start');
         const outputs = nodes.filter(node => node.type === 'output');
+        const terminals = nodes.filter(node => node.type === 'output' || node.type === 'end');
         if (!starts.length) errors.push(_t('workflows.validation.needStart'));
         if (!outputs.length) errors.push(_t('workflows.validation.needOutput'));
         edges.forEach(edge => {
@@ -946,6 +1122,15 @@
         });
         outputs.forEach(node => {
             if (edges.some(edge => edge.source === node.id)) errors.push(_t('workflows.validation.outputOutgoing', { label: node.label || node.id }));
+        });
+        nodes.filter(node => node.type === 'end').forEach(node => {
+            if (edges.some(edge => edge.source === node.id)) errors.push(_t('workflows.validation.outputOutgoing', { label: node.label || node.id }));
+        });
+        nodes.filter(node => node.type !== 'start').forEach(node => {
+            if (!edges.some(edge => edge.target === node.id)) errors.push(_t('workflows.validation.nodeNeedsIncoming', { label: node.label || node.id }));
+        });
+        nodes.filter(node => node.type !== 'output' && node.type !== 'end').forEach(node => {
+            if (!edges.some(edge => edge.source === node.id)) errors.push(_t('workflows.validation.nodeNeedsOutgoing', { label: node.label || node.id }));
         });
         nodes.filter(node => node.type === 'tool').forEach(node => {
             if (!String((node.config || {}).tool_name || '').trim()) {
@@ -962,13 +1147,86 @@
             } else if (outEdges.length > 2) {
                 errors.push(_t('workflows.validation.conditionTooManyEdges', { label: node.label || node.id }));
             }
+            const branches = outEdges.map(edge => String(((edge.config || {}).branch || edge.label || '')).trim().toLowerCase());
+            if (branches.some(branch => !['true', 'false', '是', '否', 'yes', 'no', 'y', 'n'].includes(branch))) {
+                errors.push(_t('workflows.validation.conditionBranchLabel', { label: node.label || node.id }));
+            }
+            if (new Set(branches).size !== branches.length) {
+                errors.push(_t('workflows.validation.conditionBranchDuplicate', { label: node.label || node.id }));
+            }
         });
         nodes.filter(node => node.type === 'output').forEach(node => {
             if (!String((node.config || {}).output_key || '').trim()) {
                 errors.push(_t('workflows.validation.outputNeedsKey', { label: node.label || node.id }));
             }
         });
-        return errors;
+        if (terminals.length) {
+            const outgoing = new Map();
+            edges.forEach(edge => {
+                if (!outgoing.has(edge.source)) outgoing.set(edge.source, []);
+                outgoing.get(edge.source).push(edge.target);
+            });
+            const reached = new Set();
+            const queue = starts.map(node => node.id);
+            while (queue.length) {
+                const id = queue.shift();
+                if (reached.has(id)) continue;
+                reached.add(id);
+                (outgoing.get(id) || []).forEach(next => queue.push(next));
+            }
+            nodes.forEach(node => {
+                if (!reached.has(node.id)) errors.push(_t('workflows.validation.nodeUnreachable', { label: node.label || node.id }));
+            });
+            const visiting = new Set();
+            const visited = new Set();
+            function visit(id) {
+                if (visiting.has(id)) return true;
+                if (visited.has(id)) return false;
+                visiting.add(id);
+                for (const next of (outgoing.get(id) || [])) {
+                    if (visit(next)) return true;
+                }
+                visiting.delete(id);
+                visited.add(id);
+                return false;
+            }
+            nodes.forEach(node => {
+                if (visit(node.id)) errors.push(_t('workflows.validation.graphCycle', { label: node.label || node.id }));
+            });
+        }
+        return Array.from(new Set(errors));
+    }
+
+    async function validateWorkflowGraphOnServer(graph) {
+        const response = await apiFetch('/api/workflows/validate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ graph })
+        });
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || _t('workflows.validation.serverFailed'));
+        }
+    }
+
+    function renderWorkflowDryRunTrace(result) {
+        const panel = document.getElementById('workflow-dry-run-panel');
+        const output = document.getElementById('workflow-dry-run-output');
+        if (!panel || !output) return;
+        const trace = (result && result.trace) || [];
+        panel.hidden = false;
+        if (!trace.length) {
+            output.textContent = _t('workflows.dryRunNoTrace') || 'No trace';
+            return;
+        }
+        output.innerHTML = trace.map((item, index) => {
+            const status = item.status || '';
+            const label = item.label || item.nodeId || ('#' + (index + 1));
+            return `<div class="workflow-dry-run-step">
+                <strong>${index + 1}. ${esc(label)}</strong>
+                <span>${esc(item.type || '')} · ${esc(status)}</span>
+            </div>`;
+        }).join('');
     }
 
     window.saveWorkflowDraft = async function () {
@@ -985,6 +1243,12 @@
         const errors = validateWorkflowGraph(graph);
         if (errors.length) {
             showNotification(errors.slice(0, 4).join('；'), 'error');
+            return;
+        }
+        try {
+            await validateWorkflowGraphOnServer(graph);
+        } catch (error) {
+            showNotification(error.message || _t('workflows.validation.serverFailed'), 'error');
             return;
         }
         const method = currentWorkflowId ? 'PUT' : 'POST';
@@ -1016,6 +1280,45 @@
         }
     };
 
+    window.dryRunWorkflowDraft = async function () {
+        initCy();
+        const graph = elementsToGraph();
+        const errors = validateWorkflowGraph(graph);
+        if (errors.length) {
+            showNotification(errors.slice(0, 4).join('；'), 'error');
+            return;
+        }
+        const message = window.prompt(_t('workflows.dryRunPrompt') || 'Input message for dry-run', 'ping');
+        if (message === null) return;
+        try {
+            const response = await apiFetch('/api/workflows/dry-run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ graph, inputs: { message } })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || _t('workflows.dryRunFailed'));
+            }
+            const result = data.result || {};
+            const trace = result.trace || [];
+            console.groupCollapsed('[Workflow dry-run]');
+            console.table(trace.map(item => ({
+                nodeId: item.nodeId,
+                label: item.label,
+                type: item.type,
+                status: item.status
+            })));
+            console.log(result);
+            console.groupEnd();
+            renderWorkflowDryRunTrace(result);
+            const summary = trace.slice(0, 8).map(item => `${item.label || item.nodeId}: ${item.status}`).join('\n');
+            window.alert((_t('workflows.dryRunDone') || 'Dry-run completed') + '\n\n' + summary);
+        } catch (error) {
+            showNotification(error.message || _t('workflows.dryRunFailed'), 'error');
+        }
+    };
+
     window.deleteCurrentWorkflow = async function () {
         const meta = readWorkflowMetaFromForm();
         const id = currentWorkflowId || meta.id;
@@ -1032,7 +1335,7 @@
         }
         currentWorkflowId = '';
         showNotification(_t('workflows.deleted'), 'success');
-        newWorkflowDraft();
+        newWorkflowDraft({ openMeta: false });
         await refreshWorkflows();
     };
 
@@ -1135,6 +1438,14 @@
     window.updateWorkflowTypedConfig = function () {
         if (!selectedElement) return;
         mergeVisibleConfig();
+    };
+
+    window.useWorkflowConditionExample = function (expr) {
+        const input = document.getElementById('workflow-condition-expression');
+        if (!input) return;
+        input.value = expr || '';
+        updateWorkflowTypedConfig();
+        input.focus();
     };
 
     window.removeWorkflowCustomField = function (index) {

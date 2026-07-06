@@ -52,19 +52,31 @@ func resolveBinding(b FieldBinding, state *WorkflowLocalState) any {
 		field = "output"
 	}
 	if from == "" || from == "previous" || from == "prev" {
+		if strings.HasPrefix(field, "$") || strings.HasPrefix(field, ".") {
+			return evalJSONPathValue(state.LastOutput, field)
+		}
 		if field == "output" && state.LastOutput != nil {
 			return state.LastOutput["output"]
 		}
 		return valueFromPath("previous."+field, state)
 	}
 	if from == "inputs" || from == "input" {
+		if strings.HasPrefix(field, "$") || strings.HasPrefix(field, ".") {
+			return evalJSONPathValue(state.Inputs, field)
+		}
 		if field == "" {
 			return state.Inputs
 		}
 		return valueFromPath("inputs."+field, state)
 	}
 	if from == "outputs" {
+		if strings.HasPrefix(field, "$") || strings.HasPrefix(field, ".") {
+			return evalJSONPathValue(state.Outputs, field)
+		}
 		return valueFromPath("outputs."+field, state)
+	}
+	if strings.HasPrefix(field, "$") || strings.HasPrefix(field, ".") {
+		return evalJSONPathValue(valueFromPath(from, state), field)
 	}
 	return valueFromPath(from+"."+field, state)
 }

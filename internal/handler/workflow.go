@@ -41,6 +41,12 @@ type workflowSaveRequest struct {
 	GraphJSON   json.RawMessage `json:"graph_json,omitempty"`
 }
 
+type workflowDryRunRequest struct {
+	Graph     json.RawMessage        `json:"graph,omitempty"`
+	GraphJSON json.RawMessage        `json:"graph_json,omitempty"`
+	Inputs    map[string]interface{} `json:"inputs,omitempty"`
+}
+
 func (h *WorkflowHandler) List(c *gin.Context) {
 	includeDisabled := strings.EqualFold(c.Query("includeDisabled"), "true") || c.Query("include_disabled") == "1"
 	items, err := h.db.ListWorkflowDefinitions(includeDisabled)
@@ -67,6 +73,57 @@ func (h *WorkflowHandler) Get(c *gin.Context) {
 
 func (h *WorkflowHandler) Create(c *gin.Context) {
 	h.save(c, "")
+}
+
+func (h *WorkflowHandler) Validate(c *gin.Context) {
+	var req workflowSaveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "无效的请求参数: " + err.Error()})
+		return
+	}
+	graph := req.Graph
+	if len(graph) == 0 {
+		graph = req.GraphJSON
+	}
+	if len(graph) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "graph 不能为空"})
+		return
+	}
+	if !json.Valid(graph) {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "graph 必须是合法 JSON"})
+		return
+	}
+	if err := workflowrunner.ValidateGraphJSON(c.Request.Context(), string(graph)); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *WorkflowHandler) DryRun(c *gin.Context) {
+	var req workflowDryRunRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		return
+	}
+	graph := req.Graph
+	if len(graph) == 0 {
+		graph = req.GraphJSON
+	}
+	if len(graph) == 0 || !json.Valid(graph) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "graph 必须是合法 JSON"})
+		return
+	}
+	inputs := make(map[string]any, len(req.Inputs))
+	for k, v := range req.Inputs {
+		inputs[k] = v
+	}
+	result, err := workflowrunner.DryRunGraphJSON(c.Request.Context(), string(graph), inputs)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"result": result})
 }
 
 func (h *WorkflowHandler) Update(c *gin.Context) {

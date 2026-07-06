@@ -27,9 +27,10 @@
 | 选中元素 | 单击节点或连线，右侧显示 **节点属性** |
 | 删除选中 | 点击 **删除选中** 删除当前节点或连线 |
 | 自动布局 | 点击 **自动布局** 整理节点位置 |
+| 试运行 | 点击 **试运行** 使用安全 dry-run 验证数据流；工具、Agent、审批不会真实执行 |
 | 删除流程 | 点击 **删除** 删除整个流程定义 |
 
-**建议：** 每个流程至少包含 **1 个开始节点** 和 **1 个输出节点**；开始节点不应有入边，输出节点不应有出边。
+**硬性规则：** 每个流程至少包含 **1 个开始节点** 和 **1 个输出节点**；开始节点不能有入边，输出 / 结束节点不能有出边。保存时前端和后端都会执行严格校验。
 
 ---
 
@@ -45,6 +46,7 @@
 | `lastOutput` | `{{previous.xxx}}` | **上一个刚执行完** 的节点的输出 |
 | `outputs` | `{{outputs.xxx}}` | 全局 **命名变量池**（由节点的「输出变量名」写入） |
 | `nodeOutputs` | `{{节点ID.xxx}}` | 指定节点 ID 的完整输出对象 |
+| `metrics` | 运行详情中查看 | 节点耗时、工具调用数、可收集到的 token / cost 等指标 |
 
 ### 3.1 `previous` 是什么？
 
@@ -68,6 +70,15 @@ Agent B 的 `{{previous.output}}` = Agent A 的输出。
 ```
 
 Agent B 的 `{{previous.output}}` = **条件节点** 的输出（`true` / `false`），**不是** Agent A 的结果。
+
+如果一个节点有 **多个上游节点** 同时连入，`previous` 会先按该节点的 **汇聚策略** 生成：
+
+| 汇聚策略 | 含义 | 适合场景 |
+|----------|------|----------|
+| `all_merge` | 合并所有上游输出，`previous.output` 为数组 | 默认推荐，综合多路结果 |
+| `last_by_canvas` | 按画布顺序取最后一个上游输出 | 明确只采用一路结果 |
+| `first_non_empty` | 取第一个非空输出 | 多路兜底 |
+| `fail_fast` | 任一上游失败则中止当前节点 | 关键链路、审批前置、安全检查 |
 
 ### 3.2 `outputs` 是什么？
 
@@ -135,21 +146,55 @@ outputs["你填的变量名"] = 节点输出内容
 | `{{previous.matched}}` | 上一条件节点的匹配结果（`true` / `false`） |
 | `{{outputs.变量名}}` | 某节点注册过的命名输出 |
 | `{{节点ID.output}}` | 指定节点 ID 的 `output` 字段 |
+| `{{previous.kind}}` | 上一节点输出类型，如 `agent` / `tool` / `condition` |
+| `{{previous.status}}` | 上一节点状态，如 `completed` / `failed` / `simulated` |
+
+节点输出会保留兼容字段（如 `output`、`matched`），同时带有结构化字段：
+
+```json
+{
+  "kind": "agent",
+  "node_id": "node-2",
+  "node_type": "agent",
+  "status": "completed",
+  "output": "..."
+}
+```
 
 ### 4.3 条件表达式
 
-条件节点和连线条件支持简单比较：
+条件节点和连线条件支持比较、文本匹配、正则、逻辑组合与安全 JSONPath/JQ 路径读取：
 
 ```text
 {{outputs.agent_result1}} != ""
 {{previous.output}} == "ok"
-{{outputs.count}} == "100"
+{{outputs.count}} >= 100
+{{previous.output}} contains "success"
+{{previous.output}} matches "^ok"
+{{outputs.risk_score}} >= 8 && {{previous.output}} != ""
+jsonpath({{previous.output}}, "$.status") == "ok"
+jq({{outputs.scan}}, ".severity") == "high"
 ```
 
 规则：
 
-- 使用 `==` 或 `!=` 做字符串比较（两侧会自动去掉首尾空格和引号）
+- 支持 `==`、`!=`、`>`、`>=`、`<`、`<=`
+- 支持 `contains` 子串匹配与 `matches` 正则匹配
+- 支持简单 `&&` / `||`
+- 支持 `jsonpath(value, "$.path")` 与 `jq(value, ".path")` 的**安全路径子集**，仅做字段读取，不执行任意脚本
+- 比较两侧会自动去掉首尾空格和引号
 - 无比较符时，非空且不为 `false` / `0` / `null` 视为真
+- 保存时会静态校验表达式格式、JSONPath/JQ 路径和正则语法
+
+### 4.4 嵌套字段绑定
+
+节点的字段绑定除 `output`、`message` 等普通字段外，也支持 JSONPath/JQ 风格路径：
+
+| 绑定配置 | 含义 |
+|----------|------|
+| `from=previous, field=$.status` | 从上一节点输出对象读取 `status` |
+| `from=outputs, field=$.scan.severity` | 从命名输出中读取嵌套字段 |
+| `from=node-1, field=.output.items[0]` | 从指定节点输出读取数组元素 |
 
 ---
 
@@ -175,6 +220,7 @@ outputs["你填的变量名"] = 节点输出内容
 | 输入来源 | 上游数据的模板表达式 | `{{previous.output}}` |
 | 节点指令 | 本节点要完成的任务描述 | 空 |
 | 输出变量名 | 写入 `outputs` 的键名 | `agent_result` |
+| 汇聚策略 | 多上游进入本节点时如何生成 `previous` | `all_merge` |
 
 **消息拼装规则：**
 
@@ -186,6 +232,7 @@ Agent 节点执行后：
 
 - `previous.output` 更新为本节点响应文本  
 - 若配置了 **输出变量名**，同时写入 `outputs[输出变量名]`
+- Agent 子图在 Eino 中拆为 `prepare → execute → finalize`，便于 trace 与后续局部 checkpoint
 
 ### 5.3 工具（tool）
 
@@ -196,6 +243,7 @@ Agent 节点执行后：
 | MCP 工具 | 工具名称（必填） | — |
 | 参数模板 | JSON，支持 `{{...}}` 模板 | `{}` |
 | 超时秒数 | 可选 | 空 |
+| 汇聚策略 | 多上游进入本节点时如何生成 `previous` | `all_merge` |
 
 示例参数模板：
 
@@ -212,6 +260,7 @@ Agent 节点执行后：
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
 | 条件表达式 | 支持 `{{...}}` 与 `==` / `!=` | `{{previous.output}} != ""` |
+| 汇聚策略 | 多上游进入本节点时如何生成 `previous` | `all_merge` |
 
 **分支规则：**
 
@@ -229,12 +278,21 @@ Agent 节点执行后：
 
 ### 5.5 审批（hitl）
 
-人工确认检查点（当前为记录模式，自动标记 `approved: true` 并继续）。
+人工确认检查点。流程运行到该节点前会通过 Eino interrupt/checkpoint 暂停，等待 API 或监控面板审批后恢复。
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
 | 审批提示 | 支持模板 | `请审批该步骤是否继续执行` |
+| 提示字段绑定 | 留空审批提示时，从绑定字段读取说明 | `previous.output` |
 | 审批方 | `human` / `audit_agent` | `human` |
+| 汇聚策略 | 多上游进入本节点时如何生成 `previous` | `all_merge` |
+
+HITL 等待信息会记录：
+
+- `checkpointId`
+- interrupt `beforeNodes`
+- resume target / address / path
+- resume payload schema（`approved`、`comment`）
 
 ### 5.6 输出（output）
 
@@ -244,6 +302,8 @@ Agent 节点执行后：
 |------|------|--------|
 | 输出变量名 | 必填，最终结果的键名 | `result` |
 | 变量来源 | 模板表达式，决定写入的值 | `{{previous.output}}` |
+| 固定输出值 | 可选，填写后覆盖变量来源 | 空 |
+| 汇聚策略 | 多上游进入本节点时如何生成 `previous` | `all_merge` |
 
 **注意：** 输出节点是流程的「出口」，不应再有出边。
 
@@ -254,6 +314,7 @@ Agent 节点执行后：
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
 | 结束摘要模板 | 支持 `{{outputs.xxx}}` | `{{outputs.result}}` |
+| 汇聚策略 | 多上游进入本节点时如何生成 `previous` | `all_merge` |
 
 ---
 
@@ -353,7 +414,80 @@ workflow_policy: auto
 
 ---
 
-## 九、保存前校验规则
+## 九、调试、试运行与复盘
+
+### 9.1 安全试运行（dry-run）
+
+画布工具栏点击 **试运行**，输入一条测试消息即可模拟执行流程。
+
+dry-run 的安全边界：
+
+- `start` / `condition` / `output` / `end` 会按真实逻辑计算
+- `tool` 不会真实调用 MCP，只返回 `[dry-run] tool call skipped`
+- `agent` 不会真实调用模型，只返回 `[dry-run] agent execution skipped`
+- `hitl` 不会暂停，只模拟通过
+
+相关 API：
+
+```http
+POST /api/workflows/dry-run
+```
+
+请求体：
+
+```json
+{
+  "graph": { "nodes": [], "edges": [], "config": {} },
+  "inputs": { "message": "ping" }
+}
+```
+
+响应包含：
+
+- `outputs`
+- `nodeOutputs`
+- `trace`
+- `metrics`
+- `replayScript`
+
+### 9.2 运行详情与 replay
+
+运行后可查询完整节点执行轨迹：
+
+```http
+GET /api/workflows/runs/{runId}
+```
+
+返回 `run` 与 `nodeRuns`，每个节点记录包含：
+
+- input 快照
+- output 快照
+- status / error
+- started_at / finished_at
+- `duration_ms`
+
+复盘接口：
+
+```http
+GET /api/workflows/runs/{runId}/replay
+```
+
+该接口只根据已保存的 `nodeRuns` 生成步骤，不会重新执行工具或 Agent。
+
+### 9.3 指标（metrics）
+
+工作流会尽量累计：
+
+- `node_count`
+- `duration_ms`
+- `tool_call_count`
+- Agent progress 中可收集到的 `prompt_tokens` / `completion_tokens` / `total_tokens` / `cost`
+
+token 与成本是否存在取决于底层模型/Agent 事件是否上报 usage。
+
+---
+
+## 十、保存前校验规则
 
 保存时系统会自动检查：
 
@@ -363,13 +497,20 @@ workflow_policy: auto
 | 必须有输出节点 | 至少 1 个 `output`，且填写输出变量名 |
 | 连线合法 | 源/目标节点存在，不能自环 |
 | 开始节点无入边 | 开始节点不能被指向 |
-| 输出节点无出边 | 输出节点后不应再连线 |
-| 工具节点 | 必须选择 MCP 工具 |
-| 条件节点 | 必须填写表达式；建议 1～2 条出边（是/否） |
+| 输出 / 结束节点无出边 | 输出 / 结束节点后不应再连线 |
+| 非开始节点必须有入边 | 避免孤岛节点 |
+| 非输出 / 结束节点必须有出边 | 避免执行到死路 |
+| 无环路 | Workflow 编排必须是 DAG |
+| 可达性 | 所有节点必须能从开始节点到达，并能最终到达 output/end |
+| 工具节点 | 必须选择 MCP 工具；参数 JSON 必须合法；超时必须为正整数 |
+| Agent 节点 | 必须填写节点指令或输入绑定；必须填写输出变量名 |
+| 条件节点 | 必须填写表达式；需要 1～2 条出边；分支必须标记是/否且不能重复 |
+| 连线条件 | 表达式、正则、JSONPath/JQ 路径必须通过静态校验 |
+| 汇聚策略 | 必须是 `all_merge` / `last_by_canvas` / `first_non_empty` / `fail_fast` |
 
 ---
 
-## 十、排错指南
+## 十一、排错指南
 
 | 现象 | 可能原因 | 处理建议 |
 |------|----------|----------|
@@ -379,25 +520,34 @@ workflow_policy: auto
 | 流程无最终输出 | 未命中输出节点所在分支 | 检查条件分支连线；确保至少一条路径到达 **输出** 节点 |
 | 角色对话未跑流程 | 角色未绑定或未启用 | 确认 `workflow_id`、`workflow_policy: auto`、流程 `enabled: true` |
 | 工具节点失败 | 参数 JSON 不合法或工具未启用 | 检查参数模板；在 MCP 中启用对应工具 |
+| 保存失败提示分支非法 | 条件节点出边未标记是/否或重复 | 选中连线，设置条件分支为 `true` 或 `false` |
+| 多上游结果不符合预期 | 汇聚策略不合适 | 根据场景改为 `all_merge` / `first_non_empty` / `last_by_canvas` / `fail_fast` |
+| 嵌套字段取不到 | JSONPath/JQ 路径不符合安全子集 | 使用 `$.a.b[0]` 或 `.a.b[0]`，不要用通配符/递归/表达式 |
 
 ---
 
-## 十一、最佳实践
+## 十二、最佳实践
 
 1. **命名规范**：为每个需要被引用的节点设置有意义的输出变量名，如 `scan_result`、`parsed_targets`，避免都叫 `agent_result`。  
 2. **跨节点传参优先用 `outputs`**：只要中间可能插入条件、工具、审批节点，就应用命名变量。  
 3. **`previous` 仅用于直连**：A → B 且无中间节点时，`{{previous.output}}` 最简洁。  
 4. **条件判断引用源数据**：判断 Agent 输出时用 `{{outputs.xxx}}`，不要用 `{{previous.output}}`（除非条件紧跟在目标 Agent 之后）。  
 5. **每条路径都要有出口**：确保「是」「否」分支最终都能到达 **输出** 节点（或你期望的终点）。  
-6. **保存前跑一遍**：用简单指令（如固定字符串输出）验证数据传递，再替换为真实业务逻辑。
+6. **多上游节点显式选择汇聚策略**：综合结果用 `all_merge`，兜底用 `first_non_empty`，关键链路用 `fail_fast`。  
+7. **嵌套 JSON 用 JSONPath/JQ 安全路径**：例如 `jsonpath({{previous.output}}, "$.status") == "ok"`。  
+8. **保存前先 dry-run**：用简单消息验证数据传递和分支，再绑定角色真实执行。
 
 ---
 
-## 十二、相关代码位置（开发者参考）
+## 十三、相关代码位置（开发者参考）
 
 | 模块 | 路径 |
 |------|------|
 | 执行引擎 | `internal/workflow/runner.go` |
+| Eino 编译 / checkpoint / HITL | `internal/workflow/eino_compile.go` |
+| 图校验 | `internal/workflow/validation.go` |
+| 表达式 / JSONPath / 汇聚 | `internal/workflow/expression.go`、`jsonpath.go`、`join.go` |
+| dry-run / replay 数据 | `internal/workflow/dry_run.go`、`internal/handler/workflow_run.go` |
 | 画布前端 | `web/static/js/workflows.js` |
 | 流程 API | `internal/handler/workflow.go` |
 | 角色绑定 | `internal/config/config.go`（`workflow_id` 字段） |

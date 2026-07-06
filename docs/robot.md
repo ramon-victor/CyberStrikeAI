@@ -2,7 +2,7 @@
 
 [English](robot_en.md)
 
-本文档说明如何通过**钉钉**、**飞书**与 **企业微信** 与 CyberStrikeAI 对话（长连接 / 回调模式），在手机端即可使用，无需在服务器上打开网页。按下面步骤操作可避免常见弯路。
+本文档说明如何通过**个人微信**、**钉钉**、**飞书**与 **企业微信** 与 CyberStrikeAI 对话（长连接 / 回调模式），在手机端即可使用，无需在服务器上打开网页。按下面步骤操作可避免常见弯路。
 
 ---
 
@@ -11,11 +11,14 @@
 1. 登录 CyberStrikeAI Web 端  
 2. 左侧导航进入 **系统设置**  
 3. 在左侧设置分类中点击 **机器人设置**（位于「基本设置」与「安全设置」之间）  
-4. 按平台勾选并填写（钉钉填 Client ID / Client Secret，飞书填 App ID / App Secret）  
-5. 点击 **应用配置** 保存  
-6. **重启 CyberStrikeAI 应用**（只保存不重启，机器人不会连上）
+4. 按平台配置：
+   - **个人微信**：点击「微信 / iLink」→「生成二维码并绑定」，用微信扫码确认（见 [3.4 个人微信](#34-个人微信-wechat--ilink)）
+   - **钉钉**：勾选并填写 Client ID / Client Secret
+   - **飞书**：勾选并填写 App ID / App Secret
+5. 点击 **应用配置** 保存（微信扫码绑定成功后会**自动保存并启用**，一般无需再点）
+6. **重启 CyberStrikeAI 应用**（钉钉/飞书：只保存不重启，长连接不会建立；微信绑定成功后会自动重启连接，通常无需手动重启）
 
-配置会写入 `config.yaml` 的 `robots` 段，也可在配置文件中直接编辑。**修改钉钉/飞书配置后必须重启，长连接才会生效。**
+配置会写入 `config.yaml` 的 `robots` 段，也可在配置文件中直接编辑。**修改钉钉/飞书配置后必须重启，长连接才会生效。** 个人微信绑定成功后程序会自动写入 `robots.wechat` 并重启 iLink 长轮询。
 
 ---
 
@@ -23,9 +26,14 @@
 
 | 平台     | 说明 |
 |----------|------|
+| 个人微信 | 使用微信 iLink 协议，Web 端扫码绑定后长轮询收消息，**无需公网回调** |
 | 钉钉     | 使用 Stream 长连接，程序主动连接钉钉接收消息 |
 | 飞书     | 使用长连接，程序主动连接飞书接收消息 |
 | 企业微信 | 使用 HTTP 回调接收消息，被动回包 + 主动调用企业微信发送消息 API |
+| Telegram | Bot API 长轮询（getUpdates），**无需公网回调** |
+| Slack    | Socket Mode（出站 WebSocket），**无需公网回调** |
+| Discord  | Gateway WebSocket，**无需公网回调** |
+| QQ 机器人 | QQ 开放平台 WebSocket（C2C / 群 @），**无需公网回调** |
 
 下面第三节会按平台写清：在开放平台要做什么、要复制哪些字段、填到 CyberStrikeAI 的哪一栏。
 
@@ -151,9 +159,150 @@
 
 ---
 
+### 3.4 个人微信 (WeChat / iLink)
+
+> 个人微信采用「Web 扫码绑定 + iLink 长轮询」方式工作：  
+> - 在 CyberStrikeAI Web 端生成二维码 → 用**手机微信**扫码并确认绑定；  
+> - 绑定成功后自动写入 `config.yaml` 的 `robots.wechat`，并启动 iLink 长轮询（程序主动连接 `ilinkai.weixin.qq.com` 收消息）；  
+> - **无需**在服务器上配置公网回调 URL，也**无需**去微信开放平台注册应用。
+
+**与企业微信的区别**
+
+| 项目 | 个人微信 (iLink) | 企业微信 (WeCom) |
+|------|------------------|------------------|
+| 使用场景 | 个人微信私聊 | 企业微信自建应用 |
+| 配置方式 | Web 端扫码绑定 | 管理后台配置回调 URL + Token |
+| 是否需要公网 | 否（长轮询出站即可） | 是（需可被企业微信访问的 HTTPS 回调） |
+| 配置段 | `robots.wechat` | `robots.wecom` |
+
+**绑定步骤（按顺序做）**
+
+1. **登录 CyberStrikeAI Web 端**  
+   左侧 **系统设置** → **机器人设置** → 点击 **微信 / iLink** 卡片。
+
+2. **（可选）勾选「启用微信机器人」**  
+   首次绑定可跳过；绑定成功后会自动勾选并启用。
+
+3. **生成二维码**  
+   点击 **「生成二维码并绑定」**。页面会显示二维码（约 **5 分钟**有效；过期请重新生成）。
+
+4. **微信扫码确认**  
+   - 用手机微信扫描页面二维码；  
+   - 按手机提示完成确认；  
+   - 若手机微信弹出**配对数字**，在 Web 页面对应输入框填写并点击 **提交**（仅部分账号需要）。
+
+5. **等待绑定完成**  
+   页面显示「绑定成功，微信机器人已启用」即完成。`bot_token`、`ilink_bot_id` 等会自动写入 `config.yaml`，程序会自动重启 iLink 长轮询，**一般无需手动重启服务**。
+
+6. **在手机微信里测试**  
+   打开与 CyberStrikeAI 机器人的**私聊**（绑定后微信内会出现对应会话），发送「帮助」或任意文字测试。
+
+**CyberStrikeAI 微信栏位说明**
+
+| 栏位 | 说明 |
+|------|------|
+| 启用微信机器人 | 勾选后启动 iLink 长轮询；绑定成功后会自动勾选 |
+| 生成二维码并绑定 | 发起扫码绑定流程 |
+| **高级设置**（一般保持默认即可） | |
+| API Base URL | 默认 `https://ilinkai.weixin.qq.com` |
+| Bot Type | 默认 `3` |
+| Bot Agent | 默认 `CyberStrikeAI/1.0` |
+| iLink Bot ID | 绑定成功后自动填充，只读 |
+
+**使用方式**
+
+- 仅支持在与机器人的**私聊**中对话，直接发送文字即可，**不需要 @**。  
+- 不支持群聊 @ 机器人（与钉钉/飞书群聊不同）。  
+- 仅处理**文本消息**；图片、语音等会忽略或提示暂不支持。
+
+**重新绑定**
+
+- 若需更换绑定的微信账号，在机器人设置页点击 **「重新绑定」**，再次扫码即可。  
+- 若提示「该微信已绑定过，无需重复绑定」，说明该账号此前已完成绑定。
+
+**常见问题**
+
+| 现象 | 处理 |
+|------|------|
+| 二维码过期 | 重新点击「生成二维码并绑定」（有效期约 5 分钟） |
+| 扫码后要求输入数字 | 查看手机微信显示的配对数字，在 Web 页面输入并提交 |
+| 绑定成功但发消息无回复 | 看程序日志是否有 `微信 iLink 长轮询已启动`、`微信收到消息`；确认已勾选「启用微信机器人」 |
+| 断网或睡眠后无回复 | 程序会自动重连（约 5～60 秒）；仍无回复可重启 CyberStrikeAI |
+| 无法生成二维码 | 确认服务器能访问 `https://ilinkai.weixin.qq.com`（出站 HTTPS） |
+
+---
+
+### 3.5 Telegram
+
+> Telegram 使用 **Bot API 长轮询**（`getUpdates`）：程序主动连接 `api.telegram.org` 收消息，**无需公网回调**。
+
+**配置步骤：**
+
+1. 在 Telegram 中找 **@BotFather**，发送 `/newbot` 创建机器人，获得 **Bot Token**。  
+2. CyberStrikeAI → **系统设置** → **机器人设置** → **Telegram**。  
+3. 勾选「启用 Telegram 机器人」，粘贴 **Bot Token**。  
+4. （可选）填写 Bot Username（不含 `@`），或留空由程序自动 `getMe`。  
+5. （可选）勾选「允许群聊」— 群聊中仅响应 **@机器人** 的消息。  
+6. 点击 **应用配置**（会自动重启长轮询连接）。
+
+**使用：** 与机器人私聊直接发消息；群聊需 @ 机器人（且已勾选允许群聊）。
+
+---
+
+### 3.6 Slack
+
+> Slack 使用 **Socket Mode**（出站 WebSocket）：需 **Bot Token** 与 **App-Level Token**，**无需公网回调**。
+
+**配置步骤：**
+
+1. 在 [Slack API](https://api.slack.com/apps) 创建 App → 启用 **Socket Mode**。  
+2. **Basic Information** → **App-Level Tokens** → 创建 token（scope: `connections:write`），即 **xapp-** 开头。  
+3. **OAuth & Permissions** → 添加 Bot Token Scopes：`app_mentions:read`、`chat:write`、`im:history`、`im:read` 等 → 安装到工作区，获得 **xoxb-** Bot Token。  
+4. **Event Subscriptions** → 订阅 `message.im`、`app_mention` 等（Socket Mode 下在应用内配置）。  
+5. 在 CyberStrikeAI 填入 Bot Token 与 App-Level Token → **应用配置**。
+
+**使用：** 与 Bot 私聊直接发；频道中需 @ 机器人。
+
+---
+
+### 3.7 Discord
+
+> Discord 使用 **Gateway WebSocket**：程序主动连接 Discord Gateway，**无需公网回调**。
+
+**配置步骤：**
+
+1. 在 [Discord Developer Portal](https://discord.com/developers/applications) 创建应用 → **Bot** → 复制 **Token**。  
+2. 开启 **Privileged Gateway Intents** 中的 **Message Content Intent**（否则读不到消息正文）。  
+3. OAuth2 → URL Generator → scopes: `bot` → 权限勾选 **Send Messages**、**Read Message History** 等 → 邀请 Bot 到服务器。  
+4. CyberStrikeAI → **机器人设置** → **Discord** → 填入 Token → **应用配置**。  
+5. （可选）勾选「允许服务器频道」— 频道中仅响应 **@机器人**。
+
+**使用：** 与 Bot 私聊直接发；服务器频道需 @ 机器人（且已勾选允许服务器频道）。
+
+---
+
+### 3.8 QQ 机器人
+
+> QQ 机器人使用 **QQ 开放平台 WebSocket**（官方 `botgo` SDK）：支持 C2C 私聊与群 @，**无需公网回调**（WebSocket 出站连接）。
+
+**配置步骤：**
+
+1. 在 [QQ 机器人开放平台](https://q.qq.com) 创建机器人，获取 **App ID** 与 **Client Secret**。  
+2. 在沙箱中添加测试成员（上线前仅沙箱可对话）。  
+3. 订阅 **C2C 消息**、**群 @ 消息** 等事件（WebSocket 模式）。  
+4. CyberStrikeAI → **机器人设置** → **QQ 机器人** → 填入 App ID、Client Secret。  
+5. 测试阶段勾选 **沙箱环境**；正式上线后取消沙箱并发布。  
+6. 点击 **应用配置**。
+
+**使用：** 与机器人 C2C 私聊直接发；QQ 群中需 @ 机器人。
+
+> 注意：QQ 官方正逐步推广 Webhook 回调；当前实现使用 WebSocket（与钉钉/飞书类似的长连接模式）。若配置变更后连接未刷新，可重启 CyberStrikeAI 进程。
+
+---
+
 ## 四、机器人命令
 
-在钉钉/飞书中向机器人发送以下**文本命令**（仅支持文本）：
+在任一已接入平台（钉钉/飞书/微信/Telegram/Slack/Discord/QQ 等）向机器人发送以下**文本命令**（仅支持文本）：
 
 | 命令 | 说明 |
 |------|------|
@@ -175,16 +324,25 @@
 
 ## 五、如何使用（要 @ 机器人吗？）
 
-- **单聊（推荐）**：在钉钉/飞书里**搜索并打开该机器人**，进入与机器人的**私聊**，直接输入「帮助」或任意文字即可，**不需要 @**。  
-- **群聊**：若机器人被添加到群里，在群内只有 **@机器人** 后发送的消息才会被机器人收到并回复；不 @ 的群消息不会触发机器人。
+- **个人微信**：在与 CyberStrikeAI 机器人的**私聊**中直接发送即可，**不需要 @**（不支持群聊）。  
+- **钉钉 / 飞书单聊（推荐）**：**搜索并打开该机器人**，进入**私聊**，直接输入「帮助」或任意文字即可，**不需要 @**。  
+- **钉钉 / 飞书群聊**：若机器人被添加到群里，在群内只有 **@机器人** 后发送的消息才会被机器人收到并回复；不 @ 的群消息不会触发机器人。
 
-总结：和机器人**单聊时直接发**；在**群里用时需要 @机器人** 再发内容。
+总结：**个人微信、单聊时直接发**；**钉钉/飞书在群里用时需要 @机器人** 再发内容。
 
 ---
 
 ## 六、推荐使用流程（避免漏步骤）
 
-1. **在开放平台**：按第三节完成钉钉或飞书应用创建、凭证复制、机器人开通（钉钉务必选 **Stream 模式**）、权限与发布。  
+**个人微信（最简单，无需开放平台）**
+
+1. CyberStrikeAI Web 端 → 系统设置 → 机器人设置 → **微信 / iLink** → **生成二维码并绑定**。  
+2. 手机微信扫码确认（如需配对数字则在 Web 页填写）。  
+3. 绑定成功后，在手机微信私聊中发「帮助」测试。
+
+**钉钉 / 飞书**
+
+1. **在开放平台**：按第三节完成应用创建、凭证复制、机器人开通（钉钉务必选 **Stream 模式**）、权限与发布。  
 2. **在 CyberStrikeAI**：系统设置 → 机器人设置 → 勾选对应平台，粘贴 Client ID/App ID、Client Secret/App Secret → 点击 **应用配置**。  
 3. **重启 CyberStrikeAI 进程**（否则长连接不会建立）。  
 4. **在手机钉钉/飞书**：找到该机器人（单聊直接发，群聊需 @机器人），发「帮助」或任意内容测试。
@@ -199,6 +357,14 @@
 
 ```yaml
 robots:
+  wechat: # 个人微信 iLink（扫码绑定后自动写入，一般无需手填）
+    enabled: true
+    bot_token: "your_bot_token@im.bot:..."
+    ilink_bot_id: "your_bot_id@im.bot"
+    ilink_user_id: "your_user_id@im.wechat"
+    base_url: "https://ilinkai.weixin.qq.com"
+    bot_type: "3"
+    bot_agent: "CyberStrikeAI/1.0"
   dingtalk:
     enabled: true
     client_id: "your_dingtalk_app_key"
@@ -208,9 +374,33 @@ robots:
     app_id: "your_lark_app_id"
     app_secret: "your_lark_app_secret"
     verify_token: ""
+  wecom:
+    enabled: false
+    corp_id: ""
+    agent_id: 0
+    token: ""
+    encoding_aes_key: ""
+    secret: ""
+  telegram:
+    enabled: false
+    bot_token: ""
+    allow_group_messages: false
+  slack:
+    enabled: false
+    bot_token: ""
+    app_token: ""
+  discord:
+    enabled: false
+    bot_token: ""
+    allow_guild_messages: false
+  qq:
+    enabled: false
+    app_id: ""
+    client_secret: ""
+    sandbox: true
 ```
 
-修改后需**重启应用**，长连接在应用启动时建立。
+修改钉钉/飞书/企业微信/Telegram/Slack/Discord/QQ 配置后，点击 **应用配置** 会自动重启对应长连接。个人微信扫码绑定成功后会自动写入并重启 iLink 连接。
 
 ---
 
@@ -235,7 +425,30 @@ curl -X POST "http://localhost:8080/api/robot/test" \
 
 ---
 
-## 九、钉钉发消息没反应时排查
+## 九、发消息没反应时排查
+
+### 9.1 个人微信
+
+按顺序检查：
+
+1. **是否已完成扫码绑定**  
+   机器人设置页应显示「已连接」或已绑定 Bot ID；`config.yaml` 中 `robots.wechat.bot_token` 不应为空。
+
+2. **是否已启用**  
+   确认「启用微信机器人」已勾选；若刚修改过，可重启 CyberStrikeAI 进程。
+
+3. **看程序日志**  
+   - 启动后应看到：`微信 iLink 长轮询已启动`；  
+   - 发消息后应有：`微信收到消息`；若没有，多为未绑定成功或 `bot_token` 失效，可尝试 **重新绑定**。  
+   - 若出现 `微信 iLink 长轮询异常，将自动重连`，等待自动重连或重启进程。
+
+4. **网络**  
+   服务器需能访问 `https://ilinkai.weixin.qq.com`（出站 HTTPS）。绑定阶段若无法生成二维码，优先检查此项。
+
+5. **断网或睡眠后**  
+   与钉钉/飞书类似，程序会**自动重连**（约 5～60 秒）；仍无回复可重启 CyberStrikeAI。
+
+### 9.2 钉钉
 
 按顺序检查：
 
@@ -260,8 +473,10 @@ curl -X POST "http://localhost:8080/api/robot/test" \
 
 ## 十、常见弯路（避免踩坑）
 
+- **个人微信与企业微信混淆**：个人微信走 `robots.wechat` + Web 扫码绑定；企业微信走 `robots.wecom` + 管理后台回调 URL，二者完全不同。  
+- **个人微信二维码过期**：二维码约 5 分钟有效，过期需重新生成，不要一直扫旧码。  
 - **用错了机器人类型**：在钉钉**群里**添加的「自定义」机器人（Webhook + 加签）**不能**用来做对话，本程序只支持**开放平台「企业内部应用」**里的机器人。  
-- **只保存没重启**：在 CyberStrikeAI 里改完机器人配置后必须**重启应用**，否则长连接不会建立。  
+- **只保存没重启**：钉钉/飞书改完配置后必须**重启应用**，否则长连接不会建立（个人微信扫码绑定会自动重启连接）。  
 - **Client ID 抄错**：开放平台是 `504` 就填 `504`，不要填成 `5o4`；尽量用复制粘贴。  
 - **钉钉只开了 HTTP 回调没开 Stream**：本程序通过 **Stream 长连接**收消息，开放平台里机器人的消息接收方式必须选 **Stream 模式**。  
 - **应用没发布**：开放平台里修改了机器人或权限后，要在「版本管理与发布」里**发布新版本**，否则不生效。
@@ -270,6 +485,7 @@ curl -X POST "http://localhost:8080/api/robot/test" \
 
 ## 十一、注意事项
 
-- 钉钉、飞书均**仅处理文本消息**；其他类型（如图片、语音）会提示暂不支持或忽略。  
+- 各平台均**仅处理文本消息**；其他类型（如图片、语音）会提示暂不支持或忽略。  
+- 个人微信仅支持**私聊**，不支持群聊 @ 机器人。  
 - 会话与 Web 端共用同一套对话数据：在机器人里创建的对话会在 Web 端「对话」列表中看到，反之亦然。  
 - Robot execution uses the same **Eino single-agent/multi-agent** logic (`ProcessMessageForRobot`, including progress callbacks and process-detail persistence); it only skips client-side SSE and replies once at the end to DingTalk/Lark/WeCom. Default `robot_default_agent_mode: eino_single`.

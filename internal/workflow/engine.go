@@ -17,16 +17,16 @@ type compiledArtifact struct {
 
 // Engine compiles and caches Eino Workflow artifacts.
 type Engine struct {
-	mu        sync.RWMutex
-	cache     map[string]*compiledArtifact
-	cpStore   compose.CheckPointStore
-	cpStoreMu sync.Once
-	cpStoreErr error
+	mu            sync.RWMutex
+	cache         map[string]*compiledArtifact
+	cpStore       compose.CheckPointStore
+	cpStoreMu     sync.Once
+	cpStoreErr    error
 	checkpointDir string
 }
 
 var defaultEngine = &Engine{
-	cache: make(map[string]*compiledArtifact),
+	cache:         make(map[string]*compiledArtifact),
 	checkpointDir: "data/workflow-checkpoints",
 }
 
@@ -69,11 +69,8 @@ func ValidateGraphJSON(ctx context.Context, graphJSON string) error {
 		return err
 	}
 	idx := indexGraph(g)
-	if len(findStartNodeIDs(idx)) == 0 {
-		return fmt.Errorf("工作流缺少可执行的起点节点")
-	}
-	if !hasTerminalNode(idx) {
-		return fmt.Errorf("工作流至少需要一个无出边的终点或 output/end 节点")
+	if err := validateGraphDefinition(g, idx); err != nil {
+		return err
 	}
 	_, err = defaultEngine.compile(ctx, g)
 	return err
@@ -120,6 +117,9 @@ func (e *Engine) compile(ctx context.Context, g *graphDef) (*compiledArtifact, e
 		return nil, err
 	}
 	idx := indexGraph(g)
+	if err := validateGraphDefinition(g, idx); err != nil {
+		return nil, err
+	}
 	hitlIDs := collectHITLNodeIDs(idx)
 	compileOpts := []compose.GraphCompileOption{
 		compose.WithGraphName("CyberStrikeWorkflow"),
@@ -218,6 +218,9 @@ func runWorkflowNodeLambda(runCtx context.Context, n graphNode) (WorkflowNodeOut
 	localRT := workflowRuntimeFrom(runCtx)
 	if localRT == nil {
 		return nil, fmt.Errorf("workflow runtime missing in context")
+	}
+	if err := prepareNodeInputState(localRT, n); err != nil {
+		return nil, err
 	}
 	result, proceed, err := executeNode(runCtx, localRT.args, localRT.runID, n, localRT.state)
 	if err != nil {

@@ -20,6 +20,7 @@ type WorkflowLocalState struct {
 	NodeOutputs         map[string]map[string]any `json:"nodeOutputs,omitempty"`
 	NodeProceed         map[string]bool           `json:"nodeProceed,omitempty"`
 	LastOutput          map[string]any            `json:"lastOutput,omitempty"`
+	Metrics             map[string]any            `json:"metrics,omitempty"`
 	Executed            []string                  `json:"executed,omitempty"`
 	Skipped             []string                  `json:"skipped,omitempty"`
 	WorkflowRunID       string                    `json:"workflowRunId,omitempty"`
@@ -33,10 +34,11 @@ func newWorkflowLocalState(inputs map[string]interface{}, runID string) *Workflo
 		in[k] = v
 	}
 	return &WorkflowLocalState{
-		Inputs:      in,
-		Outputs:     make(map[string]any),
-		NodeOutputs: make(map[string]map[string]any),
-		NodeProceed: make(map[string]bool),
+		Inputs:        in,
+		Outputs:       make(map[string]any),
+		NodeOutputs:   make(map[string]map[string]any),
+		NodeProceed:   make(map[string]bool),
+		Metrics:       make(map[string]any),
 		WorkflowRunID: runID,
 	}
 }
@@ -89,25 +91,6 @@ func valueFromPath(path string, state *WorkflowLocalState) any {
 		return ""
 	}
 	return cur
-}
-
-func evalCondition(expr string, state *WorkflowLocalState) bool {
-	expr = strings.TrimSpace(expr)
-	if expr == "" {
-		return true
-	}
-	resolved := strings.TrimSpace(resolveTemplate(expr, state))
-	switch {
-	case strings.Contains(resolved, "!="):
-		parts := strings.SplitN(resolved, "!=", 2)
-		return cleanComparable(parts[0]) != cleanComparable(parts[1])
-	case strings.Contains(resolved, "=="):
-		parts := strings.SplitN(resolved, "==", 2)
-		return cleanComparable(parts[0]) == cleanComparable(parts[1])
-	default:
-		v := strings.ToLower(cleanComparable(resolved))
-		return v != "" && v != "false" && v != "0" && v != "null"
-	}
 }
 
 func cleanComparable(s string) string {

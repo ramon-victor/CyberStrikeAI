@@ -100,6 +100,14 @@ func RunDeepAgent(
 	if orchMode == "supervisor" && len(effectiveSubs) == 0 {
 		return nil, fmt.Errorf("multi_agent.orchestration=supervisor 时需至少配置一个子代理（sub_agents 或 agents 目录 Markdown）")
 	}
+	if orchMode == "supervisor" && len(effectiveSubs) == 1 && progress != nil {
+		progress("progress", "Supervisor 是专家路由模式；当前仅 1 个子代理，专家路由空间有限，仍会继续执行。", map[string]interface{}{
+			"conversationId": conversationID,
+			"source":         "eino",
+			"orchestration":  orchMode,
+			"kind":           "supervisor_boundary_hint",
+		})
+	}
 
 	einoLoc, einoSkillMW, einoFSTools, skillsRoot, einoErr := prepareEinoSkills(ctx, appCfg.SkillsDir, ma, logger)
 	if einoErr != nil {
@@ -351,6 +359,7 @@ func RunDeepAgent(
 			sb.WriteString("\n- ")
 			sb.WriteString(sa.Name(ctx))
 		}
+		sb.WriteString("\n\nSupervisor 是专家路由模式：仅当任务确实需要不同专家分工时才 transfer；简单查询、单步工具调用或无需专业分流的任务由你直接完成。避免在同一子代理之间反复 transfer；除非有新的、具体的补充目标。专家返回后，你必须自行汇总、裁剪、校验证据，再用 exit 交付最终答案。")
 		sb.WriteString("\n\n当你已完成用户目标或需要将最终结论交付用户时，使用 exit 工具结束。")
 		supInstr = sb.String()
 	}

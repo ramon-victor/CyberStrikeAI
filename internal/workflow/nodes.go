@@ -13,18 +13,11 @@ func runBuiltinNode(ctx context.Context, args RunArgs, node graphNode, state *Wo
 	cfg := node.Config
 	switch strings.ToLower(strings.TrimSpace(node.Type)) {
 	case "start":
-		out := map[string]any{
-			"output":         state.Inputs["message"],
-			"message":        state.Inputs["message"],
-			"conversationId": state.Inputs["conversationId"],
-			"projectId":      state.Inputs["projectId"],
-		}
-		return out, true, "completed", ""
+		return startOutputMap(node, state.Inputs["message"], state.Inputs["conversationId"], state.Inputs["projectId"]), true, "completed", ""
 	case "condition":
 		expr := cfgString(cfg, "expression")
 		ok := evalCondition(expr, state)
-		out := map[string]any{"output": ok, "condition": expr, "matched": ok}
-		return out, true, "completed", ""
+		return conditionOutputMap(node, expr, ok), true, "completed", ""
 	case "output":
 		key := cfgString(cfg, "output_key")
 		if key == "" {
@@ -37,13 +30,13 @@ func runBuiltinNode(ctx context.Context, args RunArgs, node graphNode, state *Wo
 			value = resolveOutputSourceBinding(cfg, state)
 		}
 		state.Outputs[key] = value
-		return map[string]any{"output": value, "outputs": map[string]any{key: value}}, true, "completed", ""
+		return outputNodeOutputMap(node, key, value), true, "completed", ""
 	case "end":
 		value := resolveOutputSourceBinding(cfg, state)
 		if b, ok := parseFieldBinding(cfg, "result_binding"); ok {
 			value = resolveBinding(b, state)
 		}
-		return map[string]any{"output": value}, false, "completed", ""
+		return endOutputMap(node, value), false, "completed", ""
 	case "tool":
 		return runToolNode(ctx, args, node, state)
 	case "agent":
@@ -52,7 +45,8 @@ func runBuiltinNode(ctx context.Context, args RunArgs, node graphNode, state *Wo
 		return runHITLNode(args, node, state)
 	default:
 		reason := "未知节点类型"
-		return map[string]any{"output": "", "skipped": true, "reason": reason, "node_type": node.Type}, true, "skipped", reason
+		out := outputMap(envelope("unknown", node.ID, node.Type, "skipped", ""), map[string]any{"skipped": true, "reason": reason})
+		return out, true, "skipped", reason
 	}
 }
 
@@ -60,16 +54,16 @@ func runToolNode(ctx context.Context, args RunArgs, node graphNode, state *Workf
 	toolName := cfgString(node.Config, "tool_name")
 	if toolName == "" {
 		errText := "工具节点未选择 MCP 工具"
-		return map[string]any{"output": "", "error": errText}, false, "failed", errText
+		return outputMap(envelope("tool", node.ID, node.Type, "failed", ""), map[string]any{"error": errText}), false, "failed", errText
 	}
 	if args.Agent == nil {
 		errText := "工具节点执行失败：Agent 为空"
-		return map[string]any{"output": "", "tool_name": toolName, "error": errText}, false, "failed", errText
+		return outputMap(envelope("tool", node.ID, node.Type, "failed", ""), map[string]any{"tool_name": toolName, "error": errText}), false, "failed", errText
 	}
 	toolArgs, err := resolveToolArguments(node.Config, state)
 	if err != nil {
 		errText := fmt.Sprintf("工具参数不是合法 JSON：%v", err)
-		return map[string]any{"output": "", "tool_name": toolName, "error": errText}, false, "failed", errText
+		return outputMap(envelope("tool", node.ID, node.Type, "failed", ""), map[string]any{"tool_name": toolName, "error": errText}), false, "failed", errText
 	}
 	if args.Progress != nil {
 		args.Progress("workflow_tool_start", fmt.Sprintf("调用工具：%s", toolName), map[string]any{
@@ -81,7 +75,7 @@ func runToolNode(ctx context.Context, args RunArgs, node graphNode, state *Workf
 	result, err := args.Agent.ExecuteMCPToolForConversation(ctx, args.ConversationID, toolName, toolArgs)
 	if err != nil {
 		errText := err.Error()
-		return map[string]any{"output": "", "tool_name": toolName, "arguments": toolArgs, "error": errText}, false, "failed", errText
+		return outputMap(envelope("tool", node.ID, node.Type, "failed", ""), map[string]any{"tool_name": toolName, "arguments": toolArgs, "error": errText}), false, "failed", errText
 	}
 	output := ""
 	executionID := ""
@@ -91,13 +85,7 @@ func runToolNode(ctx context.Context, args RunArgs, node graphNode, state *Workf
 		executionID = result.ExecutionID
 		isError = result.IsError
 	}
-	out := map[string]any{
-		"output":       output,
-		"tool_name":    toolName,
-		"arguments":    toolArgs,
-		"execution_id": executionID,
-		"is_error":     isError,
-	}
+	out := toolOutputMap(node, output, toolName, toolArgs, executionID, isError)
 	if key := cfgString(node.Config, "output_key"); key != "" {
 		state.Outputs[key] = output
 	}
@@ -114,7 +102,7 @@ func runToolNode(ctx context.Context, args RunArgs, node graphNode, state *Workf
 func runAgentNode(ctx context.Context, args RunArgs, node graphNode, state *WorkflowLocalState) (map[string]any, bool, string, string) {
 	if args.AppCfg == nil || args.Agent == nil {
 		errText := "Agent 节点执行失败：应用配置或 Agent 为空"
-		return map[string]any{"output": "", "error": errText}, false, "failed", errText
+		return outputMap(envelope("agent", node.ID, node.Type, "failed", ""), map[string]any{"error": errText}), false, "failed", errText
 	}
 	mode := strings.ToLower(cfgString(node.Config, "agent_mode"))
 	if mode == "" {
@@ -167,7 +155,7 @@ func runAgentNode(ctx context.Context, args RunArgs, node graphNode, state *Work
 	if err != nil {
 		errText := err.Error()
 		state.MainIterationOffset += state.SegmentMaxIteration
-		return map[string]any{"output": "", "mode": mode, "error": errText}, false, "failed", errText
+		return outputMap(envelope("agent", node.ID, node.Type, "failed", ""), map[string]any{"mode": mode, "error": errText}), false, "failed", errText
 	}
 	state.MainIterationOffset += state.SegmentMaxIteration
 	response := ""
@@ -189,11 +177,7 @@ func runAgentNode(ctx context.Context, args RunArgs, node graphNode, state *Work
 	if key := cfgString(node.Config, "output_key"); key != "" {
 		state.Outputs[key] = response
 	}
-	return map[string]any{
-		"output":            response,
-		"mode":              mode,
-		"mcp_execution_ids": mcpIDs,
-	}, true, "completed", ""
+	return agentOutputMap(node, response, mode, mcpIDs), true, "completed", ""
 }
 
 func buildAgentNodeMessage(node graphNode, state *WorkflowLocalState, upstreamInput string) string {
@@ -221,6 +205,7 @@ func workflowAgentProgress(progress agent.ProgressCallback, state *WorkflowLocal
 			return
 		default:
 			enrichWorkflowAgentEventData(data, state, node)
+			collectAgentMetrics(state, data)
 			if eventType == "iteration" {
 				applyWorkflowMainIterationOffset(data, state)
 			}
@@ -302,7 +287,7 @@ func runHITLNode(args RunArgs, node graphNode, state *WorkflowLocalState) (map[s
 				}
 			}
 		}
-		return map[string]any{"output": "", "prompt": prompt, "approved": false, "mode": "interactive"}, false, "failed", reason
+		return hitlOutputMap(node, "failed", "", prompt, reviewer, false), false, "failed", reason
 	}
 	if args.Progress != nil {
 		args.Progress("workflow_hitl_checkpoint", "人工确认节点已通过", map[string]any{
@@ -313,11 +298,5 @@ func runHITLNode(args RunArgs, node graphNode, state *WorkflowLocalState) (map[s
 			"approved": true,
 		})
 	}
-	return map[string]any{
-		"output":   prompt,
-		"prompt":   prompt,
-		"reviewer": reviewer,
-		"approved": true,
-		"mode":     "interactive",
-	}, true, "completed", ""
+	return hitlOutputMap(node, "completed", prompt, prompt, reviewer, true), true, "completed", ""
 }

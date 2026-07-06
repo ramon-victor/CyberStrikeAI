@@ -2,7 +2,7 @@
 
 [中文](robot.md)
 
-This document explains how to chat with CyberStrikeAI from **DingTalk**, **Lark (Feishu)**, and **WeCom (Enterprise WeChat)** using long-lived connections or HTTP callbacks—no need to open a browser on the server. Following the steps below helps avoid common mistakes.
+This document explains how to chat with CyberStrikeAI from **personal WeChat**, **DingTalk**, **Lark (Feishu)**, and **WeCom (Enterprise WeChat)** using long-lived connections or HTTP callbacks—no need to open a browser on the server. Following the steps below helps avoid common mistakes.
 
 ---
 
@@ -11,11 +11,14 @@ This document explains how to chat with CyberStrikeAI from **DingTalk**, **Lark 
 1. Log in to the CyberStrikeAI web UI.
 2. Open **System Settings** in the left sidebar.
 3. Click **Robot settings** (between “Basic” and “Security”).
-4. Enable the platform and fill in credentials (DingTalk: Client ID / Client Secret; Lark: App ID / App Secret).
-5. Click **Apply configuration** to save.
-6. **Restart the CyberStrikeAI process** (saving alone does not establish the connection).
+4. Configure per platform:
+   - **Personal WeChat**: Open **WeChat / iLink** → **Generate QR code and bind**, then scan with WeChat (see [Section 3.4](#34-personal-wechat-wechat--ilink))
+   - **DingTalk**: Enable and fill in Client ID / Client Secret
+   - **Lark**: Enable and fill in App ID / App Secret
+5. Click **Apply configuration** to save (WeChat binding saves and enables automatically on success—usually no extra click needed)
+6. **Restart the CyberStrikeAI process** (DingTalk/Lark: saving alone does not establish the connection; WeChat auto-restarts the iLink poll after binding—usually no manual restart needed)
 
-Settings are written to the `robots` section of `config.yaml`; you can also edit the file directly. **After changing DingTalk or Lark config, you must restart for the long-lived connection to take effect.**
+Settings are written to the `robots` section of `config.yaml`; you can also edit the file directly. **After changing DingTalk or Lark config, you must restart for the long-lived connection to take effect.** Personal WeChat binding automatically writes `robots.wechat` and restarts the iLink long poll.
 
 ---
 
@@ -23,9 +26,14 @@ Settings are written to the `robots` section of `config.yaml`; you can also edit
 
 | Platform       | Description |
 |----------------|-------------|
+| Personal WeChat| WeChat iLink protocol; scan QR in the web UI to bind, then long-poll for messages—**no public callback URL needed** |
 | DingTalk       | Stream long-lived connection; the app connects to DingTalk to receive messages |
 | Lark (Feishu)  | Long-lived connection; the app connects to Lark to receive messages |
 | WeCom (Qiye WX)| HTTP callback to receive messages; CyberStrikeAI replies via WeCom’s message sending API |
+| Telegram       | Bot API long polling (`getUpdates`); **no public callback URL needed** |
+| Slack          | Socket Mode (outbound WebSocket); **no public callback URL needed** |
+| Discord        | Gateway WebSocket; **no public callback URL needed** |
+| QQ Bot         | QQ Open Platform WebSocket (C2C / group @); **no public callback URL needed** |
 
 Section 3 below describes, per platform, what to do in the developer console and which fields to copy into CyberStrikeAI.
 
@@ -148,9 +156,125 @@ In **Permission management** (权限管理), enable the following (names and ide
 
 ---
 
+### 3.4 Personal WeChat (WeChat / iLink)
+
+> Personal WeChat uses **“web QR binding + iLink long polling”**:  
+> - Generate a QR code in the CyberStrikeAI web UI → scan and confirm with **WeChat on your phone**;  
+> - On success, `robots.wechat` in `config.yaml` is updated automatically and iLink long polling starts (the app connects outbound to `ilinkai.weixin.qq.com`);  
+> - **No** public callback URL on your server and **no** WeChat Open Platform app registration required.
+
+**Personal WeChat vs WeCom**
+
+| Item | Personal WeChat (iLink) | WeCom (Enterprise WeChat) |
+|------|-------------------------|---------------------------|
+| Use case | Private chat in personal WeChat | Custom app in WeCom |
+| Setup | QR scan in web UI | Admin console callback URL + Token |
+| Public IP needed? | No (outbound long poll only) | Yes (HTTPS callback reachable by WeCom) |
+| Config key | `robots.wechat` | `robots.wecom` |
+
+**Binding steps (in order)**
+
+1. **Log in to CyberStrikeAI web UI**  
+   **System settings** → **Robot settings** → click the **WeChat / iLink** card.
+
+2. **(Optional) Enable “Enable WeChat robot”**  
+   You can skip this on first bind; it is checked automatically after a successful bind.
+
+3. **Generate QR code**  
+   Click **“Generate QR code and bind”**. The QR code is valid for about **5 minutes**; regenerate if it expires.
+
+4. **Scan and confirm in WeChat**  
+   - Scan the QR code with WeChat on your phone;  
+   - Complete confirmation on the phone;  
+   - If WeChat shows a **pairing code**, enter it on the web page and click **Submit** (only some accounts need this).
+
+5. **Wait for binding to complete**  
+   When the page shows “Binding successful, WeChat robot enabled”, you’re done. `bot_token`, `ilink_bot_id`, etc. are saved to `config.yaml` and the iLink poll restarts automatically—**usually no manual service restart**.
+
+6. **Test in WeChat**  
+   Open the **private chat** with the CyberStrikeAI bot in WeChat and send “帮助” (help) or any text.
+
+**Field reference (WeChat)**
+
+| Field | Description |
+|-------|-------------|
+| Enable WeChat robot | Starts iLink long polling when checked; auto-enabled after bind |
+| Generate QR code and bind | Starts the scan-to-bind flow |
+| **Advanced** (defaults are fine) | |
+| API Base URL | Default `https://ilinkai.weixin.qq.com` |
+| Bot Type | Default `3` |
+| Bot Agent | Default `CyberStrikeAI/1.0` |
+| iLink Bot ID | Filled automatically after bind (read-only) |
+
+**How to use**
+
+- **Private chat only**—send text directly; **no @ needed**.  
+- Group @-bot is **not** supported (unlike DingTalk/Lark groups).  
+- **Text messages only**; images, voice, etc. are ignored or not supported.
+
+**Re-bind**
+
+- To bind a different WeChat account, click **“Re-bind”** on the robot settings page and scan again.  
+- If you see “This WeChat account is already bound”, that account was bound before.
+
+**Common issues**
+
+| Symptom | What to do |
+|---------|------------|
+| QR code expired | Click “Generate QR code and bind” again (~5 min TTL) |
+| Phone asks for a pairing code | Enter the digits shown in WeChat on the web page |
+| Bound but no replies | Check logs for `微信 iLink 长轮询已启动` and `微信收到消息`; ensure “Enable WeChat robot” is on |
+| No reply after sleep / network drop | Auto-reconnect in ~5–60 s; restart CyberStrikeAI if still stuck |
+| Cannot generate QR code | Ensure outbound HTTPS to `https://ilinkai.weixin.qq.com` |
+
+---
+
+### 3.5 Telegram
+
+> Telegram uses **Bot API long polling** (`getUpdates`): the app connects outbound to `api.telegram.org`—**no public callback URL needed**.
+
+1. Create a bot via **@BotFather** (`/newbot`) and copy the **Bot Token**.  
+2. CyberStrikeAI → **System settings** → **Robot settings** → **Telegram**.  
+3. Enable, paste the token, optionally allow group @ mentions → **Apply configuration**.
+
+---
+
+### 3.6 Slack
+
+> Slack uses **Socket Mode** (outbound WebSocket): requires **Bot Token (xoxb-)** and **App-Level Token (xapp-)** with `connections:write`.
+
+1. Create an app at [api.slack.com](https://api.slack.com/apps) → enable **Socket Mode**.  
+2. Create an App-Level Token; install the app to get a Bot Token.  
+3. Subscribe to `message.im` and `app_mention` events.  
+4. Paste both tokens in CyberStrikeAI → **Apply configuration**.
+
+---
+
+### 3.7 Discord
+
+> Discord uses **Gateway WebSocket**—**no public callback URL needed**.
+
+1. [Discord Developer Portal](https://discord.com/developers/applications) → create app → **Bot** → copy **Token**.  
+2. Enable **Message Content Intent** under Privileged Gateway Intents.  
+3. Invite the bot with `Send Messages` permission.  
+4. Paste token in CyberStrikeAI; optionally allow guild @ mentions → **Apply configuration**.
+
+---
+
+### 3.8 QQ Bot
+
+> QQ Bot uses **QQ Open Platform WebSocket** (official `botgo` SDK) for C2C and group @—**no public callback URL needed**.
+
+1. Create a bot at [q.qq.com](https://q.qq.com) → get **App ID** and **Client Secret**.  
+2. Add sandbox testers before going live.  
+3. Subscribe to C2C and group @ events (WebSocket).  
+4. Fill in CyberStrikeAI; use **Sandbox** for testing → **Apply configuration**.
+
+---
+
 ## 4. Bot commands
 
-Send these **text commands** to the bot in DingTalk or Lark (text only):
+Send these **text commands** to the bot on any connected platform (text only):
 
 | Command | Description |
 |---------|-------------|
@@ -172,14 +296,23 @@ Any other text is sent to the AI as a user message, same as in the web UI (e.g. 
 
 ## 5. How to use (do I need to @ the bot?)
 
-- **Direct chat (recommended)**: In DingTalk or Lark, **search for the bot and open a direct chat**. Type “帮助” or any message; **no @ needed**.  
-- **Group chat**: If the bot is in a group, only messages that **@ the bot** are received and answered; other group messages are ignored.
+- **Personal WeChat**: Send directly in the **private chat** with the bot; **no @ needed** (group chat not supported).  
+- **DingTalk / Lark direct chat (recommended)**: **Search for the bot and open a direct chat**. Type “帮助” or any message; **no @ needed**.  
+- **DingTalk / Lark group chat**: If the bot is in a group, only messages that **@ the bot** are received and answered; other group messages are ignored.
 
-Summary: **Direct chat** — just send; **in a group** — @ the bot first, then send.
+Summary: **Personal WeChat and direct chat**—just send; **DingTalk/Lark in a group**—@ the bot first, then send.
 
 ---
 
 ## 6. Recommended flow (so you don’t skip steps)
+
+**Personal WeChat (simplest—no open platform)**
+
+1. CyberStrikeAI web UI → System settings → Robot settings → **WeChat / iLink** → **Generate QR code and bind**.  
+2. Scan with WeChat and confirm (enter pairing code on the web page if prompted).  
+3. After binding, send “帮助” in the WeChat private chat to test.
+
+**DingTalk / Lark**
 
 1. **In the open platform**: Complete app creation, copy credentials, enable the bot (DingTalk: **Stream mode**), set permissions, and publish (Section 3).  
 2. **In CyberStrikeAI**: System settings → Robot settings → Enable the platform, paste Client ID/App ID and Client Secret/App Secret → **Apply configuration**.  
@@ -196,6 +329,14 @@ Example `robots` section in `config.yaml`:
 
 ```yaml
 robots:
+  wechat: # Personal WeChat iLink (auto-filled after QR bind; usually no manual edit)
+    enabled: true
+    bot_token: "your_bot_token@im.bot:..."
+    ilink_bot_id: "your_bot_id@im.bot"
+    ilink_user_id: "your_user_id@im.wechat"
+    base_url: "https://ilinkai.weixin.qq.com"
+    bot_type: "3"
+    bot_agent: "CyberStrikeAI/1.0"
   dingtalk:
     enabled: true
     client_id: "your_dingtalk_app_key"
@@ -205,9 +346,33 @@ robots:
     app_id: "your_lark_app_id"
     app_secret: "your_lark_app_secret"
     verify_token: ""
+  wecom:
+    enabled: false
+    corp_id: ""
+    agent_id: 0
+    token: ""
+    encoding_aes_key: ""
+    secret: ""
+  telegram:
+    enabled: false
+    bot_token: ""
+    allow_group_messages: false
+  slack:
+    enabled: false
+    bot_token: ""
+    app_token: ""
+  discord:
+    enabled: false
+    bot_token: ""
+    allow_guild_messages: false
+  qq:
+    enabled: false
+    app_id: ""
+    client_secret: ""
+    sandbox: true
 ```
 
-**Restart the app** after changes; the long-lived connection is created at startup.
+After changing DingTalk/Lark/WeCom/Telegram/Slack/Discord/QQ settings, **Apply configuration** restarts the corresponding connections. Personal WeChat QR binding saves and restarts automatically.
 
 ---
 
@@ -232,7 +397,30 @@ API: `POST /api/robot/test` (requires login). Body: `{"platform":"optional","use
 
 ---
 
-## 9. DingTalk: no response when sending messages
+## 9. Troubleshooting: no response when sending messages
+
+### 9.1 Personal WeChat
+
+Check in this order:
+
+1. **Binding completed?**  
+   Robot settings should show “Connected” or a bound Bot ID; `robots.wechat.bot_token` in `config.yaml` must not be empty.
+
+2. **Enabled?**  
+   Confirm “Enable WeChat robot” is checked; restart CyberStrikeAI if you just changed settings.
+
+3. **Application logs**  
+   - On startup: `微信 iLink 长轮询已启动`;  
+   - After sending a message: `微信收到消息`; if missing, binding may have failed or `bot_token` is invalid—try **Re-bind**.  
+   - `微信 iLink 长轮询异常，将自动重连`: wait for auto-reconnect or restart.
+
+4. **Network**  
+   The server must reach `https://ilinkai.weixin.qq.com` (outbound HTTPS). If QR generation fails, check this first.
+
+5. **After sleep or network drop**  
+   Same as DingTalk/Lark: **auto-reconnect** in ~5–60 s; restart if still no response.
+
+### 9.2 DingTalk
 
 Check in this order:
 
@@ -257,8 +445,10 @@ Check in this order:
 
 ## 10. Common pitfalls
 
+- **Personal WeChat vs WeCom**: Personal WeChat uses `robots.wechat` + web QR bind; WeCom uses `robots.wecom` + admin callback URL—they are completely different.  
+- **WeChat QR expired**: QR codes last ~5 minutes; regenerate instead of reusing an old one.  
 - **Wrong bot type**: The “Custom” bot added in a DingTalk **group** (Webhook + sign secret) **cannot** be used for two-way chat. Only the **enterprise internal app** bot from the open platform is supported.  
-- **Saved but not restarted**: After changing robot settings in CyberStrikeAI you **must restart** the app, or the long-lived connection will not be established.  
+- **Saved but not restarted**: After changing DingTalk/Lark robot settings you **must restart** the app (WeChat QR bind restarts the connection automatically).  
 - **Client ID typo**: If the platform shows `504`, use `504` (not `5o4`); prefer copy/paste.  
 - **DingTalk: only HTTP callback, no Stream**: This app receives messages via **Stream**. In the open platform, message reception must be **Stream mode**.  
 - **App not published**: After changing the bot or permissions in the open platform, **publish a new version** under “Version management and release”, or changes won’t apply.
@@ -267,6 +457,7 @@ Check in this order:
 
 ## 11. Notes
 
-- DingTalk and Lark: **text messages only**; other types (e.g. image, voice) are not supported and may be ignored.  
+- All platforms: **text messages only**; other types (e.g. image, voice) are not supported and may be ignored.  
+- Personal WeChat: **private chat only**—group @-bot is not supported.  
 - Conversations are shared with the web UI: conversations created from the bot appear in the web “Conversations” list and vice versa.  
-- Bot execution uses the same **Eino single/multi-agent** path as the web UI (`ProcessMessageForRobot`, with progress callbacks and process details stored in the DB); only the final reply is sent back to DingTalk/Lark in one message (no SSE). Default: `robot_default_agent_mode: eino_single`.
+- Bot execution uses the same **Eino single/multi-agent** path as the web UI (`ProcessMessageForRobot`, with progress callbacks and process details stored in the DB); only the final reply is sent back to personal WeChat/DingTalk/Lark/WeCom in one message (no SSE). Default: `robot_default_agent_mode: eino_single`.

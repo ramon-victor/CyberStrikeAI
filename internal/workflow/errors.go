@@ -4,11 +4,11 @@ import "errors"
 
 // AwaitingHITLError indicates the workflow paused before a HITL node for human approval.
 type AwaitingHITLError struct {
-	RunID    string
-	NodeID   string
+	RunID     string
+	NodeID    string
 	NodeLabel string
-	Prompt   string
-	Reviewer string
+	Prompt    string
+	Reviewer  string
 }
 
 func (e *AwaitingHITLError) Error() string {

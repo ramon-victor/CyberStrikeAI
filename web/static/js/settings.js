@@ -6,6 +6,156 @@ let alwaysVisibleBuiltinToolNames = new Set();
 // 全局工具状态映射，用于保存用户在所有页面的修改
 // key: 唯一工具标识符（toolKey），value: { enabled: boolean, is_external: boolean, external_mcp: string }
 let toolStateMap = new Map();
+let activeRobotEditor = '';
+
+function settingsT(key, fallback) {
+    if (typeof window.t === 'function') {
+        const translated = window.t(key);
+        if (translated && translated !== key) return translated;
+    }
+    return fallback;
+}
+
+function getRobotStatus(type) {
+    const value = (id) => document.getElementById(id)?.value?.trim() || '';
+    const checked = (id) => document.getElementById(id)?.checked === true;
+    let configured = false;
+    let enabled = false;
+
+    if (type === 'wechat') {
+        configured = !!value('robot-wechat-ilink-bot-id');
+        enabled = checked('robot-wechat-enabled');
+    } else if (type === 'wecom') {
+        const agentId = parseInt(value('robot-wecom-agent-id'), 10);
+        configured = !!(value('robot-wecom-token') && value('robot-wecom-corp-id') && value('robot-wecom-secret') && agentId > 0);
+        enabled = checked('robot-wecom-enabled');
+    } else if (type === 'dingtalk') {
+        configured = !!(value('robot-dingtalk-client-id') && value('robot-dingtalk-client-secret'));
+        enabled = checked('robot-dingtalk-enabled');
+    } else if (type === 'lark') {
+        configured = !!(value('robot-lark-app-id') && value('robot-lark-app-secret'));
+        enabled = checked('robot-lark-enabled');
+    } else if (type === 'telegram') {
+        configured = !!value('robot-telegram-bot-token');
+        enabled = checked('robot-telegram-enabled');
+    } else if (type === 'slack') {
+        configured = !!(value('robot-slack-bot-token') && value('robot-slack-app-token'));
+        enabled = checked('robot-slack-enabled');
+    } else if (type === 'discord') {
+        configured = !!value('robot-discord-bot-token');
+        enabled = checked('robot-discord-enabled');
+    } else if (type === 'qq') {
+        configured = !!(value('robot-qq-app-id') && value('robot-qq-client-secret'));
+        enabled = checked('robot-qq-enabled');
+    }
+
+    if (enabled) {
+        return { state: 'enabled', text: settingsT('settings.robots.statusEnabled', '已启用') };
+    }
+    if (configured) {
+        return { state: 'ready', text: settingsT('settings.robots.statusConfigured', '已配置') };
+    }
+    return { state: 'idle', text: settingsT('settings.robots.statusNotConfigured', '未配置') };
+}
+
+function refreshRobotManager() {
+    ['wechat', 'wecom', 'dingtalk', 'lark', 'telegram', 'slack', 'discord', 'qq'].forEach((type) => {
+        const status = getRobotStatus(type);
+        const pill = document.getElementById(`robot-card-${type}-status`);
+        if (pill) {
+            pill.className = `robot-status-pill robot-status-pill--${status.state}`;
+            pill.textContent = status.text;
+        }
+        const card = document.querySelector(`[data-robot-card="${type}"]`);
+        if (card) {
+            card.classList.toggle('is-active', activeRobotEditor === type);
+        }
+    });
+}
+
+function openRobotEditor(type) {
+    activeRobotEditor = type;
+    const empty = document.getElementById('robot-editor-empty');
+    if (empty) empty.hidden = true;
+    document.querySelectorAll('[data-robot-editor]').forEach((panel) => {
+        panel.hidden = panel.dataset.robotEditor !== type;
+    });
+    refreshRobotManager();
+    const panel = document.querySelector(`[data-robot-editor="${type}"]`);
+    if (panel) {
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+}
+
+function openRobotCreateModal() {
+    const modal = document.getElementById('robot-create-modal');
+    if (modal) modal.style.display = 'block';
+}
+
+function closeRobotCreateModal() {
+    const modal = document.getElementById('robot-create-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function openRobotCommandsModal() {
+    if (typeof openAppModal === 'function') {
+        openAppModal('robot-commands-modal', { focus: false });
+        return;
+    }
+    const modal = document.getElementById('robot-commands-modal');
+    if (modal) modal.style.display = 'block';
+}
+
+function closeRobotCommandsModal() {
+    if (typeof closeAppModal === 'function') {
+        closeAppModal('robot-commands-modal');
+        return;
+    }
+    const modal = document.getElementById('robot-commands-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function selectRobotType(type) {
+    closeRobotCreateModal();
+    openRobotEditor(type);
+}
+
+function bindRobotManagerEvents() {
+    const robotInputIds = [
+        'robot-wechat-enabled', 'robot-wechat-ilink-bot-id',
+        'robot-wecom-enabled', 'robot-wecom-token', 'robot-wecom-corp-id', 'robot-wecom-secret', 'robot-wecom-agent-id',
+        'robot-dingtalk-enabled', 'robot-dingtalk-client-id', 'robot-dingtalk-client-secret',
+        'robot-lark-enabled', 'robot-lark-app-id', 'robot-lark-app-secret',
+        'robot-telegram-enabled', 'robot-telegram-bot-token', 'robot-telegram-bot-username', 'robot-telegram-allow-group',
+        'robot-slack-enabled', 'robot-slack-bot-token', 'robot-slack-app-token',
+        'robot-discord-enabled', 'robot-discord-bot-token', 'robot-discord-allow-guild',
+        'robot-qq-enabled', 'robot-qq-app-id', 'robot-qq-client-secret', 'robot-qq-sandbox'
+    ];
+    robotInputIds.forEach((id) => {
+        const el = document.getElementById(id);
+        if (el && !el.dataset.robotManagerBound) {
+            el.addEventListener('input', refreshRobotManager);
+            el.addEventListener('change', refreshRobotManager);
+            el.dataset.robotManagerBound = 'true';
+        }
+    });
+
+    const modal = document.getElementById('robot-create-modal');
+    if (modal && !modal.dataset.robotManagerBound) {
+        modal.addEventListener('click', (event) => {
+            if (event.target === modal) closeRobotCreateModal();
+        });
+        modal.dataset.robotManagerBound = 'true';
+    }
+
+    const commandsModal = document.getElementById('robot-commands-modal');
+    if (commandsModal && !commandsModal.dataset.robotManagerBound) {
+        commandsModal.addEventListener('click', (event) => {
+            if (event.target === commandsModal) closeRobotCommandsModal();
+        });
+        commandsModal.dataset.robotManagerBound = 'true';
+    }
+}
 
 // 生成工具的唯一标识符，用于区分同名但来源不同的工具
 function getToolKey(tool) {
@@ -500,6 +650,10 @@ async function loadConfig(loadTools = true) {
         const wecom = robots.wecom || {};
         const dingtalk = robots.dingtalk || {};
         const lark = robots.lark || {};
+        const telegram = robots.telegram || {};
+        const slack = robots.slack || {};
+        const discord = robots.discord || {};
+        const qq = robots.qq || {};
         const wechatEnabled = document.getElementById('robot-wechat-enabled');
         if (wechatEnabled) wechatEnabled.checked = wechat.enabled === true;
         const wechatBase = document.getElementById('robot-wechat-base-url');
@@ -539,6 +693,36 @@ async function loadConfig(loadTools = true) {
         if (larkAppSecret) larkAppSecret.value = lark.app_secret || '';
         const larkVerify = document.getElementById('robot-lark-verify-token');
         if (larkVerify) larkVerify.value = lark.verify_token || '';
+        const telegramEnabled = document.getElementById('robot-telegram-enabled');
+        if (telegramEnabled) telegramEnabled.checked = telegram.enabled === true;
+        const telegramToken = document.getElementById('robot-telegram-bot-token');
+        if (telegramToken) telegramToken.value = telegram.bot_token || '';
+        const telegramUsername = document.getElementById('robot-telegram-bot-username');
+        if (telegramUsername) telegramUsername.value = telegram.bot_username || '';
+        const telegramAllowGroup = document.getElementById('robot-telegram-allow-group');
+        if (telegramAllowGroup) telegramAllowGroup.checked = telegram.allow_group_messages === true;
+        const slackEnabled = document.getElementById('robot-slack-enabled');
+        if (slackEnabled) slackEnabled.checked = slack.enabled === true;
+        const slackBotToken = document.getElementById('robot-slack-bot-token');
+        if (slackBotToken) slackBotToken.value = slack.bot_token || '';
+        const slackAppToken = document.getElementById('robot-slack-app-token');
+        if (slackAppToken) slackAppToken.value = slack.app_token || '';
+        const discordEnabled = document.getElementById('robot-discord-enabled');
+        if (discordEnabled) discordEnabled.checked = discord.enabled === true;
+        const discordToken = document.getElementById('robot-discord-bot-token');
+        if (discordToken) discordToken.value = discord.bot_token || '';
+        const discordAllowGuild = document.getElementById('robot-discord-allow-guild');
+        if (discordAllowGuild) discordAllowGuild.checked = discord.allow_guild_messages === true;
+        const qqEnabled = document.getElementById('robot-qq-enabled');
+        if (qqEnabled) qqEnabled.checked = qq.enabled === true;
+        const qqAppId = document.getElementById('robot-qq-app-id');
+        if (qqAppId) qqAppId.value = qq.app_id || '';
+        const qqSecret = document.getElementById('robot-qq-client-secret');
+        if (qqSecret) qqSecret.value = qq.client_secret || '';
+        const qqSandbox = document.getElementById('robot-qq-sandbox');
+        if (qqSandbox) qqSandbox.checked = qq.sandbox === true;
+        bindRobotManagerEvents();
+        refreshRobotManager();
         
         // 只有在需要时才加载工具列表（MCP管理页面需要，系统设置页面不需要）
         if (loadTools) {
@@ -1425,6 +1609,31 @@ async function applySettings() {
                     app_secret: document.getElementById('robot-lark-app-secret')?.value.trim() || '',
                     verify_token: document.getElementById('robot-lark-verify-token')?.value.trim() || '',
                     allow_chat_id_fallback: !!(prevRobots.lark && prevRobots.lark.allow_chat_id_fallback)
+                },
+                telegram: {
+                    enabled: document.getElementById('robot-telegram-enabled')?.checked === true,
+                    bot_token: document.getElementById('robot-telegram-bot-token')?.value.trim() || '',
+                    bot_username: document.getElementById('robot-telegram-bot-username')?.value.trim() || '',
+                    allow_group_messages: document.getElementById('robot-telegram-allow-group')?.checked === true,
+                    ...(prevRobots.telegram && typeof prevRobots.telegram === 'object' ? {
+                        update_offset: prevRobots.telegram.update_offset || 0
+                    } : {})
+                },
+                slack: {
+                    enabled: document.getElementById('robot-slack-enabled')?.checked === true,
+                    bot_token: document.getElementById('robot-slack-bot-token')?.value.trim() || '',
+                    app_token: document.getElementById('robot-slack-app-token')?.value.trim() || ''
+                },
+                discord: {
+                    enabled: document.getElementById('robot-discord-enabled')?.checked === true,
+                    bot_token: document.getElementById('robot-discord-bot-token')?.value.trim() || '',
+                    allow_guild_messages: document.getElementById('robot-discord-allow-guild')?.checked === true
+                },
+                qq: {
+                    enabled: document.getElementById('robot-qq-enabled')?.checked === true,
+                    app_id: document.getElementById('robot-qq-app-id')?.value.trim() || '',
+                    client_secret: document.getElementById('robot-qq-client-secret')?.value.trim() || '',
+                    sandbox: document.getElementById('robot-qq-sandbox')?.checked === true
                 }
             },
             tools: []

@@ -22,20 +22,20 @@ type WorkflowDefinition struct {
 }
 
 type WorkflowRun struct {
-	ID              string     `json:"id"`
-	WorkflowID      string     `json:"workflow_id"`
-	WorkflowVersion int        `json:"workflow_version"`
-	ConversationID  string     `json:"conversation_id,omitempty"`
-	ProjectID       string     `json:"project_id,omitempty"`
-	RoleID          string     `json:"role_id,omitempty"`
-	Status          string     `json:"status"`
-	InputJSON       string     `json:"input_json,omitempty"`
-	OutputJSON      string     `json:"output_json,omitempty"`
-	Error           string     `json:"error,omitempty"`
-	PendingHITLNodeID string   `json:"pending_hitl_node_id,omitempty"`
-	PendingHITLJSON   string   `json:"pending_hitl_json,omitempty"`
-	StartedAt       time.Time  `json:"started_at"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	ID                string     `json:"id"`
+	WorkflowID        string     `json:"workflow_id"`
+	WorkflowVersion   int        `json:"workflow_version"`
+	ConversationID    string     `json:"conversation_id,omitempty"`
+	ProjectID         string     `json:"project_id,omitempty"`
+	RoleID            string     `json:"role_id,omitempty"`
+	Status            string     `json:"status"`
+	InputJSON         string     `json:"input_json,omitempty"`
+	OutputJSON        string     `json:"output_json,omitempty"`
+	Error             string     `json:"error,omitempty"`
+	PendingHITLNodeID string     `json:"pending_hitl_node_id,omitempty"`
+	PendingHITLJSON   string     `json:"pending_hitl_json,omitempty"`
+	StartedAt         time.Time  `json:"started_at"`
+	FinishedAt        *time.Time `json:"finished_at,omitempty"`
 }
 
 type WorkflowNodeRun struct {
@@ -48,6 +48,25 @@ type WorkflowNodeRun struct {
 	Error      string     `json:"error,omitempty"`
 	StartedAt  time.Time  `json:"started_at"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
+func scanWorkflowNodeRun(scanner interface {
+	Scan(dest ...interface{}) error
+}) (*WorkflowNodeRun, error) {
+	var row WorkflowNodeRun
+	var inputJSON, outputJSON, errText sql.NullString
+	var finishedAt sql.NullTime
+	if err := scanner.Scan(&row.ID, &row.RunID, &row.NodeID, &row.Status, &inputJSON, &outputJSON, &errText, &row.StartedAt, &finishedAt); err != nil {
+		return nil, err
+	}
+	row.InputJSON = inputJSON.String
+	row.OutputJSON = outputJSON.String
+	row.Error = errText.String
+	if finishedAt.Valid {
+		t := finishedAt.Time
+		row.FinishedAt = &t
+	}
+	return &row, nil
 }
 
 func scanWorkflowDefinition(scanner interface {
@@ -246,6 +265,31 @@ func (db *DB) FinishWorkflowNodeRun(nodeRunID, status, outputJSON, errText strin
 		return fmt.Errorf("更新工作流节点运行失败: %w", err)
 	}
 	return nil
+}
+
+func (db *DB) ListWorkflowNodeRuns(runID string) ([]*WorkflowNodeRun, error) {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, fmt.Errorf("工作流运行 id 不能为空")
+	}
+	rows, err := db.Query(
+		`SELECT id, run_id, node_id, status, input_json, output_json, error, started_at, finished_at
+		 FROM workflow_node_runs WHERE run_id = ? ORDER BY started_at ASC`,
+		runID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("查询工作流节点运行失败: %w", err)
+	}
+	defer rows.Close()
+	var out []*WorkflowNodeRun
+	for rows.Next() {
+		row, err := scanWorkflowNodeRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }
 
 func scanWorkflowRun(scanner interface {

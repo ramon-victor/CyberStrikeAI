@@ -10,7 +10,7 @@
 # ============================================
 
 # Version shown in the frontend (optional; uses the default version when empty)
-version: "v1.6.50"
+version: "v1.6.51"
 # Server settings
 server:
   host: 0.0.0.0 # 监听地址，0.0.0.0 表示监听所有网络接口
@@ -357,6 +357,24 @@ robots:
     app_secret: ""
     verify_token: ""
     allow_chat_id_fallback: false
+  telegram: # Telegram
+    enabled: false
+    bot_token: ""
+    bot_username: ""
+    allow_group_messages: false
+  slack: # Slack
+    enabled: false
+    bot_token: ""
+    app_token: ""
+  discord: # Discord
+    enabled: false
+    bot_token: ""
+    allow_guild_messages: false
+  qq: # QQ 机器人
+    enabled: false
+    app_id: ""
+    client_secret: ""
+    sandbox: true
 # ============================================
 # Skills 相关配置
 # ============================================

@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cyberstrike-ai/internal/config"
@@ -55,6 +56,137 @@ func conditionBranchGraph() string {
 func TestValidateGraphJSON_linear(t *testing.T) {
 	if err := ValidateGraphJSON(context.Background(), linearStartOutputGraph()); err != nil {
 		t.Fatalf("validate: %v", err)
+	}
+}
+
+func TestValidateGraphJSON_rejectsInvalidGraphs(t *testing.T) {
+	tests := []struct {
+		name    string
+		graph   string
+		wantErr string
+	}{
+		{
+			name: "start with incoming edge",
+			graph: `{
+  "nodes": [
+    {"id": "start-1", "type": "start", "label": "开始", "position": {"x": 0, "y": 0}, "config": {}},
+    {"id": "agent-1", "type": "agent", "label": "Agent", "position": {"x": 0, "y": 80}, "config": {"instruction": "noop"}},
+    {"id": "out-1", "type": "output", "label": "输出", "position": {"x": 0, "y": 160}, "config": {"output_key": "result"}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start-1", "target": "agent-1"},
+    {"id": "e2", "source": "agent-1", "target": "start-1"},
+    {"id": "e3", "source": "agent-1", "target": "out-1"}
+  ]
+}`,
+			wantErr: "开始节点",
+		},
+		{
+			name: "output with outgoing edge",
+			graph: `{
+  "nodes": [
+    {"id": "start-1", "type": "start", "label": "开始", "position": {"x": 0, "y": 0}, "config": {}},
+    {"id": "out-1", "type": "output", "label": "输出", "position": {"x": 0, "y": 80}, "config": {"output_key": "result"}},
+    {"id": "end-1", "type": "end", "label": "结束", "position": {"x": 0, "y": 160}, "config": {}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start-1", "target": "out-1"},
+    {"id": "e2", "source": "out-1", "target": "end-1"}
+  ]
+}`,
+			wantErr: "不能有出边",
+		},
+		{
+			name: "tool without name",
+			graph: `{
+  "nodes": [
+    {"id": "start-1", "type": "start", "label": "开始", "position": {"x": 0, "y": 0}, "config": {}},
+    {"id": "tool-1", "type": "tool", "label": "工具", "position": {"x": 0, "y": 80}, "config": {}},
+    {"id": "out-1", "type": "output", "label": "输出", "position": {"x": 0, "y": 160}, "config": {"output_key": "result"}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start-1", "target": "tool-1"},
+    {"id": "e2", "source": "tool-1", "target": "out-1"}
+  ]
+}`,
+			wantErr: "必须选择 MCP 工具",
+		},
+		{
+			name: "condition with too many branches",
+			graph: `{
+  "nodes": [
+    {"id": "start-1", "type": "start", "label": "开始", "position": {"x": 0, "y": 0}, "config": {}},
+    {"id": "cond-1", "type": "condition", "label": "判断", "position": {"x": 0, "y": 80}, "config": {"expression": "{{inputs.message}}"}},
+    {"id": "out-1", "type": "output", "label": "输出1", "position": {"x": -80, "y": 160}, "config": {"output_key": "a"}},
+    {"id": "out-2", "type": "output", "label": "输出2", "position": {"x": 0, "y": 160}, "config": {"output_key": "b"}},
+    {"id": "out-3", "type": "output", "label": "输出3", "position": {"x": 80, "y": 160}, "config": {"output_key": "c"}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start-1", "target": "cond-1"},
+    {"id": "e2", "source": "cond-1", "target": "out-1"},
+    {"id": "e3", "source": "cond-1", "target": "out-2"},
+    {"id": "e4", "source": "cond-1", "target": "out-3"}
+  ]
+}`,
+			wantErr: "1 到 2 条出边",
+		},
+		{
+			name: "orphan node",
+			graph: `{
+  "nodes": [
+    {"id": "start-1", "type": "start", "label": "开始", "position": {"x": 0, "y": 0}, "config": {}},
+    {"id": "out-1", "type": "output", "label": "输出", "position": {"x": 0, "y": 80}, "config": {"output_key": "result"}},
+    {"id": "agent-1", "type": "agent", "label": "孤岛", "position": {"x": 200, "y": 80}, "config": {"instruction": "noop"}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start-1", "target": "out-1"}
+  ]
+}`,
+			wantErr: "不可达",
+		},
+		{
+			name: "cycle",
+			graph: `{
+  "nodes": [
+    {"id": "start-1", "type": "start", "label": "开始", "position": {"x": 0, "y": 0}, "config": {}},
+    {"id": "agent-1", "type": "agent", "label": "Agent1", "position": {"x": 0, "y": 80}, "config": {"instruction": "noop", "output_key": "a1"}},
+    {"id": "agent-2", "type": "agent", "label": "Agent2", "position": {"x": 0, "y": 160}, "config": {"instruction": "noop", "output_key": "a2"}},
+    {"id": "out-1", "type": "output", "label": "输出", "position": {"x": 0, "y": 240}, "config": {"output_key": "result"}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start-1", "target": "agent-1"},
+    {"id": "e2", "source": "agent-1", "target": "agent-2"},
+    {"id": "e3", "source": "agent-2", "target": "agent-1"},
+    {"id": "e4", "source": "agent-2", "target": "out-1"}
+  ]
+}`,
+			wantErr: "环路",
+		},
+		{
+			name: "output without key",
+			graph: `{
+  "nodes": [
+    {"id": "start-1", "type": "start", "label": "开始", "position": {"x": 0, "y": 0}, "config": {}},
+    {"id": "out-1", "type": "output", "label": "输出", "position": {"x": 0, "y": 80}, "config": {}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "start-1", "target": "out-1"}
+  ]
+}`,
+			wantErr: "输出变量名",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateGraphJSON(context.Background(), tt.graph)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 

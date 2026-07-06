@@ -55,11 +55,15 @@ type App struct {
 	knowledgeIndexer   *knowledge.Indexer        // 知识库索引器（用于动态初始化）
 	knowledgeHandler   *handler.KnowledgeHandler // 知识库处理器（用于动态初始化）
 	agentHandler       *handler.AgentHandler     // Agent处理器（用于更新知识库管理器）
-	robotHandler       *handler.RobotHandler     // 机器人处理器（钉钉/飞书/企业微信）
-	robotMu            sync.Mutex                // 保护钉钉/飞书长连接的 cancel
+	robotHandler       *handler.RobotHandler     // 机器人处理器（钉钉/飞书/企业微信等）
+	robotMu            sync.Mutex                // 保护机器人长连接的 cancel
 	dingCancel         context.CancelFunc        // 钉钉 Stream 取消函数，用于配置变更时重启
 	larkCancel         context.CancelFunc        // 飞书长连接取消函数，用于配置变更时重启
 	wechatCancel       context.CancelFunc        // 微信 iLink 长轮询取消函数
+	telegramCancel     context.CancelFunc        // Telegram 长轮询取消函数
+	slackCancel        context.CancelFunc        // Slack Socket Mode 取消函数
+	discordCancel      context.CancelFunc        // Discord Gateway 取消函数
+	qqCancel           context.CancelFunc        // QQ WebSocket 取消函数
 	c2Manager          *c2.Manager               // C2 管理器（未启用 C2 时为 nil）
 	c2Watchdog         *c2.SessionWatchdog       // C2 会话看门狗
 	c2WatchdogCancel   context.CancelFunc        // 看门狗取消函数
@@ -728,6 +732,26 @@ func (a *App) startRobotConnections() {
 		a.wechatCancel = cancel
 		go robot.StartWechat(ctx, cfg.Robots, a.robotHandler, cfg.Version, a.logger.Logger)
 	}
+	if cfg.Robots.Telegram.Enabled && strings.TrimSpace(cfg.Robots.Telegram.BotToken) != "" {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.telegramCancel = cancel
+		go robot.StartTelegram(ctx, cfg.Robots, a.robotHandler, a.logger.Logger)
+	}
+	if cfg.Robots.Slack.Enabled && strings.TrimSpace(cfg.Robots.Slack.BotToken) != "" && strings.TrimSpace(cfg.Robots.Slack.AppToken) != "" {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.slackCancel = cancel
+		go robot.StartSlack(ctx, cfg.Robots, a.robotHandler, a.logger.Logger)
+	}
+	if cfg.Robots.Discord.Enabled && strings.TrimSpace(cfg.Robots.Discord.BotToken) != "" {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.discordCancel = cancel
+		go robot.StartDiscord(ctx, cfg.Robots, a.robotHandler, a.logger.Logger)
+	}
+	if cfg.Robots.QQ.Enabled && strings.TrimSpace(cfg.Robots.QQ.AppID) != "" && strings.TrimSpace(cfg.Robots.QQ.ClientSecret) != "" {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.qqCancel = cancel
+		go robot.StartQQ(ctx, cfg.Robots, a.robotHandler, a.logger.Logger)
+	}
 }
 
 // RestartRobotConnections 重启钉钉/飞书/微信长连接，使前端应用配置后立即生效（实现 handler.RobotRestarter）
@@ -744,6 +768,22 @@ func (a *App) RestartRobotConnections() {
 	if a.wechatCancel != nil {
 		a.wechatCancel()
 		a.wechatCancel = nil
+	}
+	if a.telegramCancel != nil {
+		a.telegramCancel()
+		a.telegramCancel = nil
+	}
+	if a.slackCancel != nil {
+		a.slackCancel()
+		a.slackCancel = nil
+	}
+	if a.discordCancel != nil {
+		a.discordCancel()
+		a.discordCancel = nil
+	}
+	if a.qqCancel != nil {
+		a.qqCancel()
+		a.qqCancel = nil
 	}
 	a.robotMu.Unlock()
 	// 给旧 goroutine 一点时间退出
@@ -1199,8 +1239,11 @@ func setupRoutes(
 
 		// 图编排 / 工作流定义（图结构固定，业务字段保存在 graph_json 中）
 		protected.GET("/workflows/runs/pending", workflowHandler.ListPendingRuns)
+		protected.GET("/workflows/runs/:runId/replay", workflowHandler.ReplayRun)
 		protected.GET("/workflows/runs/:runId", workflowHandler.GetRun)
 		protected.POST("/workflows/runs/:runId/resume", workflowHandler.ResumeRun)
+		protected.POST("/workflows/validate", workflowHandler.Validate)
+		protected.POST("/workflows/dry-run", workflowHandler.DryRun)
 		protected.GET("/workflows", workflowHandler.List)
 		protected.GET("/workflows/:id", workflowHandler.Get)
 		protected.POST("/workflows", workflowHandler.Create)

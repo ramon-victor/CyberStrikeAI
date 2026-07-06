@@ -24,6 +24,79 @@ function rolePlainDescription(role) {
     if (raw === 'roles.noDescription' || raw === 'roles.noDescriptionShort') return '';
     return raw;
 }
+
+function initSelectionDetailTooltip() {
+    if (window.__selectionDetailTooltipReady) return;
+    window.__selectionDetailTooltipReady = true;
+
+    const tooltip = document.createElement('div');
+    tooltip.className = 'selection-detail-tooltip';
+    tooltip.setAttribute('role', 'tooltip');
+    document.body.appendChild(tooltip);
+
+    let activeEl = null;
+
+    function hideTooltip() {
+        activeEl = null;
+        tooltip.classList.remove('visible', 'placement-left');
+    }
+
+    function positionTooltip(el) {
+        const text = el && el.getAttribute('data-selection-detail');
+        if (!text) {
+            hideTooltip();
+            return;
+        }
+        activeEl = el;
+        tooltip.textContent = text;
+        tooltip.classList.add('visible');
+
+        const rect = el.getBoundingClientRect();
+        const tipRect = tooltip.getBoundingClientRect();
+        const gap = 12;
+        const margin = 12;
+        const rightSpace = window.innerWidth - rect.right - gap - margin;
+        const placeLeft = rightSpace < tipRect.width && rect.left > tipRect.width + gap + margin;
+        const left = placeLeft ? rect.left - tipRect.width - gap : rect.right + gap;
+        const top = Math.max(margin, Math.min(rect.top + rect.height / 2 - tipRect.height / 2, window.innerHeight - tipRect.height - margin));
+
+        tooltip.classList.toggle('placement-left', placeLeft);
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = top + 'px';
+    }
+
+    document.addEventListener('mouseover', function (event) {
+        const el = event.target && event.target.closest && event.target.closest('[data-selection-detail]');
+        if (!el || (event.relatedTarget && el.contains(event.relatedTarget))) return;
+        positionTooltip(el);
+    });
+    document.addEventListener('mouseout', function (event) {
+        const el = event.target && event.target.closest && event.target.closest('[data-selection-detail]');
+        if (!el || (event.relatedTarget && el.contains(event.relatedTarget))) return;
+        hideTooltip();
+    });
+    document.addEventListener('focusin', function (event) {
+        const el = event.target && event.target.closest && event.target.closest('[data-selection-detail]');
+        if (el) positionTooltip(el);
+    });
+    document.addEventListener('focusout', function (event) {
+        const el = event.target && event.target.closest && event.target.closest('[data-selection-detail]');
+        if (el) hideTooltip();
+    });
+    window.addEventListener('scroll', hideTooltip, true);
+    window.addEventListener('resize', function () {
+        if (activeEl) positionTooltip(activeEl);
+    });
+}
+
+if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initSelectionDetailTooltip);
+    } else {
+        initSelectionDetailTooltip();
+    }
+}
+
 let currentRole = localStorage.getItem('currentRole') || '';
 let roles = [];
 let rolesSearchKeyword = ''; // 角色搜索关键词
@@ -209,9 +282,17 @@ function renderRoleSelectionSidebar() {
         const isSelected = isDefaultRole ? (currentRole === '' || currentRole === '默认') : (currentRole === role.name);
         const roleItem = document.createElement('div');
         roleItem.className = 'role-selection-item-main' + (isSelected ? ' selected' : '');
+        roleItem.setAttribute('role', 'option');
+        roleItem.tabIndex = 0;
         roleItem.onclick = () => {
             selectRole(role.name);
             closeRoleSelectionPanel(); // 选择后自动关闭面板
+        };
+        roleItem.onkeydown = (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                roleItem.click();
+            }
         };
         const icon = getRoleIcon(role);
         
@@ -221,6 +302,7 @@ function renderRoleSelectionSidebar() {
         if (isDefaultRole && !plainDesc) {
             description = _t('roles.defaultRoleDescription');
         }
+        roleItem.setAttribute('data-selection-detail', description);
         
         roleItem.innerHTML = `
             <div class="role-selection-item-icon-main">${icon}</div>

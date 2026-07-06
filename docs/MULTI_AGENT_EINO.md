@@ -5,7 +5,7 @@
 ## 总体结论
 
 - **改造已可用于生产试验**：流式对话、MCP 工具桥接、配置开关、前端模式切换均已落地。
-- **入口策略**：**单代理** 走 `/api/eino-agent/stream`；多代理（**Deep / Plan-Execute / Supervisor**）走 `/api/multi-agent/stream`，请求体 **`orchestration`** 指定编排。机器人默认 `robot_default_agent_mode: eino_single`；批量队列默认 `eino_single`，多代理模式需 `multi_agent.enabled`。
+- **入口策略**：**单代理** 走 `/api/eino-agent/stream`；多代理走 `/api/multi-agent/stream`，请求体 **`orchestration`** 指定编排。模式定位按 Eino ADK 最佳实践区分：**Deep** 适合复杂安全测试与 task 子代理协作；**Plan-Execute** 适合目标明确的规划 → 执行 → 重规划闭环；**Supervisor** 适合多个专业子代理动态分派的专家路由场景。机器人默认 `robot_default_agent_mode: eino_single`；批量队列默认 `eino_single`，多代理模式需 `multi_agent.enabled`。
 
 ## 已完成项
 
@@ -25,8 +25,8 @@
 | 配置 API | `GET /api/config` 返回 `multi_agent: { enabled, robot_use_multi_agent, sub_agent_count }`；`PUT /api/config` 可更新 `enabled`、`robot_use_multi_agent`（不覆盖 `sub_agents`）。 |
 | OpenAPI | 多代理路径说明已更新（流式未启用为 SSE 错误事件）。 |
 | 机器人 | `ProcessMessageForRobot` 按 `robot_default_agent_mode`（默认 `eino_single`）调用 `RunEinoSingleChatModelAgent` 或 `RunDeepAgent`。 |
-| 预置编排 | 聊天 / WebShell：`POST /api/multi-agent*` 请求体 `orchestration`：`deep` \| `plan_execute` \| `supervisor`（缺省 `deep`）。`plan_execute` 不构建 YAML/Markdown 子代理；`plan_execute_loop_max_iterations` 仍来自配置。`supervisor` 至少需一个子代理。 |
-| Eino 中间件 | `multi_agent.eino_middleware`（可选）：`patchtoolcalls`（默认开）、`toolsearch`（按阈值拆分 MCP 工具列表）、`plantask`（需 `eino_skills`）、`reduction`（大工具输出截断/落盘）、`checkpoint_dir`（Runner 断点）、`deep_output_key` / `deep_model_retry_max_retries` / `task_tool_description_prefix`（Deep 与 supervisor 主代理共享其中模型重试与 OutputKey）。**`plan_execute`**：`runner.go` 将 `prependEinoMiddlewares(einoMWMain)` 产物作为 `ExecPreMiddlewares` 挂到 **Executor**（与 Deep/Supervisor 主代理同序：patch → reduction → toolsearch → plantask → filesystem → skill → summarization tail）；Planner/Replanner 仅 summarization tail + prompt 预算截断，不跑 MCP 工具链。 |
+| 预置编排 | 聊天 / WebShell：`POST /api/multi-agent*` 请求体 `orchestration`：`deep` \| `plan_execute` \| `supervisor`（缺省 `deep`）。`deep` 使用 task 子代理协作；`plan_execute` 不构建 YAML/Markdown 子代理；`plan_execute_loop_max_iterations` 仍来自配置；`supervisor` 至少需一个子代理，只有一个子代理时会提示其专家路由空间有限。 |
+| Eino 中间件 | `multi_agent.eino_middleware`（可选）：`patchtoolcalls`（默认开）、`toolsearch`（按阈值拆分 MCP 工具列表）、`plantask`（需 `eino_skills`）、`reduction`（大工具输出截断/落盘）、`checkpoint_dir`（Runner 断点）、`deep_output_key` / `deep_model_retry_max_retries` / `task_tool_description_prefix`（Deep 与 supervisor 主代理共享其中模型重试与 OutputKey）。**`plan_execute`**：Executor 使用 Eino 官方允许的自定义 `adk.ChatModelAgent`，保持官方 Plan/UserInput/ExecutedSteps session contract，同时挂载与 Deep/Supervisor 主代理同源的 middleware（patch → reduction → toolsearch → plantask → filesystem → skill → summarization tail）。Planner/Replanner 仅 summarization tail + prompt 预算截断，不跑 MCP 工具链。当前 Eino 官方 `planexecute.NewExecutor` 尚未暴露 Handlers 字段，因此该自定义 Executor 是保留 middleware 的对齐实现。 |
 
 ## 进行中 / 待办（ backlog ）
 
@@ -60,5 +60,6 @@
 | 2026-03-22 | `orchestrator.md` / `kind: orchestrator` 主代理、列表主/子标记、与 `orchestrator_instruction` 优先级。 |
 | 2026-04-19 | 主聊天「对话模式」：原生 ReAct 与 Deep / Plan-Execute / Supervisor；`POST /api/multi-agent*` 请求体 `orchestration` 与界面一致；`config.yaml` / 设置页不再维护预置编排字段（机器人/批量默认 `deep`）。 |
 | 2026-04-21 | 移除角色 `skills` 与 `/api/roles/skills/list`；`bind_role` 仅继承 tools；Skills 仅通过 Eino `skill` 工具按需加载。 |
+| 2026-07-06 | **最佳实践对齐**：Deep / Plan-Execute / Supervisor 改为中性适用场景描述；Supervisor 标为专家路由特定场景并收紧 transfer/exit 约束；plan_execute Executor 明确为遵循官方 session contract 的自定义 ChatModelAgent，保留 middleware 并补类型保护。 |
 | 2026-07-02 | **plan_execute Executor 中间件对齐**：`ExecPreMiddlewares` 与 Deep 主代理同源；`buildPlanExecuteExecutorHandlers` + 回归测试；文档更正。 |
 | 2026-06-02 | **移除原生 ReAct**：删除 `/api/agent-loop*` 执行入口与 `AgentLoopWithProgress`；统一 Eino ADK（单代理 `/api/eino-agent*`，多代理 `/api/multi-agent*`）；任务 cancel/tasks API 保留。 |

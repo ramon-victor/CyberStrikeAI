@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -28,7 +29,40 @@ func (h *WorkflowHandler) GetRun(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "工作流运行不存在"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"run": run})
+	nodeRuns, err := h.db.ListWorkflowNodeRuns(runID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"run": run, "nodeRuns": nodeRuns})
+}
+
+func (h *WorkflowHandler) ReplayRun(c *gin.Context) {
+	runID := strings.TrimSpace(c.Param("runId"))
+	nodeRuns, err := h.db.ListWorkflowNodeRuns(runID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	steps := make([]gin.H, 0, len(nodeRuns))
+	for i, nodeRun := range nodeRuns {
+		var input any
+		var output any
+		_ = json.Unmarshal([]byte(nodeRun.InputJSON), &input)
+		_ = json.Unmarshal([]byte(nodeRun.OutputJSON), &output)
+		steps = append(steps, gin.H{
+			"step":       i + 1,
+			"nodeRunId":  nodeRun.ID,
+			"nodeId":     nodeRun.NodeID,
+			"status":     nodeRun.Status,
+			"input":      input,
+			"output":     output,
+			"error":      nodeRun.Error,
+			"startedAt":  nodeRun.StartedAt,
+			"finishedAt": nodeRun.FinishedAt,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"workflowRunId": runID, "steps": steps})
 }
 
 func (h *WorkflowHandler) ListPendingRuns(c *gin.Context) {
@@ -99,10 +133,10 @@ func (h *WorkflowHandler) ResumeRun(c *gin.Context) {
 	}
 	if delegated {
 		c.JSON(http.StatusOK, gin.H{
-			"workflowRunId":    runID,
-			"status":           "delegated",
-			"streamResuming":   true,
-			"approved":         req.Approved,
+			"workflowRunId":  runID,
+			"status":         "delegated",
+			"streamResuming": true,
+			"approved":       req.Approved,
 		})
 		return
 	}

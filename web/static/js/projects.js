@@ -2152,13 +2152,17 @@ function appendChatProjectPanelItem(list, project, selectedId, onSelect, tFn) {
     const t = tFn || tp;
     const isNone = !project.id;
     const isSelected = isNone ? !selectedId : selectedId === project.id;
+    const fullDesc = isNone
+        ? (project.description || '')
+        : (project.description || '').trim() || t('projects.sharedFactBoard');
     const desc = isNone
         ? (project.description || '')
-        : (project.description || '').trim().slice(0, 80) || t('projects.sharedFactBoard');
+        : fullDesc.slice(0, 80);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'role-selection-item-main' + (isSelected ? ' selected' : '');
     btn.setAttribute('role', 'option');
+    btn.setAttribute('data-selection-detail', fullDesc);
     btn.onclick = () => onSelect(project.id || '');
     btn.innerHTML = `
         <div class="role-selection-item-icon-main">${isNone ? '—' : '📁'}</div>
