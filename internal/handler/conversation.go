@@ -64,7 +64,7 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 
 	title := req.Title
 	if title == "" {
-		title = "新对话"
+		title = "New conversation"
 	}
 
 	meta := audit.ConversationCreateMetaFromGin(c, "api")

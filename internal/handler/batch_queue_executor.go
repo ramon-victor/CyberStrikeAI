@@ -115,7 +115,7 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 	conv, err := h.db.CreateConversation(title, batchMeta)
 	if err != nil {
 		h.logger.Error("创建对话失败", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.Error(err))
-		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", "创建对话失败: "+err.Error())
+		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", "failed to create conversation: "+err.Error())
 		return
 	}
 	conversationID := conv.ID
@@ -143,7 +143,7 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 		h.logger.Error("保存用户消息失败", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.String("conversationId", conversationID), zap.Error(err))
 	}
 
-	assistantMsg, err := h.db.AddMessage(conversationID, "assistant", "处理中...", nil)
+	assistantMsg, err := h.db.AddMessage(conversationID, "assistant", "processing...", nil)
 	if err != nil {
 		h.logger.Error("创建助手消息失败", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.String("conversationId", conversationID), zap.Error(err))
 		assistantMsg = nil
@@ -201,7 +201,7 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 			zap.Error(err))
 		failMsg := err.Error()
 		if errors.Is(err, ErrTaskAlreadyRunning) {
-			failMsg = "会话已有任务正在执行，无法在该会话上并行启动批量子任务"
+			failMsg = "the conversation already has a task running; cannot start a batch subtask in parallel on this conversation"
 		}
 		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", failMsg)
 		return
@@ -251,7 +251,7 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 			zap.String("queueId", queueID),
 			zap.String("taskId", task.ID),
 			zap.String("conversationId", conversationID))
-		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", "内部错误：无执行结果")
+		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", "internal error: no execution result")
 		return
 	}
 
@@ -316,7 +316,7 @@ func (h *AgentHandler) handleBatchSubTaskRunError(
 
 	if isCancelled {
 		h.logger.Info("批量任务被取消", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.String("conversationId", conversationID))
-		cancelMsg := "任务已被用户取消，后续操作已停止。"
+		cancelMsg := "the task was cancelled by the user; subsequent operations have been stopped."
 		if partialResp != "" && (strings.Contains(partialResp, "任务已被取消") || strings.Contains(partialResp, "任务执行中断")) {
 			cancelMsg = partialResp
 		}
@@ -335,7 +335,7 @@ func (h *AgentHandler) handleBatchSubTaskRunError(
 	}
 
 	h.logger.Error("批量任务执行失败", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.String("conversationId", conversationID), zap.Error(runErr))
-	errorMsg := "执行失败: " + runErr.Error()
+	errorMsg := "execution failed: " + runErr.Error()
 	if assistantMessageID != "" {
 		if _, updateErr := h.db.Exec(
 			"UPDATE messages SET content = ?, updated_at = ? WHERE id = ?",
