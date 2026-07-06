@@ -372,7 +372,7 @@ func validateChatAttachmentServerPath(abs string) (string, error) {
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("获取当前工作目录失败: %w", err)
+		return "", fmt.Errorf("failed to get current working directory: %w", err)
 	}
 	root := filepath.Join(cwd, chatUploadsDirName)
 	rootAbs, err := filepath.Abs(filepath.Clean(root))
@@ -455,12 +455,12 @@ func relocateManualOrNewUploadToConversation(absPath, conversationID string, log
 	}
 	targetDir := filepath.Join(rootAbs, datePart, convSan)
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return "", fmt.Errorf("创建会话附件目录失败: %w", err)
+		return "", fmt.Errorf("failed to create conversation attachment directory: %w", err)
 	}
 	dest := filepath.Join(targetDir, baseName)
 	dest = avoidChatUploadDestCollision(dest)
 	if err := os.Rename(absPath, dest); err != nil {
-		return "", fmt.Errorf("将附件移入会话目录失败: %w", err)
+		return "", fmt.Errorf("failed to move attachment into conversation directory: %w", err)
 	}
 	out, _ := filepath.Abs(dest)
 	if logger != nil {
@@ -480,7 +480,7 @@ func saveAttachmentsToDateAndConversationDir(attachments []ChatAttachment, conve
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("获取当前工作目录失败: %w", err)
+		return nil, fmt.Errorf("failed to get current working directory: %w", err)
 	}
 	dateDir := filepath.Join(cwd, chatUploadsDirName, time.Now().Format("2006-01-02"))
 	convDirName := strings.TrimSpace(conversationID)
@@ -491,18 +491,18 @@ func saveAttachmentsToDateAndConversationDir(attachments []ChatAttachment, conve
 	}
 	targetDir := filepath.Join(dateDir, convDirName)
 	if err = os.MkdirAll(targetDir, 0755); err != nil {
-		return nil, fmt.Errorf("创建上传目录失败: %w", err)
+		return nil, fmt.Errorf("failed to create upload directory: %w", err)
 	}
 	savedPaths = make([]string, 0, len(attachments))
 	for i, a := range attachments {
 		if sp := strings.TrimSpace(a.ServerPath); sp != "" {
 			valid, verr := validateChatAttachmentServerPath(sp)
 			if verr != nil {
-				return nil, fmt.Errorf("附件 %s: %w", a.FileName, verr)
+				return nil, fmt.Errorf("attachment %s: %w", a.FileName, verr)
 			}
 			finalPath, rerr := relocateManualOrNewUploadToConversation(valid, conversationID, logger)
 			if rerr != nil {
-				return nil, fmt.Errorf("附件 %s: %w", a.FileName, rerr)
+				return nil, fmt.Errorf("attachment %s: %w", a.FileName, rerr)
 			}
 			savedPaths = append(savedPaths, finalPath)
 			if logger != nil {
@@ -511,11 +511,11 @@ func saveAttachmentsToDateAndConversationDir(attachments []ChatAttachment, conve
 			continue
 		}
 		if strings.TrimSpace(a.Content) == "" {
-			return nil, fmt.Errorf("附件 %s 缺少内容或未提供 serverPath", a.FileName)
+			return nil, fmt.Errorf("attachment %s is missing content or serverPath", a.FileName)
 		}
 		raw, decErr := attachmentContentToBytes(a)
 		if decErr != nil {
-			return nil, fmt.Errorf("附件 %s 解码失败: %w", a.FileName, decErr)
+			return nil, fmt.Errorf("attachment %s decode failed: %w", a.FileName, decErr)
 		}
 		baseName := filepath.Base(a.FileName)
 		if baseName == "" || baseName == "." {
@@ -533,7 +533,7 @@ func saveAttachmentsToDateAndConversationDir(attachments []ChatAttachment, conve
 		}
 		fullPath := filepath.Join(targetDir, unique)
 		if err = os.WriteFile(fullPath, raw, 0644); err != nil {
-			return nil, fmt.Errorf("写入文件 %s 失败: %w", a.FileName, err)
+			return nil, fmt.Errorf("failed to write file %s: %w", a.FileName, err)
 		}
 		absPath, _ := filepath.Abs(fullPath)
 		savedPaths = append(savedPaths, absPath)
@@ -587,12 +587,12 @@ func appendAttachmentsToMessage(msg string, attachments []ChatAttachment, savedP
 	}
 	var b strings.Builder
 	b.WriteString(msg)
-	b.WriteString("\n\n[用户上传的文件]\n")
+	b.WriteString("\n\n[User-uploaded files]\n")
 	for i, a := range attachments {
 		if i < len(savedPaths) && savedPaths[i] != "" {
 			b.WriteString(fmt.Sprintf("- %s: %s\n", a.FileName, savedPaths[i]))
 		} else {
-			b.WriteString(fmt.Sprintf("- %s: （路径未知，可能保存失败）\n", a.FileName))
+			b.WriteString(fmt.Sprintf("- %s: (unknown path, may have failed to save)\n", a.FileName))
 		}
 	}
 	return b.String()
@@ -634,7 +634,7 @@ func (h *AgentHandler) mergeAssistantMessagePartialOnCancel(messageID, partial s
 	_, err := h.db.Exec(
 		`UPDATE messages
 		 SET content = CASE
-			WHEN content IS NULL OR TRIM(content) = '' OR TRIM(content) = '处理中...' THEN ?
+			WHEN content IS NULL OR TRIM(content) = '' OR TRIM(content) = 'processing...' THEN ?
 			WHEN INSTR(content, ?) > 0 THEN content
 			ELSE content || '\n\n' || ?
 		 END,
@@ -661,7 +661,7 @@ func (h *AgentHandler) finalizeRobotAgentError(ctx context.Context, assistantMes
 	if shouldPersistEinoAgentTraceAfterRunError(ctx) {
 		h.persistEinoAgentTraceForResume(conversationID, resultMA)
 	}
-	errMsg := "执行失败: " + errMA.Error()
+	errMsg := "execution failed: " + errMA.Error()
 	if assistantMessageID != "" {
 		_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
 		_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errMsg, nil)
@@ -738,12 +738,12 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, con
 		meta.ProjectID = effectiveProjectID(h.config, "")
 		conv, createErr := h.db.CreateConversation(title, meta)
 		if createErr != nil {
-			return "", "", fmt.Errorf("创建对话失败: %w", createErr)
+			return "", "", fmt.Errorf("failed to create conversation: %w", createErr)
 		}
 		conversationID = conv.ID
 	} else {
 		if _, getErr := h.db.GetConversation(conversationID); getErr != nil {
-			return "", "", fmt.Errorf("对话不存在")
+			return "", "", fmt.Errorf("conversation does not exist")
 		}
 	}
 
@@ -772,11 +772,11 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, con
 	}
 
 	if _, err = h.db.AddMessage(conversationID, "user", message, nil); err != nil {
-		return "", "", fmt.Errorf("保存用户消息失败: %w", err)
+		return "", "", fmt.Errorf("failed to save user message: %w", err)
 	}
 
 	// 与 Eino 流式对话一致：先创建助手消息占位，用 progressCallback 写过程详情（不发送 SSE）
-	assistantMsg, err := h.db.AddMessage(conversationID, "assistant", "处理中...", nil)
+	assistantMsg, err := h.db.AddMessage(conversationID, "assistant", "processing...", nil)
 	if err != nil {
 		h.logger.Warn("机器人：创建助手消息占位失败", zap.Error(err))
 	}
@@ -794,7 +794,7 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, con
 	}()
 	if _, err := h.tasks.StartTask(conversationID, message, cancelWithCause); err != nil {
 		if errors.Is(err, ErrTaskAlreadyRunning) {
-			return "", conversationID, fmt.Errorf("当前会话已有任务正在执行中，请稍后再试")
+			return "", conversationID, fmt.Errorf("the current conversation already has a task running; please try again later")
 		}
 		return "", conversationID, fmt.Errorf("无法启动任务: %w", err)
 	}
