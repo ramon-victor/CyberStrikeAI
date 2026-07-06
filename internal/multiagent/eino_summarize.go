@@ -22,60 +22,60 @@ import (
 	"go.uber.org/zap"
 )
 
-// einoSummarizeUserInstruction：压缩历史时保留渗透测试与用户约束关键信息。
-// 结构对齐 Eino 最佳实践（禁止工具、<analysis>+<summary>、<all_user_messages>），章节为安全测试领域化。
-const einoSummarizeUserInstruction = `关键：仅以纯文本响应。禁止调用任何工具（read_file、exec、grep、glob、write、edit 等）。
-上述对话中已包含全部待压缩上下文；不要要求用户粘贴历史，不要输出「请提供待压缩的对话历史」等占位/meta 回复。
-工具调用将被拒绝并浪费唯一一次摘要机会。
+// einoSummarizeUserInstruction: when compressing history, preserve the key information from penetration testing and user constraints.
+// Aligned with Eino best practices (no tools, <analysis>+<summary>, <all_user_messages>); sections are tailored to security testing.
+const einoSummarizeUserInstruction = `Key: Respond in plain text only. Do not call any tools (read_file, exec, grep, glob, write, edit, etc.).
+The conversation above already contains the full context to be compressed; do not ask the user to paste history, do not output placeholder/meta replies like "please provide the conversation history to be compressed".
+Tool calls will be rejected and will waste the one summary chance.
 
-你的任务：在保持所有关键安全测试信息完整的前提下压缩对话历史，使后续代理能无缝继续同一授权测试任务。
+Your task: Compress the conversation history while keeping all key security testing information complete, so that subsequent agents can seamlessly continue the same authorized testing task.
 
-压缩原则：
-- 必须保留：已确认漏洞与攻击路径、工具输出核心发现、凭证与认证细节、架构与薄弱点、当前进度、失败尝试与死路、策略决策
-- 保留精确技术细节（URL、路径、参数、Payload、版本号；报错原文可摘要但要点不丢）
-- 冗长扫描输出概括为结论；重复发现合并表述
-- 已枚举资产须保留可继承摘要：主域、关键子域/主机短表（或数量+代表样例）、高价值目标、已识别服务/端口要点
+Compression principles:
+- Must preserve: confirmed vulnerabilities and attack paths, core findings from tool outputs, credentials and authentication details, architecture and weaknesses, current progress, failed attempts and dead ends, strategy decisions
+- Preserve precise technical details (URLs, paths, parameters, payloads, version numbers; error messages can be summarized but key points must not be lost)
+- Summarize verbose scan outputs into conclusions; merge repeated findings
+- Already-enumerated assets must preserve an inheritable summary: main domain, brief list of key subdomains/hosts (or count + representative samples), high-value targets, key identified services/ports
 
-输出格式（严格遵循，仅一轮回复）：
-1. 先输出 <analysis> 块：按时间顺序梳理对话，检查是否涵盖下方各章节要点；analysis 仅供自检，保持简洁（建议 ≤400 字）
-2. 再输出 <summary> 块：按以下章节写入可继承的压缩报告（无信息处写「无」，禁止留空模板占位符）
+Output format (strictly follow, only one reply round):
+1. First output the <analysis> block: review the conversation in chronological order and check whether the following sections are covered; the analysis is for self-check only, keep it concise (suggested ≤ 400 words)
+2. Then output the <summary> block: write the inheritable compression report by the following sections (write "none" where there is no information, do not leave empty template placeholders)
 
 <summary>
-## 1. 授权范围与约束
-- 目标/范围/禁止项（域名、路径、IP、环境）
-- 凭证/认证信息（账号、Token、Cookie；敏感值原文保留）
-- 用户指定的方法、工具、优先级与待办
-- 否定约束（不测什么、不用什么手法）
+## 1. Authorization Scope and Constraints
+- Target / scope / prohibited items (domains, paths, IPs, environment)
+- Credentials / authentication info (accounts, tokens, cookies; preserve sensitive values verbatim)
+- User-specified methods, tools, priorities, and todos
+- Negative constraints (what not to test, what techniques not to use)
 
-## 2. 资产与服务枚举摘要
-- 主域/核心资产、关键子域或主机短表（或数量+代表样例）
-- 高价值目标、已识别服务/端口要点
-- 资产状态（存活/可攻/已排除/待验证）
+## 2. Assets and Service Enumeration Summary
+- Main domain / core assets, brief list of key subdomains or hosts (or count + representative samples)
+- High-value targets, key identified services/ports
+- Asset status (alive / attackable / ruled out / pending verification)
 
-## 3. 架构与已知薄弱点
-- 技术栈/部署拓扑/信任边界
-- 已识别薄弱点列表
+## 3. Architecture and Known Weaknesses
+- Tech stack / deployment topology / trust boundaries
+- List of identified weaknesses
 
-## 4. 已确认漏洞与攻击路径
-- 漏洞名/CVE、URL/路径、参数/Payload、PoC 要点、影响等级
-- 攻击链/利用路径（步骤化）
+## 4. Confirmed Vulnerabilities and Attack Paths
+- Vulnerability name / CVE, URL / path, parameters / payload, PoC key points, impact level
+- Attack chain / exploitation path (step-by-step)
 
-## 5. 工具核心发现与扫描结论
-- 各工具结论（概括核心输出，非冗长日志）
-- 重复发现合并表述
+## 5. Tool Core Findings and Scan Conclusions
+- Each tool's conclusion (summarize core output, not verbose logs)
+- Merge repeated findings
 
-## 6. 所有用户消息
+## 6. All User Messages
 <all_user_messages>
-- [逐条列出非 tool 结果的用户消息要点；敏感约束与原文措辞尽量保留]
+- [List the key points of each non-tool user message; preserve sensitive constraints and original wording as much as possible]
 </all_user_messages>
 
-## 7. 当前进度、策略决策与下一步
-- 当前位置（已完成/进行中/卡点）
-- 失败尝试与死路（方法、现象/报错摘要、结论）
-- 策略决策与下一步具体操作（须与最近用户请求及未完成任务一致）
+## 7. Current Progress, Strategy Decisions, and Next Steps
+- Current position (completed / in progress / blocked)
+- Failed attempts and dead ends (method, phenomenon / error summary, conclusion)
+- Strategy decisions and concrete next-step operations (must be consistent with the most recent user request and unfinished tasks)
 </summary>
 
-提醒：不要调用任何工具；必须基于上文已有对话直接输出 <analysis> 与 <summary>，勿输出 analysis 以外的正文。`
+Reminder: Do not call any tools; you must directly output <analysis> and <summary> based on the existing conversation above, and do not output any body text outside of the analysis.`
 
 // newEinoSummarizationMiddleware 使用 Eino ADK Summarization 中间件（见 https://www.cloudwego.io/zh/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_summarization/）。
 // 触发阈值：估算 token 超过 openai.max_total_tokens * summarization_trigger_ratio（默认 0.8）时摘要。
