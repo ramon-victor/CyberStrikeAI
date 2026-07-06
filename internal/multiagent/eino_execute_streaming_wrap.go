@@ -33,7 +33,7 @@ func prependPythonUnbufferedEnv(shellCommand string) string {
 
 // einoExecuteTimeoutUserHint 与写入 ADK 工具消息（模型可见）及 SSE tool_result 尾标一致。
 func einoExecuteTimeoutUserHint() string {
-	return "已超时终止 · Timed out"
+	return "Terminated due to timeout · Timed out"
 }
 
 // einoExecuteRecvErrIsToolTimeout 判断 Recv 错误是否由 agent.tool_timeout_minutes 触发。
@@ -322,7 +322,7 @@ func (w *einoStreamingShellWrap) ExecuteStreaming(ctx context.Context, input *fi
 		fireBody := rawOutput
 		if !success && hasExitCode && exitCode != 0 {
 			statusLine := security.ExecuteFailureStatusLine(exitCode)
-			if !strings.Contains(rawOutput, "命令执行失败:") {
+			if !strings.Contains(rawOutput, "Command execution failed:") {
 				_ = outW.Send(&filesystem.ExecuteResponse{Output: statusLine}, nil)
 				sb.WriteString(statusLine)
 			}

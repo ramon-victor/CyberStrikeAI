@@ -22,8 +22,8 @@ func isEinoEmptyResponseText(s string) bool {
 	if s == "" {
 		return false
 	}
-	return strings.Contains(s, "no assistant text was captured") ||
-		strings.Contains(s, "未捕获到助手文本输出")
+	return 		strings.Contains(s, "no assistant text was captured") ||
+		strings.Contains(s, "no assistant text output captured")
 }
 
 // HasEinoResumeTrace 轨迹非空，续跑才有上下文可恢复。
@@ -52,8 +52,8 @@ func EmptyResponseContinueBackoff(attempt int, mw *config.MultiAgentEinoMiddlewa
 	return einoTransientRetryBackoff(attempt, maxBackoff)
 }
 
-// FormatEmptyResponseContinueUserMessage 系统自动续跑时注入的 user 轮次（不写入 messages 表气泡）。
+// FormatEmptyResponseContinueUserMessage is the user turn injected on system auto-resume (not written to the messages table bubble).
 func FormatEmptyResponseContinueUserMessage() string {
-	return strings.TrimSpace(`【系统自动续跑 / Auto resume】
-上一轮 Eino 会话未产出可见助手正文（可能流式中断或仅完成工具调用）。请基于已有轨迹与工具结果继续推进，并给出阶段性总结；勿重复已完成步骤。`)
+	return strings.TrimSpace(`[System auto-resume / Auto resume]
+The previous Eino session did not produce visible assistant text (possibly interrupted during streaming, or only completed tool calls). Please continue advancing based on the existing trajectory and tool results, and provide a short summary; do not repeat already-completed steps.`)
 }

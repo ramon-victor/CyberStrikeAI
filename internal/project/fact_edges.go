@@ -87,11 +87,11 @@ func truncateGraphLabel(summary string, maxRunes int) string {
 // BuildProjectFactGraph 构建项目事实图（nodes + edges）。
 func BuildProjectFactGraph(db *database.DB, projectID string, view string, excludeDeprecated bool) (*database.ProjectFactGraph, error) {
 	if db == nil {
-		return nil, fmt.Errorf("database 未初始化")
+		return nil, fmt.Errorf("database not initialized")
 	}
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
-		return nil, fmt.Errorf("project_id 不能为空")
+		return nil, fmt.Errorf("project_id cannot be empty")
 	}
 
 	view = strings.TrimSpace(strings.ToLower(view))
@@ -154,7 +154,7 @@ func BuildProjectFactGraph(db *database.DB, projectID string, view string, exclu
 			if _, ok := nodeKeys[e.TargetFactKey]; ok {
 				// already included
 			} else if f, ok := factByKey[e.TargetFactKey]; !ok {
-				nodeKeys[e.TargetFactKey] = struct{}{} // 占位节点
+				nodeKeys[e.TargetFactKey] = struct{}{} // placeholder node
 			} else if isPathGraphFact(f.Category, f.FactKey) || isDependencyGraphFact(f.Category, f.FactKey) {
 				nodeKeys[e.TargetFactKey] = struct{}{}
 			} else {
@@ -230,7 +230,7 @@ func BuildProjectFactGraph(db *database.DB, projectID string, view string, exclu
 		vulnNodeID := "vuln:" + vid
 		if _, exists := nodeKeys[vulnNodeID]; !exists {
 			nodeKeys[vulnNodeID] = struct{}{}
-			label := "漏洞"
+			label := "vulnerability"
 			if len(vid) >= 8 {
 				label += " " + vid[:8] + "…"
 			} else {
@@ -317,7 +317,7 @@ func ParseFactLinkInputs(raw interface{}) (*ParsedFactLinks, error) {
 	}
 	items, ok := raw.([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("links 须为数组")
+		return nil, fmt.Errorf("links must be an array")
 	}
 	if len(items) == 0 {
 		return &ParsedFactLinks{
@@ -328,17 +328,17 @@ func ParseFactLinkInputs(raw interface{}) (*ParsedFactLinks, error) {
 	for i, item := range items {
 		m, ok := item.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("links[%d] 格式无效", i)
+			return nil, fmt.Errorf("links[%d] format invalid", i)
 		}
 		from, _ := m["from"].(string)
 		edgeType, _ := m["type"].(string)
 		from = strings.TrimSpace(from)
 		edgeType = strings.TrimSpace(edgeType)
 		if from == "" {
-			return nil, fmt.Errorf("links[%d] 须含 from", i)
+			return nil, fmt.Errorf("links[%d] must include from", i)
 		}
 		if edgeType == "" {
-			return nil, fmt.Errorf("links[%d] 须含 type", i)
+			return nil, fmt.Errorf("links[%d] must include type", i)
 		}
 		conf, _ := m["confidence"].(string)
 		parsed.Incoming = append(parsed.Incoming, database.ProjectFactEdgeFromInput{
@@ -372,12 +372,12 @@ func ParseFactIncomingLinksText(text string) ([]database.ProjectFactEdgeFromInpu
 		}
 		edgeType, source, ok := strings.Cut(line, ":")
 		if !ok {
-			return nil, fmt.Errorf("第 %d 行格式无效，应为 type: fact_key", i+1)
+			return nil, fmt.Errorf("line %d has invalid format, expected type: fact_key", i+1)
 		}
 		edgeType = strings.TrimSpace(edgeType)
 		source = strings.TrimSpace(source)
 		if edgeType == "" || source == "" {
-			return nil, fmt.Errorf("第 %d 行 type 或 fact_key 为空", i+1)
+			return nil, fmt.Errorf("line %d has empty type or fact_key", i+1)
 		}
 		out = append(out, database.ProjectFactEdgeFromInput{From: source, Type: edgeType})
 	}

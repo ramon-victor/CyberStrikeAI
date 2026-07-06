@@ -1,11 +1,11 @@
 package projectprompt
 
-// ShellExecExecuteGuidanceSection 供单代理/多代理系统提示追加：exec 与 execute 分工（尽量短）。
+// ShellExecExecuteGuidanceSection is appended to single-agent/multi-agent system prompts: division of labor between exec and execute (kept short).
 func ShellExecExecuteGuidanceSection() string {
-	return `Shell（exec/execute）：有专用 MCP 工具时优先专用工具；系统命令（管道、workdir、后台 &）用 exec；skills/ 内脚本（配合 read_file、skill）用 execute；多步扫描分拆调用，禁止一条 shell 串多个扫描器。下载/临时文件须写入系统提示中的「会话工作目录」，禁止用 /tmp。`
+	return `Shell (exec/execute): prefer dedicated MCP tools when available; use exec for system commands (pipes, workdir, background &); use execute for scripts under skills/ (paired with read_file, skill); split multi-step scanning into separate calls, never chain multiple scanners in a single shell. Downloads / temporary files must be written to the "session working directory" in the system prompt; do not use /tmp.`
 }
 
-// ShellExecExecuteGuidanceReconSuffix 侦察子代理可选追加（一行）。
+// ShellExecExecuteGuidanceReconSuffix is optionally appended to reconnaissance sub-agents (one line).
 func ShellExecExecuteGuidanceReconSuffix() string {
-	return `枚举优先 subfinder、amass 等专用 MCP，勿 exec/execute 拼长链。`
+	return `Prefer dedicated MCP tools (e.g., subfinder, amass) for enumeration; do not chain long exec/execute calls.`
 }
