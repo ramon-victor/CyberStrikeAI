@@ -158,7 +158,7 @@ func (c *lazySDKClient) ListTools(ctx context.Context) ([]Tool, error) {
 	inner := c.inner
 	c.mu.RUnlock()
 	if inner == nil {
-		return nil, fmt.Errorf("未连接")
+		return nil, fmt.Errorf("not connected")
 	}
 	return inner.ListTools(ctx)
 }
@@ -168,7 +168,7 @@ func (c *lazySDKClient) CallTool(ctx context.Context, name string, args map[stri
 	inner := c.inner
 	c.mu.RUnlock()
 	if inner == nil {
-		return nil, fmt.Errorf("未连接")
+		return nil, fmt.Errorf("not connected")
 	}
 	return inner.CallTool(ctx, name, args)
 }
@@ -231,7 +231,7 @@ func (c *sdkClient) Initialize(ctx context.Context) error {
 
 func (c *sdkClient) ListTools(ctx context.Context) ([]Tool, error) {
 	if c.session == nil {
-		return nil, fmt.Errorf("未连接")
+		return nil, fmt.Errorf("not connected")
 	}
 	res, err := c.session.ListTools(ctx, nil)
 	if err != nil {
@@ -245,7 +245,7 @@ func (c *sdkClient) ListTools(ctx context.Context) ([]Tool, error) {
 
 func (c *sdkClient) CallTool(ctx context.Context, name string, args map[string]interface{}) (*ToolResult, error) {
 	if c.session == nil {
-		return nil, fmt.Errorf("未连接")
+		return nil, fmt.Errorf("not connected")
 	}
 	params := &mcp.CallToolParams{
 		Name:      name,
@@ -345,7 +345,7 @@ func createSDKClient(ctx context.Context, serverCfg config.ExternalMCPServerConf
 
 	transport := serverCfg.GetTransportType()
 	if transport == "" {
-		return nil, fmt.Errorf("配置缺少 command 或 url，且未指定 type/transport")
+		return nil, fmt.Errorf("configuration must include command or url and specify type/transport")
 	}
 
 	// 构造 ClientOptions：KeepAlive 心跳
@@ -365,7 +365,7 @@ func createSDKClient(ctx context.Context, serverCfg config.ExternalMCPServerConf
 	switch transport {
 	case "stdio":
 		if serverCfg.Command == "" {
-			return nil, fmt.Errorf("stdio 模式需要配置 command")
+			return nil, fmt.Errorf("stdio transport requires command")
 		}
 		// 必须用 exec.Command 而非 CommandContext：doConnect 返回后 ctx 会被 cancel，
 		// 若用 CommandContext(ctx) 会立刻杀掉子进程，导致 ListTools 等后续请求失败、显示 0 工具
@@ -380,7 +380,7 @@ func createSDKClient(ctx context.Context, serverCfg config.ExternalMCPServerConf
 		t = ct
 	case "sse":
 		if serverCfg.URL == "" {
-			return nil, fmt.Errorf("sse 模式需要配置 url")
+			return nil, fmt.Errorf("sse transport requires url")
 		}
 		// SSE 是长连接（GET 流持续打开），不能设置 http.Client.Timeout（会在超时后杀掉整个连接导致 EOF）。
 		// 超时由每次 ListTools/CallTool 的 context 单独控制。
@@ -391,7 +391,7 @@ func createSDKClient(ctx context.Context, serverCfg config.ExternalMCPServerConf
 		}
 	case "http":
 		if serverCfg.URL == "" {
-			return nil, fmt.Errorf("http 模式需要配置 url")
+			return nil, fmt.Errorf("http transport requires url")
 		}
 		httpClient := httpClientWithTimeoutAndHeaders(timeout, serverCfg.Headers)
 		st := &mcp.StreamableClientTransport{
@@ -403,12 +403,12 @@ func createSDKClient(ctx context.Context, serverCfg config.ExternalMCPServerConf
 		}
 		t = st
 	default:
-		return nil, fmt.Errorf("不支持的传输模式: %s（支持: stdio, sse, http）", transport)
+		return nil, fmt.Errorf("unsupported transport: %s (supported: stdio, sse, http)", transport)
 	}
 
 	session, err := client.Connect(ctx, t, nil)
 	if err != nil {
-		return nil, fmt.Errorf("连接失败: %w", err)
+		return nil, fmt.Errorf("connection failed: %w", err)
 	}
 
 	return newSDKClientFromSession(session, client, logger), nil

@@ -5,7 +5,32 @@ import (
 	"strings"
 )
 
-// ParseTraceMessages parses the persisted last_react_input (OpenAI-style messages JSON array).
+const ModelFacingTraceVersionKey = "cyberstrike_model_facing_trace_version"
+
+// IsModelFacingTraceJSON reports whether a persisted trace was produced from the final
+// model-boundary state. Legacy traces have no version marker and require one-time migration.
+func IsModelFacingTraceJSON(traceInputJSON string) bool {
+	var raw []map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(traceInputJSON)), &raw); err != nil {
+		return false
+	}
+	for _, msg := range raw {
+		extra, _ := msg["extra"].(map[string]interface{})
+		v, ok := extra[ModelFacingTraceVersionKey]
+		if !ok {
+			continue
+		}
+		switch n := v.(type) {
+		case float64:
+			return n >= 1
+		case int:
+			return n >= 1
+		}
+	}
+	return false
+}
+
+// ParseTraceMessages 解析落库的 last_react_input（OpenAI 风格 messages JSON 数组）。
 func ParseTraceMessages(traceInputJSON string) ([]ChatMessage, error) {
 	traceInputJSON = strings.TrimSpace(traceInputJSON)
 	if traceInputJSON == "" {
@@ -15,6 +40,7 @@ func ParseTraceMessages(traceInputJSON string) ([]ChatMessage, error) {
 	if err := json.Unmarshal([]byte(traceInputJSON), &raw); err != nil {
 		return nil, err
 	}
+	modelFacing := IsModelFacingTraceJSON(traceInputJSON)
 	out := make([]ChatMessage, 0, len(raw))
 	for _, msgMap := range raw {
 		msg := ChatMessage{}
@@ -23,6 +49,7 @@ func ParseTraceMessages(traceInputJSON string) ([]ChatMessage, error) {
 			continue
 		}
 		msg.Role = role
+		msg.ModelFacingTrace = modelFacing
 		if content, ok := msgMap["content"].(string); ok {
 			msg.Content = content
 		}
@@ -78,8 +105,8 @@ func ParseTraceMessages(traceInputJSON string) ([]ChatMessage, error) {
 	return out, nil
 }
 
-// ExtractLastUserTurnMessages keeps only messages starting from the last user question (excludes earlier user turns; skips system).
-// Consistent with the trace range used by "continue conversation" resume: current task turn, not the entire multi-turn conversation history.
+// ExtractLastUserTurnMessages 仅保留最后一次 user 提问起的消息（不含更早的用户轮次；跳过 system）。
+// 与「继续对话」续跑所用轨迹范围一致：当前任务轮次，而非整段多轮对话历史。
 func ExtractLastUserTurnMessages(msgs []ChatMessage) []ChatMessage {
 	if len(msgs) == 0 {
 		return msgs
@@ -104,7 +131,7 @@ func ExtractLastUserTurnMessages(msgs []ChatMessage) []ChatMessage {
 	return out
 }
 
-// ExtractLastUserTurnTraceJSON trims the JSON trace to the segment starting from the last user message (for direct processing of persisted format).
+// ExtractLastUserTurnTraceJSON 在 JSON 轨迹上裁剪为最后一次 user 起的片段（供落库格式直接处理）。
 func ExtractLastUserTurnTraceJSON(traceInputJSON string) string {
 	traceInputJSON = strings.TrimSpace(traceInputJSON)
 	if traceInputJSON == "" {
@@ -131,7 +158,7 @@ func ExtractLastUserTurnTraceJSON(traceInputJSON string) string {
 	return string(b)
 }
 
-// MergeAssistantTraceOutput merges last_react_output into the last assistant message in the trace (consistent with loadHistoryFromAgentTrace).
+// MergeAssistantTraceOutput 将 last_react_output 合并进轨迹最后一条 assistant（与 loadHistoryFromAgentTrace 一致）。
 func MergeAssistantTraceOutput(msgs []ChatMessage, assistantOut string) []ChatMessage {
 	assistantOut = strings.TrimSpace(assistantOut)
 	if assistantOut == "" || len(msgs) == 0 {
@@ -150,7 +177,7 @@ func MergeAssistantTraceOutput(msgs []ChatMessage, assistantOut string) []ChatMe
 	return out
 }
 
-// MessagesToTraceJSON serializes messages to JSON (skipping system messages).
+// MessagesToTraceJSON 将消息带序列化为 JSON（跳过 system）。
 func MessagesToTraceJSON(msgs []ChatMessage) (string, error) {
 	filtered := make([]ChatMessage, 0, len(msgs))
 	for _, m := range msgs {

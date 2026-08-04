@@ -78,3 +78,23 @@ func TestCancelTaskDefaultCauseIsTaskCancelled(t *testing.T) {
 		t.Fatalf("expected tool canceler path for default cancel cause")
 	}
 }
+
+func TestFinishTaskInvokesToolCancelerOnSessionEnd(t *testing.T) {
+	tm := NewAgentTaskManager()
+	calls := 0
+	tm.SetToolCanceler(func(conversationID string) {
+		if conversationID == "conv-3" {
+			calls++
+		}
+	})
+
+	_, cancel := context.WithCancelCause(context.Background())
+	if _, err := tm.StartTask("conv-3", "hello", cancel); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+
+	tm.FinishTask("conv-3", "completed")
+	if calls != 1 {
+		t.Fatalf("expected one tool cleanup on FinishTask, got %d", calls)
+	}
+}

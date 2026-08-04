@@ -304,7 +304,7 @@ func (h *RoleHandler) DeleteRole(c *gin.Context) {
 		h.audit.RecordOK(c, "role", "delete", "删除角色", "role", roleName, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"message": "角色Deleted",
+		"message": "Role deleted",
 	})
 }
 
@@ -323,7 +323,7 @@ func (h *RoleHandler) saveConfig() error {
 
 	// 确保目录存在
 	if err := os.MkdirAll(rolesDir, 0755); err != nil {
-		return fmt.Errorf("Creating role目录失败: %w", err)
+		return fmt.Errorf("failed to create role directory: %w", err)
 	}
 
 	// 保存每个角色到独立的文件

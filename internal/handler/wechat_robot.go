@@ -104,11 +104,11 @@ func (h *WechatRobotHandler) HandleWechatQRCode(c *gin.Context) {
 	qr, err := client.GetBotQRCode(ctx, botType, localTokens)
 	if err != nil {
 		h.logger.Warn("获取微信二维码失败", zap.Error(err))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "获取二维码失败: " + err.Error()})
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to obtain QR code: " + err.Error()})
 		return
 	}
 	if qr.QRCode == "" || qr.QRCodeImgContent == "" {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "微信服务器未返回有效二维码"})
+		c.JSON(http.StatusBadGateway, gin.H{"error": "WeChat server returned no valid QR code"})
 		return
 	}
 
@@ -126,7 +126,7 @@ func (h *WechatRobotHandler) HandleWechatQRCode(c *gin.Context) {
 		"session_key":     sessionKey,
 		"qrcode":          qr.QRCode,
 		"qrcode_open_url": qr.QRCodeImgContent,
-		"message":         "请使用微信扫描二维码并确认绑定",
+		"message":         "scan the QR code with WeChat and confirm the binding",
 	}
 	if dataURL, err := ilink.QRCodeDataURL(qr.QRCodeImgContent, 256); err != nil {
 		h.logger.Warn("生成二维码图片失败", zap.Error(err))
@@ -142,7 +142,7 @@ func (h *WechatRobotHandler) HandleWechatQRCodeStatus(c *gin.Context) {
 	sessionKey := c.Query("session_key")
 	verifyCode := c.Query("verify_code")
 	if sessionKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 session_key"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing session_key"})
 		return
 	}
 
@@ -150,14 +150,14 @@ func (h *WechatRobotHandler) HandleWechatQRCodeStatus(c *gin.Context) {
 	sess, ok := h.logins[sessionKey]
 	h.mu.Unlock()
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "登录会话不存在或已过期，请重新生成二维码"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "login session does not exist or has expired; regenerate the QR code"})
 		return
 	}
 	if time.Since(sess.StartedAt) > wechatLoginTTL {
 		h.mu.Lock()
 		delete(h.logins, sessionKey)
 		h.mu.Unlock()
-		c.JSON(http.StatusGone, gin.H{"error": "二维码已过期，请重新生成"})
+		c.JSON(http.StatusGone, gin.H{"error": "QR code has expired; regenerate it"})
 		return
 	}
 
@@ -188,7 +188,7 @@ func (h *WechatRobotHandler) HandleWechatQRCodeStatus(c *gin.Context) {
 	case "need_verifycode":
 		c.JSON(http.StatusOK, gin.H{
 			"status":  st.Status,
-			"message": "请在手机微信查看配对数字，并在下方输入",
+			"message": "view the pairing number in WeChat and enter it below",
 		})
 		return
 	case "scaned_but_redirect":
@@ -208,12 +208,12 @@ func (h *WechatRobotHandler) HandleWechatQRCodeStatus(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status":            st.Status,
 			"already_connected": true,
-			"message":           "该微信已绑定过，无需重复绑定",
+			"message":           "this WeChat account is already bound; no need to bind again",
 		})
 		return
 	case "confirmed":
 		if st.BotToken == "" || st.ILinkBotID == "" {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "绑定确认成功但缺少 bot_token"})
+			c.JSON(http.StatusBadGateway, gin.H{"error": "binding confirmed but bot_token is missing"})
 			return
 		}
 		saveBase := st.BaseURL
@@ -235,7 +235,7 @@ func (h *WechatRobotHandler) HandleWechatQRCodeStatus(c *gin.Context) {
 		if h.configSaver != nil {
 			if err := h.configSaver.ApplyWechatRobotBinding(wc); err != nil {
 				h.logger.Warn("保存微信机器人配置失败", zap.Error(err))
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "保存配置失败: " + err.Error()})
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save configuration: " + err.Error()})
 				return
 			}
 		} else {
@@ -246,7 +246,7 @@ func (h *WechatRobotHandler) HandleWechatQRCodeStatus(c *gin.Context) {
 		h.mu.Unlock()
 		c.JSON(http.StatusOK, gin.H{
 			"status":        "confirmed",
-			"message":       "绑定成功，微信机器人已启用",
+			"message":       "binding successful, WeChat robot enabled",
 			"ilink_bot_id":  st.ILinkBotID,
 			"ilink_user_id": st.ILinkUserID,
 		})
@@ -263,7 +263,7 @@ func (h *WechatRobotHandler) HandleWechatVerifyCode(c *gin.Context) {
 		VerifyCode string `json:"verify_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.SessionKey == "" || req.VerifyCode == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "需要 session_key 与 verify_code"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "session_key and verify_code are required"})
 		return
 	}
 	h.mu.Lock()
@@ -273,10 +273,10 @@ func (h *WechatRobotHandler) HandleWechatVerifyCode(c *gin.Context) {
 	}
 	h.mu.Unlock()
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "登录会话不存在或已过期"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "login session does not exist or has expired"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "已提交配对码，请继续等待绑定"})
+	c.JSON(http.StatusOK, gin.H{"message": "pairing code submitted, waiting for binding to complete"})
 }
 
 // HandleWechatStatus GET /api/robot/wechat/status — 当前绑定状态（供前端展示）

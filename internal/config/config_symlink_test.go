@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-func TestLoadResolvesRelativeDirsFromSymlinkTarget(t *testing.T) {
-	t.Skip("Skipped: upstream v1.6.50 changed roles_dir resolution to use config file's directory, not the symlink target. Re-evaluate desired behavior.")
+func TestLoadResolvesRelativeDirsFromSymlinkPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	runtimeDir := filepath.Join(tmpDir, "runtime-config")
 	rolesDir := filepath.Join(tmpDir, "roles")
@@ -19,7 +18,7 @@ func TestLoadResolvesRelativeDirsFromSymlinkTarget(t *testing.T) {
 	}
 
 	configPath := filepath.Join(runtimeDir, "config.yaml")
-	configContent := []byte("auth:\n  password: test-password\nroles_dir: ../roles\n")
+	configContent := []byte("auth:\n  password: test-password\nroles_dir: roles\n")
 	if err := os.WriteFile(configPath, configContent, 0644); err != nil {
 		t.Fatalf("write runtime config: %v", err)
 	}
@@ -39,6 +38,6 @@ func TestLoadResolvesRelativeDirsFromSymlinkTarget(t *testing.T) {
 		t.Fatalf("load config through symlink: %v", err)
 	}
 	if _, ok := cfg.Roles["Analyst"]; !ok {
-		t.Fatalf("expected role loaded from directory relative to symlink target, got %#v", cfg.Roles)
+		 t.Fatalf("expected role loaded from directory relative to symlink path, got %#v", cfg.Roles)
 	}
 }

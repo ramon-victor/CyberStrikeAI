@@ -13,6 +13,7 @@ args:
     import sys
     import time
     import urllib.parse
+    import urllib.request
     from typing import Dict, List, Tuple
 
     try:
@@ -127,6 +128,283 @@ args:
         return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, fragment))
 
 
+    def origin_url(url: str) -> str:
+        """scheme://netloc/ — httpx build base; real request-target is set separately."""
+        parts = urllib.parse.urlsplit(url)
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/", "", ""))
+
+
+    def wire_request_target(url: str, absolute_form: bool = False) -> bytes:
+        """
+        HTTP request-target on the wire (curl --path-as-is semantics, no fragment).
+        absolute_form: HTTP forward-proxy + plaintext http:// requires absolute-form.
+        """
+        parts = urllib.parse.urlsplit(url)
+        path = parts.path or "/"
+        if absolute_form:
+            target = urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+        elif parts.query:
+            target = f"{path}?{parts.query}"
+        else:
+            target = path
+        return target.encode("utf-8", errors="surrogateescape")
+
+
+    def resolve_forward_proxy(explicit_proxy: str, trust_env: bool, url: str) -> str:
+        """Return the proxy that the custom transport must actually use."""
+        if explicit_proxy:
+            return explicit_proxy
+        if not trust_env:
+            return ""
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname or ""
+        # urllib handles NO_PROXY/no_proxy matching, including suffixes and '*'.
+        if host and urllib.request.proxy_bypass(host):
+            return ""
+        proxies = urllib.request.getproxies()
+        scheme = (parsed.scheme or "").lower()
+        return proxies.get(scheme) or proxies.get("all") or ""
+
+
+    def needs_http_absolute_form(proxy: str, url: str) -> bool:
+        """
+        Keep the custom raw target in origin-form.
+
+        httpcore adds the scheme/authority itself when an HTTP forward proxy needs
+        absolute-form. Supplying an absolute raw_path here would duplicate the URL.
+        """
+        return False
+
+
+    def display_url_for_target(url: str, wire_target: bytes) -> str:
+        target = wire_target.decode("utf-8", errors="replace")
+        if target.startswith("http://") or target.startswith("https://"):
+            return target
+        parts = urllib.parse.urlsplit(url)
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, "", "", "")).rstrip("/") + (
+            target if target.startswith("/") else "/" + target
+        )
+
+
+    def resolve_url_path_as_is(base_url: str, location: str) -> str:
+        """
+        Resolve a Location header without RFC remove_dot_segments.
+        Keeps literal '.' / '..' in both absolute and relative references.
+        """
+        location = (location or "").strip()
+        if not location:
+            raise ValueError("Redirect missing Location header")
+        if "#" in location:
+            location = location.split("#", 1)[0]
+        loc = urllib.parse.urlsplit(location)
+        base = urllib.parse.urlsplit(base_url)
+
+        if loc.scheme:
+            path = loc.path or "/"
+            return urllib.parse.urlunsplit((loc.scheme, loc.netloc, path, loc.query, ""))
+
+        if location.startswith("//"):
+            # protocol-relative
+            rest = location[2:]
+            if "/" in rest:
+                netloc, path_and_more = rest.split("/", 1)
+                path_and_more = "/" + path_and_more
+            else:
+                netloc, path_and_more = rest, "/"
+            rel = urllib.parse.urlsplit(path_and_more)
+            return urllib.parse.urlunsplit((base.scheme, netloc, rel.path or "/", rel.query, ""))
+
+        if loc.path.startswith("/"):
+            path = loc.path or "/"
+            query = loc.query
+        else:
+            base_path = base.path or "/"
+            if not base_path.endswith("/"):
+                base_dir = base_path.rsplit("/", 1)[0] + "/"
+            else:
+                base_dir = base_path
+            path = base_dir + loc.path
+            query = loc.query if ("?" in location) else ""
+
+        return urllib.parse.urlunsplit((base.scheme, base.netloc, path or "/", query, ""))
+
+
+    def redirect_method(method: str, status_code: int) -> str:
+        """Mirror httpx redirect method switching (301/302 POST->GET, 303 -> GET)."""
+        method = (method or "GET").upper()
+        if status_code == 303 and method != "HEAD":
+            return "GET"
+        if status_code in {301, 302} and method == "POST":
+            return "GET"
+        return method
+
+
+    REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+
+
+    class PathAsIsTransport(httpx.HTTPTransport):
+        """
+        Transport that honors extensions['path_as_is_target'] as the HTTP request-target.
+        Equivalent to curl --path-as-is (do not squash /./ or /../).
+        """
+
+        def handle_request(self, request: "httpx.Request") -> "httpx.Response":
+            target = request.extensions.get("path_as_is_target")
+            if target is None:
+                return super().handle_request(request)
+            if isinstance(target, str):
+                target = target.encode("utf-8", errors="surrogateescape")
+
+            original_url = request.url
+
+            class _PathAsIsURL:
+                __slots__ = ("_base", "raw_path")
+
+                def __init__(self, base, raw_path):
+                    self._base = base
+                    self.raw_path = raw_path
+
+                def __getattr__(self, name):
+                    return getattr(self._base, name)
+
+            request.url = _PathAsIsURL(original_url, target)
+            try:
+                return super().handle_request(request)
+            finally:
+                request.url = original_url
+
+
+    def send_path_as_is(
+        client: "httpx.Client",
+        *,
+        method: str,
+        url: str,
+        headers: "httpx.Headers",
+        content: bytes = None,
+        follow_redirects: bool = False,
+        max_redirects: int = 20,
+        forward_proxy: str = "",
+    ):
+        """
+        Send request with path-as-is semantics. Optionally follow redirects the same way.
+        Returns (response, final_url, final_wire_target, history).
+        Caller must close the returned response.
+        """
+        history = []
+        current_method = (method or "GET").upper()
+        current_url = url
+        current_content = content
+        # Copy so redirect Host stripping does not mutate caller's headers permanently
+        current_headers = httpx.Headers(headers)
+
+        for hop in range(max_redirects + 1):
+            absolute = needs_http_absolute_form(forward_proxy, current_url)
+            wire_target = wire_request_target(current_url, absolute_form=absolute)
+            build_kwargs = {
+                "method": current_method,
+                "url": origin_url(current_url),
+                "headers": current_headers,
+            }
+            if current_content is not None:
+                build_kwargs["content"] = current_content
+
+            request = client.build_request(**build_kwargs)
+            request.extensions["path_as_is_target"] = wire_target
+            response = client.send(request, stream=True)
+
+            is_redirect = response.status_code in REDIRECT_STATUS_CODES
+            if (not follow_redirects) or (not is_redirect):
+                try:
+                    response.history = list(history)
+                except Exception:
+                    pass
+                return response, current_url, wire_target, history
+
+            if hop >= max_redirects:
+                response.close()
+                for item in history:
+                    item.close()
+                raise httpx.TooManyRedirects(
+                    f"Exceeded maximum allowed redirects ({max_redirects})",
+                    request=request,
+                )
+
+            location = response.headers.get("Location")
+            if not location:
+                try:
+                    response.history = list(history)
+                except Exception:
+                    pass
+                return response, current_url, wire_target, history
+
+            next_url = resolve_url_path_as_is(current_url, location)
+            next_method = redirect_method(current_method, response.status_code)
+
+            # Drain body so the connection can be reused, then keep in history
+            try:
+                response.read()
+            except Exception:
+                pass
+            history.append(response)
+
+            # Drop body when method switches to GET/HEAD (httpx behavior)
+            if next_method in {"GET", "HEAD"} and next_method != current_method:
+                current_content = None
+            elif response.status_code in {301, 302, 303} and next_method == "GET":
+                current_content = None
+
+            # Host header must match next authority
+            if "Host" in current_headers:
+                del current_headers["Host"]
+
+            current_method = next_method
+            current_url = next_url
+
+        raise httpx.TooManyRedirects(
+            f"Exceeded maximum allowed redirects ({max_redirects})",
+            request=request,
+        )
+
+
+    def explain_request_error(exc: BaseException, url: str = "", proxy: str = "") -> str:
+        text = str(exc)
+        lowered = text.lower()
+        if any(
+            marker in lowered
+            for marker in (
+                "temporary failure in name resolution",
+                "name or service not known",
+                "nodename nor servname provided",
+                "getaddrinfo failed",
+            )
+        ):
+            target_host = urllib.parse.urlsplit(url).hostname or "target host"
+            if proxy:
+                proxy_host = urllib.parse.urlsplit(proxy).hostname or "proxy server"
+                return (
+                    text
+                    + f"\nHint: DNS resolution failed. This request is forwarded through the environment/explicit proxy {proxy_host}; "
+                    "confirm that the proxy process is reachable and that the proxy address itself can be resolved."
+                )
+            return (
+                text
+                + f"\nHint: DNS temporarily cannot resolve {target_host}. Check the domain, container/host DNS, and network; "
+                "if the runtime environment requires a proxy, set HTTPS_PROXY/HTTP_PROXY or pass it explicitly through the proxy parameter."
+            )
+        if "unexpected_eof" in lowered or "eof occurred in violation of protocol" in lowered:
+            return (
+                text
+                + "\nHint: The server disconnected at the TLS layer (common when a WAF/reverse proxy rejects unusual paths, an overlong URI, or sensitive-path probing)."
+                "Try reducing the number of ../ levels, using %2e%2e encoding, adding --allow-insecure, or observing the raw response through a proxy."
+            )
+        return text
+
+
+    def quote_form_component_preserving_pct(value: str) -> str:
+        normalized = urllib.parse.unquote(value)
+        return urllib.parse.quote_plus(normalized, safe="")
+
+
     def encode_form_data(data: str) -> str:
         if not data:
             return data
@@ -191,10 +469,11 @@ args:
 
         for key, value in pairs:
             if key is None:
-                parts.append(urllib.parse.quote_plus(value, safe=""))
+                parts.append(quote_form_component_preserving_pct(value))
             else:
-                encoded_value = urllib.parse.quote_plus(value, safe="")
-                parts.append(f"{key}={encoded_value}")
+                encoded_key = quote_form_component_preserving_pct(key)
+                encoded_value = quote_form_component_preserving_pct(value)
+                parts.append(f"{encoded_key}={encoded_value}")
 
         return "&".join(parts)
 
@@ -304,9 +583,9 @@ args:
                 with open(path, "rb") as fh:
                     payload = fh.read()
                 meta["source"] = path
-                meta["mode"] = "binary"
-                meta["length"] = len(payload)
-                return payload, meta
+            meta["mode"] = "binary"
+            meta["length"] = len(payload)
+            return payload, meta
         stripped = data.strip()
         content_type = headers.get("Content-Type")
         if not content_type:
@@ -335,14 +614,15 @@ args:
                 meta["mode"] = "text"
             else:
                 meta["mode"] = "raw"
-            content_type = headers.get("Content-Type")
-            charset = extract_charset_from_content_type(content_type) if content_type else ""
-            if not charset:
-                charset = "utf-8"
-                if meta["mode"] in ("json", "text", "form-urlencoded"):
-                    base = (content_type or "text/plain").split(";")[0].strip()
-                    headers["Content-Type"] = f"{base}; charset={charset}"
-            body_bytes = processed.encode(charset, errors="surrogatepass")
+        content_type = headers.get("Content-Type")
+        charset = extract_charset_from_content_type(content_type) if content_type else ""
+        if not charset and meta["mode"] in ("json", "text", "form-urlencoded"):
+            charset = "utf-8"
+            base = (content_type or "text/plain").split(";")[0].strip()
+            headers["Content-Type"] = f"{base}; charset={charset}"
+        elif not charset:
+            charset = "utf-8"
+        body_bytes = processed.encode(charset, errors="surrogatepass")
         meta["charset"] = charset
         meta["length"] = len(body_bytes)
         if debug:
@@ -424,14 +704,26 @@ args:
         return min(values), total / count, max(values)
 
 
-    def render_request_overview(method: str, url: str, headers: httpx.Headers, body_meta: Dict[str, str]):
+    def render_request_overview(
+        method: str,
+        url: str,
+        headers: httpx.Headers,
+        body_meta: Dict[str, str],
+        wire_target: bytes = None,
+        input_url: str = None,
+    ):
         items = list(headers.items())
         print("\n===== Prepared Request =====")
         print(f"Method: {method}")
         print(f"URL: {url}")
+        if input_url and input_url != url:
+            print(f"Input URL: {input_url}")
+        if wire_target is not None:
+            print(f"Wire request-target: {wire_target.decode('utf-8', errors='replace')}")
+            print("Note: path-as-is enabled (literal path/query; equivalent to curl --path-as-is).")
         print(f"Headers ({len(items)} total):")
         for key, value in items:
-            print(f" {key}: {value}")
+            print(f"  {key}: {value}")
         if body_meta["length"]:
             charset = body_meta.get("charset") or "n/a"
             print(f"Body: {body_meta['length']} bytes ({body_meta['mode']}, charset={charset}, source={body_meta['source']})")
@@ -676,6 +968,8 @@ args:
         parser.add_argument("--repeat", type=int, default=1)
         parser.add_argument("--delay", default="0")
         parser.add_argument("--additional-args", dest="additional_args", default="")
+        parser.add_argument("--http2", dest="http2", action="store_true")
+        parser.add_argument("--no-http2", dest="http2", action="store_false")
         parser.add_argument("--action", default="")
         parser.add_argument("--include-headers", dest="include_headers", action="store_true")
         parser.add_argument("--no-include-headers", dest="include_headers", action="store_false")
@@ -708,10 +1002,13 @@ args:
             show_command=False,
             show_summary=False,
             debug=False,
+            http2=False,
             response_filter_invert=False,
             response_filter_ignore_case=False,
         )
-        args = parser.parse_args()
+        # parse_known_args: tolerate legacy executor that appended bare "http2=true" tokens
+        args, unknown_args = parser.parse_known_args()
+        leaked_options = parse_additional_options(" ".join(unknown_args)) if unknown_args else {}
 
         response_filter = (args.response_filter or "").strip()
         response_max_lines = max(0, args.response_max_lines or 0)
@@ -732,31 +1029,31 @@ args:
         except ValueError:
             delay_between = 0.0
 
-        prepared_url = smart_encode_url(args.url) if args.auto_encode_url else args.url
+        encoded_url = smart_encode_url(args.url) if args.auto_encode_url else args.url
         method = (args.method or "GET").upper()
-
-        # Process headers: supports dictionary (JSON string) and string format
-        # The framework serializes object types as JSON strings for passing
+        trust_env = True
+        # Handle headers: support dictionary (JSON string) and string formats
+        # The framework serializes object values to JSON strings before passing them
         headers_list = []
         if args.headers:
             headers_str = args.headers.strip()
-            # Try parsing as JSON first (dictionaries from the framework are serialized as JSON)
+            # First try parsing as JSON (dictionaries passed by the framework are serialized as JSON)
             if headers_str.startswith("{") or headers_str.startswith("["):
                 try:
                     parsed = json.loads(headers_str)
                     if isinstance(parsed, dict):
-                        # Dictionary format: convert directly to (key, value) tuple list
+                        # Dictionary format: convert directly to a list of (key, value) tuples
                         headers_list = [(str(k).strip(), str(v).strip()) for k, v in parsed.items()]
                     elif isinstance(parsed, list):
-                        # Array format: use the original parse_headers function
+                        # Array format: process with the existing parse_headers function
                         headers_list = parse_headers(headers_str)
                     else:
                         headers_list = parse_headers(headers_str)
                 except (json.JSONDecodeError, ValueError):
-                    # JSON parsing failed, fall back to original string parsing logic
+                    # If JSON parsing fails, fall back to the existing string parsing logic
                     headers_list = parse_headers(headers_str)
             else:
-                # Non-JSON format, use the original string parsing logic (backward compatible)
+                # For non-JSON format, use the existing string parsing logic (backward compatible)
                 headers_list = parse_headers(headers_str)
         headers = httpx.Headers(headers_list)
         if args.user_agent:
@@ -782,6 +1079,9 @@ args:
             cookie_jar.set(name, value)
 
         additional_options = parse_additional_options(args.additional_args)
+        additional_options.update(leaked_options)
+        if args.http2:
+            additional_options["http2"] = "true"
 
         timeout_value = None
         if args.timeout:
@@ -791,32 +1091,71 @@ args:
                 timeout_value = None
         timeout = httpx.Timeout(timeout_value or 60.0)
 
-        client_kwargs = {
-            "timeout": timeout,
-            "verify": not args.allow_insecure,
-            "follow_redirects": args.follow_redirects,
-            "cookies": cookie_jar,
-        }
-        if args.proxy:
-            client_kwargs["proxies"] = args.proxy
-        if "http2" in additional_options:
-            client_kwargs["http2"] = str_to_bool(additional_options["http2"])
-        if "cert" in additional_options:
-            client_kwargs["cert"] = additional_options["cert"]
-        if "verify" in additional_options:
-            value = additional_options["verify"]
-            lowered = value.strip().lower()
-            client_kwargs["verify"] = str_to_bool(value) if lowered in {"true", "false", "1", "0", "yes", "no", "on", "off"} else value
+        max_redirects = 20
         if "max_redirects" in additional_options:
             try:
-                client_kwargs["max_redirects"] = int(additional_options["max_redirects"])
+                max_redirects = int(additional_options["max_redirects"])
             except ValueError:
                 pass
         if "trust_env" in additional_options:
-            client_kwargs["trust_env"] = str_to_bool(additional_options["trust_env"])
+            trust_env = str_to_bool(additional_options["trust_env"])
+
+        verify_option = not args.allow_insecure
+        if "verify" in additional_options:
+            value = additional_options["verify"]
+            lowered = value.strip().lower()
+            verify_option = str_to_bool(value) if lowered in {"true", "false", "1", "0", "yes", "no", "on", "off"} else value
+
+        http2 = str_to_bool(additional_options["http2"]) if "http2" in additional_options else False
+        if http2:
+            try:
+                import h2  # noqa: F401
+            except ImportError:
+                print(
+                    "HTTP/2 requires the h2 package. Install with: pip install 'httpx[http2]'  (or: pip install h2)",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        cert = additional_options.get("cert")
+        explicit_proxy = (args.proxy or "").strip()
+        forward_proxy = resolve_forward_proxy(explicit_proxy, trust_env, encoded_url)
+
+        transport_kwargs = {
+            "verify": verify_option,
+            "trust_env": trust_env,
+            "http2": http2,
+        }
+        if cert:
+            transport_kwargs["cert"] = cert
+        # Supplying a custom transport makes httpx.Client stop installing proxies
+        # from the environment. Pass the resolved env/explicit proxy directly so
+        # trust_env=true retains its documented behavior.
+        if forward_proxy:
+            transport_kwargs["proxy"] = forward_proxy
+
+        # Always path-as-is (security-testing default; matches curl --path-as-is)
+        initial_absolute = needs_http_absolute_form(forward_proxy, encoded_url)
+        initial_wire_target = wire_request_target(encoded_url, absolute_form=initial_absolute)
+        prepared_url = display_url_for_target(encoded_url, initial_wire_target)
+
+        client_kwargs = {
+            "timeout": timeout,
+            "verify": verify_option,
+            "follow_redirects": False,  # redirects handled by send_path_as_is
+            "cookies": cookie_jar,
+            "trust_env": trust_env,
+            "transport": PathAsIsTransport(**transport_kwargs),
+        }
 
         if args.show_command:
-            render_request_overview(method, prepared_url, headers, body_meta)
+            render_request_overview(
+                method,
+                prepared_url,
+                headers,
+                body_meta,
+                wire_target=initial_wire_target,
+                input_url=args.url if args.url != prepared_url else None,
+            )
 
         aggregate = None
         if args.show_summary:
@@ -824,9 +1163,8 @@ args:
             aggregate["wall_time"] = []
 
         exit_code = 0
-        verify_option = client_kwargs.get("verify", True)
         verify_tls = verify_option if isinstance(verify_option, bool) else True
-        skip_probe = bool(args.proxy)
+        skip_probe = bool(forward_proxy)
 
         client = httpx.Client(**client_kwargs)
         try:
@@ -835,26 +1173,29 @@ args:
                     time.sleep(delay_between)
 
                 metrics = {key: None for key in METRIC_KEYS}
-                probe_metrics = probe_connection(prepared_url, timeout_value or 60.0, verify_tls, skip_probe)
+                probe_metrics = probe_connection(encoded_url, timeout_value or 60.0, verify_tls, skip_probe)
                 metrics.update(probe_metrics)
 
                 start = time.perf_counter()
                 first_byte_time = None
                 body_buffer = bytearray()
+                wire_target = initial_wire_target
 
                 try:
-                    stream_kwargs = {
-                        "method": method,
-                        "url": prepared_url,
-                        "headers": headers,
-                    }
-                    if body_bytes is not None:
-                        stream_kwargs["content"] = body_bytes
-
-                    with client.stream(**stream_kwargs) as response:
+                    response, final_url, wire_target, redirect_history = send_path_as_is(
+                        client,
+                        method=method,
+                        url=encoded_url,
+                        headers=headers,
+                        content=body_bytes,
+                        follow_redirects=args.follow_redirects,
+                        max_redirects=max_redirects,
+                        forward_proxy=forward_proxy,
+                    )
+                    try:
                         status_code = response.status_code
                         metrics["http_code"] = status_code
-                        metrics["redirects"] = len(response.history)
+                        metrics["redirects"] = len(redirect_history)
                         http_version = response.http_version or "HTTP/1.1"
 
                         for chunk in response.iter_bytes():
@@ -875,7 +1216,7 @@ args:
                         print(f"\n===== Response #{run_index + 1} =====")
                         download_target = (args.download or "").strip()
                         if download_target:
-                            # Support multiple requests with {i} placeholder to differentiate filenames
+                            # Support distinguishing filenames with the {i} placeholder across repeated requests
                             if repeat > 1 and "{i}" in download_target:
                                 filename = download_target.format(i=run_index + 1)
                             else:
@@ -948,17 +1289,29 @@ args:
                         if args.verbose_output:
                             sent_bytes = len(body_bytes) if body_bytes else 0
                             print("\nVerbose diagnostics:")
-                            print(f" Sent body bytes: {sent_bytes}")
+                            print(f"  Sent body bytes: {sent_bytes}")
                             if probe_metrics:
                                 for key, value in probe_metrics.items():
-                                    print(f" Probe {key}: {value:.6f}s")
-                            print(f" History length: {len(response.history)}")
+                                    print(f"  Probe {key}: {value:.6f}s")
+                            print(f"  History length: {len(redirect_history)}")
+                            print(f"  Final URL: {final_url}")
+                            print(f"  Wire request-target: {wire_target.decode('utf-8', errors='replace')}")
+                    finally:
+                        response.close()
+                        for item in redirect_history:
+                            try:
+                                item.close()
+                            except Exception:
+                                pass
 
                 except httpx.HTTPError as exc:
                     exit_code = 1
                     elapsed = time.perf_counter() - start
                     print(f"\n===== Response #{run_index + 1} =====")
-                    print(f"Request failed after {elapsed:.6f}s: {exc}")
+                    print(
+                        f"Request failed after {elapsed:.6f}s: "
+                        f"{explain_request_error(exc, encoded_url, forward_proxy)}"
+                    )
                     continue
 
             if aggregate and repeat > 1:
@@ -991,50 +1344,51 @@ args:
             print("\nInterrupted.", file=sys.stderr)
             sys.exit(130)
 enabled: true
-short_description: "HTTP framework security testing tool"
+short_description: "Pure Python HTTP testing framework (httpx, session reuse and encoding safeguards)"
 description: |
-  Pure Python HTTP testing framework: built on httpx sessions, with socket probes to supplement DNS/TCP/TLS observations,
-  providing full-pipeline request body encoding safeguards, repeat playback and observability, suitable for blind injection delay, complex payload tuning, and similar scenarios.
+  Pure Python HTTP testing framework: uses httpx sessions with socket probes for DNS/TCP/TLS observability,
+  providing end-to-end request-body encoding safeguards, repeated execution, and observability for blind-injection timing, complex payload tuning, and similar scenarios.
 
   **Highlights:**
-  - Pure Python implementation: httpx session reuse, HTTP/2/proxy/certs configured directly within the script, no external binary dependencies
-  - Smart body encoding: supports application/x-www-form-urlencoded re-encoding, JSON/text charset inference,
-    `@file`/`@-` binary injection, visual debugging
-  - Connection probes: in non-proxy scenarios, additional DNS/TCP/TLS probing, coarsely replicating curl -w metrics
-  - Repeatable observation: repeat/delay + TTFB/total/speed_download statistics, suitable for blind injection/timing tests
-  - Extension switches: additional_args parses http2/cert/verify/trust_env/max_redirects and other httpx options
-  - Response body slimming: response_filter extracts lines/blocks by regex, combined with max_lines/max_bytes to limit stdout and reduce Agent token consumption
+  - Pure Python implementation: httpx session reuse and HTTP/2/proxy/certs configuration directly in the script, with no external binary dependencies
+  - Path fidelity (curl --path-as-is): custom Transport preserves literal `.`/`..` across requests and redirects; automatic absolute-form for HTTP forward proxies; compatible with httpx 0.28 `proxy=`
+  - Smart body encoding: normalized application/x-www-form-urlencoded encoding, JSON/text charset inference,
+    binary injection with `@file`/`@-`, and visual debugging
+  - Connection probes: additional DNS/TCP/TLS probing without a proxy, roughly reproducing curl -w metrics
+  - Repeatable observation: repeat/delay plus TTFB/total/speed_download statistics for blind-injection and timing tests
+  - Extension switches: http2 / httpx_options parses httpx options including http2, cert, verify, trust_env, and max_redirects
+  - Compact response bodies: response_filter extracts regex matches by line/block, while max_lines/max_bytes limit stdout and reduce Agent token use
 
-  **Response filtering best practices:**
-  - Large pages/HTML: use `response_filter` to capture keyword lines like error|exception|password|token|uid
-  - Without filter: set `response_max_lines=80` or `response_max_bytes=8192` to prevent full pages from flooding context
-  - Zero matches: automatically preview the first `response_preview_lines` lines to avoid misjudging "empty response"
-  - Complete retention: large bodies use `download` to save to disk, stdout keeps only summary lines
+  **Response Filtering Best Practices:**
+  - Large pages/HTML: use `response_filter` to capture lines containing keywords such as error|exception|password|token|uid
+  - Without a filter: set `response_max_lines=80` or `response_max_bytes=8192` to prevent an entire page from flooding the context
+  - Zero matches: automatically preview the first `response_preview_lines` lines to avoid mistaking the response for empty
+  - Full retention: save large bodies with `download` and keep only summary lines in stdout
 parameters:
   - name: "url"
     type: "string"
-    description: "Target URL (can auto-encode path/params to avoid request failures from special characters, e.g.: https://www.target.com/s?wd=test) "
+    description: "Target URL (path-as-is by default, preserving literal paths such as ../; enable auto_encode_url to encode special characters)"
     required: true
     flag: "--url"
   - name: "method"
     type: "string"
-    description: "HTTP method (GET, POST, PUT, DELETE, etc.) "
+    description: "HTTP method (GET, POST, PUT, DELETE, etc.)"
     required: false
     default: "GET"
     flag: "--method"
   - name: "data"
     type: "string"
-    description: "Request data/parameters (supports JSON, form, raw payload; @file or @- prefix to load file/STDIN) "
+    description: "Request data/parameters (supports JSON, forms, and raw payloads; prefix with @file or @- to load a file/STDIN)"
     required: false
     flag: "--data"
   - name: "headers"
     type: "object"
-    description: "Custom request headers (dictionary format, e.g. {\"X-Custom\": \"value\"}) "
+    description: "Custom request headers (dictionary format, e.g. {\"X-Custom\": \"value\"})"
     required: false
     flag: "--headers"
   - name: "cookies"
     type: "string"
-    description: "Custom cookies (format: name1=value1; name2=value2) "
+    description: "Custom cookies (format: name1=value1; name2=value2)"
     required: false
     flag: "--cookies"
   - name: "user_agent"
@@ -1044,150 +1398,157 @@ parameters:
     flag: "--user-agent"
   - name: "proxy"
     type: "string"
-    description: "Proxy (http(s):// or socks5:// address, passed directly to httpx Client) "
+    description: "Proxy (http(s):// or socks5:// address, passed directly to the httpx Client)"
     required: false
     flag: "--proxy"
   - name: "timeout"
     type: "string"
-    description: "Maximum timeout (seconds, supports decimals) "
+    description: "Maximum timeout (seconds; decimals supported)"
     required: false
     flag: "--timeout"
   - name: "repeat"
     type: "int"
-    description: "Number of repeated requests, for blind injection/stability observation (>=1) "
+    description: "Number of repeated requests for blind-injection/stability observation (>=1)"
     required: false
     default: 1
     flag: "--repeat"
   - name: "delay"
     type: "string"
-    description: "Delay between repeated requests (seconds, can be decimal) "
+    description: "Delay between repeated requests (seconds; may be decimal)"
     required: false
     default: "0"
     flag: "--delay"
   - name: "include_headers"
     type: "bool"
-    description: "Output response headers (enabled by default, can be disabled with --no-include-headers) "
+    description: "Output response headers (enabled by default; disable with --no-include-headers)"
     required: false
     default: true
     flag: "--include-headers"
   - name: "auto_encode_url"
     type: "bool"
-    description: "Auto URL encoding (enabled by default, can be disabled via --no-auto-encode-url) "
+    description: "Automatic URL encoding (enabled by default; disable with --no-auto-encode-url)"
     required: false
     default: true
     flag: "--auto-encode-url"
   - name: "follow_redirects"
     type: "bool"
-    description: "Follow redirects (httpx follow_redirects) "
+    description: "Follow redirects (httpx follow_redirects)"
     required: false
     default: false
     flag: "--follow-redirects"
   - name: "allow_insecure"
     type: "bool"
-    description: "Ignore TLS certificate errors (verify=False) "
+    description: "Ignore TLS certificate errors (verify=False)"
     required: false
     default: false
     flag: "--allow-insecure"
   - name: "verbose_output"
     type: "bool"
-    description: "Output extra debug info (request body bytes, probe delays, history length, etc.) "
+    description: "Output additional debugging information (request-body byte count, probe latency, history length, etc.)"
     required: false
     default: false
     flag: "--verbose-output"
   - name: "show_command"
     type: "bool"
-    description: "Print request overview (method, URL, all headers, body summary) "
+    description: "Print a request overview (method, URL, all headers, and body summary)"
     required: false
     default: true
     flag: "--show-command"
   - name: "show_summary"
     type: "bool"
-    description: "Print metric summary (enabled by default, includes DNS/TCP/TLS/TTFB/Total) "
+    description: "Print a metric summary (enabled by default; includes DNS/TCP/TLS/TTFB/Total)"
     required: false
     default: true
     flag: "--show-summary"
   - name: "debug"
     type: "bool"
-    description: "Debug mode: show body encoding processing details (mode/charset/length) "
+    description: "Debug mode: show body encoding details (mode/charset/length)"
     required: false
     default: false
     flag: "--debug"
   - name: "response_encoding"
     type: "string"
-    description: "Force response decoding using specified encoding (e.g. GBK), overrides auto-detection"
+    description: "Force the encoding used to decode the response (e.g. GBK), overriding automatic detection"
     required: false
     flag: "--response-encoding"
   - name: "response_filter"
     type: "string"
     description: |
-      响应体正则过滤（仅影响 stdout，不影响 --download 与指标）。
-      默认 line 模式按行匹配；示例：'(error|exception|SQL|password|token|uid)'。
-      与 response_max_lines/response_max_bytes 配合可显著减少 token 消耗。
+      Regex filtering of the response body (affects only stdout, not --download or metrics).
+      The default line mode matches by line; example: '(error|exception|SQL|password|token|uid)'.
+      Combine with response_max_lines/response_max_bytes to significantly reduce token use.
     required: false
     flag: "--response-filter"
   - name: "response_filter_mode"
     type: "string"
-    description: "过滤模式：line（按行，默认）、multiline（跨行块）、full（整段 DOTALL 匹配）"
+    description: "Filter mode: line (by line, default), multiline (cross-line blocks), or full (entire body with DOTALL)"
     required: false
     default: "line"
     flag: "--response-filter-mode"
   - name: "response_filter_invert"
     type: "bool"
-    description: "反向过滤：输出不匹配 regex 的行（用于剔除 HTML 噪音）"
+    description: "Invert filtering: output lines that do not match the regex (useful for removing HTML noise)"
     required: false
     default: false
     flag: "--response-filter-invert"
   - name: "response_filter_ignore_case"
     type: "bool"
-    description: "正则忽略大小写"
+    description: "Case-insensitive regex matching"
     required: false
     default: false
     flag: "--response-filter-ignore-case"
   - name: "response_max_lines"
     type: "int"
-    description: "stdout 最多输出行数（0=不限制）；有 filter 时限制命中行数，无 filter 时截断全文"
+    description: "Maximum lines output to stdout (0=unlimited); limits matched lines with a filter, or truncates the full body without one"
     required: false
     default: 0
     flag: "--response-max-lines"
   - name: "response_max_bytes"
     type: "int"
-    description: "stdout 响应体 UTF-8 字节上限（0=不限制），超出部分截断"
+    description: "UTF-8 byte limit for the response body on stdout (0=unlimited); excess content is truncated"
     required: false
     default: 0
     flag: "--response-max-bytes"
   - name: "response_preview_lines"
     type: "int"
-    description: "filter 零命中时预览的前 N 行（默认 5，0=不预览）"
+    description: "First N lines to preview when the filter has zero matches (default 5; 0=no preview)"
     required: false
     default: 5
     flag: "--response-preview-lines"
   - name: "response_context_lines"
     type: "int"
-    description: "line 模式下命中行上下各保留 N 行上下文（类似 grep -C）"
+    description: "Keep N context lines before and after matches in line mode (similar to grep -C)"
     required: false
     default: 0
     flag: "--response-context-lines"
   - name: "action"
     type: "string"
-    description: "Reserved field: identifies run intent (request, spider, etc.), not used internally by the script"
+    description: "Reserved field identifying invocation intent (request, spider, etc.); not used internally by the script"
     required: false
     default: "request"
     flag: "--action"
   - name: "download"
     type: "string"
     description: |
-      Save response body to a local file, writing raw byte data:
-      - "output.bin": single request saves directly to the specified file
-      - "outputs/run-{i}.bin": when repeat>1, differentiate files by index ({i} will be replaced with 1,2,...)
+      Save the response body to a local file as raw bytes:
+      - "output.bin": save a single request directly to the specified file
+      - "outputs/run-{i}.bin": for repeat>1, distinguish files by sequence number ({i} is replaced with 1,2,...)
     required: false
     flag: "--download"
-  - name: "additional_args"
+  - name: "http2"
+    type: "bool"
+    description: "Enable HTTP/2 (requires h2: pip install 'httpx[http2]'). It can also be set in httpx_options: http2=true"
+    required: false
+    default: false
+    flag: "--http2"
+  - name: "httpx_options"
     type: "string"
     description: |
-      Additional httpx options, must use httpx.Client keyword argument names and types, supports "key=value" or bare word form (equivalent to key=true):
+      Additional httpx Client options (passed together to --additional-args). Supports "key=value" or bare-word format (equivalent to key=true):
       - "http2=true"
       - "cert=/path/to/client.pem"
       - "verify=/path/to/ca.pem" or "verify=false"
       - "trust_env=false", "max_redirects=5", etc.
+      Note: do not use the framework's generic additional_args field (it is split into bare argv tokens). Use this field or http2.
     required: false
     flag: "--additional-args"

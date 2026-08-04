@@ -23,11 +23,11 @@ import (
 	"go.uber.org/zap"
 )
 
-// einoSingleAgentName matches ChatModelAgent.Name and maps streaming events to the main conversation area.
+// einoSingleAgentName 与 ChatModelAgent.Name 一致，供流式事件映射主对话区。
 const einoSingleAgentName = "cyberstrike-eino-single"
 
-// RunEinoSingleChatModelAgent uses Eino adk.NewChatModelAgent plus adk.NewRunner.Run. The official Quick Start Query also uses the Runner API;
-// using history plus a user-message slice here is equivalent to multi-turn Query. It shares runEinoADKAgentLoop SSE mapping and the MCP bridge with RunDeepAgent.
+// RunEinoSingleChatModelAgent 使用 Eino adk.NewChatModelAgent + adk.NewRunner.Run（官方 Quick Start 的 Query 同属 Runner API；此处用历史 + 用户消息切片等价于多轮 Query）。
+// 与 RunDeepAgent 共享 runEinoADKAgentLoop 的 SSE 映射与 MCP 桥。
 func RunEinoSingleChatModelAgent(
 	ctx context.Context,
 	appCfg *config.Config,
@@ -45,11 +45,12 @@ func RunEinoSingleChatModelAgent(
 	systemPromptExtra string,
 ) (*RunResult, error) {
 	if appCfg == nil || ag == nil {
-		return nil, fmt.Errorf("eino single: config or Agent is nil")
+		return nil, fmt.Errorf("eino single: config or agent is nil")
 	}
 	if ma == nil {
 		return nil, fmt.Errorf("eino single: multi_agent config is nil")
 	}
+	runtimeUserMessage := prepareLatestUserMessageForModel(userMessage, appCfg, &ma.EinoMiddleware, conversationID, logger)
 
 	einoLoc, einoSkillMW, einoFSTools, skillsRoot, einoErr := prepareEinoSkills(ctx, appCfg.SkillsDir, ma, logger)
 	if einoErr != nil {
@@ -81,7 +82,7 @@ func RunEinoSingleChatModelAgent(
 	}
 
 	toolInvokeNotify := einomcp.NewToolInvokeNotifyHolder()
-	einoExecBegin, einoExecFinish := newEinoExecuteMonitorCallbacks(ag, recorder)
+	einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish := newEinoExecuteMonitorCallbacks(ctx, ag, recorder)
 	mainDefs := ag.ToolsForRole(roleTools)
 	mainTools, err := einomcp.ToolsFromDefinitions(ag, holder, mainDefs, recorder, nil, toolInvokeNotify, einoSingleAgentName)
 	if err != nil {
@@ -90,7 +91,7 @@ func RunEinoSingleChatModelAgent(
 
 	mainToolsForCfg, mainOrchestratorPre, singleToolSearchActive, err := prependEinoMiddlewares(ctx, &ma.EinoMiddleware, einoMWMain, mainTools, einoLoc, skillsRoot, conversationID, projectID, logger)
 	if err != nil {
-		return nil, fmt.Errorf("eino single eino middleware: %w", err)
+		return nil, fmt.Errorf("eino single Eino middleware: %w", err)
 	}
 
 	httpClient := &http.Client{
@@ -110,11 +111,13 @@ func RunEinoSingleChatModelAgent(
 	httpClient = openai.NewEinoHTTPClient(&appCfg.OpenAI, httpClient)
 	openai.AttachSummarizationDiagTransport(httpClient, logger)
 
+	maxCompletionTokens := appCfg.OpenAI.MaxCompletionTokensEffective()
 	baseModelCfg := &einoopenai.ChatModelConfig{
-		APIKey:     appCfg.OpenAI.APIKey,
-		BaseURL:    strings.TrimSuffix(appCfg.OpenAI.BaseURL, "/"),
-		Model:      appCfg.OpenAI.Model,
-		HTTPClient: httpClient,
+		APIKey:              appCfg.OpenAI.APIKey,
+		BaseURL:             strings.TrimSuffix(appCfg.OpenAI.BaseURL, "/"),
+		Model:               appCfg.OpenAI.Model,
+		HTTPClient:          httpClient,
+		MaxCompletionTokens: &maxCompletionTokens,
 	}
 	reasoning.ApplyToEinoChatModelConfig(baseModelCfg, &appCfg.OpenAI, reasoningClient)
 
@@ -136,7 +139,7 @@ func RunEinoSingleChatModelAgent(
 	}
 	if einoSkillMW != nil {
 		if einoFSTools && einoLoc != nil {
-			fsMw, fsErr := subAgentFilesystemMiddleware(ctx, einoLoc, toolInvokeNotify, einoSingleAgentName, einoExecBegin, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), nil)
+			fsMw, fsErr := subAgentFilesystemMiddleware(ctx, einoLoc, toolInvokeNotify, einoSingleAgentName, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), nil)
 			if fsErr != nil {
 				return nil, fmt.Errorf("eino single filesystem middleware: %w", fsErr)
 			}
@@ -145,12 +148,15 @@ func RunEinoSingleChatModelAgent(
 		handlers = append(handlers, einoSkillMW)
 	}
 	handlers = appendEinoChatModelTailMiddlewares(handlers, einoChatModelTailConfig{
-		logger:         logger,
-		phase:          "eino_single",
-		summarization:  mainSumMw,
-		modelName:      appCfg.OpenAI.Model,
-		conversationID: conversationID,
-		trace:          modelFacingTrace,
+		logger:           logger,
+		phase:            "eino_single",
+		summarization:    mainSumMw,
+		modelName:        appCfg.OpenAI.Model,
+		maxTotalTokens:   appCfg.OpenAI.MaxTotalTokens,
+		toolMaxBytes:     toolMaxBytesFromMW(&ma.EinoMiddleware),
+		conversationID:   conversationID,
+		trace:            modelFacingTrace,
+		middlewareConfig: &ma.EinoMiddleware,
 	})
 
 	maxIter := agentMaxIterations(appCfg)
@@ -160,6 +166,8 @@ func RunEinoSingleChatModelAgent(
 			Tools:               mainToolsForCfg,
 			UnknownToolsHandler: einomcp.UnknownToolReminderHandler(),
 			ToolCallMiddlewares: []compose.ToolMiddleware{
+				modelOutputExecutionGuardMiddleware(),
+				localToolRBACMiddleware(),
 				hitlToolCallMiddleware(),
 				softRecoveryToolMiddleware(),
 			},
@@ -201,7 +209,7 @@ func RunEinoSingleChatModelAgent(
 	}
 
 	baseMsgs := historyToMessages(history, appCfg, &ma.EinoMiddleware)
-	baseMsgs = appendUserMessageIfNeeded(baseMsgs, userMessage)
+	baseMsgs = appendUserMessageIfNeeded(baseMsgs, runtimeUserMessage)
 
 	streamsMainAssistant := func(agent string) bool {
 		return agent == "" || agent == einoSingleAgentName
@@ -232,6 +240,9 @@ func RunEinoSingleChatModelAgent(
 		DA:                      chatAgent,
 		ModelFacingTrace:        modelFacingTrace,
 		EinoCallbacks:           &ma.EinoCallbacks,
-		EmptyResponseMessage:    "(Eino ADK single-agent session completed but no assistant text was captured. Check process details or logs.)",
+		MaxTotalTokens:          appCfg.OpenAI.MaxTotalTokens,
+		ToolMaxBytes:            toolMaxBytesFromMW(&ma.EinoMiddleware),
+		ModelName:               appCfg.OpenAI.Model,
+		EmptyResponseMessage:    "Eino ADK single-agent session completed but no assistant text was captured. Check process details or logs.",
 	}, baseMsgs)
 }

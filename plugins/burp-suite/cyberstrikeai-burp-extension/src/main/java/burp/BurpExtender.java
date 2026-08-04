@@ -1,7 +1,6 @@
 package burp;
 
 import javax.swing.*;
-import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -56,25 +55,32 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory {
             return;
         }
 
-        String instruction = showInstructionEditor(tab.getUiComponent(), lastInstruction);
-        if (instruction == null) {
+        SendOptionsDialog.Result options = SendOptionsDialog.show(
+                tab.getUiComponent(), client, cfg, token, lastInstruction);
+        if (options == null) {
             return;
         }
-        lastInstruction = instruction;
+        lastInstruction = options.instruction;
 
-        String prompt = HttpMessageFormatter.toPrompt(helpers, msg, instruction);
+        String prompt = HttpMessageFormatter.toPrompt(helpers, msg, options.instruction);
         String title = HttpMessageFormatter.getRequestTitle(helpers, msg);
-        String agentModeStr = cfg.agentMode.displayName;
-        String runId = tab.startNewRun(title, agentModeStr, msg);
-        tab.appendProgressToRun(runId, "\n[server] " + cfg.baseUrl + "\n\n");
+        String agentModeStr = options.agentMode.displayName;
+        String roleLabel = options.role.isEmpty() ? "Default" : options.role;
+        String runId = tab.startNewRun(title, agentModeStr + " · " + roleLabel, msg);
+        tab.appendProgressToRun(runId, "\n[server] " + cfg.baseUrl);
+        if (!options.projectId.isEmpty()) {
+            tab.appendProgressToRun(runId, "\n[project] " + options.projectId);
+        }
+        tab.appendProgressToRun(runId, "\n\n");
 
-        client.streamTest(cfg, token, prompt, new CyberStrikeAIClient.StreamListener() {
+        client.streamTest(cfg, token, prompt, options.role, options.projectId, options.agentMode,
+                new CyberStrikeAIClient.StreamListener() {
             @Override
             public void onEvent(String type, String message, String rawJson) {
                 if (type == null) type = "";
                 switch (type) {
                     case "response_start":
-                        tab.appendProgressToRun(runId, "\n\n[主回复]\n");
+                        tab.appendProgressToRun(runId, "\n\n[Main response]\n");
                         break;
                     case "response_delta":
                         if (message != null && !message.isEmpty()) {
@@ -86,7 +92,7 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory {
                         tab.setFinalResponse(runId, message);
                         break;
                     case "eino_agent_reply_stream_start":
-                        tab.appendProgressToRun(runId, "\n\n[子代理回复]\n");
+                        tab.appendProgressToRun(runId, "\n\n[Sub-agent response]\n");
                         break;
                     case "eino_agent_reply_stream_delta":
                         if (message != null && !message.isEmpty()) {
@@ -98,7 +104,7 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory {
                         break;
                     case "eino_agent_reply":
                         if (message != null && !message.isEmpty()) {
-                            tab.appendProgressToRun(runId, "\n\n[子代理回复]\n" + message + "\n");
+                            tab.appendProgressToRun(runId, "\n\n[Sub-agent response]\n" + message + "\n");
                         }
                         break;
                     case "progress":
@@ -114,7 +120,7 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory {
                         tab.setRunStatus(runId, "error");
                         break;
                     case "reasoning_chain_stream_start":
-                        tab.appendProgressToRun(runId, "\n\n[推理过程]\n");
+                        tab.appendProgressToRun(runId, "\n\n[Reasoning]\n");
                         break;
                     case "reasoning_chain_stream_delta":
                         if (message != null && !message.isEmpty()) {
@@ -128,7 +134,7 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory {
                         if (message != null && !message.isEmpty()) {
                             String streamId = rawJson != null ? SimpleJson.extractStringField(rawJson, "streamId") : "";
                             if (streamId == null || streamId.isEmpty()) {
-                                tab.appendProgressToRun(runId, "\n\n[推理过程]\n" + message + "\n");
+                                tab.appendProgressToRun(runId, "\n\n[Reasoning]\n" + message + "\n");
                             }
                         }
                         break;
@@ -190,38 +196,4 @@ public class BurpExtender implements IBurpExtender, IContextMenuFactory {
             }
         });
     }
-
-    private static String showInstructionEditor(Component parent, String initialValue) {
-        JTextArea editor = new JTextArea(
-                initialValue == null || initialValue.trim().isEmpty()
-                        ? HttpMessageFormatter.defaultInstruction()
-                        : initialValue,
-                6,
-                70
-        );
-        editor.setLineWrap(true);
-        editor.setWrapStyleWord(true);
-        editor.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
-
-        JPanel panel = new JPanel(new BorderLayout(0, 8));
-        panel.add(new JLabel("Edit instruction before sending:"), BorderLayout.NORTH);
-        panel.add(new JScrollPane(editor), BorderLayout.CENTER);
-
-        int result = JOptionPane.showConfirmDialog(
-                parent,
-                panel,
-                "Customize Prompt Instruction",
-                JOptionPane.OK_CANCEL_OPTION,
-                JOptionPane.PLAIN_MESSAGE
-        );
-        if (result != JOptionPane.OK_OPTION) {
-            return null;
-        }
-        String value = editor.getText();
-        if (value == null || value.trim().isEmpty()) {
-            return HttpMessageFormatter.defaultInstruction();
-        }
-        return value.trim();
-    }
 }
-

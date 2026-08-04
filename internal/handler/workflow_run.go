@@ -8,6 +8,8 @@ import (
 
 	"cyberstrike-ai/internal/agent"
 	"cyberstrike-ai/internal/config"
+	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/security"
 	workflowrunner "cyberstrike-ai/internal/workflow"
 
 	"github.com/gin-gonic/gin"
@@ -20,13 +22,17 @@ func (h *WorkflowHandler) SetRuntime(agent *agent.Agent, cfg *config.Config) {
 
 func (h *WorkflowHandler) GetRun(c *gin.Context) {
 	runID := strings.TrimSpace(c.Param("runId"))
+	if !h.workflowRunAllowed(c, runID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
+		return
+	}
 	run, err := h.db.GetWorkflowRun(runID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	if run == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "工作流运行不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Workflow run not found"})
 		return
 	}
 	nodeRuns, err := h.db.ListWorkflowNodeRuns(runID)
@@ -39,6 +45,10 @@ func (h *WorkflowHandler) GetRun(c *gin.Context) {
 
 func (h *WorkflowHandler) ReplayRun(c *gin.Context) {
 	runID := strings.TrimSpace(c.Param("runId"))
+	if !h.workflowRunAllowed(c, runID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
+		return
+	}
 	nodeRuns, err := h.db.ListWorkflowNodeRuns(runID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -67,11 +77,18 @@ func (h *WorkflowHandler) ReplayRun(c *gin.Context) {
 
 func (h *WorkflowHandler) ListPendingRuns(c *gin.Context) {
 	conversationID := strings.TrimSpace(c.Query("conversationId"))
+	if conversationID != "" && !h.workflowConversationAllowed(c, conversationID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
+		return
+	}
 	runs, err := h.db.ListWorkflowRunsAwaitingHITLFiltered(conversationID, 50)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	runs = filterSlice(runs, func(run *database.WorkflowRun) bool {
+		return run != nil && h.workflowConversationAllowed(c, run.ConversationID)
+	})
 	c.JSON(http.StatusOK, gin.H{"runs": runs})
 }
 
@@ -82,13 +99,17 @@ type workflowResumeRequest struct {
 
 func (h *WorkflowHandler) ResumeRun(c *gin.Context) {
 	if h.agent == nil || h.cfg == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "工作流运行时未初始化"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Workflow runtime is not initialized"})
 		return
 	}
 	runID := strings.TrimSpace(c.Param("runId"))
+	if !h.workflowRunAllowed(c, runID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
+		return
+	}
 	var req workflowResumeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
 		return
 	}
 	run, err := h.db.GetWorkflowRun(runID)
@@ -97,7 +118,7 @@ func (h *WorkflowHandler) ResumeRun(c *gin.Context) {
 		return
 	}
 	if run == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "工作流运行不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Workflow run not found"})
 		return
 	}
 	role := config.RoleConfig{Name: strings.TrimSpace(run.RoleID)}
@@ -110,7 +131,7 @@ func (h *WorkflowHandler) ResumeRun(c *gin.Context) {
 		}
 	}
 	if run.Status != "awaiting_hitl" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "工作流运行不在等待审批状态: " + run.Status})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Workflow run is not awaiting approval: " + run.Status})
 		return
 	}
 	if err := h.db.RecordWorkflowRunHITLDecision(runID, req.Approved, req.Comment); err != nil {
@@ -159,4 +180,21 @@ func (h *WorkflowHandler) ResumeRun(c *gin.Context) {
 		"status":        result.Status,
 		"awaitingHitl":  result.AwaitingHITL,
 	})
+}
+
+func (h *WorkflowHandler) workflowConversationAllowed(c *gin.Context, conversationID string) bool {
+	session, ok := security.CurrentSession(c)
+	return ok && h.db.UserCanAccessResource(session.UserID, session.Scope, "conversation", strings.TrimSpace(conversationID))
+}
+
+func (h *WorkflowHandler) workflowRunAllowed(c *gin.Context, runID string) bool {
+	session, ok := security.CurrentSession(c)
+	if !ok {
+		return false
+	}
+	if session.Scope == database.RBACScopeAll {
+		return true
+	}
+	run, err := h.db.GetWorkflowRun(strings.TrimSpace(runID))
+	return err == nil && run != nil && h.workflowConversationAllowed(c, run.ConversationID)
 }

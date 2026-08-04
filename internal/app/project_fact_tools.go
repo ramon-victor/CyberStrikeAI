@@ -18,19 +18,20 @@ import (
 func projectIDFromConversation(db *database.DB, ctx context.Context) (string, error) {
 	convID := agent.ConversationIDFromContext(ctx)
 	if convID == "" {
-		return "", fmt.Errorf("cannot determine current conversation; use the project fact tool in a conversation context")
+		return "", fmt.Errorf("cannot determine the current conversation; use project-fact tools in a conversation context")
 	}
 	pid, err := db.GetConversationProjectID(convID)
 	if err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(pid) == "" {
-		return "", fmt.Errorf("the current conversation is not bound to a project; please select a project in the conversation or create a conversation with a project first")
+		return "", fmt.Errorf("the current conversation is not bound to a project; select a project or create a project-bound conversation first")
 	}
 	return pid, nil
 }
 
 func textResult(msg string, isErr bool) *mcp.ToolResult {
+	msg = strings.ReplaceAll(msg, "错误:", "Error:")
 	return &mcp.ToolResult{
 		Content: []mcp.Content{{Type: "text", Text: msg}},
 		IsError: isErr,
@@ -41,25 +42,24 @@ func textResult(msg string, isErr bool) *mcp.ToolResult {
 func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *config.Config, logger *zap.Logger) {
 	if db == nil || cfg == nil || !cfg.Project.Enabled {
 		if logger != nil {
-			logger.Info("project blackboard tools not registered (disabled)")
+			logger.Info("项目黑板工具未注册（未启用）")
 		}
 		return
 	}
 
 	upsertTool := mcp.Tool{
 		Name: builtin.ToolUpsertProjectFact,
-		Description: "Write or update a project blackboard fact for accumulating reproducible context across conversations (not a formal vulnerability entry; for deliverable vulnerabilities use record_vulnerability)." +
-			"Record as you go: invoke immediately after confirming new findings (port/entry/credential/exploitable point); same fact_key overwrites on update; do not wait for the conversation to end." +
-			"Do not write only the conclusion: summary must include what + where + how to verify; body must include attack chain / request-response / command reproduction details." +
-			"For finding-type facts, recommended fact_key is finding|chain|exploit|poc/<slug>, category is finding|chain|exploit|poc, and body should follow the attack chain template." +
-			"For environment-type, use target|auth|infra|business/<slug>. Same fact_key overwrites on update. The current conversation must be bound to a project.",
-		ShortDescription: "Write/update project fact (with attack chain body)",
+		Description: "Write or update a project-blackboard fact for reproducible cross-conversation context (not a formal vulnerability record; use record_vulnerability for reportable vulnerabilities). " +
+			"Record findings as soon as they are confirmed during testing, overwriting the same fact_key rather than waiting for the conversation to end. " +
+			"Do not write conclusions only: summary must state what, where, and how it was verified; body must contain reproducible attack-chain, request/response, and command details. " +
+			"For findings, use fact_key finding|chain|exploit|poc/<slug> and the matching category. For environment facts, use target|auth|infra|business/<slug>. The conversation must be project-bound.",
+		ShortDescription: "Write or update a project fact",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"fact_key": map[string]interface{}{
 					"type":        "string",
-					"description": "Unique key within the project: e.g., target/primary_domain, finding/sqli-login, exploit/upload-rce",
+					"description": "Unique key within the project, such as target/primary_domain, finding/sqli-login, or exploit/upload-rce",
 				},
 				"category": map[string]interface{}{
 					"type":        "string",
@@ -68,13 +68,11 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 				},
 				"summary": map[string]interface{}{
 					"type":        "string",
-					"description": "One-line summary for index: conclusion + location + trigger/verification key points (do not just write empty statements like 'XSS exists')",
+					"description": "One-line index summary: conclusion, location, and trigger/verification details; do not write empty statements such as 'XSS exists'",
 				},
 				"body": map[string]interface{}{
-					"type": "string",
-					"description": "Full reproducible details (only returned by get_project_fact): must include attack chain steps, raw HTTP/commands, response behavior, evidence and relationships." +
-						"Required on first write for finding/exploit-type; recommended to include source evidence for environment-type. For attack chain type, you can refer to template sections: Conclusion, Target and Entry, Attack Chain, Exploit/POC, Key Evidence, Relationships, Notes." +
-						"When updating an existing fact_key, if body is omitted or left empty, the existing body in the database is preserved (you can only change summary).",
+					"type":        "string",
+					"description": "Complete reproducible details returned only by get_project_fact: attack-chain steps, raw HTTP/commands, response behavior, evidence, and links. Required for initial finding/exploit facts. Existing body is retained when updating a fact_key with an omitted or empty body.",
 				},
 				"confidence": map[string]interface{}{
 					"type":        "string",
@@ -83,21 +81,21 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 				},
 				"pinned": map[string]interface{}{
 					"type":        "boolean",
-					"description": "Whether to appear with priority in the blackboard index",
+					"description": "Whether to prioritize this fact in the blackboard index",
 				},
 				"related_vulnerability_id": map[string]interface{}{
 					"type":        "string",
-					"description": "Optional: associated vulnerability record ID",
+					"description": "Optional related vulnerability record ID",
 				},
 				"links": map[string]interface{}{
-					"type": "array",
-					"description": "Optional: relationship edges (from -> current fact). Finding must have at least 1 {from:target/*, type:discovered_on}; record exploit on finding with {from:exploit/*, type:exploits}. Omit to keep existing edges; pass [] to clear all relationship edges.",
+					"type":        "array",
+					"description": "Optional relationship edges (from -> this fact). A finding should have at least {from:target/*, type:discovered_on}; an exploit recorded on a finding uses {from:exploit/*, type:exploits}. Omit to retain existing edges; pass [] to clear all edges.",
 					"items": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
 							"from": map[string]interface{}{
 								"type":        "string",
-								"description": "Source fact_key: stored as from -> current fact",
+								"description": "Source fact_key, stored as from -> the current fact",
 							},
 							"type": map[string]interface{}{
 								"type":        "string",
@@ -127,7 +125,7 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 			return textResult("Error: fact_key and summary are required", true), nil
 		}
 		if len([]rune(summary)) > cfg.Project.FactSummaryMaxRunesEffective() {
-			return textResult(fmt.Sprintf("Error: summary is too long (max %d chars)", cfg.Project.FactSummaryMaxRunesEffective()), true), nil
+			return textResult(fmt.Sprintf("Error: summary is too long (maximum %d characters)", cfg.Project.FactSummaryMaxRunesEffective()), true), nil
 		}
 		f := &database.ProjectFact{
 			ProjectID:              projectID,
@@ -174,8 +172,8 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 
 	getTool := mcp.Tool{
 		Name:             builtin.ToolGetProjectFact,
-		Description:      "Get full body and metadata of a project fact by fact_key. When the summary is insufficient you must call this tool; do not fabricate details.",
-		ShortDescription: "Get fact details by key",
+		Description:      "Get the complete body and metadata for a project fact by fact_key. Call this when the summary is insufficient; do not invent details.",
+		ShortDescription: "Get project-fact details by key",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -212,7 +210,7 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 			}
 		}
 		if out, _ := db.ListOutgoingProjectFactEdges(projectID, f.FactKey); len(out) > 0 {
-			msg += "Points to other facts:\n"
+			msg += "Edges to other facts:\n"
 			for _, e := range out {
 				msg += fmt.Sprintf("- %s → %s (%s)\n", e.EdgeType, e.TargetFactKey, e.Confidence)
 			}
@@ -226,7 +224,7 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 
 	listTool := mcp.Tool{
 		Name:             builtin.ToolListProjectFacts,
-		Description:      "List facts in the current project (paginated).",
+		Description:      "List facts in the current project with pagination.",
 		ShortDescription: "List project facts",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -254,7 +252,7 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 			return textResult("Error: "+err.Error(), true), nil
 		}
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("Total %d entries (limit=%d offset=%d):\n", len(list), limit, offset))
+		b.WriteString(fmt.Sprintf("%d facts (limit=%d offset=%d):\n", len(list), limit, offset))
 		for _, f := range list {
 			b.WriteString(fmt.Sprintf("- [%s] %s — %s (%s)\n", f.FactKey, f.Category, f.Summary, f.Confidence))
 		}
@@ -263,7 +261,7 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 
 	searchTool := mcp.Tool{
 		Name:             builtin.ToolSearchProjectFacts,
-		Description:      "Search project facts by keyword (summary/body/fact_key).",
+		Description:      "Search project facts by keyword in summary, body, or fact_key.",
 		ShortDescription: "Search project facts",
 		InputSchema: map[string]interface{}{
 			"type": "object",
@@ -289,7 +287,7 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 			return textResult("Error: "+err.Error(), true), nil
 		}
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("Search \"%s\" matched %d entries:\n", q, len(list)))
+		b.WriteString(fmt.Sprintf("Search for %q matched %d facts:\n", q, len(list)))
 		for _, f := range list {
 			b.WriteString(fmt.Sprintf("- [%s] %s — %s\n", f.FactKey, f.Category, f.Summary))
 		}
@@ -298,8 +296,8 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 
 	deprecateTool := mcp.Tool{
 		Name:             builtin.ToolDeprecateProjectFact,
-		Description:      "Mark a fact as deprecated; it is excluded from the blackboard index.",
-		ShortDescription: "Deprecate project fact",
+		Description:      "Mark a fact deprecated and exclude it from the blackboard index.",
+		ShortDescription: "Deprecate a project fact",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -317,20 +315,20 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 		if err := db.DeprecateProjectFact(projectID, key); err != nil {
 			return textResult("Error: "+err.Error(), true), nil
 		}
-		return textResult("Fact marked as deprecated: "+key, false), nil
+		return textResult("Fact marked deprecated: "+key, false), nil
 	})
 
 	restoreTool := mcp.Tool{
 		Name:             builtin.ToolRestoreProjectFact,
-		Description:      "Restore a deprecated fact to tentative or confirmed; it re-enters the blackboard index.",
-		ShortDescription: "Restore deprecated project fact",
+		Description:      "Restore a deprecated fact as tentative or confirmed so it participates in the blackboard index again.",
+		ShortDescription: "Restore a deprecated project fact",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"fact_key": map[string]interface{}{"type": "string"},
 				"confidence": map[string]interface{}{
 					"type":        "string",
-					"description": "Confidence after restore: tentative (default) or confirmed",
+					"description": "Restored confidence: tentative (default) or confirmed",
 					"enum":        []string{"tentative", "confirmed"},
 				},
 			},
@@ -353,11 +351,11 @@ func registerProjectFactTools(mcpServer *mcp.Server, db *database.DB, cfg *confi
 		if conf == "" {
 			conf = "tentative"
 		}
-		return textResult(fmt.Sprintf("Fact restored to %s: %s", conf, key), false), nil
+		return textResult(fmt.Sprintf("Fact restored as %s: %s", conf, key), false), nil
 	})
 
 	if logger != nil {
-		logger.Info("project blackboard MCP tools registered successfully")
+		logger.Debug("项目黑板 MCP 工具注册成功")
 	}
 }
 

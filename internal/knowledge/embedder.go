@@ -75,7 +75,7 @@ func NewEmbedder(ctx context.Context, cfg *config.KnowledgeConfig, openAIConfig 
 		apiKey = strings.TrimSpace(openAIConfig.APIKey)
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("embedding API key 未配置")
+		return nil, fmt.Errorf("embedding API key is not configured")
 	}
 
 	timeout := 120 * time.Second
@@ -189,7 +189,7 @@ func (e *Embedder) EmbedStrings(ctx context.Context, texts []string, opts ...emb
 			e.logger.Debug("嵌入失败，将重试", zap.Int("attempt", attempt+1), zap.Error(err))
 		}
 	}
-	return nil, fmt.Errorf("达到最大重试次数 (%d): %v", e.maxRetries, lastErr)
+	return nil, fmt.Errorf("maximum retry count reached (%d): %v", e.maxRetries, lastErr)
 }
 
 // EmbedTexts 批量 float32 嵌入（兼容旧调用；单次请求批量以减小延迟）。

@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
+	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 )
@@ -25,9 +27,14 @@ func TestIsEinoTransientRunError(t *testing.T) {
 		{"post chat completions eof", errors.New(`Post "https://token-plan-cn.xiaomimimo.com/v1/chat/completions": EOF`), true},
 		{"post eof wraps io.EOF", fmt.Errorf(`Post %q: %w`, "https://token-plan-cn.xiaomimimo.com/v1/chat/completions", io.EOF), true},
 		{"429", errors.New("HTTP 429 Too Many Requests"), true},
+		{"typed 429", &einoopenai.APIError{HTTPStatusCode: 429}, true},
+		{"typed 400", &einoopenai.APIError{HTTPStatusCode: 400, Message: "Invalid request body"}, false},
+		{"400 with unrelated number", errors.New("status code: 400, request id contains 500"), false},
+		{"409", errors.New("HTTP 409 Conflict"), true},
 		{"rate limit", errors.New(`{"error":"rate limit exceeded"}`), true},
 		{"connection reset", errors.New("read tcp: connection reset by peer"), true},
 		{"http2 goaway", errors.New("failed to receive stream chunk: error, http2: server sent GOAWAY and closed the connection; LastStreamID=791, ErrCode=NO_ERROR"), true},
+		{"unexpected internal stream chunk", errors.New("failed to receive stream chunk: error, The service encountered an unexpected internal error. Request id: 0217851391106464f01ec66621d0980a42fd45436ed75957a6a0a"), true},
 		{"unexpected eof", errors.New("unexpected EOF"), true},
 		{"503", errors.New("upstream returned 503"), true},
 		{"iteration limit", errors.New("max iteration reached"), false},
@@ -49,11 +56,51 @@ func TestIsEinoTransientRunError(t *testing.T) {
 func TestEinoTransientRetryBackoff(t *testing.T) {
 	t.Parallel()
 	max := 30 * time.Second
-	if got := einoTransientRetryBackoff(0, max); got != 2*time.Second {
-		t.Fatalf("attempt 0: got %v", got)
+	if got := einoTransientRetryBackoff(0, max); got < time.Second || got > 2*time.Second {
+		t.Fatalf("attempt 0 outside equal-jitter range [1s,2s]: %v", got)
 	}
-	if got := einoTransientRetryBackoff(4, max); got != 30*time.Second {
-		t.Fatalf("attempt 4 capped: got %v", got)
+	if got := einoTransientRetryBackoff(4, max); got < 15*time.Second || got > 30*time.Second {
+		t.Fatalf("attempt 4 outside capped equal-jitter range [15s,30s]: %v", got)
+	}
+}
+
+func TestEinoTransientRunErrorUserDetail(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		err      error
+		wantKind string
+	}{
+		{"rate limit", errors.New("HTTP 429 Too Many Requests"), "rate_limit"},
+		{"upstream", errors.New("upstream returned 503"), "upstream_server"},
+		{"network", errors.New("read tcp: connection reset by peer"), "network"},
+		{"stream", errors.New("unexpected end of JSON"), "stream"},
+		{"stream chunk", errors.New("failed to receive stream chunk: error, The service encountered an unexpected internal error. Request id: abc"), "upstream_busy"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			kind, summary := einoTransientRunErrorUserDetail(tc.err)
+			if kind != tc.wantKind {
+				t.Fatalf("kind=%q, want %q", kind, tc.wantKind)
+			}
+			if summary == "" {
+				t.Fatal("summary should not be empty")
+			}
+		})
+	}
+}
+
+func TestEinoTrimRetryErrorSummary(t *testing.T) {
+	t.Parallel()
+	raw := strings.Repeat("报错 ", 260)
+	got := einoTrimRetryErrorSummary(raw)
+	if len([]rune(got)) > 503 {
+		t.Fatalf("summary too long: %d runes", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatal("trimmed summary should end with ellipsis")
 	}
 }
 
@@ -99,9 +146,9 @@ func TestEinoTransientRunRetrierReset(t *testing.T) {
 	if r.attempt() != 0 {
 		t.Fatalf("after reset: attempt=%d, want 0", r.attempt())
 	}
-	// 重置后下一次退避应从 2s 起算（attempt index 0）。
-	if got := einoTransientRetryBackoff(r.attempt(), r.policy.maxBackoff); got != 2*time.Second {
-		t.Fatalf("backoff after reset: got %v, want 2s", got)
+	// 重置后下一次退避应从 1s~2s equal-jitter 窗口起算（attempt index 0）。
+	if got := einoTransientRetryBackoff(r.attempt(), r.policy.maxBackoff); got < time.Second || got > 2*time.Second {
+		t.Fatalf("backoff after reset outside [1s,2s]: %v", got)
 	}
 }
 

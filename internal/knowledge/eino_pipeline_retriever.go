@@ -37,7 +37,7 @@ func (p *knowledgePipelineRetriever) Retrieve(ctx context.Context, query string,
 	}
 	q := strings.TrimSpace(query)
 	if q == "" {
-		return nil, fmt.Errorf("查询不能为空")
+		return nil, fmt.Errorf("query cannot be empty")
 	}
 
 	ro := retriever.GetCommonOptions(nil, opts...)

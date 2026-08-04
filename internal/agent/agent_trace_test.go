@@ -55,3 +55,22 @@ func TestMergeAssistantTraceOutput(t *testing.T) {
 		t.Fatalf("expected merged output, got %q", out[len(out)-1].Content)
 	}
 }
+
+func TestParseTraceMessagesMarksVersionedModelFacingTrace(t *testing.T) {
+	raw := `[{"role":"system","content":"s","extra":{"cyberstrike_model_facing_trace_version":1}},{"role":"user","content":"u"},{"role":"tool","content":"exact","tool_call_id":"c1"}]`
+	if !IsModelFacingTraceJSON(raw) {
+		t.Fatal("versioned trace not detected")
+	}
+	msgs, err := ParseTraceMessages(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, msg := range msgs {
+		if !msg.ModelFacingTrace {
+			t.Fatalf("message %d missing model-facing marker", i)
+		}
+	}
+	if IsModelFacingTraceJSON(`[{"role":"user","content":"legacy"}]`) {
+		t.Fatal("legacy trace incorrectly marked model-facing")
+	}
+}

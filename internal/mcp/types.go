@@ -199,8 +199,15 @@ type ToolExecution struct {
 	StartTime time.Time              `json:"startTime"`
 	EndTime   *time.Time             `json:"endTime,omitempty"`
 	Duration  time.Duration          `json:"duration,omitempty"`
+	// PartialOutput is a bounded tail preview of output produced by a running tool.
+	// It is intentionally separate from Result, which remains the final canonical tool result.
+	PartialOutput          string     `json:"partialOutput,omitempty"`
+	PartialOutputBytes     int64      `json:"partialOutputBytes,omitempty"`
+	PartialOutputTruncated bool       `json:"partialOutputTruncated,omitempty"`
+	PartialOutputUpdatedAt *time.Time `json:"partialOutputUpdatedAt,omitempty"`
 	// ConversationID 仅 API 展示用（进行中的 Agent 任务），不写入 tool_executions 表。
 	ConversationID string `json:"conversationId,omitempty"`
+	OwnerUserID    string `json:"-"`
 }
 
 // ToolStats 工具统计信息
@@ -311,9 +318,8 @@ func ToolResultPlainText(r *ToolResult) string {
 
 // AbortNoteBannerForModel 标出后续文本来自「用户手动终止工具时在弹窗中填写」，避免与 stdout/stderr 混淆。
 const AbortNoteBannerForModel = "---\n" +
-	"【用户终止说明｜USER INTERRUPT NOTE】\n" +
-	"（以下由操作者填写，用于指示模型如何继续；不是工具原始输出。）\n" +
-	"（Written by the operator when stopping this tool; not raw tool output.）\n" +
+	"[USER INTERRUPT NOTE]\n" +
+	"The following text was written by the operator when stopping this tool to direct how you should continue; it is not raw tool output.\n" +
 	"---"
 
 // MergePartialToolOutputAndAbortNote 格式：工具原始输出 + 醒目标题 + 用户终止说明（无说明则原样返回 partial）。

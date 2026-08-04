@@ -84,3 +84,49 @@ func TestLoadToolStatsSummaryAndListPage(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadToolStatsSummaryDoesNotCountCancelledAsFailed(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "monitor-cancelled-summary.db")
+	db, err := NewDB(dbPath, zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db.Close()
+
+	now := time.Now()
+	for i, status := range []string{"completed", "cancelled", "failed"} {
+		exec := &mcp.ToolExecution{
+			ID:        fmt.Sprintf("exec-%d", i),
+			ToolName:  "exec",
+			Arguments: map[string]interface{}{},
+			Status:    status,
+			StartTime: now.Add(time.Duration(i) * time.Second),
+		}
+		end := exec.StartTime.Add(time.Second)
+		exec.EndTime = &end
+		exec.Duration = time.Second
+		if err := db.SaveToolExecution(exec); err != nil {
+			t.Fatalf("SaveToolExecution(%s): %v", status, err)
+		}
+	}
+
+	summary, err := db.LoadToolStatsSummary(1)
+	if err != nil {
+		t.Fatalf("LoadToolStatsSummary: %v", err)
+	}
+	if summary.Summary.TotalCalls != 3 {
+		t.Fatalf("totalCalls = %d, want 3", summary.Summary.TotalCalls)
+	}
+	if summary.Summary.SuccessCalls != 1 {
+		t.Fatalf("successCalls = %d, want 1", summary.Summary.SuccessCalls)
+	}
+	if summary.Summary.FailedCalls != 1 {
+		t.Fatalf("failedCalls = %d, want 1", summary.Summary.FailedCalls)
+	}
+	if len(summary.TopTools) != 1 {
+		t.Fatalf("top tools = %d, want 1", len(summary.TopTools))
+	}
+	if summary.TopTools[0].FailedCalls != 1 {
+		t.Fatalf("top tool failedCalls = %d, want 1", summary.TopTools[0].FailedCalls)
+	}
+}

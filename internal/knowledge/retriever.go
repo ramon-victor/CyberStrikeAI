@@ -28,7 +28,7 @@ type Retriever struct {
 	rerankMu sync.RWMutex
 	reranker DocumentReranker
 
-	pipeline retriever.Retriever
+	pipeline   retriever.Retriever
 	wireOpenAI *config.OpenAIConfig
 }
 
@@ -116,11 +116,11 @@ func cosineSimilarity(a, b []float32) float64 {
 // Search 搜索知识库（Eino MultiQuery → 向量检索 → 重排 → 后处理）。
 func (r *Retriever) Search(ctx context.Context, req *SearchRequest) ([]*RetrievalResult, error) {
 	if req == nil {
-		return nil, fmt.Errorf("请求不能为空")
+		return nil, fmt.Errorf("request cannot be nil")
 	}
 	q := strings.TrimSpace(req.Query)
 	if q == "" {
-		return nil, fmt.Errorf("查询不能为空")
+		return nil, fmt.Errorf("query cannot be empty")
 	}
 	opts := r.einoRetrieverOptions(req)
 	docs, err := r.activeEinoRetriever().Retrieve(ctx, q, opts...)
@@ -189,7 +189,7 @@ WHERE 1=1`
 // vectorSearch 纯向量检索：余弦相似度排序，按相似度阈值与 TopK 截断（无 BM25、无混合分、无邻块扩展）。
 func (r *Retriever) vectorSearch(ctx context.Context, req *SearchRequest) ([]*RetrievalResult, error) {
 	if req.Query == "" {
-		return nil, fmt.Errorf("查询不能为空")
+		return nil, fmt.Errorf("query cannot be empty")
 	}
 
 	topK := req.TopK
@@ -216,7 +216,7 @@ func (r *Retriever) vectorSearch(ctx context.Context, req *SearchRequest) ([]*Re
 	queryText := FormatQueryEmbeddingText(req.RiskType, req.Query)
 	queryEmbedding, err := r.embedder.EmbedText(ctx, queryText)
 	if err != nil {
-		return nil, fmt.Errorf("向量化查询失败: %w", err)
+		return nil, fmt.Errorf("failed to embed query: %w", err)
 	}
 	queryDim := len(queryEmbedding)
 	expectedModel := ""
@@ -227,7 +227,7 @@ func (r *Retriever) vectorSearch(ctx context.Context, req *SearchRequest) ([]*Re
 	sqlStr, sqlArgs := r.knowledgeEmbeddingSelectSQL(strings.TrimSpace(req.RiskType), subIdxFilter)
 	rows, err := r.db.QueryContext(ctx, sqlStr, sqlArgs...)
 	if err != nil {
-		return nil, fmt.Errorf("查询向量失败: %w", err)
+		return nil, fmt.Errorf("failed to query vectors: %w", err)
 	}
 	defer rows.Close()
 

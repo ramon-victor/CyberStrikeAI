@@ -153,6 +153,81 @@ func TestEinoStreamingShellWrap_InactivityAfterPartialOutput(t *testing.T) {
 	}
 }
 
+func TestEinoStreamingShellWrap_SoftWaitTimeoutReturnsExecutionIDAndKeepsRunning(t *testing.T) {
+	inner := &mockStreamingShellPartialThenHang{}
+	partialCh := make(chan string, 4)
+	cancelCh := make(chan context.CancelFunc, 1)
+	unregistered := make(chan string, 1)
+	wrap := &einoStreamingShellWrap{
+		inner:                  inner,
+		toolWaitTimeoutSeconds: 1,
+		beginMonitor: func(toolCallID, command string) string {
+			return "exec-soft-wait"
+		},
+		appendPartialMonitor: func(executionID, toolCallID, chunk string) {
+			partialCh <- chunk
+		},
+		registerCancelMonitor: func(executionID string, cancel context.CancelFunc) {
+			if executionID == "exec-soft-wait" {
+				cancelCh <- cancel
+			}
+		},
+		unregisterCancelMonitor: func(executionID string) {
+			unregistered <- executionID
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sr, err := wrap.ExecuteStreaming(ctx, &filesystem.ExecuteRequest{Command: "sudo whoami"})
+	if err != nil {
+		t.Fatalf("ExecuteStreaming: %v", err)
+	}
+	defer sr.Close()
+
+	var got strings.Builder
+	for {
+		resp, rerr := sr.Recv()
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			t.Fatalf("recv: %v", rerr)
+		}
+		if resp != nil {
+			got.WriteString(resp.Output)
+		}
+	}
+	body := got.String()
+	if !strings.Contains(body, "execution_id: exec-soft-wait") || !strings.Contains(body, "status: running") {
+		t.Fatalf("expected background execution marker, got: %q", body)
+	}
+	select {
+	case chunk := <-partialCh:
+		if !strings.Contains(chunk, "[sudo] password") {
+			t.Fatalf("unexpected partial chunk: %q", chunk)
+		}
+	default:
+		t.Fatal("expected streamed partial output before soft wait return")
+	}
+	if !inner.called {
+		t.Fatal("inner shell did not run")
+	}
+	select {
+	case registeredCancel := <-cancelCh:
+		registeredCancel()
+	case <-time.After(time.Second):
+		t.Fatal("expected execution cancel registration")
+	}
+	select {
+	case id := <-unregistered:
+		if id != "exec-soft-wait" {
+			t.Fatalf("unexpected unregistered id: %q", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected execution cancel unregister")
+	}
+}
+
 type mockStreamingShellHanging struct {
 	called bool
 }

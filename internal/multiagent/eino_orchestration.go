@@ -127,12 +127,15 @@ func buildPlanExecuteExecutorHandlers(ctx context.Context, a *PlanExecuteRootArg
 			return nil, fmt.Errorf("plan_execute executor summarization: %w", sumErr)
 		}
 		execHandlers = appendEinoChatModelTailMiddlewares(execHandlers, einoChatModelTailConfig{
-			logger:         a.Logger,
-			phase:          "plan_execute_executor",
-			summarization:  sumMw,
-			modelName:      a.ModelName,
-			conversationID: a.ConversationID,
-			trace:          a.ModelFacingTrace,
+			logger:           a.Logger,
+			phase:            "plan_execute_executor",
+			summarization:    sumMw,
+			modelName:        a.ModelName,
+			maxTotalTokens:   a.AppCfg.OpenAI.MaxTotalTokens,
+			toolMaxBytes:     toolMaxBytesFromMW(a.MwCfg),
+			conversationID:   a.ConversationID,
+			trace:            a.ModelFacingTrace,
+			middlewareConfig: a.MwCfg,
 		})
 	}
 	return execHandlers, nil

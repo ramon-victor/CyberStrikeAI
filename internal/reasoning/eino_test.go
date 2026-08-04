@@ -1,12 +1,32 @@
 package reasoning
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"cyberstrike-ai/internal/config"
 
 	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
+	"github.com/cloudwego/eino/schema"
 )
+
+var reasoningPayloadKeysForTest = []string{"thinking", "reasoning_effort", "output_config", "reasoning"}
+
+func assertNoReasoningFields(t *testing.T, cfg *einoopenai.ChatModelConfig) {
+	t.Helper()
+	if cfg.ReasoningEffort != "" {
+		t.Fatalf("expected ReasoningEffort omitted, got %q", cfg.ReasoningEffort)
+	}
+	for _, key := range reasoningPayloadKeysForTest {
+		if _, ok := cfg.ExtraFields[key]; ok {
+			t.Fatalf("expected %q omitted, got %#v", key, cfg.ExtraFields)
+		}
+	}
+}
 
 func TestEffortStringForAPI_passthrough(t *testing.T) {
 	cases := map[string]string{
@@ -50,7 +70,11 @@ func TestApplyOpenAICompat_xhighExtraField(t *testing.T) {
 }
 
 func TestApplyPlanExecutePlannerModelConfig_stripsReasoningWhenGlobalOn(t *testing.T) {
-	cfg := &einoopenai.ChatModelConfig{}
+	cfg := &einoopenai.ChatModelConfig{ExtraFields: map[string]any{
+		"thinking":         map[string]any{"type": "enabled"},
+		"reasoning_effort": "high",
+		"vendor_option":    true,
+	}}
 	oa := &config.OpenAIConfig{
 		BaseURL: "https://antchat.example.com/v1",
 		Model:   "minimax-m3",
@@ -61,31 +85,119 @@ func TestApplyPlanExecutePlannerModelConfig_stripsReasoningWhenGlobalOn(t *testi
 		},
 	}
 	ApplyPlanExecutePlannerModelConfig(cfg, oa)
-	if cfg.ReasoningEffort != "" {
-		t.Fatalf("expected ReasoningEffort cleared, got %q", cfg.ReasoningEffort)
-	}
-	th, ok := cfg.ExtraFields["thinking"].(map[string]any)
-	if !ok || th["type"] != "disabled" {
-		t.Fatalf("expected thinking disabled, got %#v", cfg.ExtraFields)
-	}
-	if _, ok := cfg.ExtraFields["reasoning_effort"]; ok {
-		t.Fatalf("expected reasoning_effort stripped, got %#v", cfg.ExtraFields)
+	assertNoReasoningFields(t, cfg)
+	if cfg.ExtraFields["vendor_option"] != true {
+		t.Fatalf("expected unrelated extra field preserved, got %#v", cfg.ExtraFields)
 	}
 }
 
-func TestApplyReasoningOff_disablesThinking(t *testing.T) {
-	cfg := &einoopenai.ChatModelConfig{}
+func TestApplyReasoningOff_omitsAllReasoningFields(t *testing.T) {
+	cfg := &einoopenai.ChatModelConfig{ExtraFields: map[string]any{
+		"thinking":      map[string]any{"type": "enabled"},
+		"output_config": map[string]any{"effort": "high"},
+	}}
 	oa := &config.OpenAIConfig{
 		BaseURL: "https://api.openai.com/v1",
-		Model:   "gpt-4o",
+		Model:   "gpt-4o-mini",
 		Reasoning: config.OpenAIReasoningConfig{
-			Mode: "off",
+			Mode:    "off",
+			Effort:  "high",
+			Profile: "openai_compat",
+			ExtraRequestFields: map[string]interface{}{
+				"thinking":      map[string]any{"type": "disabled"},
+				"reasoning":     map[string]any{"effort": "high"},
+				"vendor_option": true,
+			},
 		},
 	}
 	ApplyToEinoChatModelConfig(cfg, oa, nil)
-	th, ok := cfg.ExtraFields["thinking"].(map[string]any)
-	if !ok || th["type"] != "disabled" {
-		t.Fatalf("expected thinking disabled, got %#v", cfg.ExtraFields)
+	assertNoReasoningFields(t, cfg)
+	if cfg.ExtraFields["vendor_option"] != true {
+		t.Fatalf("expected unrelated extra field preserved, got %#v", cfg.ExtraFields)
+	}
+}
+
+func TestApplyReasoningOff_clientOverrideOmit(t *testing.T) {
+	cfg := &einoopenai.ChatModelConfig{}
+	oa := &config.OpenAIConfig{Reasoning: config.OpenAIReasoningConfig{
+		Mode: "on", Effort: "high", Profile: "openai_compat",
+	}}
+	ApplyToEinoChatModelConfig(cfg, oa, &ClientIntent{Mode: "off", Effort: "high"})
+	assertNoReasoningFields(t, cfg)
+}
+
+func TestApplyReasoningOff_deepseekExplicitlyDisablesDefaultThinking(t *testing.T) {
+	for _, profile := range []string{"deepseek_compat", "auto"} {
+		t.Run(profile, func(t *testing.T) {
+			cfg := &einoopenai.ChatModelConfig{ExtraFields: map[string]any{
+				"reasoning_effort": "high",
+				"vendor_option":    true,
+			}}
+			oa := &config.OpenAIConfig{
+				BaseURL: "https://api.deepseek.com",
+				Model:   "deepseek-v4-pro",
+				Reasoning: config.OpenAIReasoningConfig{
+					Mode: "off", Effort: "high", Profile: profile,
+				},
+			}
+			ApplyToEinoChatModelConfig(cfg, oa, nil)
+			if cfg.ReasoningEffort != "" {
+				t.Fatalf("expected ReasoningEffort omitted, got %q", cfg.ReasoningEffort)
+			}
+			if _, ok := cfg.ExtraFields["reasoning_effort"]; ok {
+				t.Fatalf("expected reasoning_effort omitted, got %#v", cfg.ExtraFields)
+			}
+			thinking, ok := cfg.ExtraFields["thinking"].(map[string]any)
+			if !ok || thinking["type"] != "disabled" {
+				t.Fatalf("expected DeepSeek thinking disabled, got %#v", cfg.ExtraFields)
+			}
+			if cfg.ExtraFields["vendor_option"] != true {
+				t.Fatalf("expected unrelated extra field preserved, got %#v", cfg.ExtraFields)
+			}
+		})
+	}
+}
+
+func TestApplyReasoningOff_wirePayloadOmitsThinking(t *testing.T) {
+	var requestBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		if err := json.Unmarshal(body, &requestBody); err != nil {
+			t.Errorf("decode request body: %v; body=%s", err, body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-test","object":"chat.completion","created":1,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer srv.Close()
+
+	cfg := &einoopenai.ChatModelConfig{
+		APIKey:  "test-key",
+		BaseURL: srv.URL,
+		Model:   "gpt-4o-mini",
+	}
+	oa := &config.OpenAIConfig{
+		BaseURL: "https://api.openai.com/v1",
+		Model:   "gpt-4o-mini",
+		Reasoning: config.OpenAIReasoningConfig{
+			Mode: "off", Effort: "high", Profile: "openai_compat",
+		},
+	}
+	ApplyToEinoChatModelConfig(cfg, oa, nil)
+	model, err := einoopenai.NewChatModel(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("new chat model: %v", err)
+	}
+	if _, err := model.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")}); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, key := range reasoningPayloadKeysForTest {
+		if _, ok := requestBody[key]; ok {
+			t.Fatalf("wire payload unexpectedly contains %q: %#v", key, requestBody)
+		}
 	}
 }
 

@@ -60,11 +60,13 @@ func (c *Client) Analyze(ctx context.Context, img ImagePayload, question string)
 	}
 	httpClient = openai.NewEinoHTTPClient(&oa, httpClient)
 
+	maxCompletionTokens := oa.MaxCompletionTokensEffective()
 	modelCfg := &einoopenai.ChatModelConfig{
-		APIKey:     oa.APIKey,
-		BaseURL:    strings.TrimSuffix(oa.BaseURL, "/"),
-		Model:      oa.Model,
-		HTTPClient: httpClient,
+		APIKey:              oa.APIKey,
+		BaseURL:             strings.TrimSuffix(oa.BaseURL, "/"),
+		Model:               oa.Model,
+		HTTPClient:          httpClient,
+		MaxCompletionTokens: &maxCompletionTokens,
 	}
 	chatModel, err := einoopenai.NewChatModel(ctx, modelCfg)
 	if err != nil {
@@ -111,14 +113,14 @@ func (c *Client) Analyze(ctx context.Context, img ImagePayload, question string)
 func buildVisionPrompt(question string) string {
 	q := strings.TrimSpace(question)
 	if q == "" {
-		q = "请对图片做通用描述，侧重授权安全测试场景（可见文本、表单、按钮、验证码、错误信息、技术栈线索）。"
+		q = "Describe the image generally, focusing on authorized security-testing details such as visible text, forms, buttons, CAPTCHAs, error messages, and technology-stack clues."
 	}
 	extra := ""
 	if looksLikeCaptchaQuestion(q) {
-		extra = "\n若为验证码：仅输出你辨认出的字符序列，不要空格、标点、解释；看不清则明确说无法识别。"
+		extra = "\nIf this is a CAPTCHA, output only the character sequence you can identify, with no spaces, punctuation, or explanation. If it is unreadable, state clearly that it cannot be identified."
 	}
-	return `你是授权安全测试助手。请根据图片回答用户问题，只描述你能从图中确认的内容，不要编造。
-用户问题：` + q + extra
+	return `You are an authorized security-testing assistant. Answer the user's question based on the image. Describe only what you can verify from the image and do not invent details.
+User question: ` + q + extra
 }
 
 func looksLikeCaptchaQuestion(q string) bool {

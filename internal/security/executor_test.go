@@ -46,8 +46,8 @@ func TestExecutor_ExecuteInternalTool_UnknownTool(t *testing.T) {
 		t.Fatal("未知的工具类型应该返回错误")
 	}
 
-	if !strings.Contains(toolResult.Content[0].Text, "未知的内部工具类型") {
-		t.Errorf("错误消息应该包含'未知的内部工具类型'")
+	if !strings.Contains(toolResult.Content[0].Text, "unknown internal tool type") {
+		t.Errorf("error message should contain 'unknown internal tool type'")
 	}
 }
 
@@ -69,9 +69,46 @@ func TestExecuteSystemCommand_BackgroundDoesNotBlockOnChildStdout(t *testing.T) 
 		t.Fatalf("expected success, got %+v", res)
 	}
 	txt := res.Content[0].Text
-	if !strings.Contains(txt, "后台命令已启动") {
+	if !strings.Contains(txt, "Background command started") {
 		t.Fatalf("unexpected body: %q", txt)
 	}
+}
+
+func TestExecToolSoftWaitExposesPartialOutput(t *testing.T) {
+	executor, server := setupTestExecutor(t)
+	server.ConfigureToolWaitTimeoutSeconds(1)
+	mcp.RegisterExecutionControlTools(server, nil)
+	server.RegisterTool(mcp.Tool{Name: "exec", InputSchema: map[string]interface{}{"type": "object"}}, func(ctx context.Context, args map[string]interface{}) (*mcp.ToolResult, error) {
+		return executor.ExecuteTool(ctx, "exec", args)
+	})
+
+	result, executionID, err := server.CallTool(context.Background(), "exec", map[string]interface{}{
+		"command": "for i in 1 2 3 4; do echo partial-$i; sleep 0.3; done; sleep 5",
+		"shell":   "sh",
+	})
+	if err != nil {
+		t.Fatalf("CallTool exec: %v", err)
+	}
+	if executionID == "" || result == nil || !result.IsError {
+		t.Fatalf("expected soft wait timeout, id=%q result=%#v", executionID, result)
+	}
+
+	status, _, err := server.CallTool(context.Background(), "get_tool_execution", map[string]interface{}{
+		"execution_id":             executionID,
+		"include_partial_output":   true,
+		"partial_output_max_bytes": 4096,
+	})
+	if err != nil {
+		t.Fatalf("get_tool_execution: %v", err)
+	}
+	body := mcp.ToolResultPlainText(status)
+	if !strings.Contains(body, `"status": "running"`) {
+		t.Fatalf("expected running execution, got: %s", body)
+	}
+	if !strings.Contains(body, "partial-") || !strings.Contains(body, "partial_output") {
+		t.Fatalf("expected partial output in execution status, got: %s", body)
+	}
+	server.CancelToolExecution(executionID)
 }
 
 func TestExecuteSystemCommand_FailureFormat(t *testing.T) {
@@ -92,6 +129,70 @@ func TestExecuteSystemCommand_FailureFormat(t *testing.T) {
 	}
 	if !strings.Contains(text, "exit status 7") || !strings.Contains(text, "fail-msg") {
 		t.Fatalf("unexpected failure text: %q", text)
+	}
+}
+
+func TestExecuteSystemCommand_OutputIsSourceLimited(t *testing.T) {
+	executor, _ := setupTestExecutor(t)
+	spillRoot := t.TempDir()
+	executor.SetToolOutputMaxBytes(200)
+	executor.SetToolOutputSpillRoot(spillRoot)
+	ctx := mcp.WithMCPConversationID(context.Background(), "exec-spill")
+	res, err := executor.executeSystemCommand(ctx, map[string]interface{}{
+		"command": "i=0; while [ $i -lt 2000 ]; do printf 0123456789; i=$((i+1)); done",
+		"shell":   "sh",
+	})
+	if err != nil {
+		t.Fatalf("executeSystemCommand: %v", err)
+	}
+	if res == nil || res.IsError {
+		t.Fatalf("expected success, got %+v", res)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, "<persisted-output>") || !strings.Contains(text, "Full output saved to:") {
+		t.Fatalf("missing persisted-output notice: %q", text)
+	}
+	if len(text) > 200 {
+		t.Fatalf("output exceeded hard limit: len=%d text=%q", len(text), text)
+	}
+	if strings.Contains(text, strings.Repeat("0123456789", 20)) {
+		t.Fatalf("output kept too much data: len=%d", len(text))
+	}
+}
+
+func TestExecuteSystemCommand_StreamingOutputIsSourceLimited(t *testing.T) {
+	executor, _ := setupTestExecutor(t)
+	spillRoot := t.TempDir()
+	executor.SetToolOutputMaxBytes(200)
+	executor.SetToolOutputSpillRoot(spillRoot)
+	var streamed strings.Builder
+	ctx := context.WithValue(context.Background(), ToolOutputCallbackCtxKey, ToolOutputCallback(func(chunk string) {
+		streamed.WriteString(chunk)
+	}))
+	ctx = mcp.WithMCPConversationID(ctx, "exec-stream-spill")
+	res, err := executor.executeSystemCommand(ctx, map[string]interface{}{
+		"command": "i=0; while [ $i -lt 2000 ]; do printf abcdefghij; i=$((i+1)); done",
+		"shell":   "sh",
+	})
+	if err != nil {
+		t.Fatalf("executeSystemCommand: %v", err)
+	}
+	text := res.Content[0].Text
+	if !strings.Contains(text, "<persisted-output>") {
+		t.Fatalf("missing persisted-output notice: %q", text)
+	}
+	if len(text) > 200 {
+		t.Fatalf("returned output exceeded hard limit: len=%d text=%q", len(text), text)
+	}
+	// SSE only streams the bounded prefix; final agent-facing body is the spill notice.
+	if len(streamed.String()) > 200 {
+		t.Fatalf("streamed prefix exceeded hard limit: len=%d", len(streamed.String()))
+	}
+	if streamed.Len() == 0 {
+		t.Fatal("expected some streamed prefix before truncation")
+	}
+	if strings.Contains(text, strings.Repeat("abcdefghij", 50)) {
+		t.Fatalf("returned output kept too much raw data: len=%d", len(text))
 	}
 }
 

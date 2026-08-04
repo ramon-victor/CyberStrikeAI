@@ -38,6 +38,7 @@ func NewAuthHandler(manager *security.AuthManager, cfg *config.Config, configPat
 }
 
 type loginRequest struct {
+	Username string `json:"username"`
 	Password string `json:"password" binding:"required"`
 }
 
@@ -50,11 +51,11 @@ type changePasswordRequest struct {
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password cannot be empty"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
 		return
 	}
 
-	token, expiresAt, err := h.manager.Authenticate(req.Password)
+	token, expiresAt, err := h.manager.Authenticate(req.Username, req.Password)
 	if err != nil {
 		if h.audit != nil {
 			h.audit.Record(c, audit.Entry{
@@ -63,11 +64,13 @@ func (h *AuthHandler) Login(c *gin.Context) {
 				Action:   "login",
 				Result:   "failure",
 				Message:  "Login failed: incorrect password",
+				Actor:    strings.TrimSpace(req.Username),
 			})
 		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Incorrect password"})
 		return
 	}
+	session, _ := h.manager.ValidateToken(token)
 
 	if h.audit != nil {
 		h.audit.Record(c, audit.Entry{
@@ -75,7 +78,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			Action:      "login",
 			Result:      "success",
 			SessionHint: audit.HintFromToken(token),
-			Message:     "登录成功",
+			Message:     "Login successful",
+			Actor:       session.Username,
 			Detail: map[string]interface{}{
 				"expires_at": expiresAt.UTC().Format(time.RFC3339),
 			},
@@ -86,6 +90,15 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		"token":               token,
 		"expires_at":          expiresAt.UTC().Format(time.RFC3339),
 		"session_duration_hr": h.manager.SessionDurationHours(),
+		"user": gin.H{
+			"id":           session.UserID,
+			"username":     session.Username,
+			"display_name": session.DisplayName,
+		},
+		"roles":             session.Roles,
+		"permissions":       permissionKeys(session.Permissions),
+		"permission_scopes": session.PermissionScopes,
+		"scope":             session.Scope,
 	})
 }
 
@@ -125,21 +138,25 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	newPassword := strings.TrimSpace(req.NewPassword)
 
 	if oldPassword == "" || newPassword == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Current password and new password cannot be empty"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Current and new passwords are required"})
 		return
 	}
 
 	if len(newPassword) < 8 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be at least 8 characters"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "The new password must be at least 8 characters long"})
 		return
 	}
 
 	if oldPassword == newPassword {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "New password cannot be the same as old password"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "The new password must differ from the current password"})
 		return
 	}
 
-	if !h.manager.CheckPassword(oldPassword) {
+	session, _ := security.CurrentSession(c)
+	if session.Username == "" {
+		session.Username = "admin"
+	}
+	if !h.manager.CheckUserPassword(session.Username, oldPassword) {
 		if h.audit != nil {
 			h.audit.Record(c, audit.Entry{
 				Level:    "warn",
@@ -153,29 +170,19 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 
-	if err := config.PersistAuthPassword(h.configPath, newPassword); err != nil {
+	if session.UserID == "" {
+		session.UserID = "admin"
+	}
+	if err := h.manager.UpdateUserPassword(session.UserID, newPassword); err != nil {
 		if h.logger != nil {
-			h.logger.Error("Failed to save new password", zap.Error(err))
+			h.logger.Error("更新用户密码失败", zap.Error(err))
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save new password, please retry"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user password"})
 		return
 	}
-
-	if err := h.manager.UpdateConfig(newPassword, h.config.Auth.SessionDurationHours); err != nil {
-		if h.logger != nil {
-			h.logger.Error("Failed to update auth config", zap.Error(err))
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update auth config"})
-		return
-	}
-
-	h.config.Auth.Password = newPassword
-	h.config.Auth.GeneratedPassword = ""
-	h.config.Auth.GeneratedPasswordPersisted = false
-	h.config.Auth.GeneratedPasswordPersistErr = ""
 
 	if h.logger != nil {
-		h.logger.Info("Login password updated, all sessions invalidated")
+		h.logger.Info("登录密码已更新，所有会话已失效")
 	}
 
 	if h.audit != nil {
@@ -183,18 +190,18 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 			Category: "auth",
 			Action:   "change_password",
 			Result:   "success",
-			Message:  "Login password updated",
+			Message:  "Login password changed",
 		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Password updated, please login with new password"})
+	c.JSON(http.StatusOK, gin.H{"message": "Password updated; sign in again with the new password"})
 }
 
 // Validate returns the current session status.
 func (h *AuthHandler) Validate(c *gin.Context) {
 	token := c.GetString(security.ContextAuthTokenKey)
 	if token == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Session invalid"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid session"})
 		return
 	}
 
@@ -207,5 +214,24 @@ func (h *AuthHandler) Validate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"token":      session.Token,
 		"expires_at": session.ExpiresAt.UTC().Format(time.RFC3339),
+		"user": gin.H{
+			"id":           session.UserID,
+			"username":     session.Username,
+			"display_name": session.DisplayName,
+		},
+		"roles":             session.Roles,
+		"permissions":       permissionKeys(session.Permissions),
+		"permission_scopes": session.PermissionScopes,
+		"scope":             session.Scope,
 	})
+}
+
+func permissionKeys(perms map[string]bool) []string {
+	keys := make([]string, 0, len(perms))
+	for key, ok := range perms {
+		if ok {
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }

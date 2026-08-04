@@ -1,6 +1,6 @@
 ## CyberStrikeAI Burp Suite Extension
 
-中文说明见：`README.zh-CN.md`
+Chinese documentation: `README.zh-CN.md`
 
 ### What it does
 
@@ -63,7 +63,6 @@ If you already have Gradle available, you can still use `build.gradle` to build.
 
 ### Notes
 
-- Default connection is `https://127.0.0.1:8080` (**HTTPS** checked). Self-signed / local certs are trusted automatically (no import).
+- Default connection is `https://127.0.0.1:7022` (**HTTPS** checked). Self-signed / local certs are trusted automatically (no import).
 - Uncheck **HTTPS** only if your server runs plain HTTP.
 - It uses **Bearer Token** authentication obtained from the configured password.
-

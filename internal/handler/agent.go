@@ -18,12 +18,14 @@ import (
 
 	"cyberstrike-ai/internal/agent"
 	"cyberstrike-ai/internal/audit"
+	"cyberstrike-ai/internal/authctx"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
-	"cyberstrike-ai/internal/reasoning"
 	"cyberstrike-ai/internal/mcp/builtin"
 	"cyberstrike-ai/internal/multiagent"
 	"cyberstrike-ai/internal/openai"
+	"cyberstrike-ai/internal/reasoning"
+	"cyberstrike-ai/internal/security"
 
 	"github.com/gin-gonic/gin"
 	"github.com/robfig/cron/v3"
@@ -188,8 +190,8 @@ type AgentHandler struct {
 	hitlWhitelistSaver       HitlToolWhitelistSaver
 	hitlStrategySaver        HitlAuditStrategySaver
 	hitlDefaultReviewerSaver HitlDefaultReviewerSaver
-	auditLLM           *openai.Client
-	audit              *audit.Service
+	auditLLM                 *openai.Client
+	audit                    *audit.Service
 }
 
 // SetAudit wires platform audit logging.
@@ -210,7 +212,7 @@ func (h *AgentHandler) CancelRunningTaskForConversation(conversationID string) {
 	if h == nil || conversationID == "" || h.tasks == nil {
 		return
 	}
-	h.cancelActiveMCPToolForConversation(conversationID)
+	h.cancelRunningMCPToolsForConversation(conversationID)
 	h.tasks.AbortActiveEinoExecute(conversationID, "")
 	if ok, err := h.tasks.CancelTask(conversationID, ErrTaskCancelled); ok {
 		h.logger.Info("已取消会话运行中任务", zap.String("conversationId", conversationID))
@@ -219,12 +221,13 @@ func (h *AgentHandler) CancelRunningTaskForConversation(conversationID string) {
 	}
 }
 
-func (h *AgentHandler) cancelActiveMCPToolForConversation(conversationID string) {
-	if h == nil || h.tasks == nil || h.agent == nil {
+func (h *AgentHandler) cancelRunningMCPToolsForConversation(conversationID string) {
+	if h == nil || h.agent == nil {
 		return
 	}
-	if execID := h.tasks.ActiveMCPExecutionID(conversationID); execID != "" {
-		h.agent.CancelMCPToolExecutionWithNote(execID, "")
+	n := h.agent.CancelRunningMCPToolsForConversation(conversationID, "会话已结束，自动终止仍在运行的工具")
+	if n > 0 && h.logger != nil {
+		h.logger.Info("已终止会话仍在运行的 MCP 工具", zap.String("conversationId", conversationID), zap.Int("count", n))
 	}
 }
 
@@ -264,7 +267,7 @@ func NewAgentHandler(agent *agent.Agent, db *database.DB, cfg *config.Config, lo
 		batchCronParser:  cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor),
 		auditLLM:         openai.NewClient(llmCfg, llmHTTP, logger),
 	}
-	tm.SetToolCanceler(handler.cancelActiveMCPToolForConversation)
+	tm.SetToolCanceler(handler.cancelRunningMCPToolsForConversation)
 	if err := handler.hitlManager.EnsureSchema(); err != nil {
 		logger.Warn("初始化 HITL 表失败", zap.Error(err))
 	}
@@ -330,18 +333,39 @@ type ChatReasoningRequest struct {
 	Effort string `json:"effort,omitempty"`
 }
 
+// ChatFinalizationRequest is a caller-provided delivery policy. The server does
+// not infer execution intent from natural-language user text.
+type ChatFinalizationRequest struct {
+	RequireExecutionEvidence *bool `json:"requireExecutionEvidence,omitempty"`
+}
+
 // ChatRequest 聊天请求
 type ChatRequest struct {
-	Message              string           `json:"message" binding:"required"`
-	ConversationID       string           `json:"conversationId,omitempty"`
-	ProjectID            string           `json:"projectId,omitempty"` // 新对话绑定的项目（可选；未指定时可用 config.project.default_project_id）
-	Role                 string           `json:"role,omitempty"` // 角色名称
-	Attachments          []ChatAttachment `json:"attachments,omitempty"`
-	WebShellConnectionID string           `json:"webshellConnectionId,omitempty"` // WebShell 管理 - AI 助手：当前选中的连接 ID，仅使用 webshell_* 工具
-	Hitl                 *HITLRequest     `json:"hitl,omitempty"`
-	Reasoning            *ChatReasoningRequest `json:"reasoning,omitempty"`
+	Message              string                  `json:"message" binding:"required"`
+	ConversationID       string                  `json:"conversationId,omitempty"`
+	ProjectID            string                  `json:"projectId,omitempty"` // 新对话绑定的项目（可选；未指定时可用 config.project.default_project_id）
+	Role                 string                  `json:"role,omitempty"`      // 角色名称
+	Attachments          []ChatAttachment        `json:"attachments,omitempty"`
+	WebShellConnectionID string                  `json:"webshellConnectionId,omitempty"` // WebShell 管理 - AI 助手：当前选中的连接 ID，仅使用 webshell_* 工具
+	AIChannelID          string                  `json:"aiChannelId,omitempty"`          // 会话级 AI 通道；空则使用 ai.default_channel
+	Hitl                 *HITLRequest            `json:"hitl,omitempty"`
+	Reasoning            *ChatReasoningRequest   `json:"reasoning,omitempty"`
+	Finalization         ChatFinalizationRequest `json:"finalization,omitempty"`
 	// Orchestration 仅对 /api/multi-agent、/api/multi-agent/stream：deep | plan_execute | supervisor；空则等同 deep。机器人/批量等无请求体时由服务端默认 deep。/api/eino-agent* 不使用此字段。
 	Orchestration string `json:"orchestration,omitempty"`
+}
+
+func (h *AgentHandler) configForAIChannel(channelID string) (*config.Config, string, error) {
+	if h == nil || h.config == nil {
+		return nil, "", fmt.Errorf("server configuration is not loaded")
+	}
+	oa, resolvedID, ok := h.config.ResolveAIChannel(channelID)
+	if !ok {
+		return nil, resolvedID, fmt.Errorf("AI channel not found: %s", resolvedID)
+	}
+	cfgCopy := *h.config
+	cfgCopy.OpenAI = oa
+	return &cfgCopy, resolvedID, nil
 }
 
 func chatReasoningToClientIntent(r *ChatReasoningRequest) *reasoning.ClientIntent {
@@ -372,7 +396,7 @@ func validateChatAttachmentServerPath(abs string) (string, error) {
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("failed to get current working directory: %w", err)
+		return "", fmt.Errorf("failed to get the current working directory: %w", err)
 	}
 	root := filepath.Join(cwd, chatUploadsDirName)
 	rootAbs, err := filepath.Abs(filepath.Clean(root))
@@ -480,7 +504,7 @@ func saveAttachmentsToDateAndConversationDir(attachments []ChatAttachment, conve
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get current working directory: %w", err)
+		return nil, fmt.Errorf("failed to get the current working directory: %w", err)
 	}
 	dateDir := filepath.Join(cwd, chatUploadsDirName, time.Now().Format("2006-01-02"))
 	convDirName := strings.TrimSpace(conversationID)
@@ -511,11 +535,11 @@ func saveAttachmentsToDateAndConversationDir(attachments []ChatAttachment, conve
 			continue
 		}
 		if strings.TrimSpace(a.Content) == "" {
-			return nil, fmt.Errorf("attachment %s is missing content or serverPath", a.FileName)
+			return nil, fmt.Errorf("attachment %s has no content and no serverPath was provided", a.FileName)
 		}
 		raw, decErr := attachmentContentToBytes(a)
 		if decErr != nil {
-			return nil, fmt.Errorf("attachment %s decode failed: %w", a.FileName, decErr)
+			return nil, fmt.Errorf("failed to decode attachment %s: %w", a.FileName, decErr)
 		}
 		baseName := filepath.Base(a.FileName)
 		if baseName == "" || baseName == "." {
@@ -587,12 +611,12 @@ func appendAttachmentsToMessage(msg string, attachments []ChatAttachment, savedP
 	}
 	var b strings.Builder
 	b.WriteString(msg)
-	b.WriteString("\n\n[User-uploaded files]\n")
+	b.WriteString("\n\n[Files uploaded by the user]\n")
 	for i, a := range attachments {
 		if i < len(savedPaths) && savedPaths[i] != "" {
 			b.WriteString(fmt.Sprintf("- %s: %s\n", a.FileName, savedPaths[i]))
 		} else {
-			b.WriteString(fmt.Sprintf("- %s: (unknown path, may have failed to save)\n", a.FileName))
+			b.WriteString(fmt.Sprintf("- %s: (path unknown; the file may not have been saved)\n", a.FileName))
 		}
 	}
 	return b.String()
@@ -634,7 +658,7 @@ func (h *AgentHandler) mergeAssistantMessagePartialOnCancel(messageID, partial s
 	_, err := h.db.Exec(
 		`UPDATE messages
 		 SET content = CASE
-			WHEN content IS NULL OR TRIM(content) = '' OR TRIM(content) = 'processing...' THEN ?
+			WHEN content IS NULL OR TRIM(content) = '' OR TRIM(content) = '处理中...' THEN ?
 			WHEN INSTR(content, ?) > 0 THEN content
 			ELSE content || '\n\n' || ?
 		 END,
@@ -651,17 +675,25 @@ func (h *AgentHandler) mergeAssistantMessagePartialOnCancel(messageID, partial s
 
 // ChatResponse 聊天响应
 type ChatResponse struct {
-	Response        string    `json:"response"`
-	MCPExecutionIDs []string  `json:"mcpExecutionIds,omitempty"` // 本次对话中执行的MCP调用ID列表
-	ConversationID  string    `json:"conversationId"`            // 对话ID
-	Time            time.Time `json:"time"`
+	Response            string    `json:"response"`
+	MCPExecutionIDs     []string  `json:"mcpExecutionIds,omitempty"` // 本次对话中执行的MCP调用ID列表
+	ConversationID      string    `json:"conversationId"`            // 对话ID
+	Time                time.Time `json:"time"`
+	Finalizable         bool      `json:"finalizable"`
+	Finalized           bool      `json:"finalized"`
+	Status              string    `json:"status,omitempty"`
+	CompletionReason    string    `json:"completionReason,omitempty"`
+	EvidenceVerified    bool      `json:"evidenceVerified"`
+	EvidenceRefs        []string  `json:"evidenceRefs,omitempty"`
+	PendingExecutionIDs []string  `json:"pendingExecutionIds,omitempty"`
+	MissingChecks       []string  `json:"missingChecks,omitempty"`
 }
 
 func (h *AgentHandler) finalizeRobotAgentError(ctx context.Context, assistantMessageID, conversationID string, resultMA *multiagent.RunResult, errMA error) (string, string, error) {
 	if shouldPersistEinoAgentTraceAfterRunError(ctx) {
 		h.persistEinoAgentTraceForResume(conversationID, resultMA)
 	}
-	errMsg := "execution failed: " + errMA.Error()
+	errMsg := "Execution failed: " + errMA.Error()
 	if assistantMessageID != "" {
 		_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
 		_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errMsg, nil)
@@ -670,19 +702,20 @@ func (h *AgentHandler) finalizeRobotAgentError(ctx context.Context, assistantMes
 }
 
 func (h *AgentHandler) finalizeRobotAgentSuccess(assistantMessageID, conversationID string, resultMA *multiagent.RunResult) (string, string, error) {
-	if assistantMessageID != "" {
-		if errU := h.db.UpdateAssistantMessageFinalize(assistantMessageID, resultMA.Response, resultMA.MCPExecutionIDs, multiagent.AggregatedReasoningFromTraceJSON(resultMA.LastAgentTraceInput)); errU != nil {
-			h.logger.Warn("机器人：更新助手消息失败", zap.Error(errU))
-		}
-	} else {
-		if _, err := h.db.AddMessage(conversationID, "assistant", resultMA.Response, resultMA.MCPExecutionIDs); err != nil {
+	decision := h.finalizeAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, "robot", resultMA, resultMA.MCPExecutionIDs, multiagent.AggregatedReasoningFromTraceJSON(resultMA.LastAgentTraceInput), true)
+	responseText := decision.FinalText
+	if !decision.Finalizable {
+		responseText = finalizationBlockedMessage(decision)
+	}
+	if assistantMessageID == "" {
+		if _, err := h.db.AddMessage(conversationID, "assistant", responseText, resultMA.MCPExecutionIDs); err != nil {
 			h.logger.Warn("机器人：保存助手消息失败", zap.Error(err))
 		}
 	}
 	if resultMA.LastAgentTraceInput != "" || resultMA.LastAgentTraceOutput != "" {
 		_ = h.db.SaveAgentTrace(conversationID, resultMA.LastAgentTraceInput, resultMA.LastAgentTraceOutput)
 	}
-	return resultMA.Response, conversationID, nil
+	return responseText, conversationID, nil
 }
 
 func (h *AgentHandler) runRobotEinoSingleWithRetry(
@@ -727,7 +760,15 @@ func (h *AgentHandler) runRobotMultiAgentWithRetry(
 }
 
 // ProcessMessageForRobot 供机器人（企业微信/钉钉/飞书）调用：Eino 单/多代理执行路径（含 progressCallback、过程详情），仅不发送 SSE，最后返回完整回复
-func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, conversationID, message, role string) (response string, convID string, err error) {
+func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform string, principal authctx.Principal, conversationID, message, role, agentMode string) (response string, convID string, err error) {
+	ownerUserID := strings.TrimSpace(principal.UserID)
+	if ownerUserID == "" {
+		return "", "", fmt.Errorf("authenticated robot principal is required")
+	}
+	if !principal.HasPermission("agent:execute") || !principal.HasPermission("chat:read") || !principal.HasPermission("chat:write") {
+		return "", "", fmt.Errorf("the robot account lacks agent:execute, chat:read, or chat:write permission")
+	}
+	ctx = authctx.WithPrincipal(ctx, principal)
 	if conversationID == "" {
 		title := safeTruncateString(message, 50)
 		src := "robot"
@@ -736,14 +777,18 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, con
 		}
 		meta := audit.ConversationCreateMeta(src)
 		meta.ProjectID = effectiveProjectID(h.config, "")
+		if meta.ProjectID != "" && (!principal.HasPermission("project:read") || !h.db.UserCanAccessResource(ownerUserID, principal.ScopeFor("project:read"), "project", meta.ProjectID)) {
+			meta.ProjectID = ""
+		}
 		conv, createErr := h.db.CreateConversation(title, meta)
 		if createErr != nil {
 			return "", "", fmt.Errorf("failed to create conversation: %w", createErr)
 		}
 		conversationID = conv.ID
+		_ = h.db.SetResourceOwner("conversation", conversationID, ownerUserID)
 	} else {
-		if _, getErr := h.db.GetConversation(conversationID); getErr != nil {
-			return "", "", fmt.Errorf("conversation does not exist")
+		if _, getErr := h.db.GetConversation(conversationID); getErr != nil || !h.db.UserCanAccessResource(ownerUserID, principal.ScopeFor("chat:write"), "conversation", conversationID) {
+			return "", "", fmt.Errorf("conversation not found")
 		}
 	}
 
@@ -776,7 +821,7 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, con
 	}
 
 	// 与 Eino 流式对话一致：先创建助手消息占位，用 progressCallback 写过程详情（不发送 SSE）
-	assistantMsg, err := h.db.AddMessage(conversationID, "assistant", "processing...", nil)
+	assistantMsg, err := h.db.AddMessage(conversationID, "assistant", "处理中...", nil)
 	if err != nil {
 		h.logger.Warn("机器人：创建助手消息占位失败", zap.Error(err))
 	}
@@ -794,30 +839,29 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform, con
 	}()
 	if _, err := h.tasks.StartTask(conversationID, message, cancelWithCause); err != nil {
 		if errors.Is(err, ErrTaskAlreadyRunning) {
-			return "", conversationID, fmt.Errorf("the current conversation already has a task running; please try again later")
+			return "", conversationID, fmt.Errorf("a task is already running for this conversation; try again later")
 		}
-		return "", conversationID, fmt.Errorf("无法启动任务: %w", err)
+		return "", conversationID, fmt.Errorf("failed to start task: %w", err)
 	}
 	progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, nil)
 
-	robotMode := "eino_single"
-	if h.config != nil {
-		robotMode = config.NormalizeRobotAgentMode(h.config.MultiAgent)
+	robotMode := config.NormalizeAgentMode(agentMode)
+	if err := h.db.SetConversationAgentMode(conversationID, robotMode); err != nil {
+		h.logger.Warn("机器人：更新对话模式失败", zap.String("conversationId", conversationID), zap.String("agentMode", robotMode), zap.Error(err))
 	}
 	switch robotMode {
 	case "eino_single":
 		return h.runRobotEinoSingleWithRetry(taskCtx, conversationID, finalMessage, agentHistoryMessages, roleTools, progressCallback, assistantMessageID, &taskStatus)
 	case "deep", "plan_execute", "supervisor":
 		if h.config == nil || !h.config.MultiAgent.Enabled {
-			h.logger.Warn("机器人配置为多代理模式但未启用 multi_agent，回退 Eino 单代理",
-				zap.String("robot_mode", robotMode))
-			return h.runRobotEinoSingleWithRetry(taskCtx, conversationID, finalMessage, agentHistoryMessages, roleTools, progressCallback, assistantMessageID, &taskStatus)
+			taskStatus = "failed"
+			return "", conversationID, fmt.Errorf("robot conversation mode %s requires Eino multi-agent to be enabled", robotMode)
 		}
 		return h.runRobotMultiAgentWithRetry(taskCtx, conversationID, finalMessage, robotMode, agentHistoryMessages, roleTools, progressCallback, assistantMessageID, &taskStatus)
 	}
 
 	taskStatus = "failed"
-	return "", conversationID, fmt.Errorf("不支持的机器人代理模式: %s", robotMode)
+	return "", conversationID, fmt.Errorf("unsupported robot agent mode: %s", robotMode)
 }
 
 // StreamEvent 流式事件
@@ -842,6 +886,36 @@ func (h *AgentHandler) publishProgressToTaskEventBus(conversationID, eventType, 
 	sseLine = append(sseLine, eventJSON...)
 	sseLine = append(sseLine, '\n', '\n')
 	h.taskEventBus.Publish(conversationID, sseLine)
+}
+
+// enrichProgressEventData 为 SSE / taskEventBus 事件补齐 conversationId、messageId，便于前端懒加载过程详情。
+func enrichProgressEventData(data interface{}, conversationID, assistantMessageID string) interface{} {
+	if strings.TrimSpace(conversationID) == "" && strings.TrimSpace(assistantMessageID) == "" {
+		return data
+	}
+	var m map[string]interface{}
+	switch v := data.(type) {
+	case map[string]interface{}:
+		m = make(map[string]interface{}, len(v)+2)
+		for k, val := range v {
+			m[k] = val
+		}
+	case nil:
+		m = make(map[string]interface{}, 2)
+	default:
+		m = map[string]interface{}{"payload": data}
+	}
+	if id := strings.TrimSpace(assistantMessageID); id != "" {
+		if existing, ok := m["messageId"]; !ok || strings.TrimSpace(fmt.Sprint(existing)) == "" {
+			m["messageId"] = id
+		}
+	}
+	if id := strings.TrimSpace(conversationID); id != "" {
+		if existing, ok := m["conversationId"]; !ok || strings.TrimSpace(fmt.Sprint(existing)) == "" {
+			m["conversationId"] = id
+		}
+	}
+	return m
 }
 
 // createProgressCallback 创建进度回调函数，用于保存processDetails
@@ -988,11 +1062,21 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 			}
 		}
 
-		// 流式：写 HTTP SSE；非流式（机器人等）：镜像到 taskEventBus 供 Web 订阅
-		if sendEventFunc != nil {
-			sendEventFunc(eventType, message, data)
-		} else {
-			h.publishProgressToTaskEventBus(conversationID, eventType, message, data)
+		// 工具输出片段不在详情区实时展示；完整结果由 tool_result 落库后按需拉取。
+		if eventType == "tool_result_delta" {
+			return
+		}
+
+		deferToolProgressSend := eventType == "tool_call" || eventType == "tool_result"
+		// 流式：写 HTTP SSE；非流式（机器人等）：镜像到 taskEventBus 供 Web 订阅。
+		// 工具事件需先落库拿 processDetailId，再向前端发送摘要，避免大 payload 默认进入浏览器。
+		if !deferToolProgressSend {
+			clientData := enrichProgressEventData(data, conversationID, assistantMessageID)
+			if sendEventFunc != nil {
+				sendEventFunc(eventType, message, clientData)
+			} else {
+				h.publishProgressToTaskEventBus(conversationID, eventType, message, clientData)
+			}
 		}
 
 		// 保存tool_call事件中的参数
@@ -1140,7 +1224,7 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 							"riskType": riskType,
 							"toolName": toolName,
 						}
-						if err := h.db.AddProcessDetail(assistantMessageID, conversationID, "knowledge_retrieval", fmt.Sprintf("检索知识: %s", query), retrievalData); err != nil {
+						if err := h.db.AddProcessDetail(assistantMessageID, conversationID, "knowledge_retrieval", fmt.Sprintf("Knowledge search: %s", query), retrievalData); err != nil {
 							h.logger.Warn("保存知识检索详情失败", zap.Error(err))
 						}
 					}
@@ -1360,8 +1444,27 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 			// 在关键过程事件落库前，先把「规划中」与聚合中的 thinking / reasoning_chain 流落库
 			flushResponsePlan()
 			flushThinkingStreams()
-			if err := h.db.AddProcessDetail(assistantMessageID, conversationID, eventType, message, data); err != nil {
+			processDetailID, err := h.db.AddProcessDetailWithID(assistantMessageID, conversationID, eventType, message, data)
+			if err != nil {
 				h.logger.Warn("保存过程详情失败", zap.Error(err), zap.String("eventType", eventType))
+			}
+			if deferToolProgressSend {
+				clientData := enrichProgressEventData(summarizeProcessDetailData(eventType, data), conversationID, assistantMessageID)
+				if m, ok := clientData.(map[string]interface{}); ok {
+					m["processDetailId"] = processDetailID
+				}
+				if sendEventFunc != nil {
+					sendEventFunc(eventType, message, clientData)
+				} else {
+					h.publishProgressToTaskEventBus(conversationID, eventType, message, clientData)
+				}
+			}
+		} else if deferToolProgressSend {
+			clientData := enrichProgressEventData(summarizeProcessDetailData(eventType, data), conversationID, assistantMessageID)
+			if sendEventFunc != nil {
+				sendEventFunc(eventType, message, clientData)
+			} else {
+				h.publishProgressToTaskEventBus(conversationID, eventType, message, clientData)
 			}
 		}
 	}
@@ -1429,10 +1532,14 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if !h.agentConversationAllowed(c, req.ConversationID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access to this resource is denied"})
+		return
+	}
 
 	if req.ContinueAfter {
 		if h.tasks.GetTask(req.ConversationID) == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "未找到正在执行的任务"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "Running task not found"})
 			return
 		}
 		note := strings.TrimSpace(req.Reason)
@@ -1448,7 +1555,7 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 			return
 		}
 		if activeExec != "" {
-			c.JSON(http.StatusNotFound, gin.H{"error": "未找到进行中的工具执行或该调用已结束"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "Active tool execution not found or the call has already ended"})
 			return
 		}
 		// 无进行中的 MCP 工具（模型纯推理/流式输出阶段）：取消当前上下文并由 Eino 流式处理器合并用户补充后自动续跑。
@@ -1460,7 +1567,7 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 			return
 		}
 		if !ok {
-			c.JSON(http.StatusNotFound, gin.H{"error": "未找到正在执行的任务"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "Running task not found"})
 			return
 		}
 		h.logger.Info("对话页中断并继续（无 MCP 工具，将自动续跑）",
@@ -1480,7 +1587,7 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 
 	var cause error = ErrTaskCancelled
 	msg := "已提交取消请求，任务将在当前步骤完成后停止。"
-	h.cancelActiveMCPToolForConversation(req.ConversationID)
+	h.cancelRunningMCPToolsForConversation(req.ConversationID)
 	h.tasks.AbortActiveEinoExecute(req.ConversationID, "")
 	ok, err := h.tasks.CancelTask(req.ConversationID, cause)
 	if err != nil {
@@ -1490,15 +1597,15 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 	}
 
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "未找到正在执行的任务"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Running task not found"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":           "cancelling",
-		"conversationId": req.ConversationID,
-		"message":          msg,
-		"continueAfter":    false,
+		"status":            "cancelling",
+		"conversationId":    req.ConversationID,
+		"message":           msg,
+		"continueAfter":     false,
 		"interruptWithNote": false,
 	})
 }
@@ -1508,6 +1615,10 @@ func (h *AgentHandler) SubscribeAgentTaskEvents(c *gin.Context) {
 	conversationID := strings.TrimSpace(c.Query("conversationId"))
 	if conversationID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "conversationId is required"})
+		return
+	}
+	if !h.agentConversationAllowed(c, conversationID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access to this resource is denied"})
 		return
 	}
 	if h.tasks.GetTask(conversationID) == nil {
@@ -1530,9 +1641,8 @@ func (h *AgentHandler) SubscribeAgentTaskEvents(c *gin.Context) {
 	flusher, _ := c.Writer.(http.Flusher)
 	ctx := c.Request.Context()
 	var writeMu sync.Mutex
-	stopKeepalive := make(chan struct{})
-	go sseKeepalive(c, stopKeepalive, &writeMu)
-	defer close(stopKeepalive)
+	stopKeepalive := runSSEKeepalive(c, &writeMu)
+	defer stopKeepalive()
 
 	for {
 		select {
@@ -1588,6 +1698,9 @@ func (h *AgentHandler) enrichCompletedTasksWithConversationTitles(tasks []*Compl
 // ListAgentTasks 列出所有运行中的任务
 func (h *AgentHandler) ListAgentTasks(c *gin.Context) {
 	tasks := h.tasks.GetActiveTasks()
+	tasks = filterSlice(tasks, func(task *AgentTask) bool {
+		return task != nil && h.agentConversationAllowed(c, task.ConversationID)
+	})
 	h.enrichAgentTasksWithConversationTitles(tasks)
 	c.JSON(http.StatusOK, gin.H{
 		"tasks": tasks,
@@ -1597,10 +1710,28 @@ func (h *AgentHandler) ListAgentTasks(c *gin.Context) {
 // ListCompletedTasks 列出最近完成的任务历史
 func (h *AgentHandler) ListCompletedTasks(c *gin.Context) {
 	tasks := h.tasks.GetCompletedTasks()
+	tasks = filterSlice(tasks, func(task *CompletedTask) bool {
+		return task != nil && h.agentConversationAllowed(c, task.ConversationID)
+	})
 	h.enrichCompletedTasksWithConversationTitles(tasks)
 	c.JSON(http.StatusOK, gin.H{
 		"tasks": tasks,
 	})
+}
+
+func (h *AgentHandler) agentConversationAllowed(c *gin.Context, conversationID string) bool {
+	session, ok := security.CurrentSession(c)
+	return ok && h.db != nil && h.db.UserCanAccessResource(session.UserID, session.Scope, "conversation", strings.TrimSpace(conversationID))
+}
+
+func filterSlice[T any](items []T, keep func(T) bool) []T {
+	out := make([]T, 0, len(items))
+	for _, item := range items {
+		if keep(item) {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // BatchTaskRequest 批量任务请求
@@ -1638,7 +1769,7 @@ func (h *AgentHandler) CreateBatchQueue(c *gin.Context) {
 	}
 
 	if len(req.Tasks) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "任务列表不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "The task list cannot be empty"})
 		return
 	}
 
@@ -1651,8 +1782,14 @@ func (h *AgentHandler) CreateBatchQueue(c *gin.Context) {
 	}
 
 	if len(validTasks) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "没有有效的任务"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No valid tasks were provided"})
 		return
+	}
+	if session, ok := security.CurrentSession(c); ok && h.db != nil && session.Scope != database.RBACScopeAll && strings.TrimSpace(req.ProjectID) != "" {
+		if !h.db.UserCanAccessResource(session.UserID, session.Scope, "project", strings.TrimSpace(req.ProjectID)) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Not authorized to create batch tasks in this project"})
+			return
+		}
 	}
 
 	agentMode := config.NormalizeAgentMode(req.AgentMode)
@@ -1661,12 +1798,12 @@ func (h *AgentHandler) CreateBatchQueue(c *gin.Context) {
 	var nextRunAt *time.Time
 	if scheduleMode == "cron" {
 		if cronExpr == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "启用 Cron 调度时，调度表达式不能为空"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "The schedule expression is required when Cron scheduling is enabled"})
 			return
 		}
 		schedule, err := h.batchCronParser.Parse(cronExpr)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的 Cron 表达式: " + err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Cron expression: " + err.Error()})
 			return
 		}
 		next := schedule.Next(time.Now())
@@ -1678,11 +1815,15 @@ func (h *AgentHandler) CreateBatchQueue(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": createErr.Error()})
 		return
 	}
+	if session, ok := security.CurrentSession(c); ok && h.db != nil {
+		_ = h.db.SetResourceOwner("batch_task", queue.ID, session.UserID)
+		_ = h.db.AssignResourceToUser(session.UserID, "batch_task", queue.ID)
+	}
 	started := false
 	if req.ExecuteNow {
 		ok, err := h.startBatchQueueExecution(queue.ID, false)
 		if !ok {
-			c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 			return
 		}
 		if err != nil {
@@ -1711,7 +1852,7 @@ func (h *AgentHandler) GetBatchQueue(c *gin.Context) {
 	queueID := c.Param("queueId")
 	queue, exists := h.batchTaskManager.GetBatchQueue(queueID)
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"queue": queue})
@@ -1765,7 +1906,8 @@ func (h *AgentHandler) ListBatchQueues(c *gin.Context) {
 	}
 
 	// 获取队列列表和总数
-	queues, total, err := h.batchTaskManager.ListQueues(limit, offset, status, keyword)
+	session, _ := security.CurrentSession(c)
+	queues, total, err := h.batchTaskManager.ListQueuesForAccess(limit, offset, status, keyword, session.UserID, session.Scope)
 	if err != nil {
 		h.logger.Error("获取批量任务队列列表失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -1804,13 +1946,13 @@ func (h *AgentHandler) StartBatchQueue(c *gin.Context) {
 		return
 	}
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
 	if h.audit != nil {
 		h.audit.RecordOK(c, "task", "start_queue", "启动批量任务队列", "batch_queue", queueID, nil)
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "批量任务已开始执行", "queueId": queueID})
+	c.JSON(http.StatusOK, gin.H{"message": "Batch tasks have started", "queueId": queueID})
 }
 
 // RerunBatchQueue 重跑批量任务队列（重置所有子任务后重新执行）
@@ -1818,15 +1960,15 @@ func (h *AgentHandler) RerunBatchQueue(c *gin.Context) {
 	queueID := c.Param("queueId")
 	queue, exists := h.batchTaskManager.GetBatchQueue(queueID)
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
 	if queue.Status != "completed" && queue.Status != "cancelled" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "仅已完成或已取消的队列可以重跑"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Only completed or cancelled queues can be rerun"})
 		return
 	}
 	if !h.batchTaskManager.ResetQueueForRerun(queueID) {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "重置队列失败"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset queue"})
 		return
 	}
 	h.batchTaskManager.ClearSingleRunTask(queueID)
@@ -1836,13 +1978,13 @@ func (h *AgentHandler) RerunBatchQueue(c *gin.Context) {
 		return
 	}
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "启动失败"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start"})
 		return
 	}
 	if h.audit != nil {
 		h.audit.RecordOK(c, "task", "rerun_queue", "重跑批量任务队列", "batch_queue", queueID, nil)
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "批量任务已重新开始执行", "queueId": queueID})
+	c.JSON(http.StatusOK, gin.H{"message": "Batch tasks have restarted", "queueId": queueID})
 }
 
 // PauseBatchQueue 暂停批量任务队列
@@ -1850,13 +1992,13 @@ func (h *AgentHandler) PauseBatchQueue(c *gin.Context) {
 	queueID := c.Param("queueId")
 	success := h.batchTaskManager.PauseQueue(queueID)
 	if !success {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在或无法暂停"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found or cannot be paused"})
 		return
 	}
 	if h.audit != nil {
 		h.audit.RecordOK(c, "task", "pause_queue", "暂停批量任务队列", "batch_queue", queueID, nil)
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "批量任务已暂停"})
+	c.JSON(http.StatusOK, gin.H{"message": "Batch tasks paused"})
 }
 
 // UpdateBatchQueueMetadata 修改批量任务队列的标题、角色和代理模式
@@ -1885,12 +2027,12 @@ func (h *AgentHandler) UpdateBatchQueueSchedule(c *gin.Context) {
 	queueID := c.Param("queueId")
 	queue, exists := h.batchTaskManager.GetBatchQueue(queueID)
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
 	// 仅在非 running 状态下允许修改调度
 	if queue.Status == "running" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "队列正在运行中，无法修改调度配置"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "The queue is running; its schedule configuration cannot be changed"})
 		return
 	}
 	var req struct {
@@ -1906,12 +2048,12 @@ func (h *AgentHandler) UpdateBatchQueueSchedule(c *gin.Context) {
 	var nextRunAt *time.Time
 	if scheduleMode == "cron" {
 		if cronExpr == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "启用 Cron 调度时，调度表达式不能为空"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "The schedule expression is required when Cron scheduling is enabled"})
 			return
 		}
 		schedule, err := h.batchCronParser.Parse(cronExpr)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "无效的 Cron 表达式: " + err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Cron expression: " + err.Error()})
 			return
 		}
 		next := schedule.Next(time.Now())
@@ -1926,7 +2068,7 @@ func (h *AgentHandler) UpdateBatchQueueSchedule(c *gin.Context) {
 func (h *AgentHandler) SetBatchQueueScheduleEnabled(c *gin.Context) {
 	queueID := c.Param("queueId")
 	if _, exists := h.batchTaskManager.GetBatchQueue(queueID); !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
 	var req struct {
@@ -1937,7 +2079,7 @@ func (h *AgentHandler) SetBatchQueueScheduleEnabled(c *gin.Context) {
 		return
 	}
 	if !h.batchTaskManager.SetScheduleEnabled(queueID, req.ScheduleEnabled) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
 	queue, _ := h.batchTaskManager.GetBatchQueue(queueID)
@@ -1950,11 +2092,11 @@ func (h *AgentHandler) DeleteBatchQueue(c *gin.Context) {
 	if err := h.batchTaskManager.DeleteQueue(queueID); err != nil {
 		switch {
 		case errors.Is(err, ErrBatchQueueNotFound):
-			c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		case errors.Is(err, ErrBatchQueueExecutorActive):
-			c.JSON(http.StatusConflict, gin.H{"error": "队列执行器仍在运行，请稍后再删除"})
+			c.JSON(http.StatusConflict, gin.H{"error": "The queue executor is still running; try deleting it later"})
 		case errors.Is(err, ErrBatchQueueStillRunning):
-			c.JSON(http.StatusConflict, gin.H{"error": "队列正在运行中，无法删除"})
+			c.JSON(http.StatusConflict, gin.H{"error": "The queue is running and cannot be deleted"})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		}
@@ -1970,7 +2112,7 @@ func (h *AgentHandler) DeleteBatchQueue(c *gin.Context) {
 			Message:      "删除批量任务队列",
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "批量任务队列已删除"})
+	c.JSON(http.StatusOK, gin.H{"message": "Batch task queue deleted"})
 }
 
 // UpdateBatchTask 更新批量任务消息
@@ -1982,12 +2124,12 @@ func (h *AgentHandler) UpdateBatchTask(c *gin.Context) {
 		Message string `json:"message" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
 		return
 	}
 
 	if req.Message == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "任务消息不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "The task message cannot be empty"})
 		return
 	}
 
@@ -2000,10 +2142,10 @@ func (h *AgentHandler) UpdateBatchTask(c *gin.Context) {
 	// 返回更新后的队列信息
 	queue, exists := h.batchTaskManager.GetBatchQueue(queueID)
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "任务已更新", "queue": queue})
+	c.JSON(http.StatusOK, gin.H{"message": "Task updated", "queue": queue})
 }
 
 // AddBatchTask 添加任务到批量任务队列
@@ -2014,12 +2156,12 @@ func (h *AgentHandler) AddBatchTask(c *gin.Context) {
 		Message string `json:"message" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
 		return
 	}
 
 	if req.Message == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "任务消息不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "The task message cannot be empty"})
 		return
 	}
 
@@ -2032,10 +2174,10 @@ func (h *AgentHandler) AddBatchTask(c *gin.Context) {
 	// 返回更新后的队列信息
 	queue, exists := h.batchTaskManager.GetBatchQueue(queueID)
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "任务已添加", "task": task, "queue": queue})
+	c.JSON(http.StatusOK, gin.H{"message": "Task added", "task": task, "queue": queue})
 }
 
 // RunSingleBatchTask 单条执行指定子任务（可覆盖已成功项），完成后暂停队列
@@ -2069,7 +2211,7 @@ func (h *AgentHandler) RunSingleBatchTask(c *gin.Context) {
 
 	queue, exists := h.batchTaskManager.GetBatchQueue(queueID)
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
 	if h.audit != nil {
@@ -2099,7 +2241,7 @@ func (h *AgentHandler) DeleteBatchTask(c *gin.Context) {
 	// 返回更新后的队列信息
 	queue, exists := h.batchTaskManager.GetBatchQueue(queueID)
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "队列不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Queue not found"})
 		return
 	}
 	if h.audit != nil {
@@ -2107,7 +2249,7 @@ func (h *AgentHandler) DeleteBatchTask(c *gin.Context) {
 			"batch_queue_id": queueID,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "任务已删除", "queue": queue})
+	c.JSON(http.StatusOK, gin.H{"message": "Task deleted", "queue": queue})
 }
 
 func (h *AgentHandler) nextBatchQueueRunAt(cronExpr string, from time.Time) (*time.Time, error) {
@@ -2138,31 +2280,31 @@ func (h *AgentHandler) startBatchQueueExecution(queueID string, scheduled bool) 
 	if scheduled {
 		if queue.ScheduleMode != "cron" {
 			h.batchTaskManager.UnmarkQueueExecutor(queueID)
-			err := fmt.Errorf("队列未启用 cron 调度")
+			err := fmt.Errorf("the queue does not have Cron scheduling enabled")
 			h.batchTaskManager.SetLastScheduleError(queueID, err.Error())
 			return true, err
 		}
 		if queue.Status == "running" || queue.Status == "paused" || queue.Status == "cancelled" {
 			h.batchTaskManager.UnmarkQueueExecutor(queueID)
-			err := fmt.Errorf("当前队列状态不允许被调度执行")
+			err := fmt.Errorf("the queue state does not allow scheduled execution")
 			h.batchTaskManager.SetLastScheduleError(queueID, err.Error())
 			return true, err
 		}
 		if !h.batchTaskManager.ResetQueueForRerun(queueID) {
 			h.batchTaskManager.UnmarkQueueExecutor(queueID)
-			err := fmt.Errorf("重置队列失败")
+			err := fmt.Errorf("failed to reset queue")
 			h.batchTaskManager.SetLastScheduleError(queueID, err.Error())
 			return true, err
 		}
 		queue, _ = h.batchTaskManager.GetBatchQueue(queueID)
 	} else if queue.Status != "pending" && queue.Status != "paused" {
 		h.batchTaskManager.UnmarkQueueExecutor(queueID)
-		return true, fmt.Errorf("队列状态不允许启动")
+		return true, fmt.Errorf("the queue state does not allow startup")
 	}
 
 	if queue != nil && batchQueueWantsEino(queue.AgentMode) && (h.config == nil || !h.config.MultiAgent.Enabled) {
 		h.batchTaskManager.UnmarkQueueExecutor(queueID)
-		err := fmt.Errorf("当前队列配置为 Eino 多代理，但系统未启用多代理")
+		err := fmt.Errorf("the queue is configured for Eino multi-agent, but multi-agent is not enabled")
 		if scheduled {
 			h.batchTaskManager.SetLastScheduleError(queueID, err.Error())
 		}
@@ -2218,21 +2360,22 @@ func (h *AgentHandler) batchQueueSchedulerLoop() {
 func (h *AgentHandler) loadHistoryFromAgentTrace(conversationID string) ([]agent.ChatMessage, error) {
 	traceInputJSON, assistantOut, err := h.db.GetAgentTrace(conversationID)
 	if err != nil {
-		return nil, fmt.Errorf("获取代理轨迹失败: %w", err)
+		return nil, fmt.Errorf("failed to get agent trace: %w", err)
 	}
 
 	if traceInputJSON == "" {
-		return nil, fmt.Errorf("代理轨迹为空，将使用消息表")
+		return nil, fmt.Errorf("agent trace is empty; the message table will be used")
 	}
 
 	dataSource := "database_last_agent_trace"
 
 	var messagesArray []map[string]interface{}
 	if err := json.Unmarshal([]byte(traceInputJSON), &messagesArray); err != nil {
-		return nil, fmt.Errorf("解析代理轨迹 JSON 失败: %w", err)
+		return nil, fmt.Errorf("failed to parse agent trace JSON: %w", err)
 	}
 
 	messageCount := len(messagesArray)
+	modelFacingTrace := agent.IsModelFacingTraceJSON(traceInputJSON)
 
 	h.logger.Info("使用保存的代理轨迹恢复历史上下文",
 		zap.String("conversationId", conversationID),
@@ -2247,6 +2390,7 @@ func (h *AgentHandler) loadHistoryFromAgentTrace(conversationID string) ([]agent
 	agentMessages := make([]agent.ChatMessage, 0, len(messagesArray))
 	for _, msgMap := range messagesArray {
 		msg := agent.ChatMessage{}
+		msg.ModelFacingTrace = modelFacingTrace
 
 		// 解析role
 		if role, ok := msgMap["role"].(string); ok {
@@ -2353,7 +2497,7 @@ func (h *AgentHandler) loadHistoryFromAgentTrace(conversationID string) ([]agent
 	}
 
 	if len(agentMessages) == 0 {
-		return nil, fmt.Errorf("从代理轨迹解析的消息为空")
+		return nil, fmt.Errorf("the agent trace contains no messages")
 	}
 
 	if h.agent != nil {

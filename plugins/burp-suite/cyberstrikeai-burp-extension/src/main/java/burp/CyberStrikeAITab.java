@@ -13,19 +13,9 @@ final class CyberStrikeAITab implements ITab {
     private final JPanel root = new JPanel(new BorderLayout());
 
     private final JTextField hostField = new JTextField("127.0.0.1");
-    private final JTextField portField = new JTextField("8080");
+    private final JTextField portField = new JTextField("7022");
     private final JCheckBox useHttpsBox = new JCheckBox("HTTPS", true);
     private final JPasswordField passwordField = new JPasswordField();
-    private final JComboBox<String> agentModeBox = new JComboBox<>(agentModeLabels());
-    private static String[] agentModeLabels() {
-        CyberStrikeAIClient.AgentMode[] modes = CyberStrikeAIClient.AgentMode.values();
-        String[] labels = new String[modes.length];
-        for (int i = 0; i < modes.length; i++) {
-            labels[i] = modes[i].displayName;
-        }
-        return labels;
-    }
-
     private final JButton validateButton = new JButton("Validate");
     private final JButton clearButton = new JButton("Clear Output");
     private final JButton stopButton = new JButton("Stop");
@@ -39,7 +29,7 @@ final class CyberStrikeAITab implements ITab {
     private final JTextArea finalRawArea = new JTextArea(); // raw final stream / final response
     private JScrollPane progressScrollPane;
     private JScrollPane finalRawScrollPane;
-    /** 距底部在此像素内视为「跟随滚动」，否则用户上拉阅读时不抢滚动条 */
+    /** Treat the view as following the stream near the bottom; do not steal a user's scroll position. */
     private static final int SCROLL_FOLLOW_THRESHOLD_PX = 48;
     private final JEditorPane markdownPane = new JEditorPane("text/html", "");
     private final CardLayout outputCardsLayout = new CardLayout();
@@ -113,7 +103,6 @@ final class CyberStrikeAITab implements ITab {
         hostField.setColumns(14);
         portField.setColumns(6);
         passwordField.setColumns(12);
-        agentModeBox.setPreferredSize(new Dimension(200, agentModeBox.getPreferredSize().height));
 
         JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
         row1.add(new JLabel("Host"));
@@ -128,8 +117,6 @@ final class CyberStrikeAITab implements ITab {
         row1.add(statusLabel);
 
         JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
-        row2.add(new JLabel("Agent"));
-        row2.add(agentModeBox);
         row2.add(stopButton);
         row2.add(copyButton);
         row2.add(clearButton);
@@ -550,19 +537,13 @@ final class CyberStrikeAITab implements ITab {
         renderMarkdownBox.addActionListener(e -> refreshOutputView());
     }
 
-    private static final CyberStrikeAIClient.AgentMode[] AGENT_MODES = CyberStrikeAIClient.AgentMode.values();
-
     CyberStrikeAIClient.Config currentConfig() {
         String host = hostField.getText().trim();
         String port = portField.getText().trim();
         String password = new String(passwordField.getPassword());
         String scheme = useHttpsBox.isSelected() ? "https" : "http";
         String baseUrl = scheme + "://" + host + ":" + port;
-        int idx = agentModeBox.getSelectedIndex();
-        CyberStrikeAIClient.AgentMode mode = (idx >= 0 && idx < AGENT_MODES.length)
-                ? AGENT_MODES[idx]
-                : CyberStrikeAIClient.AgentMode.EINO_SINGLE;
-        return new CyberStrikeAIClient.Config(baseUrl, password, mode);
+        return new CyberStrikeAIClient.Config(baseUrl, password);
     }
 
     String getToken() {
@@ -867,4 +848,3 @@ final class CyberStrikeAITab implements ITab {
         return root;
     }
 }
-

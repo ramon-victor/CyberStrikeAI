@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"cyberstrike-ai/internal/agent"
+	"cyberstrike-ai/internal/authctx"
 	"cyberstrike-ai/internal/c2"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/mcp"
@@ -29,7 +31,7 @@ func registerC2Tools(mcpServer *mcp.Server, c2Manager *c2.Manager, logger *zap.L
 	registerC2EventTool(mcpServer, c2Manager, logger)
 	registerC2ProfileTool(mcpServer, c2Manager, logger)
 	registerC2FileTool(mcpServer, c2Manager, logger)
-	logger.Info("C2 MCP tools registered (8 unified tools)")
+	logger.Debug("C2 MCP tools registered (8 unified tools)")
 }
 
 func makeC2Result(data interface{}, err error) (*mcp.ToolResult, error) {
@@ -52,20 +54,31 @@ func makeC2Result(data interface{}, err error) (*mcp.ToolResult, error) {
 func registerC2ListenerTool(s *mcp.Server, m *c2.Manager, l *zap.Logger, webListenPort int) {
 	s.RegisterTool(mcp.Tool{
 		Name: builtin.ToolC2Listener,
-		Description: fmt.Sprintf("C2 listener management. Select the operation via the action parameter:\n- list: list all listeners\n- get: get listener details (requires listener_id)\n- create: create a listener (requires name, type, bind_port). On success, returns the listener and an implant_token (this token is returned only once, for X-Implant-Token / oneliner; list/get/start will not return it).\n- update: update listener config (requires listener_id; can change name/bind_host/bind_port/remark/config/callback_host)\n- start: start the listener (requires listener_id)\n- stop: stop the listener (requires listener_id)\n- delete: delete the listener (requires listener_id)\nListener types: tcp_reverse, http_beacon, https_beacon, websocket\ntcp_reverse only accepts CSB1-encrypted Beacons (AES-GCM + ImplantToken) to register a session; classic bash/nc reverse shells require config.allow_legacy_shell=true (not recommended on public networks).\nPort constraint: bind_port for create/update must not be the same as the port used by the platform Web/API. The current service uses port %d (config item server.port, loaded from the config file at process startup). If bind_port matches, the service or listener will fail to bind, and the Beacon/oneliner will connect to the Web service instead of C2. Please choose a free port for the listener.", webListenPort),
+		Description: fmt.Sprintf(`C2 listener management. Select an operation with action:
+- list: list all listeners
+- get: get listener details (listener_id required)
+- create: create a listener (name, type, bind_port required). On success, implant_token is returned with the listener only once for X-Implant-Token / oneliner; list/get/start do not return it.
+- update: update listener configuration (listener_id required; name/bind_host/bind_port/remark/config/callback_host may be changed)
+- start: start a listener (listener_id required)
+- stop: stop a listener (listener_id required)
+- delete: delete a listener (listener_id required)
+Listener types: tcp_reverse, http_beacon, https_beacon, websocket.
+tcp_reverse accepts only CSB1 encrypted Beacons by default. Classic bash/nc reverse shells require config.allow_legacy_shell=true and are not recommended on the public Internet.
+Port constraint: create/update bind_port must differ from this platform's Web/API port. This service uses port %d (server.port). Using the same port can make the service or listener bind fail, or send the Beacon/oneliner to Web instead of C2. Choose another available listener port.`, webListenPort),
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"action":      map[string]interface{}{"type": "string", "description": "Operation: list/get/create/update/start/stop/delete", "enum": []string{"list", "get", "create", "update", "start", "stop", "delete"}},
-				"listener_id": map[string]interface{}{"type": "string", "description": "Listener ID (required for get/update/start/stop/delete)"},
-				"name":        map[string]interface{}{"type": "string", "description": "Listener name (create/update)"},
-				"type":        map[string]interface{}{"type": "string", "description": "Listener type (create)", "enum": []string{"tcp_reverse", "http_beacon", "https_beacon", "websocket"}},
-				"bind_host":     map[string]interface{}{"type": "string", "description": "Bind address, default 127.0.0.1; for public-network listening, 0.0.0.0 is common"},
-				"callback_host": map[string]interface{}{"type": "string", "description": "Optional: implant/payload callback hostname (public IP or domain). Written to config_json; takes precedence over bind_host when generating oneliner/beacon. Pass an empty string in update to clear it"},
-				"bind_port":   map[string]interface{}{"type": "integer", "description": fmt.Sprintf("Bind port (required for create). Must differ from %d (the current service Web/API port, config server.port)", webListenPort), "minimum": 1, "maximum": 65535},
-				"profile_id":  map[string]interface{}{"type": "string", "description": "Malleable Profile ID"},
-				"remark":      map[string]interface{}{"type": "string", "description": "Notes"},
-				"config":      map[string]interface{}{"type": "object", "description": "Advanced config (beacon path / TLS / OPSEC, etc.), available for create/update. For tcp_reverse, optional allow_legacy_shell:true allows unencrypted classic shell (default false)"},
+				"action":        map[string]interface{}{"type": "string", "description": "Operation: list/get/create/update/start/stop/delete", "enum": []string{"list", "get", "create", "update", "start", "stop", "delete"}},
+				"listener_id":   map[string]interface{}{"type": "string", "description": "Listener ID (required for get/update/start/stop/delete)"},
+				"name":          map[string]interface{}{"type": "string", "description": "Listener name (create/update)"},
+				"type":          map[string]interface{}{"type": "string", "description": "Listener type (create)", "enum": []string{"tcp_reverse", "http_beacon", "https_beacon", "websocket"}},
+				"bind_host":     map[string]interface{}{"type": "string", "description": "Bind address; default 127.0.0.1, commonly 0.0.0.0 for an external listener"},
+				"callback_host": map[string]interface{}{"type": "string", "description": "Optional implant/Payload callback hostname (public IP or domain). Stored in config_json and preferred over bind_host when generating an oneliner/Beacon. Pass an empty string to clear it on update"},
+				"bind_port":     map[string]interface{}{"type": "integer", "description": fmt.Sprintf("Bind port (required for create); must differ from the current Web/API port %d (server.port)", webListenPort), "minimum": 1, "maximum": 65535},
+				"project_id":    map[string]interface{}{"type": "string", "description": "Owning project ID. If omitted on create, use the project bound to the current conversation; unbound conversations create an unbound listener"},
+				"profile_id":    map[string]interface{}{"type": "string", "description": "Malleable Profile ID"},
+				"remark":        map[string]interface{}{"type": "string", "description": "Remark"},
+				"config":        map[string]interface{}{"type": "object", "description": "Advanced configuration such as Beacon paths, TLS, and OPSEC. Available for create/update. tcp_reverse may set allow_legacy_shell:true for an unencrypted classic shell (default false)"},
 			},
 			"required": []string{"action"},
 		},
@@ -75,7 +88,7 @@ func registerC2ListenerTool(s *mcp.Server, m *c2.Manager, l *zap.Logger, webList
 
 		switch action {
 		case "list":
-			listeners, err := m.DB().ListC2Listeners()
+			listeners, err := m.DB().ListC2ListenersForAccess(c2ToolAccess(ctx), mcpEffectiveProjectFilter(ctx, m.DB()))
 			if err != nil {
 				return makeC2Result(nil, err)
 			}
@@ -104,6 +117,13 @@ func registerC2ListenerTool(s *mcp.Server, m *c2.Manager, l *zap.Logger, webList
 				cfg = &c2.ListenerConfig{}
 				_ = json.Unmarshal(cfgBytes, cfg)
 			}
+			projectID := strings.TrimSpace(getString(params, "project_id"))
+			if projectID == "" {
+				projectID = mcpEffectiveProjectFilter(ctx, m.DB())
+				if projectID == database.ProjectFilterUnbound {
+					projectID = ""
+				}
+			}
 			input := c2.CreateListenerInput{
 				Name:         getString(params, "name"),
 				Type:         getString(params, "type"),
@@ -111,12 +131,17 @@ func registerC2ListenerTool(s *mcp.Server, m *c2.Manager, l *zap.Logger, webList
 				BindPort:     int(getFloat64(params, "bind_port")),
 				ProfileID:    getString(params, "profile_id"),
 				Remark:       getString(params, "remark"),
+				ProjectID:    projectID,
 				Config:       cfg,
 				CallbackHost: getString(params, "callback_host"),
 			}
 			listener, err := m.CreateListener(input)
 			if err != nil {
 				return makeC2Result(nil, err)
+			}
+			if principal, ok := authctx.PrincipalFromContext(ctx); ok {
+				_ = m.DB().SetResourceOwner("c2_listener", listener.ID, principal.UserID)
+				_ = m.DB().AssignResourceToUser(principal.UserID, "c2_listener", listener.ID)
 			}
 			implantToken := listener.ImplantToken
 			listener.EncryptionKey = ""
@@ -212,21 +237,27 @@ func registerC2ListenerTool(s *mcp.Server, m *c2.Manager, l *zap.Logger, webList
 func registerC2SessionTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 	s.RegisterTool(mcp.Tool{
 		Name: builtin.ToolC2Session,
-		Description: "C2 session management. Select the operation via the action parameter:\n- list: list sessions (can filter by listener_id/status/os/search/suspicious)\n- get: get session details and recent task history (requires session_id)\n- set_sleep: set heartbeat interval (requires session_id)\n- kill: dispatch an exit task to make the implant exit (requires session_id)\n- delete: delete a single session record (requires session_id)\n- delete_batch: delete sessions in batch (requires session_ids array)",
+		Description: `C2 session management. Select an operation with action:
+- list: list sessions, optionally filtered by listener_id/status/os/search/suspicious
+- get: get session details and recent task history (session_id required)
+- set_sleep: set the heartbeat interval (session_id required)
+- kill: send an exit task to the implant (session_id required)
+- delete: delete one session record (session_id required)
+- delete_batch: delete multiple sessions (session_ids array required)`,
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"action":         map[string]interface{}{"type": "string", "description": "Operation: list/get/set_sleep/kill/delete/delete_batch", "enum": []string{"list", "get", "set_sleep", "kill", "delete", "delete_batch"}},
 				"session_id":     map[string]interface{}{"type": "string", "description": "Session ID (required for get/set_sleep/kill/delete)"},
-				"session_ids":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "List of session IDs (delete_batch)"},
+				"session_ids":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Session ID list (delete_batch)"},
 				"listener_id":    map[string]interface{}{"type": "string", "description": "Filter by listener (list)"},
 				"status":         map[string]interface{}{"type": "string", "description": "Filter by status: active/sleeping/dead/killed (list)"},
 				"os":             map[string]interface{}{"type": "string", "description": "Filter by OS: linux/windows/darwin (list)"},
-				"search":         map[string]interface{}{"type": "string", "description": "Fuzzy search hostname/username/IP (list)"},
-				"suspicious":     map[string]interface{}{"type": "boolean", "description": "Only suspected false positives: offline and tcp_* / unknown / PID 0 (list)"},
-				"limit":          map[string]interface{}{"type": "integer", "description": "Result count cap (list)"},
+				"search":         map[string]interface{}{"type": "string", "description": "Fuzzy-search hostname/username/IP (list)"},
+				"suspicious":     map[string]interface{}{"type": "boolean", "description": "Only suspected false positives: offline with tcp_*, unknown, or PID 0 (list)"},
+				"limit":          map[string]interface{}{"type": "integer", "description": "Maximum number of results (list)"},
 				"sleep_seconds":  map[string]interface{}{"type": "integer", "description": "Heartbeat interval in seconds (set_sleep)"},
-				"jitter_percent": map[string]interface{}{"type": "integer", "description": "Jitter percent 0-100 (set_sleep)"},
+				"jitter_percent": map[string]interface{}{"type": "integer", "description": "Jitter percentage, 0-100 (set_sleep)"},
 			},
 			"required": []string{"action"},
 		},
@@ -238,6 +269,7 @@ func registerC2SessionTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 		case "list":
 			filter := database.ListC2SessionsFilter{
 				ListenerID: getString(params, "listener_id"),
+				ProjectID:  mcpEffectiveProjectFilter(ctx, m.DB()),
 				Status:     getString(params, "status"),
 				OS:         getString(params, "os"),
 				Search:     getString(params, "search"),
@@ -248,7 +280,7 @@ func registerC2SessionTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 			if v, ok := params["suspicious"].(bool); ok && v {
 				filter.Suspicious = true
 			}
-			sessions, err := m.DB().ListC2Sessions(filter)
+			sessions, err := m.DB().ListC2SessionsForAccess(filter, c2ToolAccess(ctx))
 			return makeC2Result(map[string]interface{}{"sessions": sessions, "count": len(sessions)}, err)
 
 		case "get":
@@ -315,7 +347,19 @@ func registerC2SessionTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 func registerC2TaskTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 	s.RegisterTool(mcp.Tool{
 		Name: builtin.ToolC2Task,
-		Description: "Dispatch a task in a C2 session. All task types are specified via the task_type parameter:\n- exec: execute command (requires command)\n- shell: interactive command, keeps cwd (requires command)\n- pwd/ps/screenshot/socks_stop: no extra parameters\n- cd/ls: requires path\n- kill_proc: requires pid\n- upload: requires remote_path + file_id\n- download: requires remote_path\n- port_fwd: requires action(start/stop) + local_port + remote_host + remote_port\n- socks_start: requires port (default 1080)\n- load_assembly: requires data (base64) or file_id, optional args\n- persist: optional method (auto/cron/bashrc/launchagent/registry/schtasks)\nReturns task_id; use c2_task_manage's wait/get_result to fetch the result.",
+		Description: `Dispatch a task to a C2 session. Select the task type with task_type:
+- exec: execute a command (command required)
+- shell: interactive command preserving cwd (command required)
+- pwd/ps/screenshot/socks_stop: no additional parameters
+- cd/ls: path required
+- kill_proc: pid required
+- upload: remote_path and file_id required
+- download: remote_path required
+- port_fwd: action(start/stop), local_port, remote_host, and remote_port required
+- socks_start: port required (default 1080)
+- load_assembly: data(base64) or file_id required; args optional
+- persist: optional method(auto/cron/bashrc/launchagent/registry/schtasks)
+Returns task_id; use c2_task_manage wait/get_result for the result.`,
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -325,8 +369,8 @@ func registerC2TaskTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 				"path":            map[string]interface{}{"type": "string", "description": "Path (cd/ls)"},
 				"pid":             map[string]interface{}{"type": "integer", "description": "Process ID (kill_proc)"},
 				"remote_path":     map[string]interface{}{"type": "string", "description": "Remote path (upload/download)"},
-				"file_id":         map[string]interface{}{"type": "string", "description": "Server-side file ID (upload/load_assembly)"},
-				"data":            map[string]interface{}{"type": "string", "description": "base64 data (load_assembly)"},
+				"file_id":         map[string]interface{}{"type": "string", "description": "Server file ID (upload/load_assembly)"},
+				"data":            map[string]interface{}{"type": "string", "description": "Base64 data (load_assembly)"},
 				"args":            map[string]interface{}{"type": "string", "description": "Command-line arguments (load_assembly)"},
 				"action":          map[string]interface{}{"type": "string", "description": "start/stop（port_fwd）"},
 				"local_port":      map[string]interface{}{"type": "integer", "description": "Local port (port_fwd)"},
@@ -400,15 +444,19 @@ func registerC2TaskTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 func registerC2TaskManageTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 	s.RegisterTool(mcp.Tool{
 		Name: builtin.ToolC2TaskManage,
-		Description: "C2 task management. Select the operation via the action parameter:\n- get_result: get task details and result (requires task_id)\n- wait: block until task completes and return result (requires task_id)\n- list: list tasks (can filter by session_id/status)\n- cancel: cancel a queued task (requires task_id)",
+		Description: `C2 task management. Select an operation with action:
+- get_result: get task details and result (requires task_id)
+- wait: wait for completion and return the result (requires task_id)
+- list: list tasks (filter by session_id/status)
+- cancel: cancel a queued task (requires task_id)`,
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"action":          map[string]interface{}{"type": "string", "description": "Operation: get_result/wait/list/cancel", "enum": []string{"get_result", "wait", "list", "cancel"}},
-				"task_id":         map[string]interface{}{"type": "string", "description": "Task ID (required for get_result/wait/cancel)"},
+				"task_id":         map[string]interface{}{"type": "string", "description": "Task ID (required by get_result/wait/cancel)"},
 				"session_id":      map[string]interface{}{"type": "string", "description": "Filter by session (list)"},
 				"status":          map[string]interface{}{"type": "string", "description": "Filter by status: queued/sent/running/success/failed/cancelled (list)"},
-				"limit":           map[string]interface{}{"type": "integer", "description": "Result count cap (list)"},
+				"limit":           map[string]interface{}{"type": "integer", "description": "Maximum results (list)"},
 				"timeout_seconds": map[string]interface{}{"type": "integer", "description": "Wait timeout in seconds (wait), default 60"},
 			},
 			"required": []string{"action"},
@@ -457,12 +505,13 @@ func registerC2TaskManageTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 		case "list":
 			filter := database.ListC2TasksFilter{
 				SessionID: getString(params, "session_id"),
+				ProjectID: mcpEffectiveProjectFilter(ctx, m.DB()),
 				Status:    getString(params, "status"),
 			}
 			if limit := int(getFloat64(params, "limit")); limit > 0 {
 				filter.Limit = limit
 			}
-			tasks, err := m.DB().ListC2Tasks(filter)
+			tasks, err := m.DB().ListC2TasksForAccess(filter, c2ToolAccess(ctx))
 			return makeC2Result(map[string]interface{}{"tasks": tasks, "count": len(tasks)}, err)
 
 		case "cancel":
@@ -483,18 +532,21 @@ func registerC2TaskManageTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 func registerC2PayloadTool(s *mcp.Server, m *c2.Manager, l *zap.Logger, webListenPort int) {
 	s.RegisterTool(mcp.Tool{
 		Name: builtin.ToolC2Payload,
-		Description: fmt.Sprintf("C2 Payload generation. Select the operation via the action parameter:\n- oneliner: generate a single-line payload. kind must match the listener protocol, otherwise it will fail:\n  * tcp_reverse: only supports build for an encrypted Beacon by default; if listener config.allow_legacy_shell=true, kinds bash, nc, nc_mkfifo, python, perl, powershell are available.\n  * http_beacon / https_beacon / websocket: only HTTP(S) Beacon polling; oneliner only supports kind: curl_beacon (uses bash+curl internally, different from 'tcp bash'). The curl_beacon return string ends with ' &' to put the whole bash -c in the background; if you use exec/execute for synchronous execution, copy the whole string verbatim (including the trailing &). If you remove the &, the internal while loop will spin in the foreground and the call will block until timeout/process kill.\n  * For tcp_reverse on public networks, use build to generate an encrypted Beacon; do not enable allow_legacy_shell.\n  * If kind is omitted, the first compatible type is auto-selected based on the listener type (HTTP defaults to curl_beacon).\n- build: cross-compile the beacon binary. Supports http_beacon / https_beacon / websocket / tcp_reverse (for tcp_reverse, the implant sends the CSB1 magic first after callback, then AES-GCM decryption and ImplantToken validation before registering the session).\nThe dependent listener's bind_port must avoid the service Web port %d (config server.port, same as the c2_listener description); otherwise the Beacon cannot callback correctly.", webListenPort),
+		Description: fmt.Sprintf(`Generate a C2 payload. Select the operation with action:
+- oneliner: generate a one-line payload. kind must match the listener protocol.
+- build: cross-compile a Beacon binary for http_beacon, https_beacon, websocket, or tcp_reverse.
+The listener bind_port must differ from this service's Web port %d (server.port); otherwise the Beacon cannot call back.`, webListenPort),
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"action":         map[string]interface{}{"type": "string", "description": "Operation: oneliner/build", "enum": []string{"oneliner", "build"}},
-				"listener_id":    map[string]interface{}{"type": "string", "description": "Listener ID (required). Before oneliner, confirm the listener type and pick a compatible kind"},
-				"kind":           map[string]interface{}{"type": "string", "description": "Required only for action=oneliner. tcp_reverse: bash|nc|nc_mkfifo|python|perl|powershell; http_beacon|https_beacon|websocket: only curl_beacon"},
-				"host":           map[string]interface{}{"type": "string", "description": "Optional override for oneliner/build: if non-empty, force use as implant callback host. If left empty, the order is: listener callback_host (written by create/update callback_host parameter) -> bind_host (when 0.0.0.0, attempt to detect the local public IP)"},
+				"listener_id":    map[string]interface{}{"type": "string", "description": "Listener ID (required). Before oneliner, check the listener type and choose a compatible kind"},
+				"kind":           map[string]interface{}{"type": "string", "description": "Required only for action=oneliner. tcp_reverse: bash|nc|nc_mkfifo|python|perl|powershell; HTTP listeners: curl_beacon only"},
+				"host":           map[string]interface{}{"type": "string", "description": "Optional oneliner/build override. When non-empty, this host is forced as the implant callback host. When empty, resolution is callback_host (written by the listener create/update callback_host parameter), then bind_host (with local public-IP detection attempted when bind_host is 0.0.0.0)"},
 				"os":             map[string]interface{}{"type": "string", "description": "Target OS (build): linux/windows/darwin", "default": "linux"},
 				"arch":           map[string]interface{}{"type": "string", "description": "Target architecture (build): amd64/arm64/386/arm", "default": "amd64"},
 				"sleep_seconds":  map[string]interface{}{"type": "integer", "description": "Default heartbeat interval (build)"},
-				"jitter_percent": map[string]interface{}{"type": "integer", "description": "Default jitter percent (build)"},
+				"jitter_percent": map[string]interface{}{"type": "integer", "description": "Default jitter percentage (build)"},
 			},
 			"required": []string{"action", "listener_id"},
 		},
@@ -525,7 +577,7 @@ func registerC2PayloadTool(s *mcp.Server, m *c2.Manager, l *zap.Logger, webListe
 				for i, k := range compatible {
 					names[i] = string(k)
 				}
-				return makeC2Result(nil, fmt.Errorf("listener type %s does not support %s, compatible types: %v", listener.Type, kind, names))
+				return makeC2Result(nil, fmt.Errorf("listener type %s does not support %s; compatible types: %v", listener.Type, kind, names))
 			}
 			if err := c2.ValidateOnelinerForListener(listener, kind); err != nil {
 				return makeC2Result(nil, err)
@@ -545,7 +597,7 @@ func registerC2PayloadTool(s *mcp.Server, m *c2.Manager, l *zap.Logger, webListe
 				"oneliner": oneliner, "kind": input.Kind, "host": host, "port": listener.BindPort,
 			}
 			if kind == c2.OnelinerCurl {
-				out["usage_note"] = "Synchronous exec/execute: execute the entire string verbatim (must end with ' &'). If you remove it, the while loop will never end and the tool will hang."
+				out["usage_note"] = "Synchronous exec/execute: run the entire string unchanged, including the trailing '&'. Removing it leaves the while loop running indefinitely and blocks the tool."
 			}
 			return makeC2Result(out, nil)
 
@@ -562,6 +614,9 @@ func registerC2PayloadTool(s *mcp.Server, m *c2.Manager, l *zap.Logger, webListe
 			result, err := builder.BuildBeacon(input)
 			if err != nil {
 				return makeC2Result(nil, err)
+			}
+			if principal, ok := authctx.PrincipalFromContext(ctx); ok {
+				_ = m.DB().RecordC2PayloadArtifact(filepath.Base(result.OutputPath), result.PayloadID, result.ListenerID, principal.UserID)
 			}
 			return makeC2Result(map[string]interface{}{
 				"payload_id": result.PayloadID, "download_path": result.DownloadPath,
@@ -581,7 +636,7 @@ func registerC2PayloadTool(s *mcp.Server, m *c2.Manager, l *zap.Logger, webListe
 func registerC2EventTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 	s.RegisterTool(mcp.Tool{
 		Name:        builtin.ToolC2Event,
-		Description: "Get C2 events (online/offline/task/error), supports filtering by level/category/session/task/time",
+		Description: "Get C2 events (online/offline/task/error), with filters for level, category, session, task, and time",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -589,14 +644,15 @@ func registerC2EventTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 				"category":   map[string]interface{}{"type": "string", "description": "Filter by category: listener/session/task/payload/opsec"},
 				"session_id": map[string]interface{}{"type": "string", "description": "Filter by session"},
 				"task_id":    map[string]interface{}{"type": "string", "description": "Filter by task"},
-				"since":      map[string]interface{}{"type": "string", "description": "Start time (RFC3339 format, e.g., 2025-01-01T00:00:00Z)"},
-				"limit":      map[string]interface{}{"type": "integer", "default": 50, "description": "Result count"},
+				"since":      map[string]interface{}{"type": "string", "description": "Start time (RFC3339, such as 2025-01-01T00:00:00Z)"},
+				"limit":      map[string]interface{}{"type": "integer", "default": 50, "description": "Maximum results"},
 			},
 		},
 	}, func(ctx context.Context, params map[string]interface{}) (*mcp.ToolResult, error) {
 		filter := database.ListC2EventsFilter{
 			Level:     getString(params, "level"),
 			Category:  getString(params, "category"),
+			ProjectID: mcpEffectiveProjectFilter(ctx, m.DB()),
 			SessionID: getString(params, "session_id"),
 			TaskID:    getString(params, "task_id"),
 			Limit:     int(getFloat64(params, "limit")),
@@ -609,9 +665,17 @@ func registerC2EventTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 				filter.Since = &t
 			}
 		}
-		events, err := m.DB().ListC2Events(filter)
+		events, err := m.DB().ListC2EventsForAccess(filter, c2ToolAccess(ctx))
 		return makeC2Result(map[string]interface{}{"events": events, "count": len(events)}, err)
 	})
+}
+
+func c2ToolAccess(ctx context.Context) database.RBACListAccess {
+	principal, ok := authctx.PrincipalFromContext(ctx)
+	if !ok {
+		return database.RBACListAccess{Scope: database.RBACScopeAssigned}
+	}
+	return database.RBACListAccess{UserID: principal.UserID, Scope: principal.ScopeFor("c2:read")}
 }
 
 // ============================================================================
@@ -621,20 +685,25 @@ func registerC2EventTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 func registerC2ProfileTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 	s.RegisterTool(mcp.Tool{
 		Name: builtin.ToolC2Profile,
-		Description: "C2 Malleable Profile management (controls beacon communication disguise). Select the operation via the action parameter:\n- list: list all Profiles\n- get: get Profile details (requires profile_id)\n- create: create a Profile (requires name, optional user_agent/uris/request_headers/response_headers/body_template/jitter_min_ms/jitter_max_ms)\n- update: update a Profile (requires profile_id)\n- delete: delete a Profile (requires profile_id)",
+		Description: `Manage C2 Malleable Profiles that control Beacon traffic camouflage. Select an operation with action:
+- list: list all Profiles
+- get: get Profile details (profile_id required)
+- create: create a Profile (name required; user_agent/uris/request_headers/response_headers/body_template/jitter_min_ms/jitter_max_ms optional)
+- update: update a Profile (profile_id required)
+- delete: delete a Profile (profile_id required)`,
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"action":           map[string]interface{}{"type": "string", "description": "Operation: list/get/create/update/delete", "enum": []string{"list", "get", "create", "update", "delete"}},
-				"profile_id":       map[string]interface{}{"type": "string", "description": "Profile ID (required for get/update/delete)"},
+				"profile_id":       map[string]interface{}{"type": "string", "description": "Profile ID (required by get/update/delete)"},
 				"name":             map[string]interface{}{"type": "string", "description": "Profile name"},
 				"user_agent":       map[string]interface{}{"type": "string", "description": "User-Agent string"},
-				"uris":             map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "List of beacon request URIs"},
+				"uris":             map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "URI list for Beacon requests"},
 				"request_headers":  map[string]interface{}{"type": "object", "description": "Custom request headers"},
 				"response_headers": map[string]interface{}{"type": "object", "description": "Custom response headers"},
-				"body_template":    map[string]interface{}{"type": "string", "description": "Response body template"},
-				"jitter_min_ms":    map[string]interface{}{"type": "integer", "description": "Minimum jitter (ms)"},
-				"jitter_max_ms":    map[string]interface{}{"type": "integer", "description": "Maximum jitter (ms)"},
+				"body_template":    map[string]interface{}{"type": "string", "description": "Response-body template"},
+				"jitter_min_ms":    map[string]interface{}{"type": "integer", "description": "Minimum jitter in milliseconds"},
+				"jitter_max_ms":    map[string]interface{}{"type": "integer", "description": "Maximum jitter in milliseconds"},
 			},
 			"required": []string{"action"},
 		},
@@ -768,13 +837,15 @@ func registerC2ProfileTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 func registerC2FileTool(s *mcp.Server, m *c2.Manager, l *zap.Logger) {
 	s.RegisterTool(mcp.Tool{
 		Name: builtin.ToolC2File,
-		Description: "C2 file management. Select the operation via the action parameter:\n- list: list session file transfer records (requires session_id)\n- get_result: get the task result file path (e.g., screenshot) (requires task_id)",
+		Description: `Manage C2 files. Select an operation with action:
+- list: list file transfer records for a session (session_id required)
+- get_result: get the task result file path, such as a screenshot (task_id required)`,
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"action":     map[string]interface{}{"type": "string", "description": "Operation: list/get_result", "enum": []string{"list", "get_result"}},
-				"session_id": map[string]interface{}{"type": "string", "description": "Session ID (required for list)"},
-				"task_id":    map[string]interface{}{"type": "string", "description": "Task ID (required for get_result)"},
+				"session_id": map[string]interface{}{"type": "string", "description": "Session ID (required by list)"},
+				"task_id":    map[string]interface{}{"type": "string", "description": "Task ID (required by get_result)"},
 			},
 			"required": []string{"action"},
 		},

@@ -9,10 +9,10 @@ import (
 )
 
 var (
-	bodyDepFactLine   = regexp.MustCompile(`(?im)^[\s\-*]*(?:依赖事实|Dependent facts?)\s*[:：:]\s*([a-z0-9][a-z0-9._/-]*)`)
-	bodyRelFactLine   = regexp.MustCompile(`(?im)^[\s\-*]*(?:相关|Related)\s*fact_key\s*[:：:]\s*([a-z0-9][a-z0-9._/-]*)`)
-	bodyAssocSection  = regexp.MustCompile(`(?im)^##\s*(?:关联|Related)\s*$`)
-	bodySyncLinksHead = "Structured relationship edges (auto-synced)"
+	bodyDepFactLine   = regexp.MustCompile(`(?im)^[\s\-*]*依赖事实\s*[:：]\s*([a-zA-Z0-9][a-zA-Z0-9._/-]*)`)
+	bodyRelFactLine   = regexp.MustCompile(`(?im)^[\s\-*]*相关\s*fact_key\s*[:：]\s*([a-zA-Z0-9][a-zA-Z0-9._/-]*)`)
+	bodyAssocSection  = regexp.MustCompile(`(?im)^##\s*关联\s*$`)
+	bodySyncLinksHead = "结构化关系边（自动同步）"
 )
 
 // ParseLinksFromBody 从 body「关联」段落解析 from 语义的关系边（无显式 links 时的兜底）。
@@ -84,7 +84,7 @@ func extractBodySyncLinksBlock(body string) string {
 			inSync = false
 			continue
 		}
-		if inAssoc && strings.HasPrefix(trim, "## ") && !strings.HasPrefix(trim, "## 关联") && !strings.HasPrefix(trim, "## Related") {
+		if inAssoc && strings.HasPrefix(trim, "## ") && !strings.HasPrefix(trim, "## 关联") {
 			break
 		}
 		if inAssoc && strings.Contains(trim, bodySyncLinksHead) {
@@ -113,7 +113,7 @@ func SyncBodyLinksSection(body string, edges []*database.ProjectFactEdge) string
 		return body
 	}
 	if body == "" {
-		return "## Related\n" + block
+		return "## 关联\n" + block
 	}
 	lines := strings.Split(body, "\n")
 	var out []string
@@ -163,7 +163,7 @@ func SyncBodyLinksSection(body string, edges []*database.ProjectFactEdge) string
 	}
 	if !replaced {
 		if !inAssoc {
-			out = append(out, "", "## Related", block)
+			out = append(out, "", "## 关联", block)
 		} else {
 			out = append(out, block)
 		}
@@ -173,7 +173,7 @@ func SyncBodyLinksSection(body string, edges []*database.ProjectFactEdge) string
 
 func formatBodySyncLinksBlock(edges []*database.ProjectFactEdge) string {
 	if len(edges) == 0 {
-		return fmt.Sprintf("- %s:\n  (none)", bodySyncLinksHead)
+		return fmt.Sprintf("- %s:\n  （暂无）", bodySyncLinksHead)
 	}
 	var b strings.Builder
 	b.WriteString("- ")

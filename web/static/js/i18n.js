@@ -66,7 +66,9 @@
             const skipText = el.getAttribute('data-i18n-skip-text') === 'true';
             const isFormControl = (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
             const attrList = el.getAttribute('data-i18n-attr');
-            const text = i18next.t(key);
+            const translated = i18next.t(key);
+            // 缺键时保留模板中的后备文案，避免页面直接显示 assets.project 一类内部键名。
+            const text = translated && translated !== key ? translated : '';
             // 仅当元素无子元素（仅文本或空）时才替换文本，避免覆盖卡片内的数字、子节点等；input/textarea 永不设置 textContent
             const hasNoElementChildren = !el.querySelector('*');
             if (!skipText && !isFormControl && hasNoElementChildren && text && typeof text === 'string') {
@@ -80,7 +82,7 @@
                     var val = text;
                     if (attr === 'title' && titleKey) {
                         var titleText = i18next.t(titleKey);
-                        if (titleText && typeof titleText === 'string') val = titleText;
+                        if (titleText && titleText !== titleKey && typeof titleText === 'string') val = titleText;
                     }
                     if (val && typeof val === 'string') {
                         el.setAttribute(attr, val);
@@ -233,4 +235,3 @@
         });
     });
 })();
-

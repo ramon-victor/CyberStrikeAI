@@ -97,3 +97,26 @@ func TestCreateProgressCallback_FlushesReasoningOnDone(t *testing.T) {
 		t.Fatalf("expected reasoning_chain persisted on done, got %+v", details)
 	}
 }
+
+func TestEnrichProgressEventData(t *testing.T) {
+	t.Run("fills ids", func(t *testing.T) {
+		out := enrichProgressEventData(map[string]interface{}{"source": "eino"}, "conv-1", "msg-1")
+		m, ok := out.(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected map, got %T", out)
+		}
+		if m["conversationId"] != "conv-1" || m["messageId"] != "msg-1" {
+			t.Fatalf("unexpected enrichment: %+v", m)
+		}
+	})
+	t.Run("preserves existing ids", func(t *testing.T) {
+		out := enrichProgressEventData(map[string]interface{}{
+			"conversationId": "keep-conv",
+			"messageId":      "keep-msg",
+		}, "conv-1", "msg-1")
+		m := out.(map[string]interface{})
+		if m["conversationId"] != "keep-conv" || m["messageId"] != "keep-msg" {
+			t.Fatalf("should not overwrite existing ids: %+v", m)
+		}
+	})
+}

@@ -57,6 +57,60 @@ func variableTokenCounter() summarization.TokenCounterFunc {
 	}
 }
 
+func TestBuildBudgetedSummarizationModelInputKeepsRecentCompleteRounds(t *testing.T) {
+	msgs := []adk.Message{
+		schema.UserMessage("old-user"),
+		schema.AssistantMessage("old-answer", nil),
+		schema.UserMessage("latest-user"),
+		assistantToolCallsMsg("", "call-latest"),
+		schema.ToolMessage("latest-tool-result", "call-latest"),
+	}
+	input, dropped, err := buildBudgetedSummarizationModelInput(
+		context.Background(), schema.SystemMessage("summary-system"), schema.UserMessage("summary-instruction"),
+		msgs, fixedTokenCounter(2), 7, summarizationInputBudgetOpts{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped == 0 {
+		t.Fatal("expected older rounds to be omitted")
+	}
+	joined := formatSummarizationTranscript(input)
+	if strings.Contains(joined, "old-user") || strings.Contains(joined, "old-answer") {
+		t.Fatalf("old rounds leaked into bounded input: %s", joined)
+	}
+	if !strings.Contains(joined, "latest-user") || !strings.Contains(joined, "latest-tool-result") {
+		t.Fatalf("latest complete rounds missing: %s", joined)
+	}
+	for _, msg := range input {
+		if msg.Role == schema.Tool || len(msg.ToolCalls) > 0 {
+			t.Fatalf("summary input must use inert plaintext history, got role=%s tool_calls=%d", msg.Role, len(msg.ToolCalls))
+		}
+	}
+}
+
+func TestBuildBudgetedSummarizationModelInputNeutralizesMalformedToolCallProtocol(t *testing.T) {
+	call := assistantToolCallsMsg("", "broken")
+	call.ToolCalls[0].Function.Arguments = `{"command":"unterminated`
+	input, _, err := buildBudgetedSummarizationModelInput(
+		context.Background(), schema.SystemMessage("summary-system"), schema.UserMessage("summary-instruction"),
+		[]adk.Message{schema.UserMessage("run it"), call, schema.ToolMessage("parse failed", "broken")},
+		einoSummarizationTokenCounter("gpt-4o"), 4096, summarizationInputBudgetOpts{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := formatSummarizationTranscript(input)
+	if !strings.Contains(joined, `unterminated`) || !strings.Contains(joined, "parse failed") {
+		t.Fatalf("historical evidence missing from plaintext transcript: %s", joined)
+	}
+	for _, msg := range input {
+		if msg.Role == schema.Tool || len(msg.ToolCalls) != 0 {
+			t.Fatalf("provider-visible tool protocol leaked into summary input: %+v", msg)
+		}
+	}
+}
+
 func TestSplitMessagesIntoRounds_Complex(t *testing.T) {
 	msgs := []adk.Message{
 		schema.UserMessage("q1"),
@@ -496,5 +550,20 @@ func TestRefreshFactIndexInMessages(t *testing.T) {
 	}
 	if !strings.Contains(sys, "instruction") {
 		t.Fatalf("non-index system content should be preserved: %q", sys)
+	}
+}
+
+func TestBuildOriginalUserIntentLedgerUsesOnlyModelFacingMessages(t *testing.T) {
+	ledger := buildOriginalUserIntentLedgerMessage(
+		[]adk.Message{schema.UserMessage("模型实际看到的裁剪预览")},
+		config.DefaultSummarizationUserIntentLedgerMaxRunes,
+		config.DefaultSummarizationUserIntentLedgerEntryMaxRunes,
+	)
+	if ledger == nil {
+		t.Fatal("expected ledger message")
+	}
+	body := ledger.Content
+	if !strings.Contains(body, "模型实际看到的裁剪预览") {
+		t.Fatalf("ledger should preserve the model-facing user message: %q", body)
 	}
 }

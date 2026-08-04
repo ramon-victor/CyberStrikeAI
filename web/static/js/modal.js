@@ -14,6 +14,7 @@
         'batch-manage-modal',
         'create-group-modal',
         'workflow-meta-modal',
+        'workflow-dry-run-modal',
         'login-overlay',
     ]);
 

@@ -1,5 +1,5 @@
 /**
- * System Settings - Terminal: Multi-tab, streaming output, command history, Ctrl+L clear, long-running cancellable
+ * 系统设置 - 终端：多标签、流式输出、命令历史、Ctrl+L 清屏、长时间可取消
  */
 (function () {
     var getContext = HTMLCanvasElement.prototype.getContext;
@@ -15,7 +15,7 @@
     var currentTabId = 1;
     var inited = false;
     var tabIdCounter = 1;
-    var PROMPT = ''; // The real Shell outputs its own prompt, no longer customized here
+    var PROMPT = ''; // 真实 Shell 自己输出提示符，这里不再自定义
     var HISTORY_MAX = 100;
     var CANCEL_AFTER_MS = 125000;
 
@@ -30,15 +30,15 @@
         if (typeof window !== 'undefined' && typeof window.t === 'function') {
             return window.t(key, opts);
         }
-        // Fallback when i18n is not ready
+        // i18n 未就绪时的后备（与 zh-CN 一致）
         var fallbacks = {
-            'settingsTerminal.welcomeLine': 'CyberStrikeAI Terminal - Real Shell session, enter commands directly; Ctrl+L to clear',
-            'settingsTerminal.sessionClosed': '[Session Closed]',
-            'settingsTerminal.connectionError': '[Terminal Connection Error]',
-            'settingsTerminal.connectFailed': '[Failed to connect to terminal service: {{msg}}]',
+            'settingsTerminal.welcomeLine': '\\r\\n',
+            'settingsTerminal.sessionClosed': '[Session closed]',
+            'settingsTerminal.connectionError': '[Terminal connection error]',
+            'settingsTerminal.connectFailed': '[Cannot connect to terminal service: {{msg}}]',
             'settingsTerminal.closeTabTitle': 'Close',
-            'settingsTerminal.containerClickTitle': 'Click here to enter commands',
-            'settingsTerminal.xtermNotLoaded': 'xterm.js not loaded, please refresh the page or check the network.',
+            'settingsTerminal.containerClickTitle': 'Click here, then type commands',
+            'settingsTerminal.xtermNotLoaded': 'xterm.js failed to load. Refresh the page or check your network.',
             'settingsTerminal.terminalTab': 'Terminal {{n}}'
         };
         var s = fallbacks[key] || key;
@@ -55,7 +55,7 @@
     }
 
     function writePrompt(tab) {
-        // Prompt is handled by the backend Shell, keeping placeholder function to avoid old code errors
+        // 提示符交由后端 Shell 自行输出，这里仅保留占位函数，避免旧代码报错
     }
 
     function redrawTabDisplay(t) {
@@ -70,6 +70,17 @@
         if (!t || !t.term) return;
         if (text) t.term.writeln(text);
         else t.term.writeln('');
+    }
+
+    function writeTermData(tab, data) {
+        if (!tab || !tab.term || data === undefined || data === null) return;
+        try {
+            tab.term.write(data, function () {
+                try { tab.term.scrollToBottom(); } catch (e) {}
+            });
+        } catch (e) {
+            tab.term.write(data);
+        }
     }
 
     function writeOutput(tab, text, isError) {
@@ -87,7 +98,7 @@
         t.term.write(suffix);
     }
 
-    // Get current login token from local storage (consistent with auth.js structure)
+    // 从本地存储中获取当前登录 token（与 auth.js 使用的结构保持一致）
     function getStoredAuthToken() {
         try {
             var raw = localStorage.getItem('cyberstrike-auth');
@@ -98,7 +109,7 @@
         return null;
     }
 
-    // WebSocket URL construction (compatible with http/https, passing token via query for backend auth)
+    // WebSocket 地址构造（兼容 http/https，并通过 query 传递 token 以通过后端鉴权）
     function buildTerminalWSURL() {
         var proto = (window.location.protocol === 'https:') ? 'wss://' : 'ws://';
         var url = proto + window.location.host + '/api/terminal/ws';
@@ -133,21 +144,21 @@
 
             ws.onmessage = function (ev) {
                 if (!tab.term) return;
-                // Handle binary and text messages
+                // 处理二进制消息和文本消息
                 if (ev.data instanceof ArrayBuffer) {
                     var decoder = new TextDecoder('utf-8');
-                    tab.term.write(decoder.decode(ev.data));
+                    writeTermData(tab, decoder.decode(ev.data));
                 } else if (ev.data instanceof Blob) {
-                    // Blob type, needs async read
+                    // Blob 类型，需要异步读取
                     var reader = new FileReader();
                     reader.onload = function () {
                         var decoder = new TextDecoder('utf-8');
-                        tab.term.write(decoder.decode(reader.result));
+                        writeTermData(tab, decoder.decode(reader.result));
                     };
                     reader.readAsArrayBuffer(ev.data);
                 } else {
-                    // String type
-                    tab.term.write(ev.data);
+                    // 字符串类型
+                    writeTermData(tab, ev.data);
                 }
             };
 
@@ -183,6 +194,9 @@
             fontSize: 13,
             fontFamily: 'Menlo, Monaco, "Courier New", monospace',
             lineHeight: 1.2,
+            smoothScrollDuration: 0,
+            scrollSensitivity: 1,
+            fastScrollSensitivity: 5,
             scrollback: 1000,
             theme: {
                 background: '#0d1117',
@@ -241,7 +255,7 @@
         }
 
         term.onData(function (data) {
-            // Ctrl+L: local clear screen, also send ^L to backend
+            // Ctrl+L：本地清屏，同时把 ^L 也发给后端
             if (data === '\x0c') {
                 term.clear();
                 sendToWS(data);
@@ -258,8 +272,21 @@
 
         tab.term = term;
         tab.fitAddon = fitAddon;
-        // Establish WebSocket immediately so backend PTY/Shell starts and outputs prompt;
-        // If wait until first keypress to connect, user would feel forced to press enter first (actually connection not established yet).
+        if (typeof ResizeObserver !== 'undefined' && fitAddon) {
+            var resizeTimer;
+            tab.resizeObserver = new ResizeObserver(function () {
+                clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(function () {
+                    try {
+                        fitAddon.fit();
+                        term.scrollToBottom();
+                    } catch (e) {}
+                }, 50);
+            });
+            tab.resizeObserver.observe(container);
+        }
+        // 立即建立 WebSocket，让后端 PTY/Shell 马上启动并输出提示符；
+        // 若等到首次按键才 connect，用户会感觉必须先按回车才能输入（实为连接尚未建立）。
         ensureTerminalWS(tab);
         return term;
     }
@@ -278,9 +305,19 @@
         });
         var t = getCurrent();
         if (t && t.term) {
+            try {
+                if (t.fitAddon) t.fitAddon.fit();
+                t.term.scrollToBottom();
+            } catch (e) {}
             if (prevId !== id) {
                 requestAnimationFrame(function () {
-                    if (currentTabId === id && t.term) t.term.focus();
+                    if (currentTabId === id && t.term) {
+                        try {
+                            if (t.fitAddon) t.fitAddon.fit();
+                            t.term.scrollToBottom();
+                        } catch (e) {}
+                        t.term.focus();
+                    }
                 });
             } else {
                 t.term.focus();
@@ -356,9 +393,11 @@
         var switchToIndex = deletingCurrent ? (idx > 0 ? idx - 1 : 0) : -1;
 
         var tab = terminals[idx];
+        if (tab.resizeObserver && tab.resizeObserver.disconnect) tab.resizeObserver.disconnect();
         if (tab.term && tab.term.dispose) tab.term.dispose();
         tab.term = null;
         tab.fitAddon = null;
+        tab.resizeObserver = null;
         terminals.splice(idx, 1);
 
         var tabDiv = document.querySelector('.terminal-tab[data-tab-id="' + id + '"]');
@@ -423,7 +462,7 @@
     }
 
     function refreshTerminalI18n() {
-        // Update tab and container title after language switch; already opened terminal content is not forcibly cleared to avoid losing session output
+        // 语言切换后更新标签与容器 title；已打开的终端内容不强制清屏，以免丢失会话输出
         try {
             var tabsEl = document.querySelector('.terminal-tabs');
             if (tabsEl) {

@@ -31,6 +31,7 @@ jobs:
         run: |
           owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/${owner}/cyberstrikeai" >> "${GITHUB_OUTPUT}"
+          echo "app_version=v1.7.11" >> "${GITHUB_OUTPUT}"
 
       - name: Set up QEMU
         if: github.event_name != 'pull_request'
@@ -72,5 +73,7 @@ jobs:
           platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.prep.outputs.app_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -615,6 +615,28 @@ function reconcileHitlUiState() {
 
 let hitlFollowRunSeq = 0;
 
+function hitlAutoResizeTextarea(textarea) {
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.max(textarea.scrollHeight, textarea.offsetHeight || 0) + 'px';
+}
+
+function bindHitlAutoResizeTextareas(root) {
+    const scope = root || document;
+    if (!scope || !scope.querySelectorAll) return;
+    scope.querySelectorAll('.hitl-edit-args').forEach(function (textarea) {
+        if (textarea.__hitlAutoResizeBound) {
+            hitlAutoResizeTextarea(textarea);
+            return;
+        }
+        textarea.__hitlAutoResizeBound = true;
+        hitlAutoResizeTextarea(textarea);
+        textarea.addEventListener('input', function () {
+            hitlAutoResizeTextarea(textarea);
+        });
+    });
+}
+
 /**
  * 审批提交后原 SSE 已断开：轮询任务列表，运行中则拉取过程详情；任务结束后再整页加载会话以对齐终态。
  */
@@ -855,6 +877,7 @@ async function refreshHitlPending() {
         } else {
             container.innerHTML = workflowHtml + (workflowHtml && toolHtml ? '<div class="hitl-pending-section-divider"></div>' : '') + (toolHtml || '');
         }
+        bindHitlAutoResizeTextareas(container);
         renderHitlPendingPagination();
     } catch (e) {
         hitlPendingLoaded = false;
@@ -1145,6 +1168,158 @@ function hitlFormatTime(v) {
     }
 }
 
+const HITL_LOG_FILTER_SELECT_IDS = ['hitl-logs-decision-filter', 'hitl-logs-decidedby-filter'];
+const hitlLogFilterSelectMap = {};
+let hitlLogFilterSelectDocBound = false;
+
+const HITL_FILTER_SELECT_CARET = '<svg class="hitl-filter-select-caret" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function closeAllHitlLogFilterSelects() {
+    Object.keys(hitlLogFilterSelectMap).forEach(function (id) {
+        const reg = hitlLogFilterSelectMap[id];
+        if (!reg || !reg.wrapper) return;
+        reg.wrapper.classList.remove('open');
+        if (reg.trigger) reg.trigger.setAttribute('aria-expanded', 'false');
+    });
+}
+
+function syncHitlLogFilterSelect(selectId) {
+    const reg = hitlLogFilterSelectMap[selectId];
+    if (!reg) return;
+    const select = reg.select;
+    const dropdown = reg.dropdown;
+    const trigger = reg.trigger;
+    const valueSpan = trigger.querySelector('.hitl-filter-select-value');
+
+    dropdown.innerHTML = '';
+    Array.prototype.forEach.call(select.options, function (opt) {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'hitl-filter-select-option';
+        item.setAttribute('role', 'option');
+        item.setAttribute('data-value', opt.value);
+        if (opt.value === select.value) {
+            item.classList.add('is-selected');
+            item.setAttribute('aria-selected', 'true');
+        } else {
+            item.setAttribute('aria-selected', 'false');
+        }
+        const check = document.createElement('span');
+        check.className = 'hitl-filter-select-check';
+        check.setAttribute('aria-hidden', 'true');
+        check.textContent = '✓';
+        const label = document.createElement('span');
+        label.className = 'hitl-filter-select-label';
+        label.textContent = opt.textContent;
+        item.appendChild(check);
+        item.appendChild(label);
+        dropdown.appendChild(item);
+    });
+
+    const selectedOpt = select.options[select.selectedIndex];
+    if (valueSpan) {
+        valueSpan.textContent = selectedOpt ? selectedOpt.textContent : '';
+    }
+    trigger.disabled = !!select.disabled;
+    reg.wrapper.classList.toggle('is-disabled', !!select.disabled);
+}
+
+function syncAllHitlLogFilterSelects() {
+    HITL_LOG_FILTER_SELECT_IDS.forEach(syncHitlLogFilterSelect);
+}
+
+function enhanceHitlLogFilterSelect(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    if (select.dataset.hitlCustomSelect === '1') {
+        syncHitlLogFilterSelect(selectId);
+        return;
+    }
+    select.dataset.hitlCustomSelect = '1';
+    select.classList.add('hitl-filter-native-select');
+    select.tabIndex = -1;
+    select.setAttribute('aria-hidden', 'true');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'hitl-filter-select-ui';
+    if (selectId === 'hitl-logs-decision-filter') {
+        wrapper.classList.add('hitl-filter-select-ui--decision');
+    } else if (selectId === 'hitl-logs-decidedby-filter') {
+        wrapper.classList.add('hitl-filter-select-ui--decidedby');
+    }
+
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'hitl-filter-select-trigger';
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    const valueSpan = document.createElement('span');
+    valueSpan.className = 'hitl-filter-select-value';
+    trigger.appendChild(valueSpan);
+    trigger.insertAdjacentHTML('beforeend', HITL_FILTER_SELECT_CARET);
+
+    const dropdown = document.createElement('div');
+    dropdown.className = 'hitl-filter-select-dropdown';
+    dropdown.setAttribute('role', 'listbox');
+
+    const parent = select.parentNode;
+    parent.insertBefore(wrapper, select);
+    wrapper.appendChild(trigger);
+    wrapper.appendChild(dropdown);
+    wrapper.appendChild(select);
+
+    hitlLogFilterSelectMap[selectId] = { wrapper: wrapper, trigger: trigger, dropdown: dropdown, select: select };
+
+    trigger.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (select.disabled) return;
+        const open = wrapper.classList.contains('open');
+        closeAllHitlLogFilterSelects();
+        if (!open) {
+            wrapper.classList.add('open');
+            trigger.setAttribute('aria-expanded', 'true');
+        }
+    });
+
+    dropdown.addEventListener('click', function (e) {
+        const opt = e.target.closest('.hitl-filter-select-option');
+        if (!opt) return;
+        e.stopPropagation();
+        const val = opt.getAttribute('data-value');
+        if (val === null) return;
+        if (select.value !== val) {
+            select.value = val;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        wrapper.classList.remove('open');
+        trigger.setAttribute('aria-expanded', 'false');
+        syncHitlLogFilterSelect(selectId);
+    });
+
+    select.addEventListener('change', function () {
+        syncHitlLogFilterSelect(selectId);
+    });
+}
+
+function initHitlLogFilterSelects() {
+    if (!hitlLogFilterSelectDocBound) {
+        document.addEventListener('click', closeAllHitlLogFilterSelects);
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape') closeAllHitlLogFilterSelects();
+        });
+        hitlLogFilterSelectDocBound = true;
+    }
+    HITL_LOG_FILTER_SELECT_IDS.forEach(function (id) {
+        enhanceHitlLogFilterSelect(id);
+        const select = document.getElementById(id);
+        if (select && !select.dataset.hitlFilterBound) {
+            select.dataset.hitlFilterBound = '1';
+            select.addEventListener('change', filterHitlLogs);
+        }
+    });
+    syncAllHitlLogFilterSelects();
+}
+
 function hitlLogsHasActiveFilters() {
     const qEl = document.getElementById('hitl-logs-search');
     const decEl = document.getElementById('hitl-logs-decision-filter');
@@ -1432,6 +1607,7 @@ function refreshHitlPendingI18n() {
 function refreshHitlI18n() {
     refreshHitlLogsI18n();
     refreshHitlPendingI18n();
+    syncAllHitlLogFilterSelects();
     renderHitlLogsPagination();
     renderHitlPendingPagination();
 }
@@ -1619,6 +1795,7 @@ window.addEventListener('pageshow', function () {
 document.addEventListener('DOMContentLoaded', function () {
     initHitlPageSizeFromStorage(HITL_LOGS_PAGE_SIZE_KEY, 20, function (n) { hitlLogsPageSize = n; });
     initHitlPageSizeFromStorage(HITL_PENDING_PAGE_SIZE_KEY, 20, function (n) { hitlPendingPageSize = n; });
+    initHitlLogFilterSelects();
     if (typeof window.bindHitlReviewerToggleListeners === 'function') {
         window.bindHitlReviewerToggleListeners();
     }

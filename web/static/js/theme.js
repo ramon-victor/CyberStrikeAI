@@ -4,14 +4,14 @@
     const STORAGE_KEY = 'cyberstrike-theme';
     const THEMES = ['system', 'light', 'dark'];
     const FALLBACK_LABELS = {
-        system: '跟随系统',
-        light: '浅色',
-        dark: '暗色'
+        system: 'titleSystem',
+        light: 'titleLight',
+        dark: 'titleDark'
     };
     const FALLBACK_TITLES = {
-        system: '当前：跟随系统主题。点击切换为浅色。',
-        light: '当前：浅色主题。点击切换为暗色。',
-        dark: '当前：暗色主题。点击切换为跟随系统。'
+        system: 'titleSystem',
+        light: 'titleLight',
+        dark: 'titleDark'
     };
     const TITLE_KEYS = {
         system: 'titleSystem',
@@ -83,6 +83,11 @@
         root.setAttribute('data-theme', resolved);
         root.style.colorScheme = resolved;
         updateButton(normalized, resolved);
+        document.dispatchEvent(
+            new CustomEvent('cyberstrike-themechange', {
+                detail: { preference: normalized, resolved: resolved },
+            }),
+        );
     }
 
     function savePreference(preference) {

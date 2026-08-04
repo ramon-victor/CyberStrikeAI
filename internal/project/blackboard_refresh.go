@@ -3,7 +3,10 @@ package project
 import "strings"
 
 // FactIndexSectionHeading 黑板索引可读标题行前缀（块内保留，供 Agent 阅读）。
-const FactIndexSectionHeading = "## 项目黑板索引"
+const FactIndexSectionHeading = "## Project blackboard index"
+
+// LegacyFactIndexSectionHeading remains recognized in persisted historical prompts.
+const LegacyFactIndexSectionHeading = "## 项目黑板索引"
 
 // FactIndexSectionStartMarker / EndMarker：HTML 注释边界，供程序化替换；对模型无指令语义。
 const (

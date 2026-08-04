@@ -16,6 +16,7 @@ import (
 	"cyberstrike-ai/internal/agents"
 	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/config"
+	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/knowledge"
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/mcp/builtin"
@@ -74,7 +75,7 @@ type ConfigHandler struct {
 	config                     *config.Config
 	mcpServer                  *mcp.Server
 	executor                   *security.Executor
-	agent                      AgentUpdater               // Agent接口，用于Updating Agent config
+	agent                      AgentUpdater               // Agent接口，用于更新Agent配置
 	attackChainHandler         AttackChainUpdater         // 攻击链处理器接口，用于更新配置
 	externalMCPMgr             *mcp.ExternalMCPManager    // 外部MCP管理器
 	knowledgeToolRegistrar     KnowledgeToolRegistrar     // 知识库工具注册器（可选）
@@ -89,9 +90,30 @@ type ConfigHandler struct {
 	appUpdater                 AppUpdater                 // App更新器（可选）
 	robotRestarter             RobotRestarter             // 机器人连接重启器（可选），ApplyConfig 时重启钉钉/飞书
 	audit                      *audit.Service
+	db                         *database.DB
 	logger                     *zap.Logger
 	mu                         sync.RWMutex
 	lastEmbeddingConfig        *config.EmbeddingConfig // 上一次的嵌入模型配置（用于检测变更）
+}
+
+func (h *ConfigHandler) SetDB(db *database.DB) {
+	h.db = db
+}
+
+func (h *ConfigHandler) validateRobotServiceAccounts(robots config.RobotsConfig) error {
+	if h.db == nil {
+		return fmt.Errorf("RBAC service is unavailable; cannot validate the robot service account")
+	}
+	for platform, userID := range robots.ServiceAccountUserIDs() {
+		user, err := h.db.GetRBACUserByID(userID)
+		if err != nil {
+			return fmt.Errorf("the user configured by robots.%s.auth.service_user_id does not exist", platform)
+		}
+		if !user.Enabled {
+			return fmt.Errorf("the user configured by robots.%s.auth.service_user_id is disabled", platform)
+		}
+	}
+	return nil
 }
 
 // AttackChainUpdater 攻击链处理器更新接口
@@ -236,17 +258,21 @@ func (h *ConfigHandler) ApplyWechatRobotBinding(wc config.RobotWechatConfig) err
 
 // GetConfigResponse 获取配置响应
 type GetConfigResponse struct {
-	OpenAI     config.OpenAIConfig     `json:"openai"`
-	Vision     config.VisionConfig     `json:"vision"`
-	FOFA       config.FofaConfig       `json:"fofa"`
-	MCP        config.MCPConfig        `json:"mcp"`
-	Tools      []ToolConfigInfo        `json:"tools"`
-	Agent      config.AgentConfig      `json:"agent"`
-	Hitl       config.HitlConfig       `json:"hitl,omitempty"`
-	Knowledge  config.KnowledgeConfig  `json:"knowledge"`
-	Robots     config.RobotsConfig     `json:"robots,omitempty"`
-	MultiAgent config.MultiAgentPublic `json:"multi_agent,omitempty"`
-	C2         config.C2Public         `json:"c2"`
+	AI         config.AIConfig          `json:"ai"`
+	OpenAI     config.OpenAIConfig      `json:"openai"`
+	Vision     config.VisionConfig      `json:"vision"`
+	FOFA       config.FofaConfig        `json:"fofa"`
+	ZoomEye    config.SpaceSearchConfig `json:"zoomeye"`
+	Quake      config.SpaceSearchConfig `json:"quake"`
+	Shodan     config.SpaceSearchConfig `json:"shodan"`
+	MCP        config.MCPConfig         `json:"mcp"`
+	Tools      []ToolConfigInfo         `json:"tools"`
+	Agent      config.AgentConfig       `json:"agent"`
+	Hitl       config.HitlConfig        `json:"hitl,omitempty"`
+	Knowledge  config.KnowledgeConfig   `json:"knowledge"`
+	Robots     config.RobotsConfig      `json:"robots,omitempty"`
+	MultiAgent config.MultiAgentPublic  `json:"multi_agent,omitempty"`
+	C2         config.C2Public          `json:"c2"`
 }
 
 // ToolConfigInfo 工具配置信息
@@ -319,13 +345,18 @@ func (h *ConfigHandler) GetConfig(c *gin.Context) {
 		subAgentCount = len(agents.MergeYAMLAndMarkdown(h.config.MultiAgent.SubAgents, load.SubAgents))
 	}
 	multiPub := config.MultiAgentPublic{
-		Enabled:                      h.config.MultiAgent.Enabled,
-		RobotDefaultAgentMode:        config.NormalizeRobotAgentMode(h.config.MultiAgent),
-		BatchUseMultiAgent:           h.config.MultiAgent.BatchUseMultiAgent,
-		SubAgentCount:                subAgentCount,
-		Orchestration:                config.NormalizeMultiAgentOrchestration(h.config.MultiAgent.Orchestration),
-		PlanExecuteLoopMaxIterations: h.config.MultiAgent.PlanExecuteLoopMaxIterations,
-		ToolSearchAlwaysVisibleTools: append([]string(nil), h.config.MultiAgent.EinoMiddleware.ToolSearchAlwaysVisibleTools...),
+		Enabled:                                    h.config.MultiAgent.Enabled,
+		RobotDefaultAgentMode:                      config.NormalizeRobotAgentMode(h.config.MultiAgent),
+		BatchUseMultiAgent:                         h.config.MultiAgent.BatchUseMultiAgent,
+		SubAgentCount:                              subAgentCount,
+		Orchestration:                              config.NormalizeMultiAgentOrchestration(h.config.MultiAgent.Orchestration),
+		PlanExecuteLoopMaxIterations:               h.config.MultiAgent.PlanExecuteLoopMaxIterations,
+		SummarizationUserIntentLedgerMaxRunes:      h.config.MultiAgent.EinoMiddleware.SummarizationUserIntentLedgerMaxRunesEffective(),
+		SummarizationUserIntentLedgerEntryMaxRunes: h.config.MultiAgent.EinoMiddleware.SummarizationUserIntentLedgerEntryMaxRunesEffective(),
+		LatestUserMessageMaxRunes:                  h.config.MultiAgent.EinoMiddleware.LatestUserMessageMaxRunesEffective(),
+		LatestUserMessageHeadRunes:                 h.config.MultiAgent.EinoMiddleware.LatestUserMessageHeadRunesEffective(),
+		LatestUserMessageTailRunes:                 h.config.MultiAgent.EinoMiddleware.LatestUserMessageTailRunesEffective(),
+		ToolSearchAlwaysVisibleTools:               append([]string(nil), h.config.MultiAgent.EinoMiddleware.ToolSearchAlwaysVisibleTools...),
 		ToolSearchAlwaysVisibleEffectiveTools: mergeToolNameLists(
 			h.config.MultiAgent.EinoMiddleware.ToolSearchAlwaysVisibleTools,
 			builtin.GetAllBuiltinTools(),
@@ -333,9 +364,13 @@ func (h *ConfigHandler) GetConfig(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, GetConfigResponse{
+		AI:         h.config.AI,
 		OpenAI:     h.config.OpenAI,
 		Vision:     h.config.Vision,
 		FOFA:       h.config.FOFA,
+		ZoomEye:    h.config.ZoomEye,
+		Quake:      h.config.Quake,
+		Shodan:     h.config.Shodan,
 		MCP:        h.config.MCP,
 		Tools:      tools,
 		Agent:      h.config.Agent,
@@ -419,7 +454,7 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 	// 快照配置后立即释放锁，避免外部 MCP 网络 IO 阻塞整个配置子系统
 	h.mu.RLock()
 	securityTools := append([]config.ToolConfig(nil), h.config.Security.Tools...)
-	_ = h.config.Roles
+	roles := h.config.Roles
 	toolDescriptionMode := h.config.Security.ToolDescriptionMode
 	mcpServer := h.mcpServer
 	externalMCPMgr := h.externalMCPMgr
@@ -432,9 +467,9 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 	// 解析角色参数，用于过滤工具并标注启用状态
 	roleName := c.Query("role")
 	var roleToolsSet map[string]bool // 角色配置的工具集合
-	var roleUsesAllTools bool = true // whether role uses all tools (default role)
-	if roleName != "" && roleName != "default" && h.config.Roles != nil {
-		if role, exists := h.config.Roles[roleName]; exists && role.Enabled {
+	var roleUsesAllTools bool = true // 角色是否使用所有工具（默认角色）
+	if roleName != "" && roleName != "默认" && roles != nil {
+		if role, exists := roles[roleName]; exists && role.Enabled {
 			if len(role.Tools) > 0 {
 				// 角色配置了工具列表，只使用这些工具
 				roleToolsSet = make(map[string]bool)
@@ -521,7 +556,7 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 			// 根据角色配置标注工具状态
 			if roleName != "" {
 				if roleUsesAllTools {
-					// 角色使用所有工具，直接注册的工具default启用
+					// 角色使用所有工具，直接注册的工具默认启用
 					roleEnabled := true
 					toolInfo.RoleEnabled = &roleEnabled
 				} else {
@@ -671,26 +706,36 @@ func (h *ConfigHandler) GetTools(c *gin.Context) {
 	})
 }
 
-// UpdateConfigRequest update configuration request
+// UpdateConfigRequest 更新配置请求
 type UpdateConfigRequest struct {
-	OpenAI     *config.OpenAIConfig         `json:"openai,omitempty"`
-	Vision     *config.VisionConfig         `json:"vision,omitempty"`
-	FOFA       *config.FofaConfig           `json:"fofa,omitempty"`
-	MCP        *config.MCPConfig            `json:"mcp,omitempty"`
-	Tools      []ToolEnableStatus           `json:"tools,omitempty"`
-	Agent      *AgentConfigUpdate           `json:"agent,omitempty"`
-	Knowledge  *config.KnowledgeConfig      `json:"knowledge,omitempty"`
-	Robots     *config.RobotsConfig         `json:"robots,omitempty"`
-	MultiAgent *config.MultiAgentAPIUpdate  `json:"multi_agent,omitempty"`
-	C2         *config.C2APIUpdate          `json:"c2,omitempty"`
+	AI         *config.AIConfig            `json:"ai,omitempty"`
+	OpenAI     *config.OpenAIConfig        `json:"openai,omitempty"`
+	Vision     *config.VisionConfig        `json:"vision,omitempty"`
+	FOFA       *config.FofaConfig          `json:"fofa,omitempty"`
+	ZoomEye    *config.SpaceSearchConfig   `json:"zoomeye,omitempty"`
+	Quake      *config.SpaceSearchConfig   `json:"quake,omitempty"`
+	Shodan     *config.SpaceSearchConfig   `json:"shodan,omitempty"`
+	MCP        *config.MCPConfig           `json:"mcp,omitempty"`
+	Tools      []ToolEnableStatus          `json:"tools,omitempty"`
+	Agent      *AgentConfigUpdate          `json:"agent,omitempty"`
+	Hitl       *config.HitlConfig          `json:"hitl,omitempty"`
+	Knowledge  *config.KnowledgeConfig     `json:"knowledge,omitempty"`
+	Robots     *config.RobotsConfig        `json:"robots,omitempty"`
+	MultiAgent *config.MultiAgentAPIUpdate `json:"multi_agent,omitempty"`
+	C2         *config.C2APIUpdate         `json:"c2,omitempty"`
 }
 
 // AgentConfigUpdate 用于 PATCH /api/config 的 agent 段：仅 JSON 中出现的字段（指针非 nil）覆盖内存配置。
 // 避免旧版「整包替换 *AgentConfig」时，未传的整型字段被反序列化为 0 误覆盖（例如 tool_timeout_minutes 变成 0）。
 type AgentConfigUpdate struct {
-	MaxIterations      *int    `json:"max_iterations,omitempty"`
-	ToolTimeoutMinutes *int    `json:"tool_timeout_minutes,omitempty"`
-	SystemPromptPath   *string `json:"system_prompt_path,omitempty"`
+	MaxIterations                      *int    `json:"max_iterations,omitempty"`
+	ToolTimeoutMinutes                 *int    `json:"tool_timeout_minutes,omitempty"`
+	ToolWaitTimeoutSeconds             *int    `json:"tool_wait_timeout_seconds,omitempty"`
+	ExternalMCPMaxConcurrentPerServer  *int    `json:"external_mcp_max_concurrent_per_server,omitempty"`
+	ExternalMCPMaxConcurrentTotal      *int    `json:"external_mcp_max_concurrent_total,omitempty"`
+	ExternalMCPCircuitFailureThreshold *int    `json:"external_mcp_circuit_failure_threshold,omitempty"`
+	ExternalMCPCircuitCooldownSeconds  *int    `json:"external_mcp_circuit_cooldown_seconds,omitempty"`
+	SystemPromptPath                   *string `json:"system_prompt_path,omitempty"`
 }
 
 func applyAgentConfigUpdate(dst *config.AgentConfig, src *AgentConfigUpdate) {
@@ -702,6 +747,21 @@ func applyAgentConfigUpdate(dst *config.AgentConfig, src *AgentConfigUpdate) {
 	}
 	if src.ToolTimeoutMinutes != nil {
 		dst.ToolTimeoutMinutes = *src.ToolTimeoutMinutes
+	}
+	if src.ToolWaitTimeoutSeconds != nil {
+		dst.ToolWaitTimeoutSeconds = *src.ToolWaitTimeoutSeconds
+	}
+	if src.ExternalMCPMaxConcurrentPerServer != nil {
+		dst.ExternalMCPMaxConcurrentPerServer = *src.ExternalMCPMaxConcurrentPerServer
+	}
+	if src.ExternalMCPMaxConcurrentTotal != nil {
+		dst.ExternalMCPMaxConcurrentTotal = *src.ExternalMCPMaxConcurrentTotal
+	}
+	if src.ExternalMCPCircuitFailureThreshold != nil {
+		dst.ExternalMCPCircuitFailureThreshold = *src.ExternalMCPCircuitFailureThreshold
+	}
+	if src.ExternalMCPCircuitCooldownSeconds != nil {
+		dst.ExternalMCPCircuitCooldownSeconds = *src.ExternalMCPCircuitCooldownSeconds
 	}
 	if src.SystemPromptPath != nil {
 		dst.SystemPromptPath = *src.SystemPromptPath
@@ -727,56 +787,121 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Updating OpenAI config
+	// 更新OpenAI配置
+	if req.AI != nil {
+		h.config.AI = *req.AI
+		h.config.ApplyDefaultAIChannel()
+		h.logger.Info("更新 AI 通道配置",
+			zap.String("default_channel", h.config.AI.DefaultChannel),
+			zap.Int("channels", len(h.config.AI.Channels)),
+		)
+	}
 	if req.OpenAI != nil {
 		h.config.OpenAI = *req.OpenAI
-		h.logger.Info("Updating OpenAI config",
+		h.config.AI.EnsureDefaultFromOpenAI(h.config.OpenAI)
+		if def := config.NormalizeAIChannelID(h.config.AI.DefaultChannel); def != "" {
+			h.config.AI.Channels[def] = config.AIChannelFromOpenAI(def, "Default", h.config.OpenAI)
+		}
+		h.logger.Info("更新OpenAI配置",
 			zap.String("base_url", h.config.OpenAI.BaseURL),
 			zap.String("model", h.config.OpenAI.Model),
 		)
 	}
 
-	// Updating FOFA config
 	if req.Vision != nil {
 		h.config.Vision = *req.Vision
-		h.logger.Info("Updated Vision config",
+		h.logger.Info("更新 Vision 配置",
 			zap.Bool("enabled", h.config.Vision.Enabled),
 			zap.String("model", h.config.Vision.Model),
 		)
 	}
 
-	// Updating FOFA config
+	// 更新FOFA配置
 	if req.FOFA != nil {
 		h.config.FOFA = *req.FOFA
-		h.logger.Info("Updating FOFA config", zap.String("email", h.config.FOFA.Email))
+		h.logger.Info("更新FOFA配置", zap.String("base_url", h.config.FOFA.BaseURL))
+	}
+	if req.ZoomEye != nil {
+		h.config.ZoomEye = *req.ZoomEye
+		h.logger.Info("更新ZoomEye配置", zap.String("base_url", h.config.ZoomEye.BaseURL))
+	}
+	if req.Quake != nil {
+		h.config.Quake = *req.Quake
+		h.logger.Info("更新Quake配置", zap.String("base_url", h.config.Quake.BaseURL))
+	}
+	if req.Shodan != nil {
+		h.config.Shodan = *req.Shodan
+		h.logger.Info("更新Shodan配置", zap.String("base_url", h.config.Shodan.BaseURL))
 	}
 
-	// Updating MCP config
+	// 更新MCP配置
 	if req.MCP != nil {
 		h.config.MCP = *req.MCP
-		h.logger.Info("Updating MCP config",
+		h.logger.Info("更新MCP配置",
 			zap.Bool("enabled", h.config.MCP.Enabled),
 			zap.String("host", h.config.MCP.Host),
 			zap.Int("port", h.config.MCP.Port),
 		)
 	}
 
-	// Updating Agent config（按字段合并，避免部分 JSON 把未出现的字段写成 0）
+	// 更新Agent配置（按字段合并，避免部分 JSON 把未出现的字段写成 0）
 	if req.Agent != nil {
 		applyAgentConfigUpdate(&h.config.Agent, req.Agent)
-		h.logger.Info("Updating Agent config",
+		h.logger.Info("更新Agent配置",
 			zap.Int("max_iterations", h.config.Agent.MaxIterations),
 			zap.Int("tool_timeout_minutes", h.config.Agent.ToolTimeoutMinutes),
+			zap.Int("tool_wait_timeout_seconds", h.config.Agent.ToolWaitTimeoutSeconds),
+			zap.Int("external_mcp_max_concurrent_per_server", h.config.Agent.ExternalMCPMaxConcurrentPerServer),
+			zap.Int("external_mcp_max_concurrent_total", h.config.Agent.ExternalMCPMaxConcurrentTotal),
+			zap.Int("external_mcp_circuit_failure_threshold", h.config.Agent.ExternalMCPCircuitFailureThreshold),
+			zap.Int("external_mcp_circuit_cooldown_seconds", h.config.Agent.ExternalMCPCircuitCooldownSeconds),
 		)
 		if h.agent != nil && req.Agent.MaxIterations != nil {
 			h.agent.UpdateMaxIterations(h.config.Agent.MaxIterations)
 		}
+		if h.executor != nil {
+			h.executor.SetToolOutputMaxBytes(h.config.MultiAgent.EinoMiddleware.ReductionMaxLengthForTruncEffective())
+			h.executor.SetToolOutputSpillRoot(h.config.MultiAgent.EinoMiddleware.ReductionRootDir)
+		}
 		if h.mcpServer != nil {
 			h.mcpServer.ConfigureHTTPToolCallTimeoutFromAgentMinutes(h.config.Agent.ToolTimeoutMinutes)
+			h.mcpServer.ConfigureToolWaitTimeoutSeconds(h.config.Agent.ToolWaitTimeoutSeconds)
+			h.mcpServer.ConfigureToolResultMaxBytes(h.config.MultiAgent.EinoMiddleware.ReductionMaxLengthForTruncEffective())
+			h.mcpServer.ConfigureToolResultSpillRoot(h.config.MultiAgent.EinoMiddleware.ReductionRootDir)
+		}
+		if h.externalMCPMgr != nil {
+			h.externalMCPMgr.ConfigureToolWaitTimeoutSeconds(h.config.Agent.ToolWaitTimeoutSeconds)
+			h.externalMCPMgr.ConfigureToolResultMaxBytes(h.config.MultiAgent.EinoMiddleware.ReductionMaxLengthForTruncEffective())
+			h.externalMCPMgr.ConfigureToolResultSpillRoot(h.config.MultiAgent.EinoMiddleware.ReductionRootDir)
+			h.externalMCPMgr.ConfigureResilience(mcp.ExternalMCPResilienceConfig{
+				MaxConcurrentPerServer:  h.config.Agent.ExternalMCPMaxConcurrentPerServer,
+				MaxConcurrentTotal:      h.config.Agent.ExternalMCPMaxConcurrentTotal,
+				CircuitFailureThreshold: h.config.Agent.ExternalMCPCircuitFailureThreshold,
+				CircuitCooldown:         time.Duration(h.config.Agent.ExternalMCPCircuitCooldownSeconds) * time.Second,
+			})
 		}
 	}
 
-	// Updating Knowledge config
+	if req.Hitl != nil {
+		h.config.Hitl.AuditModel = req.Hitl.AuditModel
+		h.config.Hitl.ToolWhitelist = mergeHitlToolWhitelistSlice(nil, req.Hitl.ToolWhitelist)
+		h.config.Hitl.DefaultReviewer = req.Hitl.EffectiveDefaultReviewer()
+		h.config.Hitl.AuditAgentPrompt = strings.TrimSpace(req.Hitl.AuditAgentPrompt)
+		h.config.Hitl.AuditAgentPromptReviewEdit = strings.TrimSpace(req.Hitl.AuditAgentPromptReviewEdit)
+		if req.Hitl.RetentionDays != nil {
+			v := *req.Hitl.RetentionDays
+			if v < 0 {
+				v = 0
+			}
+			h.config.Hitl.RetentionDays = &v
+		}
+		h.logger.Info("更新HITL配置",
+			zap.String("default_reviewer", h.config.Hitl.DefaultReviewer),
+			zap.Int("tool_whitelist", len(h.config.Hitl.ToolWhitelist)),
+		)
+	}
+
+	// 更新Knowledge配置
 	if req.Knowledge != nil {
 		// 保存旧的嵌入模型配置（用于检测变更）
 		if h.config.Knowledge.Enabled {
@@ -788,7 +913,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 			}
 		}
 		h.config.Knowledge = *req.Knowledge
-		h.logger.Info("Updating Knowledge config",
+		h.logger.Info("更新Knowledge配置",
 			zap.Bool("enabled", h.config.Knowledge.Enabled),
 			zap.String("base_path", h.config.Knowledge.BasePath),
 			zap.String("embedding_model", h.config.Knowledge.Embedding.Model),
@@ -797,14 +922,23 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 		)
 	}
 
-	// Updating Robot config
+	// 更新机器人配置
 	if req.Robots != nil {
 		if err := config.ValidateWecomConfig(req.Robots.Wecom); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		if err := config.ValidateRobotsAuthorization(*req.Robots); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := h.validateRobotServiceAccounts(*req.Robots); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		h.config.Robots = *req.Robots
-		h.logger.Info("Updating Robot config",
+		h.logger.Info("更新机器人配置",
+			zap.Bool("wechat_enabled", h.config.Robots.Wechat.Enabled),
 			zap.Bool("wecom_enabled", h.config.Robots.Wecom.Enabled),
 			zap.Bool("dingtalk_enabled", h.config.Robots.Dingtalk.Enabled),
 			zap.Bool("lark_enabled", h.config.Robots.Lark.Enabled),
@@ -818,7 +952,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 	if req.C2 != nil {
 		v := req.C2.Enabled
 		h.config.C2.Enabled = &v
-		h.logger.Info("Updating C2 config", zap.Bool("enabled", v))
+		h.logger.Info("更新C2配置", zap.Bool("enabled", v))
 	}
 
 	// 多代理标量（sub_agents 等仍由 config.yaml 维护）
@@ -833,19 +967,59 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 		if req.MultiAgent.PlanExecuteLoopMaxIterations != nil {
 			h.config.MultiAgent.PlanExecuteLoopMaxIterations = *req.MultiAgent.PlanExecuteLoopMaxIterations
 		}
+		if req.MultiAgent.SummarizationUserIntentLedgerMaxRunes != nil {
+			v := *req.MultiAgent.SummarizationUserIntentLedgerMaxRunes
+			if v < 0 {
+				v = 0
+			}
+			h.config.MultiAgent.EinoMiddleware.SummarizationUserIntentLedgerMaxRunes = v
+		}
+		if req.MultiAgent.SummarizationUserIntentLedgerEntryMaxRunes != nil {
+			v := *req.MultiAgent.SummarizationUserIntentLedgerEntryMaxRunes
+			if v < 0 {
+				v = 0
+			}
+			h.config.MultiAgent.EinoMiddleware.SummarizationUserIntentLedgerEntryMaxRunes = v
+		}
+		if req.MultiAgent.LatestUserMessageMaxRunes != nil {
+			v := *req.MultiAgent.LatestUserMessageMaxRunes
+			if v < 0 {
+				v = 0
+			}
+			h.config.MultiAgent.EinoMiddleware.LatestUserMessageMaxRunes = v
+		}
+		if req.MultiAgent.LatestUserMessageHeadRunes != nil {
+			v := *req.MultiAgent.LatestUserMessageHeadRunes
+			if v < 0 {
+				v = 0
+			}
+			h.config.MultiAgent.EinoMiddleware.LatestUserMessageHeadRunes = v
+		}
+		if req.MultiAgent.LatestUserMessageTailRunes != nil {
+			v := *req.MultiAgent.LatestUserMessageTailRunes
+			if v < 0 {
+				v = 0
+			}
+			h.config.MultiAgent.EinoMiddleware.LatestUserMessageTailRunes = v
+		}
 		if req.MultiAgent.ToolSearchAlwaysVisibleTools != nil {
 			h.config.MultiAgent.EinoMiddleware.ToolSearchAlwaysVisibleTools = dedupeToolNameList(*req.MultiAgent.ToolSearchAlwaysVisibleTools)
 		}
-		h.logger.Info("Updating multi-agent config",
+		h.logger.Info("更新多代理配置",
 			zap.Bool("enabled", h.config.MultiAgent.Enabled),
 			zap.String("robot_default_agent_mode", config.NormalizeRobotAgentMode(h.config.MultiAgent)),
 			zap.Bool("batch_use_multi_agent", h.config.MultiAgent.BatchUseMultiAgent),
 			zap.Int("plan_execute_loop_max_iterations", h.config.MultiAgent.PlanExecuteLoopMaxIterations),
+			zap.Int("summarization_user_intent_ledger_max_runes", h.config.MultiAgent.EinoMiddleware.SummarizationUserIntentLedgerMaxRunesEffective()),
+			zap.Int("summarization_user_intent_ledger_entry_max_runes", h.config.MultiAgent.EinoMiddleware.SummarizationUserIntentLedgerEntryMaxRunesEffective()),
+			zap.Int("latest_user_message_max_runes", h.config.MultiAgent.EinoMiddleware.LatestUserMessageMaxRunesEffective()),
+			zap.Int("latest_user_message_head_runes", h.config.MultiAgent.EinoMiddleware.LatestUserMessageHeadRunesEffective()),
+			zap.Int("latest_user_message_tail_runes", h.config.MultiAgent.EinoMiddleware.LatestUserMessageTailRunesEffective()),
 			zap.Int("tool_search_always_visible_tools", len(h.config.MultiAgent.EinoMiddleware.ToolSearchAlwaysVisibleTools)),
 		)
 	}
 
-	// Updating tool enabled status
+	// 更新工具启用状态
 	if req.Tools != nil {
 		// 分离内部工具和外部工具
 		internalToolMap := make(map[string]bool)
@@ -870,7 +1044,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 		for i := range h.config.Security.Tools {
 			if enabled, ok := internalToolMap[h.config.Security.Tools[i].Name]; ok {
 				h.config.Security.Tools[i].Enabled = enabled
-				h.logger.Info("Updating tool enabled status",
+				h.logger.Info("更新工具启用状态",
 					zap.String("tool", h.config.Security.Tools[i].Name),
 					zap.Bool("enabled", enabled),
 				)
@@ -886,7 +1060,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 				}
 				cfg, exists := h.config.ExternalMCP.Servers[mcpName]
 				if !exists {
-					h.logger.Warn("External MCP config not found", zap.String("mcp", mcpName))
+					h.logger.Warn("外部MCP配置不存在", zap.String("mcp", mcpName))
 					continue
 				}
 
@@ -898,7 +1072,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 				// 更新每个工具的启用状态
 				for toolName, enabled := range toolStates {
 					cfg.ToolEnabled[toolName] = enabled
-					h.logger.Info("Updating external tool enabled status",
+					h.logger.Info("更新外部工具启用状态",
 						zap.String("mcp", mcpName),
 						zap.String("tool", toolName),
 						zap.Bool("enabled", enabled),
@@ -918,7 +1092,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 				// 如果MCP之前已启用，保持启用状态（允许部分工具禁用）
 				if !cfg.ExternalMCPEnable && hasEnabledTool {
 					cfg.ExternalMCPEnable = true
-					h.logger.Info("Auto-enabling external MCP (tool enabled)", zap.String("mcp", mcpName))
+					h.logger.Info("自动启用外部MCP（因为有工具启用）", zap.String("mcp", mcpName))
 				}
 
 				h.config.ExternalMCP.Servers[mcpName] = cfg
@@ -933,17 +1107,17 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 				cfg := h.config.ExternalMCP.Servers[mcpName]
 				// 如果MCP需要启用，确保客户端已启动
 				if cfg.ExternalMCPEnable {
-					// Starting external MCP（如果未启动）- 异步执行，避免阻塞
+					// 启动外部MCP（如果未启动）- 异步执行，避免阻塞
 					client, exists := h.externalMCPMgr.GetClient(mcpName)
 					if !exists || !client.IsConnected() {
 						go func(name string) {
 							if err := h.externalMCPMgr.StartClient(name); err != nil {
-								h.logger.Warn("Failed to start external MCP",
+								h.logger.Warn("启动外部MCP失败",
 									zap.String("mcp", name),
 									zap.Error(err),
 								)
 							} else {
-								h.logger.Info("Starting external MCP",
+								h.logger.Info("启动外部MCP",
 									zap.String("mcp", name),
 								)
 							}
@@ -956,15 +1130,15 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 
 	// 保存配置到文件
 	if err := h.saveConfig(); err != nil {
-		h.logger.Error("Failed to save config", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save config: " + err.Error()})
+		h.logger.Error("保存配置失败", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存配置失败: " + err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Config updated"})
 	if h.audit != nil {
-		h.audit.RecordOK(c, "config", "update", "Updated in-memory config", "config", "", nil)
+		h.audit.RecordOK(c, "config", "update", "更新内存配置", "config", "", nil)
 	}
+	c.JSON(http.StatusOK, gin.H{"message": "配置已更新"})
 }
 
 // TestOpenAIRequest 测试OpenAI连接请求
@@ -979,16 +1153,16 @@ type TestOpenAIRequest struct {
 func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 	var req TestOpenAIRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
 		return
 	}
 
 	if strings.TrimSpace(req.APIKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key cannot be empty"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key 不能为空"})
 		return
 	}
 	if strings.TrimSpace(req.Model) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Model cannot be empty"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "模型不能为空"})
 		return
 	}
 
@@ -1041,14 +1215,14 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 		if apiErr, ok := err.(*openai.APIError); ok {
 			c.JSON(http.StatusOK, gin.H{
 				"success":     false,
-				"error":       fmt.Sprintf("API returned error (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
+				"error":       fmt.Sprintf("API 返回错误 (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
 				"status_code": apiErr.StatusCode,
 			})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"error":   "Connection failed: " + err.Error(),
+			"error":   "连接失败: " + err.Error(),
 		})
 		return
 	}
@@ -1057,7 +1231,7 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 	if len(chatResp.Choices) == 0 {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"error":   "API response missing choices field, check Base URL path",
+			"error":   "API 响应缺少 choices 字段，请检查 Base URL 路径是否正确",
 		})
 		return
 	}
@@ -1262,12 +1436,12 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 		if _, err := knowledgeInitializer(); err != nil {
 			h.logger.Error("动态初始化知识库失败", zap.Error(err))
 			if h.audit != nil {
-				h.audit.RecordFail(c, "config", "apply", "Config apply failed: initialize knowledge base", map[string]interface{}{"error": err.Error()})
+				h.audit.RecordFail(c, "config", "apply", "应用配置失败：初始化知识库", map[string]interface{}{"error": err.Error()})
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initialize knowledge base: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "初始化知识库失败: " + err.Error()})
 			return
 		}
-		h.logger.Info("Knowledge base dynamic init complete, tools registered")
+		h.logger.Debug("知识库动态初始化完成，工具已注册")
 	}
 
 	// 检查嵌入模型配置是否变更（需要在锁外执行，避免阻塞）
@@ -1299,12 +1473,12 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 		if _, err := reinitKnowledgeInitializer(); err != nil {
 			h.logger.Error("重新初始化知识库失败", zap.Error(err))
 			if h.audit != nil {
-				h.audit.RecordFail(c, "config", "apply", "Config apply failed: re-initialize knowledge base", map[string]interface{}{"error": err.Error()})
+				h.audit.RecordFail(c, "config", "apply", "应用配置失败：重新初始化知识库", map[string]interface{}{"error": err.Error()})
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to re-initialize knowledge base: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "重新初始化知识库失败: " + err.Error()})
 			return
 		}
-		h.logger.Info("Knowledge base components reinitialized")
+		h.logger.Info("知识库组件重新初始化完成")
 	}
 
 	// C2：在 ClearTools 之前按配置启停（随后由 c2ToolRegistrar 注册 MCP 工具）
@@ -1313,11 +1487,11 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 	h.mu.RUnlock()
 	if c2Rt != nil {
 		if err := c2Rt.ReconcileC2AfterConfigApply(); err != nil {
-			h.logger.Error("C2 config apply failed", zap.Error(err))
+			h.logger.Error("C2 配置应用失败", zap.Error(err))
 			if h.audit != nil {
-				h.audit.RecordFail(c, "config", "apply", "Config apply failed: C2", map[string]interface{}{"error": err.Error()})
+				h.audit.RecordFail(c, "config", "apply", "应用配置失败：C2", map[string]interface{}{"error": err.Error()})
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "C2 start failed: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "C2 启动失败: " + err.Error()})
 			return
 		}
 	}
@@ -1346,16 +1520,19 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "重新加载工具配置失败: " + err.Error()})
 		return
 	}
-	h.logger.Info("已从 tools 目录重新加载工具配置", zap.Int("tools_count", len(h.config.Security.Tools)))
+	h.logger.Debug("已从 tools 目录重新加载工具配置", zap.Int("tools_count", len(h.config.Security.Tools)))
 
 	// 重新注册工具（根据新的启用状态）
-	h.logger.Info("重新注册工具")
+	h.logger.Debug("重新注册工具")
 
 	// 清空MCP服务器中的工具
 	h.mcpServer.ClearTools()
 
 	// 重新注册安全工具
+	h.executor.SetToolOutputMaxBytes(h.config.MultiAgent.EinoMiddleware.ReductionMaxLengthForTruncEffective())
+	h.executor.SetToolOutputSpillRoot(h.config.MultiAgent.EinoMiddleware.ReductionRootDir)
 	h.executor.RegisterTools(h.mcpServer)
+	mcp.RegisterExecutionControlTools(h.mcpServer, h.externalMCPMgr)
 
 	// 重新注册漏洞记录工具（内置工具，必须注册）
 	if h.vulnerabilityToolRegistrar != nil {
@@ -1422,23 +1599,41 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 		h.agent.UpdateConfig(&h.config.OpenAI)
 		h.agent.UpdateMaxIterations(h.config.Agent.MaxIterations)
 		h.agent.UpdateToolDescriptionMode(h.config.Security.ToolDescriptionMode)
-		h.logger.Info("AgentConfig updated")
+		h.logger.Info("Agent配置已更新")
 	}
 	if h.mcpServer != nil {
 		h.mcpServer.ConfigureHTTPToolCallTimeoutFromAgentMinutes(h.config.Agent.ToolTimeoutMinutes)
+		h.mcpServer.ConfigureToolWaitTimeoutSeconds(h.config.Agent.ToolWaitTimeoutSeconds)
+		h.mcpServer.ConfigureToolResultMaxBytes(h.config.MultiAgent.EinoMiddleware.ReductionMaxLengthForTruncEffective())
+		h.mcpServer.ConfigureToolResultSpillRoot(h.config.MultiAgent.EinoMiddleware.ReductionRootDir)
+	}
+	if h.executor != nil {
+		h.executor.SetToolOutputMaxBytes(h.config.MultiAgent.EinoMiddleware.ReductionMaxLengthForTruncEffective())
+		h.executor.SetToolOutputSpillRoot(h.config.MultiAgent.EinoMiddleware.ReductionRootDir)
+	}
+	if h.externalMCPMgr != nil {
+		h.externalMCPMgr.ConfigureToolWaitTimeoutSeconds(h.config.Agent.ToolWaitTimeoutSeconds)
+		h.externalMCPMgr.ConfigureToolResultMaxBytes(h.config.MultiAgent.EinoMiddleware.ReductionMaxLengthForTruncEffective())
+		h.externalMCPMgr.ConfigureToolResultSpillRoot(h.config.MultiAgent.EinoMiddleware.ReductionRootDir)
+		h.externalMCPMgr.ConfigureResilience(mcp.ExternalMCPResilienceConfig{
+			MaxConcurrentPerServer:  h.config.Agent.ExternalMCPMaxConcurrentPerServer,
+			MaxConcurrentTotal:      h.config.Agent.ExternalMCPMaxConcurrentTotal,
+			CircuitFailureThreshold: h.config.Agent.ExternalMCPCircuitFailureThreshold,
+			CircuitCooldown:         time.Duration(h.config.Agent.ExternalMCPCircuitCooldownSeconds) * time.Second,
+		})
 	}
 
 	// 更新AttackChainHandler的OpenAI配置
 	if h.attackChainHandler != nil {
 		h.attackChainHandler.UpdateConfig(&h.config.OpenAI)
-		h.logger.Info("AttackChainHandlerConfig updated")
+		h.logger.Info("AttackChainHandler配置已更新")
 	}
 
 	// 更新检索器配置（如果知识库启用）
 	if h.config.Knowledge.Enabled && h.retrieverUpdater != nil {
 		retrievalConfig := knowledge.RetrievalConfigFromYAML(h.config.Knowledge.Retrieval)
 		h.retrieverUpdater.UpdateConfig(retrievalConfig)
-		h.logger.Info("检索器Config updated",
+		h.logger.Info("检索器配置已更新",
 			zap.Int("top_k", retrievalConfig.TopK),
 			zap.Float64("similarity_threshold", retrievalConfig.SimilarityThreshold),
 		)
@@ -1454,7 +1649,7 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 		}
 	}
 
-	// 重启钉钉/飞书长连接，使前端修改的机器人配置立即生效（None需重启服务）
+	// 重启钉钉/飞书长连接，使前端修改的机器人配置立即生效（无需重启服务）
 	if h.robotRestarter != nil {
 		h.robotRestarter.RestartRobotConnections()
 		h.logger.Info("已触发机器人连接重启（钉钉/飞书）")
@@ -1489,23 +1684,27 @@ func (h *ConfigHandler) saveConfig() error {
 	// 读取现有配置文件并创建备份
 	data, err := os.ReadFile(h.configPath)
 	if err != nil {
-		return fmt.Errorf("Failed to read config file: %w", err)
+		return fmt.Errorf("读取配置文件失败: %w", err)
 	}
 
 	if err := os.WriteFile(h.configPath+".backup", data, 0644); err != nil {
-		h.logger.Warn("Failed to create config backup", zap.Error(err))
+		h.logger.Warn("创建配置备份失败", zap.Error(err))
 	}
 
 	root, err := loadYAMLDocument(h.configPath)
 	if err != nil {
-		return fmt.Errorf("Failed to parse config file: %w", err)
+		return fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
 	updateAgentConfig(root, h.config.Agent)
 	updateMCPConfig(root, h.config.MCP)
-	updateOpenAIConfig(root, h.config.OpenAI)
+	updateAIConfig(root, h.config.AI)
+	removeKeyFromMap(root.Content[0], "openai")
 	updateVisionConfig(root, h.config.Vision)
 	updateFOFAConfig(root, h.config.FOFA)
+	updateSpaceSearchConfig(root, "zoomeye", h.config.ZoomEye)
+	updateSpaceSearchConfig(root, "quake", h.config.Quake)
+	updateSpaceSearchConfig(root, "shodan", h.config.Shodan)
 	updateKnowledgeConfig(root, h.config.Knowledge)
 	updateC2Config(root, h.config.C2)
 	updateRobotsConfig(root, h.config.Robots)
@@ -1515,7 +1714,7 @@ func (h *ConfigHandler) saveConfig() error {
 	updateExternalMCPConfig(root, h.config.ExternalMCP)
 
 	if err := writeYAMLDocument(h.configPath, root); err != nil {
-		return fmt.Errorf("Failed to save config file: %w", err)
+		return fmt.Errorf("保存配置文件失败: %w", err)
 	}
 
 	// 更新工具配置文件中的enabled状态
@@ -1533,7 +1732,7 @@ func (h *ConfigHandler) saveConfig() error {
 				// 尝试.yml扩展名
 				toolFile = filepath.Join(toolsDir, tool.Name+".yml")
 				if _, err := os.Stat(toolFile); os.IsNotExist(err) {
-					h.logger.Warn("工具配置File not found", zap.String("tool", tool.Name))
+					h.logger.Warn("工具配置文件不存在", zap.String("tool", tool.Name))
 					continue
 				}
 			}
@@ -1555,7 +1754,7 @@ func (h *ConfigHandler) saveConfig() error {
 		}
 	}
 
-	h.logger.Info("配置Saved", zap.String("path", h.configPath))
+	h.logger.Info("配置已保存", zap.String("path", h.configPath))
 	return nil
 }
 
@@ -1612,6 +1811,11 @@ func updateAgentConfig(doc *yaml.Node, agent config.AgentConfig) {
 	agentNode := ensureMap(root, "agent")
 	setIntInMap(agentNode, "max_iterations", agent.MaxIterations)
 	setIntInMap(agentNode, "tool_timeout_minutes", agent.ToolTimeoutMinutes)
+	setIntInMap(agentNode, "tool_wait_timeout_seconds", agent.ToolWaitTimeoutSeconds)
+	setIntInMap(agentNode, "external_mcp_max_concurrent_per_server", agent.ExternalMCPMaxConcurrentPerServer)
+	setIntInMap(agentNode, "external_mcp_max_concurrent_total", agent.ExternalMCPMaxConcurrentTotal)
+	setIntInMap(agentNode, "external_mcp_circuit_failure_threshold", agent.ExternalMCPCircuitFailureThreshold)
+	setIntInMap(agentNode, "external_mcp_circuit_cooldown_seconds", agent.ExternalMCPCircuitCooldownSeconds)
 	setStringInMap(agentNode, "system_prompt_path", agent.SystemPromptPath)
 }
 
@@ -1689,12 +1893,82 @@ func updateOpenAIConfig(doc *yaml.Node, cfg config.OpenAIConfig) {
 	}
 }
 
+func updateAIConfig(doc *yaml.Node, cfg config.AIConfig) {
+	root := doc.Content[0]
+	aiNode := ensureMap(root, "ai")
+	if strings.TrimSpace(cfg.DefaultChannel) != "" {
+		setStringInMap(aiNode, "default_channel", config.NormalizeAIChannelID(cfg.DefaultChannel))
+	}
+	channelsNode := ensureMap(aiNode, "channels")
+	channelsNode.Content = nil
+	normalized := make(map[string]config.AIChannelConfig, len(cfg.Channels))
+	ids := make([]string, 0, len(cfg.Channels))
+	for id, ch := range cfg.Channels {
+		nid := config.NormalizeAIChannelID(id)
+		if nid == "" {
+			continue
+		}
+		if _, exists := normalized[nid]; !exists {
+			ids = append(ids, nid)
+		}
+		normalized[nid] = ch
+	}
+	sort.Strings(ids)
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ch := normalized[id]
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: id}
+		channelNode := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		channelsNode.Content = append(channelsNode.Content, keyNode, channelNode)
+		setStringInMap(channelNode, "name", ch.Name)
+		if strings.TrimSpace(ch.Provider) != "" {
+			setStringInMap(channelNode, "provider", ch.Provider)
+		}
+		setStringInMap(channelNode, "api_key", ch.APIKey)
+		setStringInMap(channelNode, "base_url", ch.BaseURL)
+		setStringInMap(channelNode, "model", ch.Model)
+		if ch.MaxTotalTokens > 0 {
+			setIntInMap(channelNode, "max_total_tokens", ch.MaxTotalTokens)
+		}
+		if ch.MaxCompletionTokens > 0 {
+			setIntInMap(channelNode, "max_completion_tokens", ch.MaxCompletionTokens)
+		}
+		rn := ensureMap(channelNode, "reasoning")
+		if strings.TrimSpace(ch.Reasoning.Mode) != "" {
+			setStringInMap(rn, "mode", ch.Reasoning.Mode)
+		}
+		if strings.TrimSpace(ch.Reasoning.Effort) != "" {
+			setStringInMap(rn, "effort", ch.Reasoning.Effort)
+		}
+		if ch.Reasoning.AllowClientReasoning != nil {
+			setBoolInMap(rn, "allow_client_reasoning", *ch.Reasoning.AllowClientReasoning)
+		}
+		if strings.TrimSpace(ch.Reasoning.Profile) != "" {
+			setStringInMap(rn, "profile", ch.Reasoning.Profile)
+		}
+		if len(rn.Content) == 0 {
+			removeKeyFromMap(channelNode, "reasoning")
+		}
+	}
+}
+
 func updateFOFAConfig(doc *yaml.Node, cfg config.FofaConfig) {
 	root := doc.Content[0]
 	fofaNode := ensureMap(root, "fofa")
 	setStringInMap(fofaNode, "base_url", cfg.BaseURL)
-	setStringInMap(fofaNode, "email", cfg.Email)
+	removeKeyFromMap(fofaNode, "email")
 	setStringInMap(fofaNode, "api_key", cfg.APIKey)
+}
+
+func updateSpaceSearchConfig(doc *yaml.Node, key string, cfg config.SpaceSearchConfig) {
+	root := doc.Content[0]
+	node := ensureMap(root, key)
+	setStringInMap(node, "base_url", cfg.BaseURL)
+	setStringInMap(node, "api_key", cfg.APIKey)
 }
 
 func updateKnowledgeConfig(doc *yaml.Node, cfg config.KnowledgeConfig) {
@@ -1804,9 +2078,15 @@ func (h *ConfigHandler) MergeHitlToolWhitelistIntoConfig(add []string) error {
 func updateHitlConfig(doc *yaml.Node, cfg config.HitlConfig) {
 	root := doc.Content[0]
 	hitlNode := ensureMap(root, "hitl")
+	auditModelNode := ensureMap(hitlNode, "audit_model")
+	setStringInMap(auditModelNode, "provider", cfg.AuditModel.Provider)
+	setStringInMap(auditModelNode, "base_url", cfg.AuditModel.BaseURL)
+	setStringInMap(auditModelNode, "api_key", cfg.AuditModel.APIKey)
+	setStringInMap(auditModelNode, "model", cfg.AuditModel.Model)
 	// flow 样式 [a, b, c] 单行展示，工具多时比块序列省行数
 	setFlowStringSliceInMap(hitlNode, "tool_whitelist", cfg.ToolWhitelist)
 	setStringInMap(hitlNode, "default_reviewer", cfg.EffectiveDefaultReviewer())
+	setIntInMap(hitlNode, "retention_days", cfg.RetentionDaysEffective())
 	setStringInMap(hitlNode, "audit_agent_prompt", cfg.AuditAgentPrompt)
 	setStringInMap(hitlNode, "audit_agent_prompt_review_edit", cfg.AuditAgentPromptReviewEdit)
 }
@@ -1906,6 +2186,11 @@ func updateMultiAgentConfig(doc *yaml.Node, cfg config.MultiAgentConfig) {
 	setBoolInMap(maNode, "batch_use_multi_agent", cfg.BatchUseMultiAgent)
 	setIntInMap(maNode, "plan_execute_loop_max_iterations", cfg.PlanExecuteLoopMaxIterations)
 	mwNode := ensureMap(maNode, "eino_middleware")
+	setIntInMap(mwNode, "summarization_user_intent_ledger_max_runes", cfg.EinoMiddleware.SummarizationUserIntentLedgerMaxRunesEffective())
+	setIntInMap(mwNode, "summarization_user_intent_ledger_entry_max_runes", cfg.EinoMiddleware.SummarizationUserIntentLedgerEntryMaxRunesEffective())
+	setIntInMap(mwNode, "latest_user_message_max_runes", cfg.EinoMiddleware.LatestUserMessageMaxRunesEffective())
+	setIntInMap(mwNode, "latest_user_message_head_runes", cfg.EinoMiddleware.LatestUserMessageHeadRunesEffective())
+	setIntInMap(mwNode, "latest_user_message_tail_runes", cfg.EinoMiddleware.LatestUserMessageTailRunesEffective())
 	setFlowStringSliceInMap(mwNode, "tool_search_always_visible_tools", dedupeToolNameList(cfg.EinoMiddleware.ToolSearchAlwaysVisibleTools))
 }
 
@@ -1994,6 +2279,18 @@ func setStringInMap(mapNode *yaml.Node, key, value string) {
 	valueNode.Tag = "!!str"
 	valueNode.Style = 0
 	valueNode.Value = value
+}
+
+func removeKeyFromMap(mapNode *yaml.Node, key string) {
+	if mapNode == nil || mapNode.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(mapNode.Content); i += 2 {
+		if mapNode.Content[i].Value == key {
+			mapNode.Content = append(mapNode.Content[:i], mapNode.Content[i+2:]...)
+			return
+		}
+	}
 }
 
 func setStringSliceInMap(mapNode *yaml.Node, key string, values []string) {
@@ -2088,8 +2385,7 @@ func setFloatInMap(mapNode *yaml.Node, key string, value float64) {
 	}
 }
 
-// getExternalMCPTools gets the external MCP tool list (public method).
-// Returns ToolConfigInfo list with enabled status and Description processed.
+// getExternalMCPTools 获取外部MCP工具列表（公共方法）
 func (h *ConfigHandler) getExternalMCPTools(ctx context.Context) []ToolConfigInfo {
 	if h.externalMCPMgr == nil {
 		return nil
@@ -2190,8 +2486,8 @@ func (h *ConfigHandler) calculateExternalToolEnabledWithManager(
 	return true
 }
 
-// pickToolDescription selects short or full description based on security.tool_description_mode and limits length.
-// Callers holding h.mu read lock should read mode directly and call pickToolDescriptionWithMode to avoid nested RLock deadlock.
+// pickToolDescription 根据 security.tool_description_mode 选择 short 或 full 描述并限制长度。
+// 调用方若已持有 h.mu 读锁，须直接读 mode 并调用 pickToolDescriptionWithMode，避免嵌套 RLock 死锁。
 func (h *ConfigHandler) pickToolDescription(shortDesc, fullDesc string) string {
 	return pickToolDescriptionWithMode(h.config.Security.ToolDescriptionMode, shortDesc, fullDesc)
 }
@@ -2214,7 +2510,7 @@ func pickToolDescriptionWithMode(mode, shortDesc, fullDesc string) string {
 func (h *ConfigHandler) GetToolSchema(c *gin.Context) {
 	toolName := c.Param("name")
 	if toolName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Tool name cannot be empty"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "工具名称不能为空"})
 		return
 	}
 
@@ -2236,7 +2532,7 @@ func (h *ConfigHandler) GetToolSchema(c *gin.Context) {
 				}
 			}
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": "External tool not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "外部工具未找到"})
 		return
 	}
 
@@ -2262,7 +2558,7 @@ func (h *ConfigHandler) GetToolSchema(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusNotFound, gin.H{"error": "Tool not found"})
+	c.JSON(http.StatusNotFound, gin.H{"error": "工具未找到"})
 }
 
 // buildInputSchemaFromParams 从 YAML 工具的 ParameterConfig 构建 JSON Schema（用于前端展示）。

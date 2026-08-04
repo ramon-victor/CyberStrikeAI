@@ -611,6 +611,7 @@ func (h *AgentHandler) ListHITLPending(c *gin.Context) {
 	offset := (page - 1) * pageSize
 	q, args := h.buildHitlListQuery(false)
 	q, args = h.appendHitlListFilters(q, args, c)
+	q, args = appendConversationAccessSQL(q, args, "conversation_id", notificationAccessFromContext(c))
 	total, err := h.countHitlQuery(q, args)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -649,6 +650,10 @@ func (h *AgentHandler) DecideHITLInterrupt(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "hitl manager unavailable"})
 		return
 	}
+	if !h.hitlInterruptAllowed(c, req.InterruptID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		return
+	}
 	if err := h.hitlManager.ResolveInterrupt(req.InterruptID, req.Decision, req.Comment, req.EditedArguments); err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
@@ -671,6 +676,10 @@ func (h *AgentHandler) DismissHITLInterrupt(c *gin.Context) {
 	}
 	if h.hitlManager == nil {
 		c.JSON(500, gin.H{"error": "hitl manager unavailable"})
+		return
+	}
+	if !h.hitlInterruptAllowed(c, req.InterruptID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
 		return
 	}
 	res, err := h.db.Exec(`UPDATE hitl_interrupts SET status='cancelled', decision='reject',
@@ -728,7 +737,6 @@ func (h *AgentHandler) interceptHITLForEinoTool(runCtx context.Context, cancelRu
 	return arguments, nil
 }
 
-
 type hitlConfigReq struct {
 	ConversationID string `json:"conversationId" binding:"required"`
 	HITLRequest
@@ -738,6 +746,10 @@ func (h *AgentHandler) GetHITLConversationConfig(c *gin.Context) {
 	conversationID := strings.TrimSpace(c.Param("conversationId"))
 	if conversationID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "conversationId is required"})
+		return
+	}
+	if !h.hitlConversationAllowed(c, conversationID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
 		return
 	}
 	cfg, err := h.loadHITLConversationConfig(conversationID)
@@ -768,6 +780,10 @@ func (h *AgentHandler) UpsertHITLConversationConfig(c *gin.Context) {
 	var req hitlConfigReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !h.hitlConversationAllowed(c, req.ConversationID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
 		return
 	}
 	req.Mode = normalizeHitlMode(req.Mode)
@@ -868,8 +884,8 @@ func (h *AgentHandler) SetHITLGlobalToolWhitelist(c *gin.Context) {
 		h.audit.RecordOK(c, "hitl", "tool_whitelist_update", "HITL 全局白名单更新", "hitl_config", "tool_whitelist", nil)
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"ok":                      true,
-		"toolWhitelist":           h.hitlConfigGlobalToolWhitelist(),
+		"ok":                        true,
+		"toolWhitelist":             h.hitlConfigGlobalToolWhitelist(),
 		"hitlGlobalToolWhitelist":   h.hitlConfigGlobalToolWhitelist(),
 		"hitlGlobalWhitelistMerged": false,
 	})

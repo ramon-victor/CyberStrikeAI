@@ -568,7 +568,7 @@ func (h *SkillsHandler) ClearSkillStats(c *gin.Context) {
 
 	h.logger.Info("已清空所有Skills统计信息")
 	c.JSON(http.StatusOK, gin.H{
-		"message": "已清空所有Skills统计信息",
+		"message": "All skill statistics have been cleared",
 	})
 }
 
@@ -593,7 +593,7 @@ func (h *SkillsHandler) ClearSkillStatsByName(c *gin.Context) {
 
 	h.logger.Info("已清空指定skill统计信息", zap.String("skill", skillName))
 	c.JSON(http.StatusOK, gin.H{
-		"message": fmt.Sprintf("已清空skill '%s' 的统计信息", skillName),
+		"message": fmt.Sprintf("Statistics for skill '%s' have been cleared", skillName),
 	})
 }
 
@@ -618,7 +618,7 @@ func (h *SkillsHandler) saveRolesConfig() error {
 
 	// 确保目录存在
 	if err := os.MkdirAll(rolesDir, 0755); err != nil {
-		return fmt.Errorf("Creating role目录失败: %w", err)
+		return fmt.Errorf("failed to create role directory: %w", err)
 	}
 
 	// 保存每个角色到独立的文件

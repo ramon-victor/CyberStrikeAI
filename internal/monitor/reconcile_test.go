@@ -32,7 +32,7 @@ func TestExecutionReconciler_ReconcileOnStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetToolExecution: %v", err)
 	}
-	if got.Status != "cancelled" {
-		t.Fatalf("expected cancelled after startup reconcile, got %s", got.Status)
+	if got.Status != "orphaned" {
+		t.Fatalf("expected orphaned after startup reconcile, got %s", got.Status)
 	}
 }

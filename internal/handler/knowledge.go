@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"cyberstrike-ai/internal/audit"
@@ -50,7 +51,7 @@ func NewKnowledgeHandler(
 func (h *KnowledgeHandler) GetCategories(c *gin.Context) {
 	categories, err := h.manager.GetCategories()
 	if err != nil {
-		h.logger.Error("Failed to get categories", zap.Error(err))
+		h.logger.Error("获取分类失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -58,7 +59,7 @@ func (h *KnowledgeHandler) GetCategories(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"categories": categories})
 }
 
-// GetItems 获取知识项列表（支持按分类分页和关键字搜索，default不返回完整内容）
+// GetItems 获取知识项列表（支持按分类分页和关键字搜索，默认不返回完整内容）
 func (h *KnowledgeHandler) GetItems(c *gin.Context) {
 	category := c.Query("category")
 	searchKeyword := c.Query("search") // 搜索关键字
@@ -67,7 +68,7 @@ func (h *KnowledgeHandler) GetItems(c *gin.Context) {
 	if searchKeyword != "" {
 		items, err := h.manager.SearchItemsByKeyword(searchKeyword, category)
 		if err != nil {
-			h.logger.Error("Failed to search knowledge items", zap.Error(err))
+			h.logger.Error("搜索知识项失败", zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -77,7 +78,7 @@ func (h *KnowledgeHandler) GetItems(c *gin.Context) {
 		for _, item := range items {
 			cat := item.Category
 			if cat == "" {
-				cat = "Uncategorized"
+				cat = "未分类"
 			}
 			groupedByCategory[cat] = append(groupedByCategory[cat], item)
 		}
@@ -111,10 +112,10 @@ func (h *KnowledgeHandler) GetItems(c *gin.Context) {
 	}
 
 	// 分页模式：categoryPage=true 表示按分类分页，否则按项分页（向后兼容）
-	categoryPageMode := c.Query("categoryPage") != "false" // default使用分类分页
+	categoryPageMode := c.Query("categoryPage") != "false" // 默认使用分类分页
 
 	// 分页参数
-	limit := 50 // default每页 50 条（分类分页时为分类数，项分页时为项数）
+	limit := 50 // 默认每页 50 条（分类分页时为分类数，项分页时为项数）
 	offset := 0
 	if limitStr := c.Query("limit"); limitStr != "" {
 		if parsed, err := parseInt(limitStr); err == nil && parsed > 0 && parsed <= 500 {
@@ -132,7 +133,7 @@ func (h *KnowledgeHandler) GetItems(c *gin.Context) {
 		// 单分类模式：返回该分类的所有知识项（不分页）
 		items, total, err := h.manager.GetItemsSummary(category, 0, 0)
 		if err != nil {
-			h.logger.Error("Failed to get knowledge items", zap.Error(err))
+			h.logger.Error("获取知识项失败", zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -156,15 +157,15 @@ func (h *KnowledgeHandler) GetItems(c *gin.Context) {
 	}
 
 	if categoryPageMode {
-		// 按分类分页模式（default）
+		// 按分类分页模式（默认）
 		// limit 表示每页分类数，推荐 5-10 个分类
 		if limit <= 0 || limit > 100 {
-			limit = 10 // default每页 10 个分类
+			limit = 10 // 默认每页 10 个分类
 		}
 
 		categoriesWithItems, totalCategories, err := h.manager.GetCategoriesWithItems(limit, offset)
 		if err != nil {
-			h.logger.Error("Failed to get category knowledge items", zap.Error(err))
+			h.logger.Error("获取分类知识项失败", zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -179,14 +180,14 @@ func (h *KnowledgeHandler) GetItems(c *gin.Context) {
 	}
 
 	// 按项分页模式（向后兼容）
-	// 是否包含完整内容（default false，只返回摘要）
+	// 是否包含完整内容（默认 false，只返回摘要）
 	includeContent := c.Query("includeContent") == "true"
 
 	if includeContent {
 		// 返回完整内容（向后兼容）
 		items, err := h.manager.GetItemsWithOptions(category, limit, offset, true)
 		if err != nil {
-			h.logger.Error("Failed to get knowledge items", zap.Error(err))
+			h.logger.Error("获取知识项失败", zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -194,7 +195,7 @@ func (h *KnowledgeHandler) GetItems(c *gin.Context) {
 		// 获取总数
 		total, err := h.manager.GetItemsCount(category)
 		if err != nil {
-			h.logger.Warn("Failed to get knowledge item count", zap.Error(err))
+			h.logger.Warn("获取知识项总数失败", zap.Error(err))
 			total = len(items)
 		}
 
@@ -208,7 +209,7 @@ func (h *KnowledgeHandler) GetItems(c *gin.Context) {
 		// 返回摘要（不包含完整内容，推荐方式）
 		items, total, err := h.manager.GetItemsSummary(category, limit, offset)
 		if err != nil {
-			h.logger.Error("Failed to get knowledge items", zap.Error(err))
+			h.logger.Error("获取知识项失败", zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -228,7 +229,7 @@ func (h *KnowledgeHandler) GetItem(c *gin.Context) {
 
 	item, err := h.manager.GetItem(id)
 	if err != nil {
-		h.logger.Error("Failed to get knowledge items", zap.Error(err))
+		h.logger.Error("获取知识项失败", zap.Error(err))
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
@@ -251,7 +252,7 @@ func (h *KnowledgeHandler) CreateItem(c *gin.Context) {
 
 	item, err := h.manager.CreateItem(req.Category, req.Title, req.Content)
 	if err != nil {
-		h.logger.Error("Failed to create knowledge item", zap.Error(err))
+		h.logger.Error("创建知识项失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -260,7 +261,7 @@ func (h *KnowledgeHandler) CreateItem(c *gin.Context) {
 	go func() {
 		ctx := context.Background()
 		if err := h.indexer.IndexItem(ctx, item.ID); err != nil {
-			h.logger.Warn("Failed to index knowledge item", zap.String("itemId", item.ID), zap.Error(err))
+			h.logger.Warn("索引知识项失败", zap.String("itemId", item.ID), zap.Error(err))
 		}
 	}()
 
@@ -284,7 +285,7 @@ func (h *KnowledgeHandler) UpdateItem(c *gin.Context) {
 
 	item, err := h.manager.UpdateItem(id, req.Category, req.Title, req.Content)
 	if err != nil {
-		h.logger.Error("Failed to update knowledge item", zap.Error(err))
+		h.logger.Error("更新知识项失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -293,7 +294,7 @@ func (h *KnowledgeHandler) UpdateItem(c *gin.Context) {
 	go func() {
 		ctx := context.Background()
 		if err := h.indexer.IndexItem(ctx, item.ID); err != nil {
-			h.logger.Warn("Failed to reindex knowledge item", zap.String("itemId", item.ID), zap.Error(err))
+			h.logger.Warn("重新索引知识项失败", zap.String("itemId", item.ID), zap.Error(err))
 		}
 	}()
 
@@ -305,51 +306,86 @@ func (h *KnowledgeHandler) DeleteItem(c *gin.Context) {
 	id := c.Param("id")
 
 	if err := h.manager.DeleteItem(id); err != nil {
-		h.logger.Error("Failed to delete knowledge item", zap.Error(err))
+		h.logger.Error("删除知识项失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	if h.audit != nil {
-		h.audit.RecordOK(c, "knowledge", "item_delete", "Deleted knowledge item", "knowledge_item", id, nil)
+		h.audit.RecordOK(c, "knowledge", "item_delete", "删除知识项", "knowledge_item", id, nil)
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Deleted successfully"})
+	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
 }
 
-// RebuildIndex 重建索引
-func (h *KnowledgeHandler) RebuildIndex(c *gin.Context) {
-	// 异步重建索引
+// StartIndex 构建知识库向量索引。默认仅补齐尚无向量的知识项；mode=full 时全量重建。
+func (h *KnowledgeHandler) StartIndex(c *gin.Context) {
+	if err := h.indexer.TryBeginIndexRun(); err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "已有索引任务正在进行，请等待完成"})
+		return
+	}
+
+	mode := strings.TrimSpace(c.Query("mode"))
+	if mode == "" {
+		mode = "missing"
+	}
+	if mode != "full" && mode != "missing" {
+		h.indexer.FinishIndexRun()
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的 mode 参数，可选值：missing、full"})
+		return
+	}
+
+	fullRebuild := mode == "full"
+	message := "索引构建已开始，将在后台进行"
+	auditAction := "index_build"
+	auditDetail := "构建知识库索引"
+	if fullRebuild {
+		message = "全量索引重建已开始，将在后台进行"
+		auditAction = "index_rebuild_full"
+		auditDetail = "全量重建知识库索引"
+	}
+
 	go func() {
+		defer h.indexer.FinishIndexRun()
 		ctx := context.Background()
-		if err := h.indexer.RebuildIndex(ctx); err != nil {
-			h.logger.Error("Failed to rebuild index", zap.Error(err))
+		var err error
+		if fullRebuild {
+			err = h.indexer.RunRebuildIndex(ctx)
+		} else {
+			err = h.indexer.RunIndexMissing(ctx)
+		}
+		if err != nil {
+			if fullRebuild {
+				h.logger.Error("全量重建索引失败", zap.Error(err))
+			} else {
+				h.logger.Error("构建知识库索引失败", zap.Error(err))
+			}
 		}
 	}()
 
 	if h.audit != nil {
-		h.audit.RecordOK(c, "knowledge", "index_rebuild", "Rebuilt knowledge base index", "knowledge", "", nil)
+		h.audit.RecordOK(c, "knowledge", auditAction, auditDetail, "knowledge", "", nil)
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Index rebuild started, running in background"})
+	c.JSON(http.StatusOK, gin.H{"message": message, "mode": mode})
 }
 
-// ScanKnowledgeBase Scanning knowledge base
+// ScanKnowledgeBase 扫描知识库
 func (h *KnowledgeHandler) ScanKnowledgeBase(c *gin.Context) {
 	itemsToIndex, err := h.manager.ScanKnowledgeBase()
 	if err != nil {
-		h.logger.Error("Failed to scan knowledge base", zap.Error(err))
+		h.logger.Error("扫描知识库失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	if len(itemsToIndex) == 0 {
-		c.JSON(http.StatusOK, gin.H{"message": "Scan complete, no new or updated items to index"})
+		c.JSON(http.StatusOK, gin.H{"message": "扫描完成，没有需要索引的新项或更新项"})
 		return
 	}
 
 	// 异步索引新添加或更新的项（增量索引）
 	go func() {
 		ctx := context.Background()
-		h.logger.Info("Starting incremental index", zap.Int("count", len(itemsToIndex)))
+		h.logger.Info("开始增量索引", zap.Int("count", len(itemsToIndex)))
 		failedCount := 0
 		consecutiveFailures := 0
 		var firstFailureItemID string
@@ -364,7 +400,7 @@ func (h *KnowledgeHandler) ScanKnowledgeBase(c *gin.Context) {
 				if consecutiveFailures == 1 {
 					firstFailureItemID = itemID
 					firstFailureError = err
-					h.logger.Warn("Failed to index knowledge item",
+					h.logger.Warn("索引知识项失败",
 						zap.String("itemId", itemID),
 						zap.Int("totalItems", len(itemsToIndex)),
 						zap.Error(err),
@@ -373,7 +409,7 @@ func (h *KnowledgeHandler) ScanKnowledgeBase(c *gin.Context) {
 
 				// 如果连续失败 2 次，立即停止增量索引
 				if consecutiveFailures >= 2 {
-					h.logger.Error("Too many consecutive index failures, stopping incremental index",
+					h.logger.Error("连续索引失败次数过多，立即停止增量索引",
 						zap.Int("consecutiveFailures", consecutiveFailures),
 						zap.Int("totalItems", len(itemsToIndex)),
 						zap.Int("processedItems", i+1),
@@ -394,10 +430,10 @@ func (h *KnowledgeHandler) ScanKnowledgeBase(c *gin.Context) {
 
 			// 减少进度日志频率
 			if (i+1)%10 == 0 || i+1 == len(itemsToIndex) {
-				h.logger.Info("Index progress", zap.Int("current", i+1), zap.Int("total", len(itemsToIndex)), zap.Int("failed", failedCount))
+				h.logger.Info("索引进度", zap.Int("current", i+1), zap.Int("total", len(itemsToIndex)), zap.Int("failed", failedCount))
 			}
 		}
-		h.logger.Info("Incremental index completed", zap.Int("totalItems", len(itemsToIndex)), zap.Int("failedCount", failedCount))
+		h.logger.Info("增量索引完成", zap.Int("totalItems", len(itemsToIndex)), zap.Int("failedCount", failedCount))
 	}()
 
 	c.JSON(http.StatusOK, gin.H{
@@ -410,7 +446,7 @@ func (h *KnowledgeHandler) ScanKnowledgeBase(c *gin.Context) {
 func (h *KnowledgeHandler) GetRetrievalLogs(c *gin.Context) {
 	conversationID := c.Query("conversationId")
 	messageID := c.Query("messageId")
-	limit := 50 // default 50 条
+	limit := 50 // 默认 50 条
 
 	if limitStr := c.Query("limit"); limitStr != "" {
 		if parsed, err := parseInt(limitStr); err == nil && parsed > 0 {
@@ -438,14 +474,14 @@ func (h *KnowledgeHandler) DeleteRetrievalLog(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Deleted successfully"})
+	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
 }
 
-// GetIndexStatus 获取Index status
+// GetIndexStatus 获取索引状态
 func (h *KnowledgeHandler) GetIndexStatus(c *gin.Context) {
 	status, err := h.manager.GetIndexStatus()
 	if err != nil {
-		h.logger.Error("获取Index status失败", zap.Error(err))
+		h.logger.Error("获取索引状态失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -461,7 +497,7 @@ func (h *KnowledgeHandler) GetIndexStatus(c *gin.Context) {
 			}
 		}
 
-		// 获取重建Index status
+		// 获取重建索引状态
 		isRebuilding, totalItems, current, failed, lastItemID, lastChunks, startTime := h.indexer.GetRebuildStatus()
 		if isRebuilding {
 			status["is_rebuilding"] = true

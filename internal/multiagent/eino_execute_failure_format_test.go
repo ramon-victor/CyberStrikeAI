@@ -112,3 +112,41 @@ func TestFriendlyEinoExecuteInvokeTail(t *testing.T) {
 		t.Fatal("unexpected error should get tail")
 	}
 }
+
+func TestMCPBackgroundWaitResultIsDisplayRunning(t *testing.T) {
+	body := `工具已提交到后台执行，但本次等待已到达上限。
+
+execution_id: 3eaaa391-050b-4be1-a870-48a855923cb7
+tool: exec
+status: running
+wait_timeout: 10s
+elapsed: 10s
+
+你可以继续推理、改用其他工具，或调用 wait_tool_execution 继续等待该 execution_id；也可以调用 cancel_tool_execution 取消。`
+	modelFacing := einomcp.ToolErrorPrefix + body
+	if !einoToolResultIsError("exec", modelFacing) {
+		t.Fatal("soft wait timeout must remain model-facing tool error")
+	}
+	if !isMCPBackgroundWaitResult(einoToolResultBody(modelFacing)) {
+		t.Fatal("soft wait timeout should display as background running")
+	}
+	if got := mcpExecutionIDFromWaitResult(einoToolResultBody(modelFacing)); got != "3eaaa391-050b-4be1-a870-48a855923cb7" {
+		t.Fatalf("execution id = %q", got)
+	}
+	if isMCPBackgroundWaitResult("execution_id: abc\nstatus: failed\nerror: boom") {
+		t.Fatal("real failures must not display as background running")
+	}
+	jsonBody := `{
+  "execution_id": "e98baefc-72eb-4a7e-9091-9be179a75d71",
+  "tool": "exec",
+  "status": "running"
+}
+
+本次等待已到达 timeout_seconds，上述 execution 仍未完成。可继续等待、取消，或采用其他步骤。`
+	if !isMCPBackgroundWaitResult(jsonBody) {
+		t.Fatal("json wait_tool_execution timeout should display as background running")
+	}
+	if got := mcpExecutionIDFromWaitResult(jsonBody); got != "e98baefc-72eb-4a7e-9091-9be179a75d71" {
+		t.Fatalf("json execution id = %q", got)
+	}
+}

@@ -30,6 +30,7 @@ func TestDockerEntrypointInitializesRuntimeConfigFromTemplate(t *testing.T) {
 
 	cmd := exec.Command("bash", dockerEntrypointScriptPath(t), "true")
 	cmd.Env = append(os.Environ(),
+		"CYBERSTRIKE_APP_VERSION=v1.7.11",
 		"CYBERSTRIKE_TEMPLATE_CONFIG="+templatePath,
 		"CYBERSTRIKE_RUNTIME_CONFIG_DIR="+runtimeDir,
 		"CYBERSTRIKE_RUNTIME_CONFIG_PATH="+runtimeConfigPath,
@@ -43,8 +44,9 @@ func TestDockerEntrypointInitializesRuntimeConfigFromTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read runtime config: %v", err)
 	}
-	if string(got) != string(templateContent) {
-		t.Fatalf("runtime config mismatch\nwant:\n%s\ngot:\n%s", templateContent, got)
+	want := "version: \"v1.7.11\"\n" + string(templateContent)
+	if string(got) != want {
+		t.Fatalf("runtime config mismatch\nwant:\n%s\ngot:\n%s", want, got)
 	}
 }
 
@@ -68,6 +70,7 @@ func TestDockerEntrypointPreservesExistingRuntimeConfig(t *testing.T) {
 
 	cmd := exec.Command("bash", dockerEntrypointScriptPath(t), "true")
 	cmd.Env = append(os.Environ(),
+		"CYBERSTRIKE_APP_VERSION=v1.7.11",
 		"CYBERSTRIKE_TEMPLATE_CONFIG="+templatePath,
 		"CYBERSTRIKE_RUNTIME_CONFIG_DIR="+runtimeDir,
 		"CYBERSTRIKE_RUNTIME_CONFIG_PATH="+runtimeConfigPath,
@@ -81,7 +84,46 @@ func TestDockerEntrypointPreservesExistingRuntimeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read runtime config: %v", err)
 	}
-	if string(got) != string(existingContent) {
-		t.Fatalf("runtime config should be preserved\nwant:\n%s\ngot:\n%s", existingContent, got)
+	want := "version: \"v1.7.11\"\n" + string(existingContent)
+	if string(got) != want {
+		t.Fatalf("runtime config should preserve settings\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}
+
+func TestDockerEntrypointUpdatesOnlyTopLevelVersion(t *testing.T) {
+	tmpDir := t.TempDir()
+	templatePath := filepath.Join(tmpDir, "config.example.yaml")
+	runtimeDir := filepath.Join(tmpDir, "runtime-config")
+	runtimeConfigPath := filepath.Join(runtimeDir, "config.yaml")
+	content := []byte("version: \"v1.0.0\"\nserver:\n  version: nested\n  port: 7022\n")
+
+	if err := os.WriteFile(templatePath, content, 0644); err != nil {
+		t.Fatalf("write template config: %v", err)
+	}
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatalf("mkdir runtime dir: %v", err)
+	}
+	if err := os.WriteFile(runtimeConfigPath, content, 0644); err != nil {
+		t.Fatalf("write runtime config: %v", err)
+	}
+
+	cmd := exec.Command("bash", dockerEntrypointScriptPath(t), "true")
+	cmd.Env = append(os.Environ(),
+		"CYBERSTRIKE_APP_VERSION=v1.7.11",
+		"CYBERSTRIKE_TEMPLATE_CONFIG="+templatePath,
+		"CYBERSTRIKE_RUNTIME_CONFIG_DIR="+runtimeDir,
+		"CYBERSTRIKE_RUNTIME_CONFIG_PATH="+runtimeConfigPath,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run docker entrypoint: %v\n%s", err, out)
+	}
+
+	got, err := os.ReadFile(runtimeConfigPath)
+	if err != nil {
+		t.Fatalf("read runtime config: %v", err)
+	}
+	want := "version: \"v1.7.11\"\nserver:\n  version: nested\n  port: 7022\n"
+	if string(got) != want {
+		t.Fatalf("entrypoint changed more than top-level version\nwant:\n%s\ngot:\n%s", want, got)
 	}
 }

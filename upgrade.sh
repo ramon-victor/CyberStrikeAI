@@ -21,6 +21,7 @@ VENV_DIR="$ROOT_DIR/venv"
 KNOWLEDGE_BASE_DIR="$ROOT_DIR/knowledge_base"
 
 BACKUP_BASE_DIR="$ROOT_DIR/.upgrade-backup"
+UPGRADE_TMP_DIR=""
 
 GITHUB_REPO="Ed1s0nZ/CyberStrikeAI"
 
@@ -277,6 +278,7 @@ sync_code() {
   rsync_excludes+=( "--exclude=.upgrade-backup/" )
   rsync_excludes+=( "--exclude=config.yaml" )
   rsync_excludes+=( "--exclude=data/" )
+  rsync_excludes+=( "--exclude=tmp/" )
 
   if [[ "$PRESERVE_VENV" -eq 1 ]]; then
     rsync_excludes+=( "--exclude=venv/" )
@@ -374,27 +376,26 @@ main() {
     backup_dir_tgz "skills" "$ROOT_DIR/skills"
   fi
 
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  trap 'rm -rf "$tmp_dir" >/dev/null 2>&1 || true' EXIT
+  UPGRADE_TMP_DIR="$(mktemp -d)"
+  trap 'rm -rf "${UPGRADE_TMP_DIR:-}" >/dev/null 2>&1 || true' EXIT
 
-  local tarball="${tmp_dir}/source.tar.gz"
+  local tarball="${UPGRADE_TMP_DIR}/source.tar.gz"
   local url="https://github.com/${GITHUB_REPO}/archive/refs/tags/${TAG}.tar.gz"
   info "Downloading source package: ${url}"
   http_get "$url" >"$tarball"
 
   info "Extracting source package..."
-  tar -xzf "$tarball" -C "$tmp_dir"
+  tar -xzf "$tarball" -C "$UPGRADE_TMP_DIR"
 
   # GitHub tarball usually creates a top-level directory.
   local extracted_dir
-  extracted_dir="$(ls -d "${tmp_dir}"/*/ 2>/dev/null | head -n 1 || true)"
+  extracted_dir="$(ls -d "${UPGRADE_TMP_DIR}"/*/ 2>/dev/null | head -n 1 || true)"
   if [[ -z "$extracted_dir" || ! -f "${extracted_dir}/run.sh" ]]; then
     err "run.sh not found in the extracted directory. Please check network/download contents."
     exit 1
   fi
 
-  sync_code "$tmp_dir" "$extracted_dir"
+  sync_code "$UPGRADE_TMP_DIR" "$extracted_dir"
 
   # Update config.yaml version display
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -408,4 +409,3 @@ main() {
 }
 
 main "$@"
-

@@ -1,7 +1,13 @@
 let currentConversationId = null;
 let loadConversationRequestSeq = 0;
 
-/** 轻量会话 LRU 缓存：来回切换已加载会话时避免重复网络 + 全量 DOM 重建 */
+/**
+ * 轻量会话 LRU 缓存。
+ *
+ * 缓存只用作请求失败时的降级数据，不能先于服务端响应直接渲染：
+ * 运行中会话的 process details 会持续写入，直接渲染旧快照会让
+ * UI 暂时回退到旧轮次，等 task-events 接管后又突然跳到最新轮次。
+ */
 const CONVERSATION_LITE_CACHE_MAX = 12;
 const conversationLiteCache = new Map();
 
@@ -50,6 +56,7 @@ const mentionState = {
 
 // IME输入法状态跟踪
 let isComposing = false;
+let compositionEndTimer = null;
 
 // 输入框草稿保存相关
 const DRAFT_STORAGE_KEY = 'cyberstrike-chat-draft';
@@ -58,11 +65,15 @@ const DRAFT_SAVE_DELAY = 500; // 500ms防抖延迟
 
 // 对话文件上传相关（后端会拼接路径与内容发给大模型，前端不再重复发文件列表）
 const MAX_CHAT_FILES = 10;
-const CHAT_FILE_DEFAULT_PROMPT = '请根据上传的文件内容进行分析。';
+const CHAT_FILE_DEFAULT_PROMPT = 'Please analyze the uploaded files.';
 /** 与 handler.formatInterruptContinueUserMessage 首段一致；主对话不展示，仅迭代详情（user_interrupt_continue） */
-const CHAT_INTERRUPT_CONTINUE_USER_PREFIX = '【用户补充 / 中断后继续】';
+const CHAT_INTERRUPT_CONTINUE_USER_PREFIX = '[USER ADDENDUM / CONTINUE AFTER INTERRUPT]';
+const CHAT_INTERRUPT_CONTINUE_USER_LEGACY_PREFIX = '【用户补充 / 中断后继续】';
 function isInterruptContinueInjectChatMessage(content) {
-    return typeof content === 'string' && content.trimStart().startsWith(CHAT_INTERRUPT_CONTINUE_USER_PREFIX);
+    if (typeof content !== 'string') return false;
+    const trimmed = content.trimStart();
+    return trimmed.startsWith(CHAT_INTERRUPT_CONTINUE_USER_PREFIX)
+        || trimmed.startsWith(CHAT_INTERRUPT_CONTINUE_USER_LEGACY_PREFIX);
 }
 /**
  * 对话附件：选文件后异步 POST /api/chat-uploads，发送时只传 serverPath（绝对路径），请求体不再内联大文件内容。
@@ -73,11 +84,17 @@ let chatAttachmentSeq = 0;
 
 // 对话模式：eino_single = Eino ADK 单代理（/api/eino-agent/stream）；deep / plan_execute / supervisor = Eino 多代理（/api/multi-agent/stream，请求体 orchestration）
 const AGENT_MODE_STORAGE_KEY = 'cyberstrike-chat-agent-mode';
+const AGENT_MODE_CONVERSATION_STORAGE_PREFIX = 'cyberstrike-chat-agent-mode:conversation';
+const AI_CHANNEL_STORAGE_KEY = 'cyberstrike-chat-ai-channel';
 const REASONING_MODE_LS = 'cyberstrike-chat-reasoning-mode';
 const REASONING_EFFORT_LS = 'cyberstrike-chat-reasoning-effort';
+const CHAT_AI_CHANNEL_SUMMARY_NAME_MAX = 10;
 const CHAT_AGENT_MODE_EINO_SINGLE = 'eino_single';
 const CHAT_AGENT_EINO_MODES = ['deep', 'plan_execute', 'supervisor'];
 let multiAgentAPIEnabled = false;
+let chatAIChannels = {};
+let chatDefaultAIChannel = '';
+let chatAIChannelIdByNormalizedId = {};
 
 // 人机协同（HITL）会话级配置
 const HITL_STORAGE_PREFIX = 'cyberstrike-chat-hitl';
@@ -89,6 +106,190 @@ const HITL_MODE_APPROVAL = 'approval';
 const HITL_MODE_REVIEW_EDIT = 'review_edit';
 const HITL_MODE_OPTIONS = [HITL_MODE_OFF, HITL_MODE_APPROVAL, HITL_MODE_REVIEW_EDIT];
 let hitlApplyFeedbackTimer = null;
+let hitlAutoSaveTimer = null;
+const sessionSettingsSelects = new Map();
+let sessionSettingsSelectDocBound = false;
+
+function sessionSettingsSelectLabel(option) {
+    return option ? (option.textContent || option.label || option.value || '') : '';
+}
+
+function syncSessionSettingsSelect(select) {
+    const reg = sessionSettingsSelects.get(select);
+    if (!reg) return;
+    const selected = select.options[select.selectedIndex];
+    reg.value.textContent = sessionSettingsSelectLabel(selected);
+    reg.trigger.disabled = !!select.disabled;
+    reg.wrapper.classList.toggle('is-disabled', !!select.disabled);
+    reg.menu.innerHTML = '';
+
+    Array.prototype.forEach.call(select.options, function (option, index) {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'session-settings-select-option';
+        item.setAttribute('role', 'option');
+        item.setAttribute('data-index', String(index));
+        item.setAttribute('aria-selected', option.selected ? 'true' : 'false');
+        item.disabled = !!option.disabled;
+        item.classList.toggle('is-selected', !!option.selected);
+
+        const label = document.createElement('span');
+        label.className = 'session-settings-select-option-label';
+        label.textContent = sessionSettingsSelectLabel(option);
+        item.appendChild(label);
+        reg.menu.appendChild(item);
+    });
+}
+
+function closeSessionSettingsSelect(select) {
+    const reg = sessionSettingsSelects.get(select);
+    if (!reg) return;
+    reg.wrapper.classList.remove('open');
+    reg.trigger.setAttribute('aria-expanded', 'false');
+}
+
+function closeAllSessionSettingsSelects() {
+    sessionSettingsSelects.forEach(function (_reg, select) {
+        closeSessionSettingsSelect(select);
+    });
+}
+
+function enhanceSessionSettingsSelect(select) {
+    if (!select || select.dataset.sessionSettingsSelect === '1') {
+        if (select) syncSessionSettingsSelect(select);
+        return;
+    }
+    const panel = select.closest && select.closest('.conversation-reasoning-card');
+    if (!panel) return;
+
+    select.dataset.sessionSettingsSelect = '1';
+    select.classList.add('session-settings-native-select');
+    select.tabIndex = -1;
+    select.setAttribute('aria-hidden', 'true');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'session-settings-select';
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'session-settings-select-trigger';
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    const value = document.createElement('span');
+    value.className = 'session-settings-select-value';
+    const caret = document.createElement('span');
+    caret.className = 'session-settings-select-caret';
+    caret.setAttribute('aria-hidden', 'true');
+    caret.textContent = '⌄';
+    trigger.appendChild(value);
+    trigger.appendChild(caret);
+
+    const menu = document.createElement('div');
+    menu.className = 'session-settings-select-menu';
+    menu.setAttribute('role', 'listbox');
+
+    select.parentNode.insertBefore(wrapper, select);
+    wrapper.appendChild(trigger);
+    wrapper.appendChild(menu);
+    wrapper.appendChild(select);
+    sessionSettingsSelects.set(select, { wrapper: wrapper, trigger: trigger, value: value, menu: menu });
+
+    trigger.addEventListener('click', function (event) {
+        event.stopPropagation();
+        if (select.disabled) return;
+        const willOpen = !wrapper.classList.contains('open');
+        closeAllSessionSettingsSelects();
+        wrapper.classList.toggle('open', willOpen);
+        trigger.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    });
+
+    trigger.addEventListener('keydown', function (event) {
+        if (select.disabled) return;
+        const enabled = Array.prototype.filter.call(select.options, function (option) { return !option.disabled; });
+        if (!enabled.length) return;
+        const currentOption = select.options[select.selectedIndex];
+        const current = Math.max(0, enabled.indexOf(currentOption));
+        let next = current;
+        if (event.key === 'ArrowDown') next = Math.min(enabled.length - 1, current + 1);
+        else if (event.key === 'ArrowUp') next = Math.max(0, current - 1);
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = enabled.length - 1;
+        else if (event.key === 'Escape') {
+            closeSessionSettingsSelect(select);
+            return;
+        } else if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            wrapper.classList.add('open');
+            trigger.setAttribute('aria-expanded', 'true');
+            return;
+        } else {
+            return;
+        }
+        event.preventDefault();
+        const nextOption = enabled[next];
+        if (nextOption && select.value !== nextOption.value) {
+            select.value = nextOption.value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        syncSessionSettingsSelect(select);
+    });
+
+    menu.addEventListener('click', function (event) {
+        const item = event.target.closest('.session-settings-select-option');
+        if (!item || item.disabled) return;
+        event.stopPropagation();
+        const option = select.options[Number(item.dataset.index)];
+        if (option && !option.disabled && select.value !== option.value) {
+            select.value = option.value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        syncSessionSettingsSelect(select);
+        closeSessionSettingsSelect(select);
+    });
+
+    select.addEventListener('change', function () {
+        syncSessionSettingsSelect(select);
+    });
+    syncSessionSettingsSelect(select);
+}
+
+function initSessionSettingsSelects() {
+    const panel = document.getElementById('conversation-reasoning-body');
+    if (!panel) return;
+    panel.querySelectorAll('select').forEach(enhanceSessionSettingsSelect);
+    if (!sessionSettingsSelectDocBound) {
+        document.addEventListener('click', closeAllSessionSettingsSelects);
+        document.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape') closeAllSessionSettingsSelects();
+        });
+        sessionSettingsSelectDocBound = true;
+    }
+}
+
+function refreshSessionSettingsSelects() {
+    sessionSettingsSelects.forEach(function (_reg, select) {
+        syncSessionSettingsSelect(select);
+    });
+}
+
+function syncChatReasoningBarHeight() {
+    const inputBar = document.getElementById('chat-input-container');
+    const reasoning = document.getElementById('chat-reasoning-wrapper');
+    if (!inputBar || !reasoning) return;
+    const h = Math.ceil(inputBar.getBoundingClientRect().height || 0);
+    if (h > 0) {
+        reasoning.style.setProperty('--chat-input-bar-height', h + 'px');
+    }
+}
+
+function initChatReasoningBarHeightSync() {
+    syncChatReasoningBarHeight();
+    window.addEventListener('resize', syncChatReasoningBarHeight);
+    const inputBar = document.getElementById('chat-input-container');
+    if (inputBar && typeof ResizeObserver !== 'undefined') {
+        const ro = new ResizeObserver(syncChatReasoningBarHeight);
+        ro.observe(inputBar);
+    }
+}
 
 /** 非阻塞提示（与 chat-files-toast 样式共用） */
 function showChatToast(message, type) {
@@ -324,11 +525,11 @@ async function onHitlReviewerChanged(reviewer) {
         } else if (typeof window.putHitlDefaultReviewer === 'function') {
             await window.putHitlDefaultReviewer(cfg.reviewer);
         }
-        const ok = typeof window.t === 'function' ? window.t('hitl.pageReviewerSaved') : '审批方已保存。';
+        const ok = typeof window.t === 'function' ? window.t('hitl.pageReviewerSaved') : 'Reviewer saved.';
         showChatToast(ok, 'success');
     } catch (e) {
         console.warn('onHitlReviewerChanged', e);
-        const prefix = typeof window.t === 'function' ? window.t('chat.hitlApplyFail') : '同步到服务器失败';
+        const prefix = typeof window.t === 'function' ? window.t('chat.hitlApplyFail') : 'Failed to sync to server';
         showChatToast(prefix, 'error');
     }
 }
@@ -384,7 +585,7 @@ function readHitlConfigFromForm() {
 }
 
 function updateHitlStatusUI(_cfg) {
-    /* 侧栏已改为「应用」按钮生效，不再用角标展示模式 */
+    /* 侧栏已改为自动保存，不再用角标展示模式 */
 }
 
 function applyHitlConfigToUI(cfg) {
@@ -402,6 +603,7 @@ function applyHitlConfigToUI(cfg) {
     }
     if (toolsEl) toolsEl.value = toolsVal;
     updateHitlStatusUI(conf);
+    refreshSessionSettingsSelects();
 }
 
 function bindHitlSidebarModeListener() {
@@ -410,6 +612,9 @@ function bindHitlSidebarModeListener() {
     modeEl.dataset.hitlModeBound = '1';
     modeEl.addEventListener('change', function () {
         applyHitlConfigToUI(readHitlConfigFromForm());
+        refreshSessionSettingsSelects();
+        scheduleHitlSidebarAutosave(0);
+        updateChatReasoningSummary();
     });
 }
 
@@ -451,7 +656,7 @@ function showHitlApplyFeedback(text, isError, partial) {
     }
 }
 
-/** 侧栏人机协同：修改模式/白名单后点此写入本地、合并展示并同步服务端 */
+/** 侧栏人机协同：自动写入本地、合并展示并尽量同步服务端 */
 async function applyHitlSidebarConfig() {
     const btn = document.getElementById('hitl-apply-btn');
     showHitlApplyFeedback('', false);
@@ -476,13 +681,13 @@ async function applyHitlSidebarConfig() {
 
         if (cid && typeof window.saveHitlConversationConfig === 'function') {
             await window.saveHitlConversationConfig(cid, cfg);
-            const ok = typeof window.t === 'function' ? window.t('chat.hitlApplyOkSync') : '人机协同配置已保存并同步到服务器。';
+            const ok = typeof window.t === 'function' ? window.t('chat.hitlApplyOkSync') : 'HITL settings saved and synced to the server.';
             showHitlApplyFeedback(ok, false);
         } else if (yamlMerged) {
-            const okYaml = typeof window.t === 'function' ? window.t('chat.hitlApplyOkWhitelistYaml') : '免审批工具已合并进 config.yaml 并生效。协同模式、超时等仍须选中会话后再点「应用」才会写入服务器。';
+            const okYaml = typeof window.t === 'function' ? window.t('chat.hitlApplyOkWhitelistYaml') : 'Tool whitelist merged into config.yaml and active. Session settings are saved automatically.';
             showHitlApplyFeedback(okYaml, false);
         } else {
-            const localOnly = typeof window.t === 'function' ? window.t('chat.hitlApplyOkLocal') : '已保存到本浏览器。';
+            const localOnly = typeof window.t === 'function' ? window.t('chat.hitlApplyOkLocal') : 'Saved in this browser.';
             showHitlApplyFeedback(localOnly, false);
         }
         if (typeof window.refreshHitlPageWhitelist === 'function') {
@@ -490,12 +695,35 @@ async function applyHitlSidebarConfig() {
         }
     } catch (e) {
         console.warn('applyHitlSidebarConfig', e);
-        const prefix = typeof window.t === 'function' ? window.t('chat.hitlApplyFail') : '同步到服务器失败';
+        const prefix = typeof window.t === 'function' ? window.t('chat.hitlApplyFail') : 'Failed to sync to server';
         const detail = (e && e.message) ? e.message : String(e);
         showHitlApplyFeedback(prefix + (detail ? '：' + detail : ''), true);
     } finally {
         if (btn) btn.disabled = false;
     }
+}
+
+function scheduleHitlSidebarAutosave(delayMs) {
+    if (hitlAutoSaveTimer) {
+        clearTimeout(hitlAutoSaveTimer);
+        hitlAutoSaveTimer = null;
+    }
+    hitlAutoSaveTimer = setTimeout(function () {
+        hitlAutoSaveTimer = null;
+        applyHitlSidebarConfig();
+    }, typeof delayMs === 'number' ? delayMs : 500);
+}
+
+function bindHitlSensitiveToolsAutosaveListener() {
+    const toolsEl = document.getElementById('hitl-sensitive-tools');
+    if (!toolsEl || toolsEl.dataset.hitlAutosaveBound === '1') return;
+    toolsEl.dataset.hitlAutosaveBound = '1';
+    toolsEl.addEventListener('input', function () {
+        scheduleHitlSidebarAutosave(700);
+    });
+    toolsEl.addEventListener('blur', function () {
+        scheduleHitlSidebarAutosave(0);
+    });
 }
 
 /** 将 localStorage 规范为 eino_single | deep | plan_execute | supervisor */
@@ -508,6 +736,44 @@ function chatAgentModeNormalizeStored(stored, cfg) {
         return multiOn ? s : CHAT_AGENT_MODE_EINO_SINGLE;
     }
     return CHAT_AGENT_MODE_EINO_SINGLE;
+}
+
+function normalizeConversationAgentModeForUI(mode) {
+    const v = String(mode || '').trim().toLowerCase().replace(/-/g, '_');
+    if (chatAgentModeIsEinoSingle(v)) return v;
+    if (chatAgentModeIsEino(v)) {
+        return multiAgentAPIEnabled ? v : CHAT_AGENT_MODE_EINO_SINGLE;
+    }
+    return '';
+}
+
+function conversationAgentModeStorageKey(conversationId) {
+    return `${AGENT_MODE_CONVERSATION_STORAGE_PREFIX}:${String(conversationId || '').trim()}`;
+}
+
+function readConversationAgentModePreference(conversationId) {
+    if (!conversationId) return '';
+    try {
+        return normalizeConversationAgentModeForUI(localStorage.getItem(conversationAgentModeStorageKey(conversationId)) || '');
+    } catch (e) {
+        return '';
+    }
+}
+
+function saveConversationAgentModePreference(conversationId, mode) {
+    const normalized = normalizeConversationAgentModeForUI(mode);
+    if (!conversationId || !normalized) return;
+    try {
+        localStorage.setItem(conversationAgentModeStorageKey(conversationId), normalized);
+    } catch (e) { /* ignore */ }
+}
+
+function applyConversationAgentMode(conversationId, conversation) {
+    const saved = readConversationAgentModePreference(conversationId);
+    const fromServer = normalizeConversationAgentModeForUI(conversation && (conversation.agentMode || conversation.agent_mode));
+    const mode = saved || fromServer;
+    if (!mode) return;
+    syncAgentModeFromValue(mode);
 }
 
 if (typeof window !== 'undefined') {
@@ -529,6 +795,7 @@ if (typeof window !== 'undefined') {
     window.getHitlConfigForConversation = getHitlConfigForConversation;
     bindHitlSidebarModeListener();
     bindHitlReviewerToggleListeners();
+    bindHitlSensitiveToolsAutosaveListener();
     window.setHitlReviewerUI = setHitlReviewerUI;
     window.onHitlReviewerChanged = onHitlReviewerChanged;
     window.bindHitlReviewerToggleListeners = bindHitlReviewerToggleListeners;
@@ -591,7 +858,7 @@ function getAgentModeLabelForValue(mode) {
         }
     }
     switch (mode) {
-        case CHAT_AGENT_MODE_EINO_SINGLE: return 'Eino 单代理';
+        case CHAT_AGENT_MODE_EINO_SINGLE: return '⚡';
         case 'deep': return 'Deep';
         case 'plan_execute': return 'Plan-Execute';
         case 'supervisor': return 'Supervisor';
@@ -631,8 +898,83 @@ function syncReasoningRowVisibility(modeVal) {
     if (!show) {
         closeChatReasoningPanel();
     } else {
+        syncChatReasoningBarHeight();
         updateChatReasoningSummary();
     }
+}
+
+function normalizeChatAIChannelId(s) {
+    return String(s || '').trim().toLowerCase().replace(/_/g, '-').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function resolveChatAIChannelId(id) {
+    const raw = String(id || '').trim();
+    if (!raw) return '';
+    if (chatAIChannels[raw]) return raw;
+    const normalized = normalizeChatAIChannelId(raw);
+    return normalized && chatAIChannelIdByNormalizedId[normalized] ? chatAIChannelIdByNormalizedId[normalized] : '';
+}
+
+function populateChatAIChannelSelect(ai) {
+    const select = document.getElementById('chat-ai-channel-select');
+    if (!select) return;
+    const cfg = ai && typeof ai === 'object' ? ai : {};
+    chatAIChannels = cfg.channels && typeof cfg.channels === 'object' ? cfg.channels : {};
+    chatAIChannelIdByNormalizedId = {};
+    Object.keys(chatAIChannels).forEach(function (id) {
+        const normalized = normalizeChatAIChannelId(id);
+        if (normalized && !chatAIChannelIdByNormalizedId[normalized]) {
+            chatAIChannelIdByNormalizedId[normalized] = id;
+        }
+    });
+    chatDefaultAIChannel = resolveChatAIChannelId(cfg.default_channel || '');
+    select.innerHTML = '';
+    const fallbackOpt = document.createElement('option');
+    fallbackOpt.value = '';
+    fallbackOpt.textContent = typeof window.t === 'function' ? window.t('chat.aiChannelDefault') : 'Use default channel';
+    select.appendChild(fallbackOpt);
+    Object.keys(chatAIChannels).sort().forEach(function (id) {
+        const ch = chatAIChannels[id] || {};
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = (ch.name || id) + (ch.model ? ' · ' + ch.model : '');
+        select.appendChild(opt);
+    });
+    let stored = '';
+    try { stored = localStorage.getItem(AI_CHANNEL_STORAGE_KEY) || ''; } catch (e) {}
+    stored = resolveChatAIChannelId(stored);
+    select.value = stored || '';
+    refreshSessionSettingsSelects();
+    updateChatReasoningSummary();
+}
+
+function selectedChatAIChannelId() {
+    const select = document.getElementById('chat-ai-channel-select');
+    return resolveChatAIChannelId(select ? select.value : '');
+}
+
+function currentChatAIChannelLabel() {
+    const id = selectedChatAIChannelId() || chatDefaultAIChannel;
+    const ch = id ? chatAIChannels[id] : null;
+    if (!ch) {
+        return typeof window.t === 'function' ? window.t('chat.aiChannelDefaultShort') : 'Default channel';
+    }
+    return ch.name || id;
+}
+
+function truncateChatAIChannelSummaryLabel(label) {
+    const chars = Array.from(String(label || ''));
+    if (chars.length <= CHAT_AI_CHANNEL_SUMMARY_NAME_MAX) return chars.join('');
+    return chars.slice(0, CHAT_AI_CHANNEL_SUMMARY_NAME_MAX).join('') + '...';
+}
+
+function persistChatAIChannelPref() {
+    const id = selectedChatAIChannelId();
+    try {
+        if (id) localStorage.setItem(AI_CHANNEL_STORAGE_KEY, id);
+        else localStorage.removeItem(AI_CHANNEL_STORAGE_KEY);
+    } catch (e) {}
+    updateChatReasoningSummary();
 }
 
 function reasoningSummaryModeLabel(mode) {
@@ -655,8 +997,18 @@ function updateChatReasoningSummary() {
     const effort = effEl && effEl.value ? String(effEl.value).trim() : '';
     const t = (typeof window.t === 'function') ? window.t : function (k) { return k; };
     const modePart = reasoningSummaryModeLabel(mode);
-    const effPart = effort || t('chat.reasoningSummaryDash');
-    el.textContent = modePart + ' / ' + effPart;
+    const reasoningPart = effort || modePart || t('chat.reasoningSummaryDash');
+    let hitlPart = '';
+    try {
+        const hitlCfg = readHitlConfigFromForm();
+        hitlPart = getHitlModeLabel(hitlCfg.mode);
+    } catch (e) {
+        hitlPart = '';
+    }
+    const channelPart = currentChatAIChannelLabel();
+    const parts = [truncateChatAIChannelSummaryLabel(channelPart), reasoningPart, hitlPart].filter(Boolean);
+    el.textContent = parts.join(' / ');
+    el.title = [channelPart, reasoningPart, hitlPart].filter(Boolean).join(' / ');
 }
 
 function closeChatReasoningPanel() {
@@ -670,6 +1022,7 @@ function toggleConversationReasoningCard() {
     const wrap = document.getElementById('chat-reasoning-wrapper');
     const toggle = document.getElementById('conversation-reasoning-toggle');
     if (!wrap || !toggle) return;
+    syncChatReasoningBarHeight();
     wrap.classList.toggle('conversation-reasoning-collapsed');
     const collapsed = wrap.classList.contains('conversation-reasoning-collapsed');
     toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
@@ -704,6 +1057,7 @@ function restoreChatReasoningControlsFromStorage() {
                 e.value = v;
             }
         }
+        refreshSessionSettingsSelects();
         updateChatReasoningSummary();
     } catch (err) { /* ignore */ }
 }
@@ -714,6 +1068,7 @@ function persistChatReasoningPrefs() {
         const elEff = document.getElementById('chat-reasoning-effort');
         if (m) localStorage.setItem(REASONING_MODE_LS, m.value || 'default');
         if (elEff) localStorage.setItem(REASONING_EFFORT_LS, elEff.value || '');
+        refreshSessionSettingsSelects();
         updateChatReasoningSummary();
     } catch (err) { /* ignore */ }
 }
@@ -739,12 +1094,15 @@ function buildReasoningRequestPayload() {
 }
 
 if (typeof window !== 'undefined') {
+    window.persistChatAIChannelPref = persistChatAIChannelPref;
+    window.populateChatAIChannelSelect = populateChatAIChannelSelect;
     window.persistChatReasoningPrefs = persistChatReasoningPrefs;
     window.buildReasoningRequestPayload = buildReasoningRequestPayload;
     window.closeChatReasoningPanel = closeChatReasoningPanel;
     window.toggleChatReasoningPanel = toggleChatReasoningPanel;
     window.toggleConversationReasoningCard = toggleConversationReasoningCard;
     window.updateChatReasoningSummary = updateChatReasoningSummary;
+    window.refreshSessionSettingsSelects = refreshSessionSettingsSelects;
 }
 
 function closeAgentModePanel() {
@@ -783,6 +1141,7 @@ function toggleAgentModePanel() {
 function selectAgentMode(mode) {
     const ok = chatAgentModeIsEinoSingle(mode) || chatAgentModeIsEino(mode);
     if (!ok) return;
+    saveConversationAgentModePreference(currentConversationId, mode);
     try {
         localStorage.setItem(AGENT_MODE_STORAGE_KEY, mode);
     } catch (e) { /* ignore */ }
@@ -819,6 +1178,7 @@ async function initChatAgentModeFromConfig() {
         if (!r.ok) return;
         const cfg = await r.json();
         multiAgentAPIEnabled = !!(cfg.multi_agent && cfg.multi_agent.enabled);
+        populateChatAIChannelSelect(cfg.ai || {});
         if (typeof window !== 'undefined') {
             window.__csaiMultiAgentPublic = cfg.multi_agent || null;
             const tw = cfg.hitl && cfg.hitl.tool_whitelist;
@@ -891,7 +1251,7 @@ function saveChatDraft(content) {
         }
     } catch (error) {
         // localStorage可能已满或不可用，静默失败
-        console.warn('保存草稿失败:', error);
+        console.warn('Failed to save draft:', error);
     }
 }
 
@@ -925,7 +1285,7 @@ function restoreChatDraft() {
             localStorage.removeItem(DRAFT_STORAGE_KEY);
         }
     } catch (error) {
-        console.warn('恢复草稿失败:', error);
+        console.warn('Failed to restore draft:', error);
     }
 }
 
@@ -935,7 +1295,7 @@ function clearChatDraft() {
         // 同步清除，确保立即生效
         localStorage.removeItem(DRAFT_STORAGE_KEY);
     } catch (error) {
-        console.warn('清除草稿失败:', error);
+        console.warn('Failed to clear draft:', error);
     }
 }
 
@@ -974,7 +1334,7 @@ async function sendMessage() {
         if (needWait) {
             const waitLabel = (typeof window.t === 'function')
                 ? window.t('chat.waitingAttachmentsUpload')
-                : '正在等待附件上传完成…';
+                : 'Waiting for attachment uploads to finish…';
             chatAttachmentProgressSet(true, 0, waitLabel);
         }
         try {
@@ -986,7 +1346,7 @@ async function sendMessage() {
         if (bad.length) {
             const hint = (typeof window.t === 'function')
                 ? window.t('chat.attachmentsUploadIncomplete')
-                : '部分附件未上传成功，请移除失败项或重新选择文件后再发送。';
+                : 'Some attachments failed to upload. Remove the failed items or choose the files again before sending.';
             alert(hint);
             return;
         }
@@ -1035,9 +1395,23 @@ async function sendMessage() {
         conversationId: currentConversationId,
         role: typeof getCurrentRole === 'function' ? getCurrentRole() : ''
     };
+    if (window.__csNextChatFinalizationPolicy && typeof window.__csNextChatFinalizationPolicy === 'object') {
+        body.finalization = window.__csNextChatFinalizationPolicy;
+        window.__csNextChatFinalizationPolicy = null;
+    }
+    let streamConversationId = body.conversationId ? String(body.conversationId) : null;
+    const isStreamStillVisibleForRequest = function () {
+        if (!document.getElementById(progressId)) return false;
+        if (!streamConversationId) return currentConversationId === body.conversationId;
+        return currentConversationId === streamConversationId;
+    };
     if (!currentConversationId && typeof getActiveProjectId === 'function') {
         const pid = getActiveProjectId();
         if (pid) body.projectId = pid;
+    }
+    const aiChannelId = selectedChatAIChannelId();
+    if (aiChannelId) {
+        body.aiChannelId = aiChannelId;
     }
     const hitlCfg = readHitlConfigFromForm();
     if (normalizeHitlMode(hitlCfg.mode) !== HITL_MODE_OFF) {
@@ -1071,7 +1445,7 @@ async function sendMessage() {
         window.CyberStrikeChatScroll.onUserSendMessage();
     }
     const progressElement = document.getElementById(progressId);
-    registerProgressTask(progressId, currentConversationId);
+    registerProgressTask(progressId, streamConversationId);
     loadActiveTasks();
     let assistantMessageId = null;
     let mcpExecutionIds = [];
@@ -1079,6 +1453,7 @@ async function sendMessage() {
     try {
         const modeSel = document.getElementById('agent-mode-select');
         let modeVal = modeSel ? modeSel.value : CHAT_AGENT_MODE_EINO_SINGLE;
+        saveConversationAgentModePreference(streamConversationId || currentConversationId, modeVal);
         const useMulti = multiAgentAPIEnabled && chatAgentModeIsEino(modeVal);
         const streamPath = useMulti ? '/api/multi-agent/stream' : '/api/eino-agent/stream';
         if (useMulti && modeVal) {
@@ -1093,12 +1468,12 @@ async function sendMessage() {
         });
         
         if (!response.ok) {
-            throw new Error('请求失败: ' + response.status);
+            throw new Error('Request failed: ' + response.status);
         }
 
         window.__csAgentLiveStream = {
             active: true,
-            conversationId: currentConversationId || null,
+            conversationId: streamConversationId || null,
             progressId: progressId
         };
         try {
@@ -1110,9 +1485,26 @@ async function sendMessage() {
                 if (eventData && eventData.type === 'done') {
                     streamSawDone = true;
                 }
+                const eventConvId = eventData && eventData.data && eventData.data.conversationId
+                    ? String(eventData.data.conversationId)
+                    : '';
+                let justBoundConversation = false;
+                if (eventConvId) {
+                    if (streamConversationId && streamConversationId !== eventConvId) {
+                        return;
+                    }
+                    if (!streamConversationId && eventData.type === 'conversation') {
+                        streamConversationId = eventConvId;
+                        justBoundConversation = true;
+                    }
+                }
+                if (!justBoundConversation && !isStreamStillVisibleForRequest()) {
+                    return;
+                }
                 handleStreamEvent(eventData, progressElement, progressId,
                     () => assistantMessageId, (id) => { assistantMessageId = id; },
-                    () => mcpExecutionIds, (ids) => { mcpExecutionIds = ids; });
+                    () => mcpExecutionIds, (ids) => { mcpExecutionIds = ids; },
+                    { conversationId: streamConversationId });
             };
             const processSseLines = typeof processSseDataLinesYielding === 'function'
                 ? processSseDataLinesYielding
@@ -1122,7 +1514,7 @@ async function sendMessage() {
                             try {
                                 onEvent(JSON.parse(line.slice(6)));
                             } catch (e) {
-                                console.error('解析事件数据失败:', e, line);
+                                console.error('Failed to parse event data:', e, line);
                             }
                         }
                     }
@@ -1150,16 +1542,16 @@ async function sendMessage() {
                 if (typeof loadActiveTasks === 'function') {
                     loadActiveTasks();
                 }
-                const convId = currentConversationId || (body && body.conversationId) || null;
+                const convId = streamConversationId || (body && body.conversationId) || null;
                 let attached = false;
                 if (convId && typeof window.attachRunningTaskEventStream === 'function') {
                     window.__csAgentLiveStream = { active: false, conversationId: null, progressId: null };
                     attached = await window.attachRunningTaskEventStream(convId).catch(() => false);
                 }
-                if (!attached) {
+                if (!attached && isStreamStillVisibleForRequest()) {
                     const hint = typeof window.t === 'function'
                         ? window.t('chat.streamEndedWithoutDone')
-                        : '连接提前结束，未收到任务完成信号。任务可能仍在后端执行，请查看顶部运行中任务或刷新当前对话。';
+                        : 'The connection ended before the task-completion signal arrived. The task may still be running on the backend. Check the running tasks at the top or refresh this conversation.';
                     addMessage('system', hint);
                 }
             }
@@ -1179,15 +1571,21 @@ async function sendMessage() {
         }
         
     } catch (error) {
+        if (!isStreamStillVisibleForRequest()) {
+            if (typeof loadActiveTasks === 'function') {
+                loadActiveTasks();
+            }
+            return;
+        }
         removeMessage(progressId);
         const msg = error && error.message != null ? String(error.message) : String(error);
         const isNetwork = /network|fetch|Failed to fetch|aborted|AbortError|load failed|NetworkError/i.test(msg);
         if (isNetwork && typeof window.t === 'function') {
             addMessage('system', window.t('chat.streamNetworkErrorHint', { detail: msg }));
         } else if (isNetwork) {
-            addMessage('system', '连接已中断（' + msg + '）。长时间任务可能仍在后端执行，请查看顶部运行中任务或稍后刷新对话。');
+            addMessage('system', 'Connection interrupted (' + msg + '). Long-running tasks may still be running on the backend. Check the running tasks at the top or refresh the conversation later.');
         } else {
-            addMessage('system', '错误: ' + msg);
+            addMessage('system', 'Error: ' + msg);
         }
         if (typeof loadActiveTasks === 'function') {
             loadActiveTasks();
@@ -1213,17 +1611,17 @@ function renderChatFileChips() {
         name.title = a.fileName;
         let label = a.fileName;
         if (a.uploading) {
-            label += ' · ' + ((typeof window.t === 'function') ? window.t('chat.attachmentUploading') : '上传中…');
+            label += ' · ' + ((typeof window.t === 'function') ? window.t('chat.attachmentUploading') : 'Uploading…');
         } else if (a.uploadError) {
-            label += ' · ' + ((typeof window.t === 'function') ? window.t('chat.attachmentUploadFailed') : '失败');
+            label += ' · ' + ((typeof window.t === 'function') ? window.t('chat.attachmentUploadFailed') : 'Failed');
         }
         name.textContent = label;
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'chat-file-chip-remove';
-        remove.title = typeof window.t === 'function' ? window.t('chatGroup.remove') : '移除';
+        remove.title = typeof window.t === 'function' ? window.t('chatGroup.remove') : 'Remove';
         remove.innerHTML = '×';
-        remove.setAttribute('aria-label', '移除 ' + a.fileName);
+        remove.setAttribute('aria-label', 'Remove ' + a.fileName);
         remove.addEventListener('click', () => removeChatAttachment(i));
         chip.appendChild(name);
         chip.appendChild(remove);
@@ -1285,7 +1683,7 @@ function refreshChatAttachmentUploadProgress() {
             total: chatAttachments.length,
             percent: overall
         })
-        : ('上传附件 ' + (chatAttachments.length - uploading.length) + '/' + chatAttachments.length + ' · ' + overall + '%');
+        : ('Uploading attachments ' + (chatAttachments.length - uploading.length) + '/' + chatAttachments.length + ' · ' + overall + '%');
     chatAttachmentProgressSet(true, overall, line);
 }
 
@@ -1332,7 +1730,7 @@ async function uploadOneChatAttachment(entry, file) {
             cur.uploadError = msg;
             cur.serverPath = null;
         }
-        alert(((typeof window.t === 'function') ? window.t('chat.attachmentUploadAlert', { name: file.name }) : ('上传失败：' + file.name)) + '\n' + msg);
+        alert(((typeof window.t === 'function') ? window.t('chat.attachmentUploadAlert', { name: file.name }) : ('Upload failed: ' + file.name)) + '\n' + msg);
     }
     renderChatFileChips();
     refreshChatAttachmentUploadProgress();
@@ -1342,7 +1740,7 @@ async function addFilesToChat(files) {
     if (!files || !files.length) return;
     const next = Array.from(files);
     if (chatAttachments.length + next.length > MAX_CHAT_FILES) {
-        alert('最多同时上传 ' + MAX_CHAT_FILES + ' 个文件，当前已选 ' + chatAttachments.length + ' 个。');
+        alert('You can upload at most ' + MAX_CHAT_FILES + ' files at once. ' + chatAttachments.length + ' files are already selected.');
         return;
     }
     next.forEach((file) => {
@@ -1492,7 +1890,7 @@ async function fetchMentionTools() {
                 });
             }
         } catch (mcpError) {
-            console.warn('加载外部MCP列表失败:', mcpError);
+            console.warn('Failed to load the external MCP list:', mcpError);
             externalMcpNames = [];
         }
 
@@ -1547,7 +1945,7 @@ async function fetchMentionTools() {
         mentionTools = collected;
         mentionToolsLoaded = true;
     } catch (error) {
-        console.warn('加载工具列表失败，@提及功能可能不可用:', error);
+        console.warn('Failed to load the tool list; @ mentions may be unavailable:', error);
     }
     return mentionTools;
 }
@@ -1570,8 +1968,9 @@ function handleChatInputClick(event) {
 
 function handleChatInputKeydown(event) {
     // 如果正在使用输入法输入（IME），回车键应该用于确认候选词，而不是发送消息
-    // 使用 event.isComposing 或 isComposing 标志来判断
-    if (event.isComposing || isComposing) {
+    // Safari 可能在确认候选词时先触发 compositionend，再触发 Enter keydown，
+    // 因此这里同时使用全局状态和 keyCode 229 兜底。
+    if (event.isComposing || isComposing || event.keyCode === 229) {
         return;
     }
 
@@ -1755,14 +2154,14 @@ function renderMentionSuggestions({ showLoading = false } = {}) {
     const previousScrollTop = canPreserveScroll ? existingList.scrollTop : 0;
 
     if (showLoading) {
-        mentionSuggestionsEl.innerHTML = '<div class="mention-empty">' + (typeof window.t === 'function' ? window.t('chat.loadingTools') : '正在加载工具...') + '</div>';
+        mentionSuggestionsEl.innerHTML = '<div class="mention-empty">' + (typeof window.t === 'function' ? window.t('chat.loadingTools') : 'Loading tools...') + '</div>';
         mentionSuggestionsEl.style.display = 'block';
         delete mentionSuggestionsEl.dataset.lastMentionQuery;
         return;
     }
 
     if (!mentionFilteredTools.length) {
-        mentionSuggestionsEl.innerHTML = '<div class="mention-empty">' + (typeof window.t === 'function' ? window.t('chat.noMatchTools') : '没有匹配的工具') + '</div>';
+        mentionSuggestionsEl.innerHTML = '<div class="mention-empty">' + (typeof window.t === 'function' ? window.t('chat.noMatchTools') : 'No matching tools') + '</div>';
         mentionSuggestionsEl.style.display = 'block';
         mentionSuggestionsEl.dataset.lastMentionQuery = currentQuery;
         return;
@@ -1773,16 +2172,16 @@ function renderMentionSuggestions({ showLoading = false } = {}) {
         // 如果工具有 roleEnabled 字段（指定了角色），使用它；否则使用 enabled
         const toolEnabled = tool.roleEnabled !== undefined ? tool.roleEnabled : tool.enabled;
         const disabledClass = toolEnabled ? '' : 'disabled';
-        const badge = tool.isExternal ? '<span class="mention-item-badge">外部</span>' : '<span class="mention-item-badge internal">内置</span>';
+        const badge = tool.isExternal ? '<span class="mention-item-badge">External</span>' : '<span class="mention-item-badge internal">Built-in</span>';
         const nameHtml = escapeHtml(tool.name);
-        const description = tool.description && tool.description.length > 0 ? escapeHtml(tool.description) : (typeof window.t === 'function' ? window.t('chat.noDescription') : '暂无描述');
+        const description = tool.description && tool.description.length > 0 ? escapeHtml(tool.description) : (typeof window.t === 'function' ? window.t('chat.noDescription') : 'No description');
         const descHtml = `<div class="mention-item-desc">${description}</div>`;
         // 根据工具在当前角色中的启用状态显示状态标签
-        const statusLabel = toolEnabled ? '可用' : (tool.roleEnabled !== undefined ? '已禁用（当前角色）' : '已禁用');
+        const statusLabel = toolEnabled ? 'Available' : (tool.roleEnabled !== undefined ? 'Disabled (current role)' : 'Disabled');
         const statusClass = toolEnabled ? 'enabled' : 'disabled';
         const originLabel = tool.isExternal
-            ? (tool.externalMcp ? `来源：${escapeHtml(tool.externalMcp)}` : '来源：外部MCP')
-            : '来源：内置工具';
+            ? (tool.externalMcp ? `Source: ${escapeHtml(tool.externalMcp)}` : 'Source: external MCP')
+            : 'Source: built-in tool';
 
         return `
             <button type="button" class="mention-item ${activeClass} ${disabledClass}" data-index="${index}">
@@ -1972,7 +2371,7 @@ function initializeChatUI() {
 
     const messagesDiv = document.getElementById('chat-messages');
     if (messagesDiv && messagesDiv.childElementCount === 0) {
-        const readyMsg = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : '系统已就绪。请输入您的测试需求，系统将自动执行相应的安全测试。';
+        const readyMsg = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System is ready. Please enter your test requirements, and the system will automatically perform the corresponding security tests.';
         addMessage('assistant', readyMsg, null, null, null, { systemReadyMessage: true });
     }
 
@@ -2094,7 +2493,7 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     let displayContent = content;
     if (role === 'assistant' && typeof displayContent === 'string' && typeof window.t === 'function') {
         if (displayContent.indexOf('执行失败: ') === 0) {
-            displayContent = window.t('chat.executeFailed') + ': ' + displayContent.slice('执行失败: '.length);
+            displayContent = window.t('chat.executeFailed') + ': ' + displayContent.slice('Execution failed'.length);
         }
         if (displayContent.indexOf('调用OpenAI失败:') !== -1) {
             displayContent = displayContent.replace(/调用OpenAI失败:/g, window.t('chat.callOpenAIFailed') + ':');
@@ -2134,8 +2533,8 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     if (role === 'assistant') {
         const copyBtn = document.createElement('button');
         copyBtn.className = 'message-copy-btn';
-        copyBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span>' + (typeof window.t === 'function' ? window.t('common.copy') : '复制') + '</span>';
-        copyBtn.title = typeof window.t === 'function' ? window.t('chat.copyMessageTitle') : '复制消息内容';
+        copyBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span>' + (typeof window.t === 'function' ? window.t('common.copy') : 'Copy') + '</span>';
+        copyBtn.title = typeof window.t === 'function' ? window.t('chat.copyMessageTitle') : 'Copy message';
         copyBtn.onclick = function(e) {
             e.stopPropagation();
             copyMessageToClipboard(messageDiv, this);
@@ -2172,19 +2571,20 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
         timeDiv.dataset.messageTime = messageTime.toISOString();
     } catch (e) { /* ignore */ }
     contentWrapper.appendChild(timeDiv);
+    messageDiv.appendChild(contentWrapper);
     
     // 有 MCP 执行记录且非流式占位消息时展示调用按钮；带 progressId 的流式占位不挂此条（与进度卡片一致，结束时 integrate 再创建）
     if (role === 'assistant' && (mcpExecutionIds && Array.isArray(mcpExecutionIds) && mcpExecutionIds.length > 0) && !progressId) {
         if (options && options.deferMcpButtons) {
             try {
-                messageDiv.dataset.pendingMcpExecutionIds = JSON.stringify(mcpExecutionIds);
+                const ids = cacheMcpExecutionIds(messageDiv, mcpExecutionIds);
+                messageDiv.dataset.pendingMcpExecutionIds = JSON.stringify(ids);
             } catch (e) { /* ignore */ }
         } else {
-            appendMcpCallButtons(messageDiv, mcpExecutionIds);
+            setMcpCallExecutionIds(messageDiv, mcpExecutionIds);
         }
     }
     
-    messageDiv.appendChild(contentWrapper);
     // 标记「系统就绪」占位消息，便于切换语言后刷新文案
     if (options && options.systemReadyMessage) {
         messageDiv.setAttribute('data-system-ready-message', '1');
@@ -2211,7 +2611,7 @@ function copyMessageToClipboard(messageDiv, button) {
                 return navigator.clipboard.writeText(text).then(() => {
                     showCopySuccess(button);
                 }).catch(err => {
-                    console.error('Clipboard API 复制失败:', err);
+                    console.error('Clipboard API copy failed:', err);
                     fallbackCopy(text);
                 });
             } else {
@@ -2242,8 +2642,8 @@ function copyMessageToClipboard(messageDiv, button) {
                     throw new Error('execCommand copy failed');
                 }
             } catch (execErr) {
-                console.error('降级复制失败:', execErr);
-                alert(typeof window.t === 'function' ? window.t('chat.copyFailedManual') : '复制失败，请手动选择内容复制');
+                console.error('Fallback copy failed:', execErr);
+                alert(typeof window.t === 'function' ? window.t('chat.copyFailedManual') : 'Copy failed, please select and copy manually');
             }
         };
 
@@ -2272,8 +2672,8 @@ function copyMessageToClipboard(messageDiv, button) {
         // 使用原始Markdown内容
         doCopy(originalContent);
     } catch (error) {
-        console.error('复制消息时出错:', error);
-        alert(typeof window.t === 'function' ? window.t('chat.copyFailedManual') : '复制失败，请手动选择内容复制');
+        console.error('delete turn failed:', error);
+        alert(typeof window.t === 'function' ? window.t('chat.copyFailedManual') : 'Copy failed, please select and copy manually');
     }
 }
 
@@ -2282,7 +2682,7 @@ function showCopySuccess(button) {
     if (button) {
         const originalText = button.innerHTML;
         button.dataset.copySuccessActive = '1';
-        button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20 6L9 17l-5-5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span>' + (typeof window.t === 'function' ? window.t('common.copied') : '已复制') + '</span>';
+        button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M20 6L9 17l-5-5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span>' + (typeof window.t === 'function' ? window.t('common.copied') : 'Copied') + '</span>';
         button.style.color = '#10b981';
         button.style.background = 'rgba(16, 185, 129, 0.1)';
         button.style.borderColor = 'rgba(16, 185, 129, 0.3)';
@@ -2370,11 +2770,19 @@ async function syncAssistantReasoningContentFromServer(backendMessageId, domAssi
         const msg = conv.messages.find((m) => m && String(m.id) === String(backendMessageId));
         if (!msg || !msg.reasoningContent) return;
         setMessageReasoningContent(domAssistantId, msg.reasoningContent);
-        const pdRes = await apiFetch(`/api/messages/${encodeURIComponent(String(backendMessageId))}/process-details`);
-        const pdJson = await pdRes.json().catch(() => ({}));
-        const details = pdRes.ok && Array.isArray(pdJson.processDetails) ? pdJson.processDetails : [];
-        if (typeof renderProcessDetails === 'function') {
-            renderProcessDetails(domAssistantId, details);
+        // 最终回复到达后同样必须完整恢复过程详情；无参数接口默认仅返回前 50 条，
+        // 否则这里会把 task-events 恢复出的完整时间线再次覆盖成第一页。
+        if (typeof window.loadProcessDetailsPaginated === 'function') {
+            await window.loadProcessDetailsPaginated(domAssistantId, String(backendMessageId));
+        } else {
+            const pdRes = await apiFetch(
+                `/api/messages/${encodeURIComponent(String(backendMessageId))}/process-details?full=1`
+            );
+            const pdJson = await pdRes.json().catch(() => ({}));
+            const details = pdRes.ok && Array.isArray(pdJson.processDetails) ? pdJson.processDetails : [];
+            if (typeof renderProcessDetails === 'function') {
+                renderProcessDetails(domAssistantId, details);
+            }
         }
     } catch (e) {
         console.warn('syncAssistantReasoningContentFromServer failed', e);
@@ -2397,7 +2805,10 @@ function isEinoAgentHeartbeatProgress(detail) {
 
 function filterNoiseProcessDetails(details) {
     if (!Array.isArray(details)) return details;
-    return details.filter(function (d) { return !isEinoAgentHeartbeatProgress(d); });
+    return details.filter(function (d) {
+        if (isEinoAgentHeartbeatProgress(d)) return false;
+        return !(d && d.eventType === 'tool_calls_detected');
+    });
 }
 
 function dedupeConsecutiveProcessDetailRows(details) {
@@ -2441,14 +2852,83 @@ function compactWorkflowProcessDetails(details) {
     });
 }
 
+function isProcessDetailsUserExpanded(messageId) {
+    const container = document.getElementById('process-details-' + messageId);
+    return !!(container && container.dataset && container.dataset.userExpanded === '1');
+}
+
+function messageHasConversationContent(messageElement) {
+    if (!messageElement || !messageElement.classList || !messageElement.classList.contains('assistant')) return false;
+    if (messageElement.hasAttribute('data-system-ready-message')) return false;
+    if (messageElement.dataset && String(messageElement.dataset.backendMessageId || '').trim()) return true;
+    const raw = messageElement.dataset ? String(messageElement.dataset.originalContent || '').trim() : '';
+    if (raw) return true;
+    const bubble = messageElement.querySelector('.message-bubble');
+    if (!bubble) return false;
+    const clone = bubble.cloneNode(true);
+    clone.querySelectorAll('.message-copy-btn').forEach((btn) => btn.remove());
+    return String(clone.textContent || '').trim().length > 0;
+}
+
+function syncProcessDetailButtonLabels(messageId, expanded) {
+    const expandT = typeof window.t === 'function' ? window.t('chat.expandDetail') : 'Expand details';
+    const collapseT = typeof window.t === 'function' ? window.t('tasks.collapseDetail') : 'Collapse details';
+    const label = expanded ? collapseT : expandT;
+    document.querySelectorAll('#' + messageId + ' .process-detail-btn').forEach((btn) => {
+        btn.innerHTML = '<span>' + label + '</span>';
+    });
+}
+
+/** 懒加载占位提示可点击，与工具栏「展开详情」行为一致 */
+function bindProcessDetailsLazyHint(hostEl, messageId) {
+    if (!hostEl || !messageId) return;
+    const emptyEl = hostEl.classList && hostEl.classList.contains('progress-timeline-empty')
+        ? hostEl
+        : hostEl.querySelector('.progress-timeline-empty');
+    if (!emptyEl || emptyEl.dataset.lazyHintBound === '1') return;
+    emptyEl.dataset.lazyHintBound = '1';
+    emptyEl.classList.add('progress-timeline-lazy-clickable');
+    emptyEl.setAttribute('role', 'button');
+    emptyEl.setAttribute('tabindex', '0');
+    const activate = () => {
+        if (typeof toggleProcessDetails === 'function') {
+            toggleProcessDetails(null, messageId);
+        }
+    };
+    emptyEl.addEventListener('click', activate);
+    emptyEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            activate();
+        }
+    });
+}
+window.bindProcessDetailsLazyHint = bindProcessDetailsLazyHint;
+
 // 渲染过程详情
 // options.append=true 时分页追加；options.markLoaded=false 时保留 lazy 标记（分页加载中）
 function renderProcessDetails(messageId, processDetails, options) {
     const renderOpts = options || {};
     const appendMode = !!renderOpts.append;
+    const prependMode = !!renderOpts.prepend;
     const markLoaded = renderOpts.markLoaded !== false;
+    const toolStatusByProcessDetailId = new Map();
+    if (Array.isArray(renderOpts.toolExecutions)) {
+        renderOpts.toolExecutions.forEach((execution) => {
+            if (!execution || !execution.processDetailId) return;
+            toolStatusByProcessDetailId.set(String(execution.processDetailId), String(execution.status || '').toLowerCase());
+        });
+    }
     const messageElement = document.getElementById(messageId);
     if (!messageElement) {
+        return;
+    }
+    const isLazyRequest = (processDetails === null);
+    const reasoningFromMessage = getMessageReasoningContent(messageElement);
+    const backendId = messageElement.dataset ? String(messageElement.dataset.backendMessageId || '').trim() : '';
+    const hasConversationContent = !!renderOpts.force || messageHasConversationContent(messageElement);
+    if (isLazyRequest && !reasoningFromMessage && !backendId && getMcpExecutionCount(messageElement) <= 0 && !hasConversationContent) {
+        pruneEmptyMcpCallSection(messageElement);
         return;
     }
     
@@ -2462,7 +2942,7 @@ function renderProcessDetails(messageId, processDetails, options) {
     if (!processDetailBtn) {
         processDetailBtn = document.createElement('button');
         processDetailBtn.className = 'mcp-detail-btn process-detail-btn';
-        processDetailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.expandDetail') : '展开详情') + '</span>';
+        processDetailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.expandDetail') : 'Expand details') + '</span>';
         processDetailBtn.onclick = () => toggleProcessDetails(null, messageId);
         buttonsContainer.appendChild(processDetailBtn);
     }
@@ -2503,14 +2983,14 @@ function renderProcessDetails(messageId, processDetails, options) {
     }
     
     // processDetails === null 表示“尚未加载（懒加载）”；messages.reasoningContent 可先展示
-    const isLazyNotLoaded = (processDetails === null);
-    const reasoningFromMessage = getMessageReasoningContent(messageElement);
+    const isLazyNotLoaded = isLazyRequest;
     if (isLazyNotLoaded && !reasoningFromMessage) {
         detailsContainer.dataset.lazyNotLoaded = '1';
         detailsContainer.dataset.loaded = '0';
-        const expandLabel = typeof window.t === 'function' ? window.t('chat.expandDetail') : '展开详情';
-        let lazyHint = expandLabel + '（点击后加载迭代详情）';
+        const expandLabel = typeof window.t === 'function' ? window.t('chat.expandDetail') : 'Expand details';
+        let lazyHint = expandLabel + ' (click to load iteration details)';
         timeline.innerHTML = '<div class="progress-timeline-empty">' + lazyHint + '</div>';
+        bindProcessDetailsLazyHint(timeline, messageId);
         timeline.classList.remove('expanded');
         prefetchProcessDetailsSummaryHint(messageId, messageElement);
         return;
@@ -2529,20 +3009,36 @@ function renderProcessDetails(messageId, processDetails, options) {
     processDetails = mergeMessageReasoningContentIntoProcessDetails(processDetails, reasoningFromMessage);
     processDetails = filterNoiseProcessDetails(processDetails);
     processDetails = dedupeConsecutiveProcessDetailRows(processDetails);
+    const renderedMcpIds = collectMcpExecutionIdsFromProcessDetails(processDetails);
+    if (renderedMcpIds.length > 0) {
+        setPendingMcpExecutionIds(messageElement, renderedMcpIds);
+    }
+    const renderedToolCount = processDetails.filter((d) => d && d.eventType === 'tool_call').length;
+    if (renderedToolCount > 0) {
+        setMcpExecutionSummaryCount(messageElement, renderedToolCount);
+    }
     if (typeof window.coalesceProcessDetailsToolPairs === 'function') {
         processDetails = window.coalesceProcessDetailsToolPairs(processDetails);
     }
     processDetails = compactWorkflowProcessDetails(processDetails);
     // 如果没有processDetails或为空，显示空状态
     if (!processDetails || processDetails.length === 0) {
-        if (!appendMode) {
-            timeline.innerHTML = '<div class="progress-timeline-empty">' + (typeof window.t === 'function' ? window.t('chat.noProcessDetail') : '暂无过程详情（可能执行过快或未触发详细事件）') + '</div>';
-            timeline.classList.remove('expanded');
+        if (!appendMode && !prependMode) {
+            timeline.innerHTML = '<div class="progress-timeline-empty">' + (typeof window.t === 'function' ? window.t('chat.noProcessDetail') : 'No process details (execution may be too fast or no detailed events)') + '</div>';
+            if (!isProcessDetailsUserExpanded(messageId)) {
+                timeline.classList.remove('expanded');
+            }
         }
         return;
     }
     
-    if (!appendMode) {
+    const prependAnchor = prependMode ? timeline.firstChild : null;
+    const prependScrollBox = prependMode ? document.getElementById('chat-messages') : null;
+    const prependScrollHeight = prependScrollBox ? prependScrollBox.scrollHeight : 0;
+    const prependScrollTop = prependScrollBox ? prependScrollBox.scrollTop : 0;
+    const prependedIds = [];
+
+    if (!appendMode && !prependMode) {
         timeline.innerHTML = '';
     }
     
@@ -2551,6 +3047,83 @@ function renderProcessDetails(messageId, processDetails, options) {
         if (!d || d.einoAgent == null) return '';
         const s = String(d.einoAgent).trim();
         return s ? ('[' + s + '] ') : '';
+    }
+
+    function formatProcessDetailEinoRunRetryKind(kind) {
+        if (typeof window.formatEinoRunRetryKind === 'function') {
+            return window.formatEinoRunRetryKind(kind);
+        }
+        const key = String(kind || '').trim();
+        if (!key) return '';
+        const labels = {
+            rate_limit: 'Rate limit / too many requests',
+            retryable_http: 'Retryable HTTP error',
+            upstream_server: 'Upstream service error',
+            http_error: 'HTTP error',
+            upstream_busy: 'Upstream service busy',
+            network: 'Network connection error',
+            stream: 'Stream read error',
+            transient: 'Transient error'
+        };
+        if (typeof window.t === 'function') {
+            const translated = window.t('chat.einoRunRetryKind_' + key);
+            if (translated && translated !== 'chat.einoRunRetryKind_' + key) return translated;
+        }
+        return labels[key] || key;
+    }
+
+    function formatProcessDetailEinoRunRetryTitle(data) {
+        if (typeof window.formatEinoRunRetryTitle === 'function') {
+            return window.formatEinoRunRetryTitle(data);
+        }
+        const d = data && typeof data === 'object' ? data : {};
+        const base = typeof window.t === 'function'
+            ? window.t('chat.einoRunRetryTitle')
+            : '🔁 Retrying after a transient error';
+        const attempt = Number(d.attempt || 0);
+        const maxAttempts = Number(d.maxAttempts || 0);
+        if (Number.isFinite(attempt) && attempt > 0 && Number.isFinite(maxAttempts) && maxAttempts > 0) {
+            return base + '（' + attempt + '/' + maxAttempts + '）';
+        }
+        return base;
+    }
+
+    function formatProcessDetailEinoRunRetryMessage(message, data) {
+        if (typeof window.formatEinoRunRetryMessage === 'function') {
+            return window.formatEinoRunRetryMessage(message, data);
+        }
+        const d = data && typeof data === 'object' ? data : {};
+        const base = String(message || '').trim();
+        const errRaw = d.errorSummary != null && String(d.errorSummary).trim() !== ''
+            ? String(d.errorSummary).trim()
+            : (d.error != null ? String(d.error).trim() : '');
+        const lines = [];
+        if (base) lines.push(base);
+        const attempt = Number(d.attempt || 0);
+        const maxAttempts = Number(d.maxAttempts || 0);
+        const backoffSec = Number(d.backoffSec || 0);
+        const kind = formatProcessDetailEinoRunRetryKind(d.errorKind);
+        if (Number.isFinite(attempt) && attempt > 0 && Number.isFinite(maxAttempts) && maxAttempts > 0) {
+            const retryPlan = typeof window.t === 'function'
+                ? window.t('chat.einoRunRetryPlan', { attempt: attempt, maxAttempts: maxAttempts, backoffSec: Number.isFinite(backoffSec) && backoffSec > 0 ? backoffSec : '-' })
+                : ('Retry progress: attempt ' + attempt + '/' + maxAttempts + ', waiting ' + (Number.isFinite(backoffSec) && backoffSec > 0 ? backoffSec : '-') + ' seconds');
+            if (!base || base.indexOf(String(attempt) + '/' + String(maxAttempts)) === -1) {
+                lines.push(retryPlan);
+            }
+        }
+        if (kind) {
+            const kindLabel = typeof window.t === 'function'
+                ? window.t('chat.einoRunRetryReasonKind')
+                : 'Reason type';
+            lines.push(kindLabel + ': ' + kind);
+        }
+        if (errRaw && (!base || base.indexOf(errRaw) === -1)) {
+            const detailLabel = typeof window.t === 'function'
+                ? window.t('chat.einoRunRetryErrorDetail')
+                : 'Error details';
+            lines.push(detailLabel + ': ' + errRaw);
+        }
+        return lines.join('\n');
     }
 
     function renderOneProcessDetail(detail) {
@@ -2562,41 +3135,41 @@ function renderProcessDetails(messageId, processDetails, options) {
         let itemTitle = title;
         if (eventType === 'workflow_start') {
             const name = data.workflowName || data.workflowId || '';
-            itemTitle = '🧭 工作流开始' + (name ? (' · ' + name) : '');
+            itemTitle = '🧭 Workflow started' + (name ? (' · ' + name) : '');
         } else if (eventType === 'workflow_done') {
             const name = data.workflowName || data.workflowId || '';
-            itemTitle = '✅ 工作流完成' + (name ? (' · ' + name) : '');
+            itemTitle = '✅ Workflow completed' + (name ? (' · ' + name) : '');
         } else if (eventType === 'workflow_node_start') {
             const label = data.label || title || data.nodeId || '';
-            itemTitle = '▶ 节点开始' + (label ? (' · ' + label) : '');
+            itemTitle = '▶ Node started' + (label ? (' · ' + label) : '');
         } else if (eventType === 'workflow_node_result') {
             const label = data.label || data.nodeId || '';
             const status = data.status || '';
             const nodeType = data.nodeType != null ? String(data.nodeType).toLowerCase() : '';
             if (nodeType === 'condition') {
                 const matched = data.matched === true || data.matched === 'true' || (data.output && (data.output.matched === true || data.output.matched === 'true'));
-                itemTitle = (matched ? '✅' : '🔀') + ' 条件判断' + (label ? (' · ' + label) : '') + ' → ' + (matched ? '是' : '否');
+                itemTitle = (matched ? '✅' : '🔀') + ' Condition' + (label ? (' · ' + label) : '') + ' → ' + (matched ? 'Yes' : 'No');
             } else {
                 const icon = status === 'failed' ? '❌' : (status === 'skipped' ? '⏭️' : '✅');
-                itemTitle = icon + ' 节点完成' + (label ? (' · ' + label) : '') + (status ? ('（' + status + '）') : '');
+                itemTitle = icon + ' Node completed' + (label ? (' · ' + label) : '') + (status ? (' (' + status + ')') : '');
             }
         } else if (eventType === 'workflow_branch_taken' || eventType === 'workflow_branch_skipped') {
             const branch = data.branchLabel || '';
             const target = data.targetLabel || data.targetId || '';
             const taken = eventType === 'workflow_branch_taken';
-            itemTitle = (taken ? '➡️' : '⏭️') + (taken ? ' 执行分支' : ' 跳过分支') + (branch ? (' · ' + branch) : '') + (target ? (' → ' + target) : '');
+            itemTitle = (taken ? '➡️' : '⏭️') + (taken ? ' Executed branch' : ' Skipped branch') + (branch ? (' · ' + branch) : '') + (target ? (' → ' + target) : '');
         } else if (eventType === 'workflow_tool_start') {
             const tool = data.tool || data.toolName || '';
-            itemTitle = '🔧 工具节点' + (tool ? (' · ' + tool) : '');
+            itemTitle = '🔧 Tool node' + (tool ? (' · ' + tool) : '');
         } else if (eventType === 'workflow_agent_output') {
             const label = data.label || data.nodeId || '';
-            itemTitle = '🤖 Agent 输出' + (label ? (' · ' + label) : '');
+            itemTitle = '🤖 Agent output' + (label ? (' · ' + label) : '');
         } else if (eventType === 'workflow_hitl_checkpoint') {
-            itemTitle = '🧑‍⚖️ 人工确认检查点';
+            itemTitle = '🧑‍⚖️ Human approval checkpoint';
         } else if (eventType === 'workflow_hitl_waiting') {
-            itemTitle = '🧑‍⚖️ 工作流等待审批';
+            itemTitle = '🧑‍⚖️ Workflow awaiting approval';
         } else if (eventType === 'workflow_paused') {
-            itemTitle = '⏸️ 工作流已暂停';
+            itemTitle = '⏸️ Workflow paused';
         } else if (eventType === 'iteration') {
             const n = data.iteration || 1;
             if (data.orchestration === 'plan_execute' && data.einoScope === 'main') {
@@ -2604,96 +3177,121 @@ function renderProcessDetails(messageId, processDetails, options) {
                     ? window.translatePlanExecuteAgentName(data.einoAgent) : (data.einoAgent || '');
                 itemTitle = (typeof window.t === 'function'
                     ? window.t('chat.einoPlanExecuteRound', { n: n, phase: phase })
-                    : ('Plan-Execute · 第 ' + n + ' 轮 · ' + phase));
+                    : ('Plan-Execute · Round ' + n + ' · ' + phase));
             } else if (data.einoScope === 'main') {
                 itemTitle = agPx + (typeof window.t === 'function'
                     ? window.t('chat.einoOrchestratorRound', { n: n })
-                    : ('主代理 · 第 ' + n + ' 轮'));
+                    : ('Main agent · Round ' + n));
             } else if (data.einoScope === 'sub') {
                 const agent = data.einoAgent != null ? String(data.einoAgent).trim() : '';
                 itemTitle = agPx + (typeof window.t === 'function'
                     ? window.t('chat.einoSubAgentStep', { n: n, agent: agent })
-                    : ('子代理 · ' + agent + ' · 第 ' + n + ' 步'));
+                    : ('Sub-agent · ' + agent + ' · Step ' + n));
             } else {
-                itemTitle = agPx + (typeof window.t === 'function' ? window.t('chat.iterationRound', { n: n }) : '第 ' + n + ' 轮迭代');
+                itemTitle = agPx + (typeof window.t === 'function' ? window.t('chat.iterationRound', { n: n }) : 'Iteration round ' + n);
             }
         } else if (eventType === 'thinking') {
-            itemTitle = agPx + '🤔 ' + (typeof window.t === 'function' ? window.t('chat.aiThinking') : 'AI思考');
+            itemTitle = agPx + '🤔 ' + (typeof window.t === 'function' ? window.t('chat.aiThinking') : 'AI thinking');
         } else if (eventType === 'reasoning_chain') {
-            itemTitle = agPx + '🔗 ' + (typeof window.t === 'function' ? window.t('chat.reasoningChain') : '推理过程');
+            itemTitle = agPx + '🔗 ' + (typeof window.t === 'function' ? window.t('chat.reasoningChain') : 'Reasoning process');
         } else if (eventType === 'planning') {
             if (typeof window.einoMainStreamPlanningTitle === 'function') {
                 itemTitle = window.einoMainStreamPlanningTitle(data);
             } else {
-                itemTitle = agPx + '📝 ' + (typeof window.t === 'function' ? window.t('chat.planning') : '规划中');
+                itemTitle = agPx + '📝 ' + (typeof window.t === 'function' ? window.t('chat.planning') : 'Planning');
             }
         } else if (eventType === 'tool_calls_detected') {
-            itemTitle = agPx + '🔧 ' + (typeof window.t === 'function' ? window.t('chat.toolCallsDetected', { count: data.count || 0 }) : '检测到 ' + (data.count || 0) + ' 个工具调用');
+            itemTitle = agPx + '🔧 ' + (typeof window.t === 'function' ? window.t('chat.toolCallsDetected', { count: data.count || 0 }) : (data.count || 0) + ' tool call(s) detected');
         } else if (eventType === 'tool_call') {
-            const toolName = data.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : '未知工具');
+            const toolName = data.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : 'Unknown tool');
             const index = data.index || 0;
             const total = data.total || 0;
             const callTitle = typeof window.formatToolCallTimelineTitle === 'function'
                 ? window.formatToolCallTimelineTitle(toolName, index, total)
-                : (typeof window.t === 'function' ? window.t('chat.callTool', { name: escapeHtml(toolName), index: index, total: total }) : '调用工具: ' + escapeHtml(toolName) + ' (' + index + '/' + total + ')');
+                : (typeof window.t === 'function' ? window.t('chat.callTool', { name: escapeHtml(toolName), index: index, total: total }) : 'Call tool: ' + escapeHtml(toolName) + ' (' + index + '/' + total + ')');
             itemTitle = agPx + '🔧 ' + callTitle;
         } else if (eventType === 'tool_result') {
-            const toolName = data.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : '未知工具');
-            const success = data.success !== false;
-            const statusIcon = success ? '✅' : '❌';
-            const execText = success ? (typeof window.t === 'function' ? window.t('chat.toolExecComplete', { name: escapeHtml(toolName) }) : '工具 ' + escapeHtml(toolName) + ' 执行完成') : (typeof window.t === 'function' ? window.t('chat.toolExecFailed', { name: escapeHtml(toolName) }) : '工具 ' + escapeHtml(toolName) + ' 执行失败');
+            const toolName = data.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : 'Unknown tool');
+            const noResultText = typeof window.t === 'function' ? window.t('timeline.noResult') : 'No result';
+            const result = data.result != null ? data.result : (data.error != null ? data.error : (data.resultPreview != null ? data.resultPreview : noResultText));
+            const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+            const displayState = typeof window.getToolResultDisplayState === 'function'
+                ? window.getToolResultDisplayState(data, { rawText: resultStr })
+                : { kind: (data.success !== false ? 'success' : 'error'), isError: data.success === false };
+            const backgroundRunning = displayState.kind === 'background_running';
+            const success = !displayState.isError && !backgroundRunning;
+            const statusIcon = backgroundRunning ? '⏳' : (success ? '✅' : '❌');
+            const execText = backgroundRunning
+                ? ((typeof window.getBackgroundRunningToolLabel === 'function' ? window.getBackgroundRunningToolLabel() : 'Running in background') + ': ' + escapeHtml(toolName))
+                : (success ? (typeof window.t === 'function' ? window.t('chat.toolExecComplete', { name: escapeHtml(toolName) }) : 'Tool ' + escapeHtml(toolName) + ' completed') : (typeof window.t === 'function' ? window.t('chat.toolExecFailed', { name: escapeHtml(toolName) }) : 'Tool ' + escapeHtml(toolName) + ' failed'));
             let execLine = statusIcon + ' ' + execText;
             if (toolName === BuiltinTools.SEARCH_KNOWLEDGE_BASE && success) {
-                execLine = '📚 ' + execLine + ' - ' + (typeof window.t === 'function' ? window.t('chat.knowledgeRetrievalTag') : '知识检索');
+                execLine = '📚 ' + execLine + ' - ' + (typeof window.t === 'function' ? window.t('chat.knowledgeRetrievalTag') : 'Knowledge retrieval');
             }
             itemTitle = agPx + execLine;
         } else if (eventType === 'eino_agent_reply') {
-            itemTitle = agPx + '💬 ' + (typeof window.t === 'function' ? window.t('chat.einoAgentReplyTitle') : '子代理回复');
+            itemTitle = agPx + '💬 ' + (typeof window.t === 'function' ? window.t('chat.einoAgentReplyTitle') : 'Sub-agent reply');
         } else if (eventType === 'eino_empty_response_continue') {
             itemTitle = typeof window.t === 'function'
                 ? window.t('chat.einoEmptyResponseContinueTitle')
-                : '🔁 自动续跑（无助手正文）';
+                : '🔁 Automatic continuation (no assistant response)';
         } else if (eventType === 'eino_run_retry') {
-            itemTitle = typeof window.t === 'function'
-                ? window.t('chat.einoRunRetryTitle')
-                : '🔁 临时错误重试';
-            const errRaw = data && data.error != null ? String(data.error).trim() : '';
-            if (errRaw) {
-                const detailLabel = typeof window.t === 'function'
-                    ? window.t('chat.einoRunRetryErrorDetail')
-                    : '错误详情';
-                if (!title || String(title).indexOf(errRaw) === -1) {
-                    const merged = title ? (String(title) + '\n' + detailLabel + '：' + errRaw) : (detailLabel + '：' + errRaw);
-                    detail.message = merged;
-                }
-            }
+            itemTitle = formatProcessDetailEinoRunRetryTitle(data);
+            detail.message = formatProcessDetailEinoRunRetryMessage(title, data);
         } else if (eventType === 'knowledge_retrieval') {
-            itemTitle = '📚 ' + (typeof window.t === 'function' ? window.t('chat.knowledgeRetrieval') : '知识检索');
+            itemTitle = '📚 ' + (typeof window.t === 'function' ? window.t('chat.knowledgeRetrieval') : 'Knowledge retrieval');
         } else if (eventType === 'error') {
-            itemTitle = '❌ ' + (typeof window.t === 'function' ? window.t('chat.error') : '错误');
+            itemTitle = '❌ ' + (typeof window.t === 'function' ? window.t('chat.error') : 'Error');
         } else if (eventType === 'cancelled') {
-            itemTitle = '⛔ ' + (typeof window.t === 'function' ? window.t('chat.taskCancelled') : '任务已取消');
+            itemTitle = '⛔ ' + (typeof window.t === 'function' ? window.t('chat.taskCancelled') : 'Task cancelled');
         } else if (eventType === 'hitl_interrupt') {
-            const hitlMsg = (detail.message && String(detail.message).trim()) ? String(detail.message).trim() : (typeof window.t === 'function' ? window.t('hitl.pendingTitle') : '待审批');
+            const hitlMsg = (detail.message && String(detail.message).trim()) ? String(detail.message).trim() : (typeof window.t === 'function' ? window.t('hitl.pendingTitle') : 'Pending approvals');
             itemTitle = agPx + '🧑‍⚖️ HITL · ' + hitlMsg;
         } else if (eventType === 'progress') {
             itemTitle = typeof window.translateProgressMessage === 'function' ? window.translateProgressMessage(detail.message || '') : (detail.message || '');
         } else if (eventType === 'user_interrupt_continue') {
             itemTitle = typeof window.t === 'function'
                 ? window.t('chat.userInterruptContinueTitle')
-                : '⏸️ 用户中断并继续';
+                : '⏸️ User interrupted and continued';
         }
         
         const timelineOpts = {
             title: itemTitle,
             message: detail.message || '',
             data: data,
+            processDetailId: detail.id || '',
             createdAt: detail.createdAt
         };
         if (eventType === 'tool_call' && data._mergedResult) {
             timelineOpts.mergedResult = data._mergedResult;
+            if (typeof window.getToolResultDisplayState === 'function') {
+                const displayState = window.getToolResultDisplayState(data._mergedResult);
+                if (displayState && displayState.kind === 'background_running') {
+                    timelineOpts.toolStatus = 'background_running';
+                }
+            }
         }
-        addTimelineItem(timeline, eventType, timelineOpts);
+        if (!timelineOpts.toolStatus && eventType === 'tool_call' && detail.id && toolStatusByProcessDetailId.has(String(detail.id))) {
+            timelineOpts.toolStatus = toolStatusByProcessDetailId.get(String(detail.id));
+        }
+        const itemId = addTimelineItem(timeline, eventType, timelineOpts);
+        if (prependMode && itemId) {
+            prependedIds.push(itemId);
+        }
+    }
+
+    function finishPrependRender() {
+        if (!prependMode || prependedIds.length === 0) return;
+        const fragment = document.createDocumentFragment();
+        prependedIds.forEach((id) => {
+            const node = document.getElementById(id);
+            if (node) fragment.appendChild(node);
+        });
+        timeline.insertBefore(fragment, prependAnchor || timeline.firstChild);
+        if (prependScrollBox) {
+            const delta = prependScrollBox.scrollHeight - prependScrollHeight;
+            prependScrollBox.scrollTop = prependScrollTop + delta;
+        }
     }
 
     const TIMELINE_RENDER_BATCH = 40;
@@ -2705,13 +3303,17 @@ function renderProcessDetails(messageId, processDetails, options) {
         if (endIdx < processDetails.length) {
             requestAnimationFrame(() => renderTimelineBatch(endIdx));
         } else if (markLoaded) {
+            finishPrependRender();
             finishProcessDetailsRender(messageElement, processDetails, isLazyNotLoaded, timeline);
+        } else {
+            finishPrependRender();
         }
     };
     if (processDetails.length > TIMELINE_RENDER_BATCH) {
         renderTimelineBatch(0);
     } else {
         processDetails.forEach(renderOneProcessDetail);
+        finishPrependRender();
         if (markLoaded) {
             finishProcessDetailsRender(messageElement, processDetails, isLazyNotLoaded, timeline);
         }
@@ -2722,9 +3324,10 @@ function finishProcessDetailsRender(messageElement, processDetails, isLazyNotLoa
     if (isLazyNotLoaded && getMessageReasoningContent(messageElement)) {
         const lazyHint = document.createElement('div');
         lazyHint.className = 'progress-timeline-empty progress-timeline-lazy-hint';
-        lazyHint.textContent = (typeof window.t === 'function' ? window.t('chat.expandDetail') : '展开详情') +
-            '（点击后加载完整过程详情）';
+        lazyHint.textContent = (typeof window.t === 'function' ? window.t('chat.expandDetail') : 'Expand details') +
+            ' (click to load full process details)';
         timeline.appendChild(lazyHint);
+        bindProcessDetailsLazyHint(lazyHint, messageElement.id);
     }
     
     const hasPendingHitlInDetails = processDetails.some(d => d && d.eventType === 'hitl_interrupt');
@@ -2732,12 +3335,13 @@ function finishProcessDetailsRender(messageElement, processDetails, isLazyNotLoa
     const hasErrorOrCancelled = processDetails.some(d => 
         d.eventType === 'error' || d.eventType === 'cancelled'
     );
-    if (hasErrorOrCancelled && !hasPendingHitlInDetails && !hasPendingWorkflowHitl) {
+    const userExpanded = isProcessDetailsUserExpanded(messageElement.id);
+    if (userExpanded) {
+        timeline.classList.add('expanded');
+        syncProcessDetailButtonLabels(messageElement.id, true);
+    } else if (hasErrorOrCancelled && !hasPendingHitlInDetails && !hasPendingWorkflowHitl) {
         timeline.classList.remove('expanded');
-        const processDetailBtn = messageElement.querySelector('.process-detail-btn');
-        if (processDetailBtn) {
-            processDetailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.expandDetail') : '展开详情') + '</span>';
-        }
+        syncProcessDetailButtonLabels(messageElement.id, false);
     }
     if (hasPendingWorkflowHitl && messageElement && messageElement.id) {
         const convId = typeof window.currentConversationId === 'string' ? window.currentConversationId : '';
@@ -2760,18 +3364,32 @@ function prefetchProcessDetailsSummaryHint(messageId, messageElement) {
             const j = await res.json().catch(() => ({}));
             if (!res.ok || !j.summary) return;
             const s = j.summary;
+            const toolCount = parseInt(s.toolCount, 10) || 0;
+            const summaryMcpIds = Array.isArray(s.mcpExecutionIds) ? s.mcpExecutionIds : [];
+            const summaryTools = Array.isArray(s.toolExecutions) ? s.toolExecutions : [];
+            if (summaryTools.length > 0) {
+                setPendingToolExecutionSummaries(messageElement, summaryTools);
+            }
+            if (summaryMcpIds.length > 0) {
+                setPendingMcpExecutionIds(messageElement, summaryMcpIds);
+            }
+            const buttonToolCount = summaryTools.length > 0 ? summaryTools.length : (toolCount || summaryMcpIds.length);
+            if (buttonToolCount > 0) {
+                setMcpExecutionSummaryCount(messageElement, buttonToolCount);
+            }
             const timeline = detailsContainer.querySelector('.progress-timeline');
             if (!timeline || detailsContainer.dataset.loaded === '1') return;
-            const expandLabel = typeof window.t === 'function' ? window.t('chat.expandDetail') : '展开详情';
-            let hint = expandLabel + '（点击后加载迭代详情）';
+            const expandLabel = typeof window.t === 'function' ? window.t('chat.expandDetail') : 'Expand details';
+            let hint = expandLabel + ' (click to load iteration details)';
             if (s.maxIteration > 0) {
-                hint = expandLabel + '（共 ' + s.maxIteration + ' 轮迭代，' + (s.total || 0) + ' 条详情）';
+                hint = expandLabel + ' (' + s.maxIteration + ' iteration(s), ' + (s.total || 0) + ' detail(s) total)';
             } else if (s.total > 0) {
-                hint = expandLabel + '（共 ' + (s.total || 0) + ' 条详情）';
+                hint = expandLabel + ' (' + (s.total || 0) + ' detail(s) total)';
             }
             const empty = timeline.querySelector('.progress-timeline-empty');
             if (empty) {
                 empty.textContent = hint;
+                bindProcessDetailsLazyHint(timeline, messageId);
             }
         })
         .catch(() => {});
@@ -2794,10 +3412,20 @@ if (chatInput) {
     chatInput.addEventListener('focus', handleChatInputClick);
     // IME输入法事件监听，用于跟踪输入法状态
     chatInput.addEventListener('compositionstart', () => {
+        if (compositionEndTimer) {
+            clearTimeout(compositionEndTimer);
+            compositionEndTimer = null;
+        }
         isComposing = true;
     });
     chatInput.addEventListener('compositionend', () => {
-        isComposing = false;
+        if (compositionEndTimer) {
+            clearTimeout(compositionEndTimer);
+        }
+        compositionEndTimer = setTimeout(() => {
+            isComposing = false;
+            compositionEndTimer = null;
+        }, 0);
     });
     chatInput.addEventListener('blur', () => {
         setTimeout(() => {
@@ -2821,23 +3449,6 @@ window.addEventListener('beforeunload', () => {
     }
 });
 
-// 异步获取工具名称并更新按钮文本
-async function updateButtonWithToolName(button, executionId, index) {
-    try {
-        const response = await apiFetch(`/api/monitor/execution/${executionId}`);
-        if (response.ok) {
-            const exec = await response.json();
-            const toolName = exec.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : '未知工具');
-            // 格式化工具名称（如果是 name::toolName 格式，只显示 toolName 部分）
-            const displayToolName = toolName.includes('::') ? toolName.split('::')[1] : toolName;
-            button.querySelector('span').textContent = `${displayToolName} #${index}`;
-        }
-    } catch (error) {
-        // 如果获取失败，保持原有文本不变
-        console.error('获取工具名称失败:', error);
-    }
-}
-
 function getPendingMcpExecutionCount(messageElement) {
     if (!messageElement || !messageElement.dataset || !messageElement.dataset.pendingMcpExecutionIds) {
         return 0;
@@ -2850,14 +3461,206 @@ function getPendingMcpExecutionCount(messageElement) {
     }
 }
 
+function getPendingToolExecutionSummaryCount(messageElement) {
+    if (!messageElement || !messageElement.dataset || !messageElement.dataset.pendingToolExecutionSummaries) {
+        return 0;
+    }
+    try {
+        const tools = JSON.parse(messageElement.dataset.pendingToolExecutionSummaries);
+        return Array.isArray(tools) ? tools.length : 0;
+    } catch (e) {
+        return 0;
+    }
+}
+
 function getMcpExecutionCount(messageElement) {
-    const pending = getPendingMcpExecutionCount(messageElement);
-    if (pending > 0) return pending;
+    const pendingSummaries = getPendingToolExecutionSummaryCount(messageElement);
+    if (pendingSummaries > 0) return pendingSummaries;
     const toolList = messageElement && messageElement.querySelector('.mcp-tool-list');
     if (toolList) {
-        return toolList.querySelectorAll('.mcp-detail-btn[data-exec-id]').length;
+        const rendered = toolList.querySelectorAll('.mcp-detail-btn').length;
+        if (rendered > 0) return rendered;
     }
+    if (messageElement && messageElement.dataset && messageElement.dataset.mcpExecutionCount) {
+        const summaryCount = parseInt(messageElement.dataset.mcpExecutionCount, 10) || 0;
+        if (summaryCount > 0) return summaryCount;
+    }
+    const pending = getPendingMcpExecutionCount(messageElement);
+    if (pending > 0) return pending;
     return 0;
+}
+
+function getExistingMcpCallSectionChrome(messageElement) {
+    if (!messageElement) return null;
+    const mcpSection = messageElement.querySelector('.mcp-call-section');
+    if (!mcpSection) return null;
+    return {
+        mcpSection: mcpSection,
+        toolbar: mcpSection.querySelector('.mcp-call-toolbar'),
+        toolList: mcpSection.querySelector('.mcp-tool-list')
+    };
+}
+
+function pruneEmptyMcpCallSection(messageElement) {
+    const chrome = getExistingMcpCallSectionChrome(messageElement);
+    if (!chrome || !chrome.mcpSection) return;
+    const hasDetails = !!chrome.mcpSection.querySelector('.process-details-container');
+    const hasProcessDetailButton = !!(chrome.toolbar && chrome.toolbar.querySelector('.process-detail-btn'));
+    const hasToolButtons = !!(chrome.toolList && chrome.toolList.querySelector('.mcp-detail-btn'));
+    const hasPendingTools = getPendingMcpExecutionCount(messageElement) > 0 ||
+        getPendingToolExecutionSummaryCount(messageElement) > 0 ||
+        getMcpExecutionCount(messageElement) > 0;
+    if (!hasDetails && !hasProcessDetailButton && !hasToolButtons && !hasPendingTools) {
+        chrome.mcpSection.remove();
+    }
+}
+
+function collectMcpExecutionIdsFromProcessDetails(processDetails) {
+    if (!Array.isArray(processDetails)) return [];
+    const seen = new Set();
+    const ids = [];
+    const add = (value) => {
+        const id = value == null ? '' : String(value).trim();
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        ids.push(id);
+    };
+    processDetails.forEach((detail) => {
+        const data = detail && detail.data && typeof detail.data === 'object' ? detail.data : null;
+        if (!data) return;
+        add(data.executionId);
+        const merged = data._mergedResult && typeof data._mergedResult === 'object' ? data._mergedResult : null;
+        if (merged) add(merged.executionId);
+    });
+    return ids;
+}
+
+function normalizeMcpExecutionIds(executionIds) {
+    if (!Array.isArray(executionIds)) return [];
+    const seen = new Set();
+    return executionIds.reduce((ids, value) => {
+        const id = value == null ? '' : String(value).trim();
+        if (id && !seen.has(id)) {
+            seen.add(id);
+            ids.push(id);
+        }
+        return ids;
+    }, []);
+}
+
+function cacheMcpExecutionIds(messageElement, executionIds) {
+    if (!messageElement || !messageElement.dataset) return [];
+    const ids = normalizeMcpExecutionIds(executionIds);
+    if (ids.length > 0) {
+        messageElement.dataset.mcpExecutionIds = JSON.stringify(ids);
+    } else {
+        delete messageElement.dataset.mcpExecutionIds;
+    }
+    return ids;
+}
+
+function getCachedMcpExecutionIds(messageElement) {
+    if (!messageElement || !messageElement.dataset || !messageElement.dataset.mcpExecutionIds) return [];
+    try {
+        return normalizeMcpExecutionIds(JSON.parse(messageElement.dataset.mcpExecutionIds));
+    } catch (e) {
+        delete messageElement.dataset.mcpExecutionIds;
+        return [];
+    }
+}
+
+function setPendingMcpExecutionIds(messageElement, executionIds) {
+    if (!messageElement || !messageElement.dataset || !Array.isArray(executionIds)) return;
+    const ids = cacheMcpExecutionIds(messageElement, executionIds);
+    if (ids.length > 0) {
+        messageElement.dataset.pendingMcpExecutionIds = JSON.stringify(ids);
+    } else {
+        delete messageElement.dataset.pendingMcpExecutionIds;
+    }
+    const renderedToolList = messageElement.querySelector('.mcp-tool-list');
+    if (ids.length > 0 && renderedToolList && renderedToolList.querySelector('.mcp-detail-btn')) {
+        renderMcpCallButtons(messageElement);
+    }
+    if (typeof syncMcpToolsToggleButton === 'function') {
+        syncMcpToolsToggleButton(messageElement);
+    }
+}
+
+function normalizeToolExecutionSummaryForButton(raw) {
+    const data = raw && typeof raw === 'object' ? raw : {};
+	return {
+	    toolName: data.toolName || data.name || '',
+	    status: data.status || '',
+	    executionId: data.executionId || '',
+	    toolCallId: data.toolCallId || '',
+	    processDetailId: data.processDetailId || '',
+	    resultDetailId: data.resultDetailId || ''
+	};
+}
+
+function cacheToolExecutionSummaries(messageElement, summaries) {
+    if (!messageElement || !messageElement.dataset || !Array.isArray(summaries)) return [];
+    const normalized = summaries
+        .map(normalizeToolExecutionSummaryForButton)
+        .filter((item) => item.toolName || item.executionId || item.toolCallId);
+    if (normalized.length > 0) {
+        messageElement.dataset.toolExecutionSummaries = JSON.stringify(normalized);
+    } else {
+        delete messageElement.dataset.toolExecutionSummaries;
+    }
+    return normalized;
+}
+
+function getCachedToolExecutionSummaries(messageElement) {
+    if (!messageElement || !messageElement.dataset || !messageElement.dataset.toolExecutionSummaries) return [];
+    try {
+        const parsed = JSON.parse(messageElement.dataset.toolExecutionSummaries);
+        return Array.isArray(parsed) ? parsed.map(normalizeToolExecutionSummaryForButton) : [];
+    } catch (e) {
+        delete messageElement.dataset.toolExecutionSummaries;
+        return [];
+    }
+}
+
+function selectToolExecutionSummariesForButtons(summaries, executionIds) {
+    const normalizedSummaries = Array.isArray(summaries)
+        ? summaries.map(normalizeToolExecutionSummaryForButton)
+        : [];
+    const normalizedIds = normalizeMcpExecutionIds(executionIds);
+    if (normalizedSummaries.length > 0) return normalizedSummaries;
+    if (normalizedIds.length === 0) return normalizedSummaries;
+    return normalizedIds.map((executionId) => normalizeToolExecutionSummaryForButton({ executionId }));
+}
+
+function setPendingToolExecutionSummaries(messageElement, summaries) {
+    if (!messageElement || !messageElement.dataset || !Array.isArray(summaries)) return;
+    const normalized = cacheToolExecutionSummaries(messageElement, summaries);
+    if (normalized.length > 0) {
+        messageElement.dataset.pendingToolExecutionSummaries = JSON.stringify(normalized);
+    } else {
+        delete messageElement.dataset.pendingToolExecutionSummaries;
+    }
+    const renderedToolList = messageElement.querySelector('.mcp-tool-list');
+    if (normalized.length > 0 && renderedToolList && renderedToolList.querySelector('.mcp-detail-btn')) {
+        setMcpCallSummaries(messageElement, normalized);
+        delete messageElement.dataset.pendingToolExecutionSummaries;
+    }
+    if (typeof syncMcpToolsToggleButton === 'function') {
+        syncMcpToolsToggleButton(messageElement);
+    }
+}
+
+function setMcpExecutionSummaryCount(messageElement, count) {
+    if (!messageElement || !messageElement.dataset) return;
+    const n = parseInt(count, 10) || 0;
+    if (n > 0) {
+        messageElement.dataset.mcpExecutionCount = String(n);
+    } else {
+        delete messageElement.dataset.mcpExecutionCount;
+    }
+    if (typeof syncMcpToolsToggleButton === 'function') {
+        syncMcpToolsToggleButton(messageElement);
+    }
 }
 
 function formatMcpToolsToggleLabel(count, expanded) {
@@ -2866,13 +3669,13 @@ function formatMcpToolsToggleLabel(count, expanded) {
             const s = window.t('chat.collapseToolExecutions');
             if (s && s !== 'chat.collapseToolExecutions') return s;
         }
-        return '收起工具执行';
+        return '<div class="conversations-list-empty" data-i18n="chat.noUnboundConversations"></div>';
     }
     if (typeof window.t === 'function') {
         const s = window.t('chat.toolExecutionsCount', { n: count });
         if (s && s !== 'chat.toolExecutionsCount') return s;
     }
-    return count + '次工具执行';
+    return count + ' tool execution(s)';
 }
 
 /** 渗透测试区：工具栏（展开详情 | N次工具执行）+ 独立工具列表 + 迭代时间线 */
@@ -2886,29 +3689,22 @@ function ensureMcpCallSectionChrome(messageElement, messageId) {
         mcpSection.className = 'mcp-call-section';
         const mcpLabel = document.createElement('div');
         mcpLabel.className = 'mcp-call-label';
-        mcpLabel.textContent = '📋 ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : '渗透测试详情');
+        mcpLabel.textContent = '📋 ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : 'Task execution details');
         mcpSection.appendChild(mcpLabel);
         contentWrapper.appendChild(mcpSection);
     } else {
         const mcpLabel = mcpSection.querySelector('.mcp-call-label');
-        const labelText = '📋 ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : '渗透测试详情');
+        const labelText = '📋 ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : 'Task execution details');
         if (mcpLabel && mcpLabel.textContent !== labelText) {
             mcpLabel.textContent = labelText;
         }
     }
 
     let toolbar = mcpSection.querySelector('.mcp-call-toolbar');
-    const legacyButtons = mcpSection.querySelector('.mcp-call-buttons');
     if (!toolbar) {
         toolbar = document.createElement('div');
         toolbar.className = 'mcp-call-toolbar';
-        if (legacyButtons) {
-            const processBtn = legacyButtons.querySelector('.process-detail-btn');
-            if (processBtn) toolbar.appendChild(processBtn);
-            mcpSection.replaceChild(toolbar, legacyButtons);
-        } else {
-            mcpSection.appendChild(toolbar);
-        }
+        mcpSection.appendChild(toolbar);
     }
 
     let toolList = mcpSection.querySelector('.mcp-tool-list');
@@ -2923,16 +3719,11 @@ function ensureMcpCallSectionChrome(messageElement, messageId) {
         }
     }
 
-    if (legacyButtons && legacyButtons.parentNode === mcpSection) {
-        legacyButtons.querySelectorAll('.mcp-detail-btn[data-exec-id]').forEach((btn) => toolList.appendChild(btn));
-        legacyButtons.remove();
-    }
-
     const clientId = messageId || messageElement.id;
     if (clientId && !toolbar.querySelector('.process-detail-btn')) {
         const processDetailBtn = document.createElement('button');
         processDetailBtn.className = 'mcp-detail-btn process-detail-btn';
-        processDetailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.expandDetail') : '展开详情') + '</span>';
+        processDetailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.expandDetail') : 'Expand details') + '</span>';
         processDetailBtn.onclick = () => toggleProcessDetails(null, clientId);
         toolbar.appendChild(processDetailBtn);
     }
@@ -2942,13 +3733,19 @@ function ensureMcpCallSectionChrome(messageElement, messageId) {
 
 function syncMcpToolsToggleButton(messageElement) {
     if (!messageElement) return;
-    const chrome = ensureMcpCallSectionChrome(messageElement, messageElement.id);
+    const count = getMcpExecutionCount(messageElement);
+    let chrome = getExistingMcpCallSectionChrome(messageElement);
+    if (!chrome || (count > 0 && (!chrome.toolbar || !chrome.toolList))) {
+        if (count <= 0) return;
+        chrome = ensureMcpCallSectionChrome(messageElement, messageElement.id);
+    }
     if (!chrome) return;
     const { toolbar, toolList } = chrome;
-    const count = getMcpExecutionCount(messageElement);
+    if (!toolbar || !toolList) return;
     let toolsToggle = toolbar.querySelector('.mcp-tools-toggle-btn');
     if (count <= 0) {
         if (toolsToggle) toolsToggle.remove();
+        pruneEmptyMcpCallSection(messageElement);
         return;
     }
     if (!toolsToggle) {
@@ -2965,15 +3762,147 @@ function syncMcpToolsToggleButton(messageElement) {
     toolsToggle.innerHTML = '<span>' + formatMcpToolsToggleLabel(count, expanded) + '</span>';
 }
 
+function cssEscapeValue(value) {
+    const s = String(value || '');
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+        return CSS.escape(s);
+    }
+    return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+async function ensureProcessDetailsForToolFocus(messageElement, anchorId) {
+    if (!messageElement || !messageElement.id) return null;
+    const detailsId = 'process-details-' + messageElement.id;
+    let detailsContainer = document.getElementById(detailsId);
+    const backendId = messageElement.dataset ? String(messageElement.dataset.backendMessageId || '').trim() : '';
+    if (detailsContainer && detailsContainer.dataset && detailsContainer.dataset.lazyNotLoaded === '1' && backendId && typeof window.loadProcessDetailsPaginated === 'function') {
+        await window.loadProcessDetailsPaginated(messageElement.id, backendId, { autoLoadAll: false, anchorId: anchorId || '' });
+        detailsContainer = document.getElementById(detailsId);
+    } else if (!detailsContainer && backendId && typeof renderProcessDetails === 'function') {
+        renderProcessDetails(messageElement.id, null);
+        detailsContainer = document.getElementById(detailsId);
+        if (detailsContainer && typeof window.loadProcessDetailsPaginated === 'function') {
+            await window.loadProcessDetailsPaginated(messageElement.id, backendId, { autoLoadAll: false, anchorId: anchorId || '' });
+            detailsContainer = document.getElementById(detailsId);
+        }
+    }
+    if (typeof window.expandProcessDetailsTimeline === 'function') {
+        window.expandProcessDetailsTimeline(messageElement.id);
+    } else if (typeof toggleProcessDetails === 'function') {
+        const timeline = detailsContainer && detailsContainer.querySelector('.progress-timeline');
+        if (!timeline || !timeline.classList.contains('expanded')) {
+            toggleProcessDetails(null, messageElement.id);
+        }
+    }
+    return document.getElementById(detailsId);
+}
+
+async function focusToolExecutionInProcessDetails(messageElement, summary, index) {
+    const item = normalizeToolExecutionSummaryForButton(summary);
+    let detailsContainer = await ensureProcessDetailsForToolFocus(messageElement, item.processDetailId || '');
+    let timeline = detailsContainer && detailsContainer.querySelector('.progress-timeline');
+    if (!timeline) return;
+    let target = null;
+    if (item.processDetailId) {
+        target = timeline.querySelector('[data-process-detail-id="' + cssEscapeValue(item.processDetailId) + '"]');
+    }
+    if (!target && item.toolCallId) {
+        target = timeline.querySelector('[data-tool-call-id="' + cssEscapeValue(item.toolCallId) + '"]');
+    }
+    if (!target) {
+        const toolItems = timeline.querySelectorAll('.timeline-item-tool_call');
+        target = toolItems[index] || null;
+    }
+    if (!target && item.processDetailId && messageElement.dataset && messageElement.dataset.backendMessageId && typeof window.loadProcessDetailsPaginated === 'function') {
+        await window.loadProcessDetailsPaginated(messageElement.id, messageElement.dataset.backendMessageId, {
+            autoLoadAll: false,
+            anchorId: item.processDetailId
+        });
+        detailsContainer = document.getElementById('process-details-' + messageElement.id);
+        timeline = detailsContainer && detailsContainer.querySelector('.progress-timeline');
+        target = timeline ? timeline.querySelector('[data-process-detail-id="' + cssEscapeValue(item.processDetailId) + '"]') : null;
+    }
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.classList.remove('timeline-item-focus-pulse');
+    void target.offsetWidth;
+    target.classList.add('timeline-item-focus-pulse');
+    setTimeout(() => {
+        target.classList.remove('timeline-item-focus-pulse');
+    }, 2200);
+}
+
+async function findToolExecutionTimelineItem(messageElement, summary, index) {
+    const item = normalizeToolExecutionSummaryForButton(summary);
+    let detailsContainer = await ensureProcessDetailsForToolFocus(messageElement, item.processDetailId || '');
+    let timeline = detailsContainer && detailsContainer.querySelector('.progress-timeline');
+    if (!timeline) return null;
+    let target = null;
+    if (item.processDetailId) {
+        target = timeline.querySelector('[data-process-detail-id="' + cssEscapeValue(item.processDetailId) + '"]');
+    }
+    if (!target && item.toolCallId) {
+        target = timeline.querySelector('[data-tool-call-id="' + cssEscapeValue(item.toolCallId) + '"]');
+    }
+    if (!target && item.processDetailId && messageElement.dataset && messageElement.dataset.backendMessageId && typeof window.loadProcessDetailsPaginated === 'function') {
+        await window.loadProcessDetailsPaginated(messageElement.id, messageElement.dataset.backendMessageId, {
+            autoLoadAll: false,
+            anchorId: item.processDetailId
+        });
+        detailsContainer = document.getElementById('process-details-' + messageElement.id);
+        timeline = detailsContainer && detailsContainer.querySelector('.progress-timeline');
+        target = timeline ? timeline.querySelector('[data-process-detail-id="' + cssEscapeValue(item.processDetailId) + '"]') : null;
+    }
+    return target;
+}
+
+async function resolveToolExecutionSummaryForFocus(messageElement, executionId, index) {
+    const wantedExecutionId = executionId == null ? '' : String(executionId).trim();
+    let summaries = getCachedToolExecutionSummaries(messageElement);
+    let item = wantedExecutionId
+        ? summaries.find((summary) => summary.executionId === wantedExecutionId)
+        : summaries[index];
+    if (item && (item.processDetailId || item.toolCallId)) return item;
+
+    const backendId = messageElement && messageElement.dataset
+        ? String(messageElement.dataset.backendMessageId || '').trim()
+        : '';
+    if (!backendId || typeof apiFetch !== 'function') return item || null;
+    try {
+        const res = await apiFetch('/api/messages/' + encodeURIComponent(backendId) + '/process-details?summary=1');
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok || !payload.summary || !Array.isArray(payload.summary.toolExecutions)) {
+            return item || null;
+        }
+        summaries = cacheToolExecutionSummaries(messageElement, payload.summary.toolExecutions);
+        item = wantedExecutionId
+            ? summaries.find((summary) => summary.executionId === wantedExecutionId)
+            : summaries[index];
+        return item || null;
+    } catch (e) {
+        return item || null;
+    }
+}
+
 function toggleMcpToolList(assistantMessageId) {
     const messageEl = document.getElementById(assistantMessageId);
     if (!messageEl) return;
     const chrome = ensureMcpCallSectionChrome(messageEl, assistantMessageId);
     if (!chrome) return;
     const { toolList } = chrome;
+    if (
+        !getPendingMcpExecutionCount(messageEl) &&
+        !getPendingToolExecutionSummaryCount(messageEl) &&
+        !toolList.querySelector('.mcp-detail-btn')
+    ) {
+        if (typeof toggleProcessDetails === 'function') {
+            toggleProcessDetails(null, assistantMessageId);
+        }
+        return;
+    }
     const willExpand = !toolList.classList.contains('expanded');
     if (willExpand) {
-        ensureMcpCallButtons(messageEl);
+        renderPendingMcpCallButtons(messageEl);
         toolList.classList.add('expanded');
     } else {
         toolList.classList.remove('expanded');
@@ -2983,58 +3912,335 @@ function toggleMcpToolList(assistantMessageId) {
 
 window.toggleMcpToolList = toggleMcpToolList;
 window.syncMcpToolsToggleButton = syncMcpToolsToggleButton;
+window.isProcessDetailsUserExpanded = isProcessDetailsUserExpanded;
+window.syncProcessDetailButtonLabels = syncProcessDetailButtonLabels;
 window.ensureMcpCallSectionChrome = ensureMcpCallSectionChrome;
+window.setMcpExecutionSummaryCount = setMcpExecutionSummaryCount;
+window.setPendingMcpExecutionIds = setPendingMcpExecutionIds;
+window.setPendingToolExecutionSummaries = setPendingToolExecutionSummaries;
 
-/** 将 MCP 工具按钮挂到独立工具列表，并批量解析工具名 */
-function appendMcpCallButtons(messageElement, executionIds) {
-    if (!messageElement || !Array.isArray(executionIds) || executionIds.length === 0) {
+async function fetchProcessDetailDataForModal(detailId) {
+    const id = detailId != null ? String(detailId).trim() : '';
+    if (!id || typeof apiFetch !== 'function') return null;
+    const res = await apiFetch('/api/process-details/' + encodeURIComponent(id));
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) return null;
+    const detail = j && j.processDetail ? j.processDetail : null;
+    return detail && detail.data ? detail.data : null;
+}
+
+async function fetchProcessDetailForModal(detailId) {
+    const id = detailId != null ? String(detailId).trim() : '';
+    if (!id || typeof apiFetch !== 'function') return null;
+    const res = await apiFetch('/api/process-details/' + encodeURIComponent(id));
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) return null;
+    return j && j.processDetail ? j.processDetail : null;
+}
+
+function processToolResultTextFromData(resultData) {
+    if (!resultData) return '';
+    const noResultText = typeof window.t === 'function' ? window.t('timeline.noResult') : 'No result';
+    const result = resultData.result != null
+        ? resultData.result
+        : (resultData.error != null ? resultData.error : (resultData.resultPreview != null ? resultData.resultPreview : noResultText));
+    return typeof result === 'string' ? result : JSON.stringify(result);
+}
+
+function processToolResultToMCPResult(resultData, rawText) {
+    if (!resultData) return null;
+    const displayState = typeof window.getToolResultDisplayState === 'function'
+        ? window.getToolResultDisplayState(resultData, { rawText: rawText })
+        : { kind: ((resultData.isError || resultData.success === false) ? 'error' : 'success'), isError: !!(resultData.isError || resultData.success === false) };
+    const isError = !!displayState.isError;
+    let text = rawText;
+    if (text == null || String(text) === '') {
+        text = processToolResultTextFromData(resultData);
+    }
+    return {
+        content: [{ type: 'text', text: String(text || '') }],
+        isError: isError
+    };
+}
+
+async function showMCPDetailFromProcessToolItem(messageElement, summary, index) {
+    const item = normalizeToolExecutionSummaryForButton(summary);
+    if (item.processDetailId) {
+        const callDetail = await fetchProcessDetailForModal(item.processDetailId);
+        const callData = callDetail && callDetail.data ? callDetail.data : null;
+        if (callData) {
+            const args = typeof window.parseToolCallArgsFromData === 'function'
+                ? window.parseToolCallArgsFromData(callData)
+                : (callData.argumentsObj || {});
+            let resultData = callData._mergedResult || null;
+            let resultDetailId = item.resultDetailId || callData._mergedResultDetailId || '';
+            let rawText = resultData ? processToolResultTextFromData(resultData) : '';
+            const resultPayloadDeferred = resultData && resultData._payloadDeferred === true;
+            const resultOnlyHasPreview = resultData && resultData.result == null && resultData.error == null && resultData.resultPreview != null;
+            if (resultDetailId && (!resultData || resultPayloadDeferred || resultOnlyHasPreview)) {
+                const resultDetail = await fetchProcessDetailForModal(resultDetailId);
+                const fullResult = resultDetail && resultDetail.data ? resultDetail.data : null;
+                if (fullResult) {
+                    resultData = fullResult;
+                    rawText = processToolResultTextFromData(fullResult);
+                }
+            }
+            const displayState = resultData && typeof window.getToolResultDisplayState === 'function'
+                ? window.getToolResultDisplayState(resultData, { rawText: rawText })
+                : null;
+            const backgroundRunning = (displayState && displayState.kind === 'background_running') || String(item.status || '').toLowerCase() === 'background_running';
+            const success = resultData
+                ? !(displayState ? displayState.isError : (resultData.isError || resultData.success === false))
+                : String(item.status || '').toLowerCase() !== 'failed';
+            const status = backgroundRunning
+                ? 'background_running'
+                : (resultData || item.status
+                    ? (success ? 'completed' : 'failed')
+                    : 'running');
+            const exec = {
+                id: (resultData && resultData.executionId) || item.executionId || callData.executionId || '',
+                toolName: item.toolName || callData.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : 'Unknown tool'),
+                status: status,
+                startTime: callDetail.createdAt || '',
+                arguments: args || {},
+                result: processToolResultToMCPResult(resultData, rawText),
+                error: resultData && resultData.error ? String(resultData.error) : ''
+            };
+            openAppModal('mcp-detail-modal', { focus: false });
+            deferModalContent(function () {
+                renderMCPDetailModal(exec);
+            });
+            return;
+        }
+    }
+
+    const target = await findToolExecutionTimelineItem(messageElement, summary, index);
+    if (!target) {
+        alert(typeof window.t === 'function'
+            ? window.t('chat.toolExecutionDetailPending')
+            : 'Tool execution details are not synchronized yet. Please try again later.');
         return;
     }
+    const state = typeof window.getToolCallDetailState === 'function'
+        ? window.getToolCallDetailState(target)
+        : {};
+    let args = state.args;
+    let resultData = state.resultData;
+    let rawText = state.rawText;
+    if ((!args || Object.keys(args).length === 0) && state.processDetailId) {
+        const fullCall = await fetchProcessDetailDataForModal(state.processDetailId);
+        if (fullCall) {
+            args = typeof window.parseToolCallArgsFromData === 'function'
+                ? window.parseToolCallArgsFromData(fullCall)
+                : (fullCall.argumentsObj || {});
+        }
+    }
+    const resultDetailId = state.resultDetailId || target.dataset.toolResultDetailId || '';
+    const resultPayloadDeferred = resultData && resultData._payloadDeferred === true;
+    const resultOnlyHasPreview = resultData && resultData.result == null && resultData.error == null && resultData.resultPreview != null;
+    if (resultDetailId && (!resultData || resultPayloadDeferred || resultOnlyHasPreview)) {
+        const fullResult = await fetchProcessDetailDataForModal(resultDetailId);
+        if (fullResult) {
+            resultData = fullResult;
+            rawText = processToolResultTextFromData(fullResult);
+        }
+    }
+    const toolName = (summary && summary.toolName) || target.dataset.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : 'Unknown tool');
+    const displayState = resultData && typeof window.getToolResultDisplayState === 'function'
+        ? window.getToolResultDisplayState(resultData, { rawText: rawText })
+        : null;
+    const backgroundRunning = (displayState && displayState.kind === 'background_running') || target.dataset.toolDisplayStatus === 'background_running';
+    const success = resultData ? !(displayState ? displayState.isError : (resultData.isError || resultData.success === false)) : target.dataset.toolSuccess !== '0';
+    const status = backgroundRunning
+        ? 'background_running'
+        : (resultData || target.classList.contains('tool-call-completed') || target.classList.contains('tool-call-failed')
+            ? (success ? 'completed' : 'failed')
+            : 'running');
+    const exec = {
+        id: (resultData && resultData.executionId) || (summary && summary.executionId) || '',
+        toolName: toolName,
+        status: status,
+        startTime: target.dataset.createdAtIso || '',
+        arguments: args || {},
+        result: processToolResultToMCPResult(resultData, rawText),
+        error: resultData && resultData.error ? String(resultData.error) : ''
+    };
+    openAppModal('mcp-detail-modal', { focus: false });
+    deferModalContent(function () {
+        renderMCPDetailModal(exec);
+    });
+}
+
+async function openTaskToolExecutionDetail(messageElement, item, index) {
+    let detailItem = item;
+    if (!detailItem.executionId) {
+        const refreshedItem = await resolveToolExecutionSummaryForFocus(messageElement, '', index);
+        detailItem = refreshedItem || detailItem;
+    }
+    if (detailItem.executionId) {
+        await showMCPDetail(detailItem.executionId);
+        return;
+    }
+    await showMCPDetailFromProcessToolItem(messageElement, detailItem, index);
+}
+
+/**
+ * 声明式渲染工具调用列表。
+ * 过程摘要提供完整展示入口；executionIds 只补充可直接打开监控详情的 ID。
+ * 每次更新整体替换列表，避免增量追加产生双重状态。
+ */
+function renderMcpCallButtons(messageElement) {
+    if (!messageElement) return;
     const chrome = ensureMcpCallSectionChrome(messageElement, messageElement.id);
     if (!chrome) return;
     const toolList = chrome.toolList;
+    const executionIds = getCachedMcpExecutionIds(messageElement);
+    const summaries = getCachedToolExecutionSummaries(messageElement);
+    const items = selectToolExecutionSummariesForButtons(summaries, executionIds);
 
-    executionIds.forEach((execId, index) => {
-        if (toolList.querySelector('.mcp-detail-btn[data-exec-id="' + CSS.escape(String(execId)) + '"]')) {
-            return;
+    const renderVersion = String((parseInt(toolList.dataset.renderVersion, 10) || 0) + 1);
+    toolList.dataset.renderVersion = renderVersion;
+    const fragment = document.createDocumentFragment();
+    items.forEach((item, index) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'mcp-detail-btn';
+        btn.dataset.execIndex = String(index + 1);
+        if (item.executionId) {
+            btn.dataset.execId = item.executionId;
         }
-        const detailBtn = document.createElement('button');
-        detailBtn.className = 'mcp-detail-btn';
-        detailBtn.dataset.execId = execId;
-        detailBtn.dataset.execIndex = String(index + 1);
-        detailBtn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.callNumber', { n: index + 1 }) : '调用 #' + (index + 1)) + '</span>';
-        detailBtn.onclick = () => showMCPDetail(execId);
-        toolList.appendChild(detailBtn);
+        if (item.toolCallId) {
+            btn.dataset.toolCallId = item.toolCallId;
+        }
+        btn.onclick = () => openTaskToolExecutionDetail(messageElement, item, index);
+        if (item.toolName) {
+            renderToolExecutionButtonContent(btn, item.toolName, String(index + 1), item.status);
+        } else {
+            btn.innerHTML = '<span>' + (typeof window.t === 'function'
+                ? window.t('chat.callNumber', { n: index + 1 })
+                : 'Call #' + (index + 1)) + '</span>';
+        }
+        fragment.appendChild(btn);
     });
-    batchUpdateButtonToolNames(toolList, executionIds);
+    toolList.replaceChildren(fragment);
+
+    if (summaries.length === 0 && executionIds.length > 0) {
+        batchUpdateButtonToolNames(toolList, executionIds, renderVersion);
+    }
     syncMcpToolsToggleButton(messageElement);
 }
 
-/** 历史会话懒加载：用户展开工具列表时再渲染工具按钮 */
-function ensureMcpCallButtons(messageElement) {
-    if (!messageElement || !messageElement.dataset || !messageElement.dataset.pendingMcpExecutionIds) {
-        return;
-    }
-    let executionIds;
-    try {
-        executionIds = JSON.parse(messageElement.dataset.pendingMcpExecutionIds);
-    } catch (e) {
-        delete messageElement.dataset.pendingMcpExecutionIds;
-        return;
-    }
-    if (!Array.isArray(executionIds) || executionIds.length === 0) {
-        delete messageElement.dataset.pendingMcpExecutionIds;
-        return;
-    }
-    appendMcpCallButtons(messageElement, executionIds);
-    delete messageElement.dataset.pendingMcpExecutionIds;
+function setMcpCallExecutionIds(messageElement, executionIds) {
+    if (!messageElement || !Array.isArray(executionIds)) return;
+    cacheMcpExecutionIds(messageElement, executionIds);
+    renderMcpCallButtons(messageElement);
 }
 
-window.ensureMcpCallButtons = ensureMcpCallButtons;
-window.appendMcpCallButtons = appendMcpCallButtons;
+function setMcpCallSummaries(messageElement, summaries) {
+    if (!messageElement || !Array.isArray(summaries)) return;
+    cacheToolExecutionSummaries(messageElement, summaries);
+    renderMcpCallButtons(messageElement);
+}
 
-// 批量获取工具名称并更新按钮（消除 N 次单独 API 请求，合并为 1 次）
-async function batchUpdateButtonToolNames(buttonsContainer, executionIds) {
+/** 懒加载：用户展开工具列表时提交待渲染的数据模型。 */
+function renderPendingMcpCallButtons(messageElement) {
+    if (!messageElement || !messageElement.dataset) {
+        return;
+    }
+    let renderedSummaryExecutions = false;
+    if (messageElement.dataset.pendingToolExecutionSummaries) {
+        let summaries;
+        try {
+            summaries = JSON.parse(messageElement.dataset.pendingToolExecutionSummaries);
+        } catch (e) {
+            delete messageElement.dataset.pendingToolExecutionSummaries;
+            summaries = [];
+        }
+        if (Array.isArray(summaries) && summaries.length > 0) {
+            setMcpCallSummaries(messageElement, summaries);
+            renderedSummaryExecutions = true;
+        }
+        delete messageElement.dataset.pendingToolExecutionSummaries;
+    }
+    if (renderedSummaryExecutions) {
+        return;
+    }
+    if (messageElement.dataset.pendingMcpExecutionIds) {
+        let executionIds;
+        try {
+            executionIds = JSON.parse(messageElement.dataset.pendingMcpExecutionIds);
+        } catch (e) {
+            delete messageElement.dataset.pendingMcpExecutionIds;
+            executionIds = [];
+        }
+        if (Array.isArray(executionIds) && executionIds.length > 0) {
+            setMcpCallExecutionIds(messageElement, executionIds);
+        }
+        delete messageElement.dataset.pendingMcpExecutionIds;
+    }
+}
+
+window.setMcpCallExecutionIds = setMcpCallExecutionIds;
+
+function normalizeToolExecutionSummary(raw) {
+    if (typeof raw === 'string') {
+        return { toolName: raw, status: '' };
+    }
+    if (raw && typeof raw === 'object') {
+        return {
+            toolName: raw.toolName || raw.name || '',
+            status: raw.status || ''
+        };
+    }
+    return { toolName: '', status: '' };
+}
+
+function getToolExecutionStatusLabel(status) {
+    const normalized = String(status || '').toLowerCase();
+    if (typeof window.t === 'function') {
+        const keyMap = {
+            completed: 'mcpMonitor.statusSuccess',
+            failed: 'mcpMonitor.statusFailed',
+            running: 'mcpMonitor.statusRunning',
+            cancelled: 'mcpMonitor.statusCancelled',
+            pending: 'mcpMonitor.statusPending',
+            result_missing: 'timeline.resultMissing'
+        };
+        const key = keyMap[normalized];
+        if (key) {
+            const translated = window.t(key);
+            if (translated && translated !== key) return translated;
+        }
+    }
+    const fallback = {
+        completed: 'Succeeded',
+        failed: 'Failed',
+        running: 'Running',
+        cancelled: 'Cancelled',
+        pending: 'Pending',
+        result_missing: 'Result record missing'
+    };
+    return fallback[normalized] || '';
+}
+
+function renderToolExecutionButtonContent(btn, displayToolName, index, status) {
+    const safeToolName = escapeHtml(displayToolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : 'Unknown tool'));
+    const safeIndex = escapeHtml(index || '');
+    const statusText = getToolExecutionStatusLabel(status);
+    const normalizedStatus = String(status || '').toLowerCase();
+    const label = safeIndex ? `${safeToolName} #${safeIndex}` : safeToolName;
+    btn.innerHTML = '<span class="mcp-tool-name">' + label + '</span>';
+    if (!statusText) {
+        btn.removeAttribute('data-status');
+        btn.removeAttribute('title');
+        return;
+    }
+    btn.dataset.status = normalizedStatus;
+    btn.title = statusText;
+}
+
+// 批量获取工具摘要并更新按钮（消除 N 次单独 API 请求，合并为 1 次）
+async function batchUpdateButtonToolNames(buttonsContainer, executionIds, renderVersion) {
     if (!executionIds || executionIds.length === 0) return;
     try {
         const response = await apiFetch('/api/monitor/executions/names', {
@@ -3043,26 +4249,25 @@ async function batchUpdateButtonToolNames(buttonsContainer, executionIds) {
             body: JSON.stringify({ ids: executionIds }),
         });
         if (!response.ok) return;
-        const nameMap = await response.json(); // { execId: toolName }
+        const nameMap = await response.json(); // { execId: toolName } 或 { execId: { toolName, status } }
+        // 等待请求期间如果摘要触发了新一轮渲染，旧响应不得覆盖新状态。
+        if (renderVersion && buttonsContainer.dataset.renderVersion !== renderVersion) return;
         // 更新对应按钮的文本
         const buttons = buttonsContainer.querySelectorAll('.mcp-detail-btn[data-exec-id]');
         buttons.forEach(btn => {
             const execId = btn.dataset.execId;
             const index = btn.dataset.execIndex;
-            const toolName = nameMap[execId];
+            const summary = normalizeToolExecutionSummary(nameMap[execId]);
+            const toolName = summary.toolName;
             if (toolName) {
                 const displayToolName = toolName.includes('::') ? toolName.split('::')[1] : toolName;
-                const span = btn.querySelector('span');
-                if (span) span.textContent = `${displayToolName} #${index}`;
+                renderToolExecutionButtonContent(btn, displayToolName, index, summary.status);
             }
         });
     } catch (error) {
-        console.error('批量获取工具名称失败:', error);
+        console.error('delete turn failed:', error);
     }
 }
-
-// 显示MCP调用详情
-const MCP_DETAIL_MAX_CHARS = 120000;
 
 function extractMCPResultText(result) {
     if (!result) return '';
@@ -3080,37 +4285,148 @@ function extractMCPResultText(result) {
     return '';
 }
 
-function truncateMCPDetailText(text, maxChars) {
+function formatMCPDetailText(text) {
     if (text == null) return '';
-    const s = String(text);
-    if (s.length <= maxChars) return s;
-    const hint = typeof window.t === 'function'
-        ? window.t('mcpDetailModal.contentTruncated')
-        : '…（展示已截断；完整内容见 persisted-output 中的文件路径，用 read_file 读取）';
-    return s.slice(0, maxChars) + '\n\n' + hint;
+    return String(text);
 }
 
-/** 响应结果区 JSON 展示（过大时截断 content 内 text，避免 stringify 卡死页面） */
-function formatMCPResultJsonForDisplay(result, maxChars) {
+function formatMCPResultJsonForDisplay(result) {
     if (!result) return '{}';
     const payload = {
         content: result.content,
         isError: !!result.isError
     };
-    let json = JSON.stringify(payload, null, 2);
-    if (json.length <= maxChars) {
-        return json;
-    }
-    const text = extractMCPResultText(result);
-    const truncatedPayload = {
-        content: [{ type: 'text', text: truncateMCPDetailText(text, Math.min(maxChars - 800, MCP_DETAIL_MAX_CHARS)) }],
-        isError: !!result.isError
+    return JSON.stringify(payload, null, 2);
+}
+
+function switchMCPResultDetailTab(tabName) {
+    const normalized = tabName === 'raw' ? 'raw' : 'success';
+    const tabs = {
+        success: document.getElementById('detail-result-tab-success'),
+        raw: document.getElementById('detail-result-tab-raw')
     };
-    json = JSON.stringify(truncatedPayload, null, 2);
-    if (json.length > maxChars) {
-        return json.slice(0, maxChars) + '\n…';
+    const panels = {
+        success: document.getElementById('detail-result-panel-success'),
+        raw: document.getElementById('detail-result-panel-raw')
+    };
+    Object.keys(tabs).forEach(function (key) {
+        const isActive = key === normalized;
+        if (tabs[key]) {
+            tabs[key].classList.toggle('active', isActive);
+            tabs[key].setAttribute('aria-selected', isActive ? 'true' : 'false');
+        }
+        if (panels[key]) {
+            panels[key].classList.toggle('active', isActive);
+            panels[key].hidden = !isActive;
+        }
+    });
+}
+
+function setMCPResultDetailTabs(defaultTab, hasSuccessContent) {
+    const successTab = document.getElementById('detail-result-tab-success');
+    if (successTab) {
+        successTab.disabled = !hasSuccessContent;
+        successTab.classList.toggle('disabled', !hasSuccessContent);
     }
-    return json;
+    switchMCPResultDetailTab(hasSuccessContent && defaultTab !== 'raw' ? 'success' : 'raw');
+}
+
+function copyActiveMCPResultDetail(triggerBtn = null) {
+    const activePanel = document.querySelector('#mcp-detail-modal .detail-result-panel.active');
+    const activeBlock = activePanel ? activePanel.querySelector('.code-block') : null;
+    copyDetailBlock(activeBlock ? activeBlock.id : 'detail-response', triggerBtn);
+}
+
+function renderMCPDetailModal(exec) {
+    exec = exec || {};
+    document.getElementById('detail-tool-name').textContent = exec.toolName || (typeof window.t === 'function' ? window.t('mcpDetailModal.unknown') : 'Unknown');
+    document.getElementById('detail-execution-id').textContent = exec.id || 'N/A';
+    const statusEl = document.getElementById('detail-status');
+    const normalizedStatus = (exec.status || 'unknown').toLowerCase();
+    statusEl.textContent = getStatusText(exec.status);
+    const statusClass = normalizedStatus === 'background_running' ? 'running' : normalizedStatus;
+    statusEl.className = `status-chip status-${statusClass}`;
+    try {
+        statusEl.dataset.detailStatus = (exec.status || '') + '';
+    } catch (e) { /* ignore */ }
+    const detailTimeLocale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
+    const detailTimeEl = document.getElementById('detail-time');
+    if (detailTimeEl) {
+        detailTimeEl.textContent = exec.startTime
+            ? new Date(exec.startTime).toLocaleString(detailTimeLocale)
+            : '—';
+        try {
+            detailTimeEl.dataset.detailTimeIso = exec.startTime ? new Date(exec.startTime).toISOString() : '';
+        } catch (e) { /* ignore */ }
+    }
+
+    const requestData = {
+        tool: exec.toolName,
+        arguments: exec.arguments
+    };
+    document.getElementById('detail-request').textContent = JSON.stringify(requestData, null, 2);
+
+    const responseElement = document.getElementById('detail-response');
+    const successElement = document.getElementById('detail-success');
+    const errorSection = document.getElementById('detail-error-section');
+    const errorElement = document.getElementById('detail-error');
+
+    responseElement.className = 'code-block';
+    responseElement.textContent = '';
+    if (successElement) {
+        successElement.className = 'code-block';
+        successElement.textContent = '';
+    }
+    if (errorSection && errorElement) {
+        errorSection.style.display = 'none';
+        errorElement.textContent = '';
+    }
+    setMCPResultDetailTabs('raw', false);
+
+    if (exec.result) {
+        const agentVisibleText = formatMCPDetailText(extractMCPResultText(exec.result));
+        const emptyText = typeof window.t === 'function' ? window.t('mcpDetailModal.execSuccessNoContent') : 'Execution succeeded with no displayable content.';
+
+        if (exec.result.isError) {
+            responseElement.className = 'code-block error';
+            responseElement.textContent = formatMCPResultJsonForDisplay(exec.result);
+            if (successElement) {
+                successElement.textContent = '';
+            }
+            setMCPResultDetailTabs('raw', false);
+            if (exec.error && errorSection && errorElement) {
+                errorSection.style.display = 'block';
+                errorElement.textContent = exec.error;
+            }
+        } else {
+            responseElement.className = 'code-block';
+            responseElement.textContent = formatMCPResultJsonForDisplay(exec.result);
+            if (successElement) {
+                successElement.textContent = agentVisibleText || emptyText;
+            }
+            setMCPResultDetailTabs('success', true);
+        }
+    } else {
+        if (normalizedStatus === 'running' || normalizedStatus === 'background_running') {
+            responseElement.textContent = typeof window.t === 'function' ? window.t('mcpDetailModal.runningNoResponseYet') : 'No output yet; the tool may still be running. If it hangs, use "Stop tool" below to end this call only.';
+        } else {
+            responseElement.textContent = typeof window.t === 'function' ? window.t('chat.noResponseData') : 'No response data';
+        }
+        setMCPResultDetailTabs('raw', false);
+    }
+
+    const abortSection = document.getElementById('detail-abort-section');
+    const abortBtn = document.getElementById('detail-abort-btn');
+    if (abortSection && abortBtn) {
+        if ((normalizedStatus === 'running' || normalizedStatus === 'background_running') && exec.id) {
+            abortSection.style.display = 'block';
+            abortBtn.dataset.execId = exec.id || '';
+            abortBtn.textContent = typeof window.t === 'function' ? window.t('mcpDetailModal.abortBtn') : 'Stop tool';
+        } else {
+            abortSection.style.display = 'none';
+            delete abortBtn.dataset.execId;
+        }
+    }
 }
 
 async function showMCPDetail(executionId) {
@@ -3121,101 +4437,16 @@ async function showMCPDetail(executionId) {
 
         if (!response.ok) {
             closeMCPDetail();
-            alert((typeof window.t === 'function' ? window.t('mcpDetailModal.getDetailFailed') : '获取详情失败') + ': ' + (exec.error || (typeof window.t === 'function' ? window.t('mcpDetailModal.unknown') : '未知错误')));
+            alert((typeof window.t === 'function' ? window.t('mcpDetailModal.getDetailFailed') : 'Failed to get details') + ': ' + (exec.error || (typeof window.t === 'function' ? window.t('mcpDetailModal.unknown') : 'Unknown error')));
             return;
         }
 
         deferModalContent(function () {
-            // 填充模态框内容
-            document.getElementById('detail-tool-name').textContent = exec.toolName || (typeof window.t === 'function' ? window.t('mcpDetailModal.unknown') : 'Unknown');
-            document.getElementById('detail-execution-id').textContent = exec.id || 'N/A';
-            const statusEl = document.getElementById('detail-status');
-            const normalizedStatus = (exec.status || 'unknown').toLowerCase();
-            statusEl.textContent = getStatusText(exec.status);
-            statusEl.className = `status-chip status-${normalizedStatus}`;
-            try {
-                statusEl.dataset.detailStatus = (exec.status || '') + '';
-            } catch (e) { /* ignore */ }
-            const detailTimeLocale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
-            const detailTimeEl = document.getElementById('detail-time');
-            if (detailTimeEl) {
-                detailTimeEl.textContent = exec.startTime
-                    ? new Date(exec.startTime).toLocaleString(detailTimeLocale)
-                    : '—';
-                try {
-                    detailTimeEl.dataset.detailTimeIso = exec.startTime ? new Date(exec.startTime).toISOString() : '';
-                } catch (e) { /* ignore */ }
-            }
-            
-            // 请求参数
-            const requestData = {
-                tool: exec.toolName,
-                arguments: exec.arguments
-            };
-            document.getElementById('detail-request').textContent = JSON.stringify(requestData, null, 2);
-            
-            // 响应结果 + 正确信息 / 错误信息
-            const responseElement = document.getElementById('detail-response');
-            const successSection = document.getElementById('detail-success-section');
-            const successElement = document.getElementById('detail-success');
-            const errorSection = document.getElementById('detail-error-section');
-            const errorElement = document.getElementById('detail-error');
-
-            // 重置状态
-            responseElement.className = 'code-block';
-            responseElement.textContent = '';
-            if (successSection && successElement) {
-                successSection.style.display = 'none';
-                successElement.textContent = '';
-            }
-            if (errorSection && errorElement) {
-                errorSection.style.display = 'none';
-                errorElement.textContent = '';
-            }
-
-            if (exec.result) {
-                const agentVisibleText = truncateMCPDetailText(extractMCPResultText(exec.result), MCP_DETAIL_MAX_CHARS);
-                const emptyText = typeof window.t === 'function' ? window.t('mcpDetailModal.execSuccessNoContent') : '执行成功，未返回可展示的文本内容。';
-
-                if (exec.result.isError) {
-                    responseElement.className = 'code-block error';
-                    responseElement.textContent = formatMCPResultJsonForDisplay(exec.result, MCP_DETAIL_MAX_CHARS);
-                    if (exec.error && errorSection && errorElement) {
-                        errorSection.style.display = 'block';
-                        errorElement.textContent = exec.error;
-                    }
-                } else {
-                    responseElement.className = 'code-block';
-                    responseElement.textContent = formatMCPResultJsonForDisplay(exec.result, MCP_DETAIL_MAX_CHARS);
-                    if (successSection && successElement) {
-                        successSection.style.display = 'block';
-                        successElement.textContent = agentVisibleText || emptyText;
-                    }
-                }
-            } else {
-                if (normalizedStatus === 'running') {
-                    responseElement.textContent = typeof window.t === 'function' ? window.t('mcpDetailModal.runningNoResponseYet') : '尚无返回，工具可能仍在执行。若长时间无响应，可在下方终止本次调用。';
-                } else {
-                    responseElement.textContent = typeof window.t === 'function' ? window.t('chat.noResponseData') : '暂无响应数据';
-                }
-            }
-
-            const abortSection = document.getElementById('detail-abort-section');
-            const abortBtn = document.getElementById('detail-abort-btn');
-            if (abortSection && abortBtn) {
-                if (normalizedStatus === 'running') {
-                    abortSection.style.display = 'block';
-                    abortBtn.dataset.execId = exec.id || '';
-                    abortBtn.textContent = typeof window.t === 'function' ? window.t('mcpDetailModal.abortBtn') : '终止工具';
-                } else {
-                    abortSection.style.display = 'none';
-                    delete abortBtn.dataset.execId;
-                }
-            }
+            renderMCPDetailModal(exec);
         });
     } catch (error) {
         closeMCPDetail();
-        alert((typeof window.t === 'function' ? window.t('mcpDetailModal.getDetailFailed') : '获取详情失败') + ': ' + error.message);
+        alert((typeof window.t === 'function' ? window.t('mcpDetailModal.getDetailFailed') : 'Failed to get details') + ': ' + error.message);
     }
 }
 
@@ -3297,7 +4528,7 @@ async function cancelMCPToolExecutionSubmit(executionId, userNote, options = {})
                 throw new Error(body.error || body.message || res.statusText);
             }
         }
-        const okMsg = typeof window.t === 'function' ? window.t('mcpDetailModal.abortSuccess') : '已发送终止请求';
+        const okMsg = typeof window.t === 'function' ? window.t('mcpDetailModal.abortSuccess') : 'Cancellation requested; status will update when the tool returns.';
         alert(okMsg);
         if (options.refreshDetail && typeof showMCPDetail === 'function') {
             await showMCPDetail(executionId);
@@ -3307,7 +4538,7 @@ async function cancelMCPToolExecutionSubmit(executionId, userNote, options = {})
             await refreshMonitorPanel(page);
         }
     } catch (e) {
-        const failMsg = typeof window.t === 'function' ? window.t('mcpDetailModal.abortFailed') : '终止失败';
+        const failMsg = typeof window.t === 'function' ? window.t('mcpDetailModal.abortFailed') : 'Failed to stop tool';
         alert(failMsg + ': ' + (e && e.message ? e.message : String(e)));
     }
 }
@@ -3356,11 +4587,11 @@ function copyDetailBlock(elementId, triggerBtn = null) {
         if (!triggerBtn) {
             return;
         }
-        triggerBtn.textContent = '已复制';
+        triggerBtn.textContent = 'Copied';
         triggerBtn.disabled = true;
         setTimeout(() => {
             triggerBtn.disabled = false;
-            triggerBtn.textContent = triggerBtn.dataset.originalLabel || originalLabel || '复制';
+            triggerBtn.textContent = triggerBtn.dataset.originalLabel || originalLabel || 'Copy';
         }, 1200);
     };
 
@@ -3399,9 +4630,9 @@ function copyDetailBlock(elementId, triggerBtn = null) {
         .catch(() => {
             if (triggerBtn) {
                 triggerBtn.disabled = false;
-                triggerBtn.textContent = triggerBtn.dataset.originalLabel || originalLabel || '复制';
+                triggerBtn.textContent = triggerBtn.dataset.originalLabel || originalLabel || 'Copy';
             }
-            alert('复制失败，请手动选择文本复制。');
+            alert('Copy failed. Please select and copy the text manually.');
         });
 }
 
@@ -3434,7 +4665,7 @@ async function startNewConversation() {
         await refreshChatProjectSelector();
     }
     document.getElementById('chat-messages').innerHTML = '';
-    const readyMsgNew = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : '系统已就绪。请输入您的测试需求，系统将自动执行相应的安全测试。';
+    const readyMsgNew = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System is ready. Please enter your test requirements, and the system will automatically perform the corresponding security tests.';
     addMessage('assistant', readyMsgNew, null, null, null, { systemReadyMessage: true });
     addAttackChainButton(null);
     updateActiveConversation();
@@ -3483,7 +4714,7 @@ function createConversationListItem(conversation) {
 
     const title = document.createElement('div');
     title.className = 'conversation-title';
-    const titleText = conversation.title || '未命名对话';
+    const titleText = conversation.title || 'Untitled conversation';
     title.textContent = safeTruncateText(titleText, 60);
     title.title = titleText; // 设置完整标题以便悬停查看
     contentWrapper.appendChild(title);
@@ -3515,7 +4746,7 @@ function createConversationListItem(conversation) {
                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
     `;
-    deleteBtn.title = '删除对话';
+    deleteBtn.title = 'Delete conversation';
     deleteBtn.onclick = (e) => {
         e.stopPropagation();
         deleteConversation(conversation.id);
@@ -3583,7 +4814,7 @@ function formatConversationTimestamp(dateObj, todayStart, yesterdayStart) {
     const referenceYesterday = yesterdayStart || new Date(referenceToday.getTime() - 24 * 60 * 60 * 1000);
     const messageDate = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate());
     const fmtLocale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
-    const yesterdayLabel = typeof window.t === 'function' ? window.t('chat.yesterday') : '昨天';
+    const yesterdayLabel = typeof window.t === 'function' ? window.t('chat.yesterday') : 'Yesterday';
 
     const timeOnlyOpts = { hour: '2-digit', minute: '2-digit' };
     const dateTimeOpts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
@@ -3645,7 +4876,7 @@ async function prefetchLastAssistantProcessDetails() {
         await window.loadProcessDetailsPaginated(last.id, backendId);
         return;
     }
-    const res = await apiFetch('/api/messages/' + encodeURIComponent(String(backendId)) + '/process-details');
+    const res = await apiFetch('/api/messages/' + encodeURIComponent(String(backendId)) + '/process-details?full=1');
     const j = await res.json().catch(() => ({}));
     if (!res.ok || !Array.isArray(j.processDetails) || j.processDetails.length === 0) return;
     if (typeof renderProcessDetails === 'function') {
@@ -3657,32 +4888,24 @@ async function loadConversation(conversationId) {
     const seq = ++loadConversationRequestSeq;
     try {
         const cachedConversation = getConversationLiteFromCache(conversationId);
-        const fetchPromise = apiFetch(`/api/conversations/${conversationId}?include_process_details=0`)
-            .then(async (response) => {
-                const data = await response.json();
-                return { response, data };
-            });
-
-        let conversation;
-        let response;
-        if (cachedConversation) {
+        let conversation = null;
+        let response = null;
+        try {
+            response = await apiFetch(`/api/conversations/${conversationId}?include_process_details=0`);
+            conversation = await response.json();
+        } catch (fetchError) {
+            if (!cachedConversation) throw fetchError;
+            console.warn('Failed to load the latest conversation; using the local cache:', fetchError);
             conversation = cachedConversation;
-            fetchPromise.then(({ response: freshResp, data }) => {
-                if (freshResp.ok && data && seq === loadConversationRequestSeq && currentConversationId === conversationId) {
-                    putConversationLiteCache(conversationId, data);
-                }
-            }).catch(() => {});
-        } else {
-            const fetched = await fetchPromise;
-            response = fetched.response;
-            conversation = fetched.data;
-            if (seq !== loadConversationRequestSeq) {
-                return;
-            }
-            if (!response.ok) {
-                showChatToast('加载对话失败: ' + (conversation.error || '未知错误'), 'error');
-                return;
-            }
+        }
+        if (seq !== loadConversationRequestSeq) {
+            return;
+        }
+        if (response && !response.ok) {
+            showChatToast('Failed to load conversation: ' + (conversation.error || 'Unknown error'), 'error');
+            return;
+        }
+        if (response && response.ok) {
             putConversationLiteCache(conversationId, conversation);
         }
         if (seq !== loadConversationRequestSeq) {
@@ -3727,6 +4950,11 @@ async function loadConversation(conversationId) {
         // 更新当前对话ID
         currentConversationId = conversationId;
         window._loadedConversationProjectId = conversation.projectId || conversation.project_id || '';
+        const conversationRoleName = conversation.roleName || conversation.role_name || '';
+        if (typeof window.setCurrentRole === 'function') {
+            window.setCurrentRole(conversationRoleName || '默认');
+        }
+        applyConversationAgentMode(conversationId, conversation);
         try {
             window.currentConversationId = conversationId;
         } catch (e) { /* ignore */ }
@@ -3885,7 +5113,7 @@ async function loadConversation(conversationId) {
                 await window.restoreHitlInlineForConversation(conversationId);
             }
         } else {
-            const readyMsgEmpty = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : '系统已就绪。请输入您的测试需求，系统将自动执行相应的安全测试。';
+            const readyMsgEmpty = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System is ready. Please enter your test requirements, and the system will automatically perform the corresponding security tests.';
             addMessage('assistant', readyMsgEmpty, null, null, null, { systemReadyMessage: true, scroll: 'force' });
             if (window.CyberStrikeChatScroll) {
                 window.CyberStrikeChatScroll.forceScrollToBottom(false);
@@ -3922,7 +5150,7 @@ async function loadConversation(conversationId) {
             });
         }
     } catch (error) {
-        console.error('加载对话失败:', error);
+        console.error('delete turn failed:', error);
         showChatToast('加载对话失败: ' + (error && error.message ? error.message : String(error)), 'error');
     }
 }
@@ -3936,7 +5164,7 @@ function attachDeleteTurnButton(messageEl) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'message-delete-turn-btn';
-    const title = typeof window.t === 'function' ? window.t('chat.deleteTurnTitle') : '删除本轮对话';
+    const title = typeof window.t === 'function' ? window.t('chat.deleteTurnTitle') : 'Delete this turn';
     btn.title = title;
     btn.setAttribute('aria-label', title);
     btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14zM10 11v6M14 11v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -3963,7 +5191,7 @@ function attachDeleteTurnButton(messageEl) {
 /** 删除锚点所在整轮（后端：该轮 user 至下一轮 user 之前），并清空 ReAct 快照 */
 async function deleteConversationTurnFromUI(anchorBackendMessageId) {
     if (!currentConversationId || !anchorBackendMessageId) return;
-    const confirmMsg = typeof window.t === 'function' ? window.t('chat.deleteTurnConfirm') : '确定删除本轮对话？';
+    const confirmMsg = typeof window.t === 'function' ? window.t('chat.deleteTurnConfirm') : 'Delete this entire turn (user message and assistant reply)? This cannot be undone. The next reply will use only the remaining messages; saved context snapshots will be cleared.';
     if (!confirm(confirmMsg)) return;
     try {
         const response = await apiFetch(`/api/conversations/${currentConversationId}/delete-turn`, {
@@ -3987,7 +5215,7 @@ async function deleteConversationTurnFromUI(anchorBackendMessageId) {
         }
     } catch (error) {
         console.error('delete turn failed:', error);
-        const failed = typeof window.t === 'function' ? window.t('chat.deleteTurnFailed') : '删除本轮失败';
+        const failed = typeof window.t === 'function' ? window.t('chat.deleteTurnFailed') : 'Failed to delete turn';
         alert(failed + ': ' + (error && error.message ? error.message : error));
     }
 }
@@ -3996,7 +5224,7 @@ async function deleteConversationTurnFromUI(anchorBackendMessageId) {
 async function deleteConversation(conversationId, skipConfirm = false) {
     // 确认删除（如果调用者没有跳过确认）
     if (!skipConfirm) {
-        if (!confirm('确定要删除这个对话吗？对话消息将不可恢复，但已记录的漏洞会保留在漏洞库中。')) {
+        if (!confirm('Delete this conversation? Chat messages cannot be recovered, but recorded vulnerabilities will remain in the vulnerability library.')) {
             return;
         }
     }
@@ -4008,7 +5236,7 @@ async function deleteConversation(conversationId, skipConfirm = false) {
         
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.error || '删除失败');
+            throw new Error(error.error || 'Delete failed');
         }
         
         // 如果删除的是当前对话，清空对话界面
@@ -4018,7 +5246,7 @@ async function deleteConversation(conversationId, skipConfirm = false) {
                 window.currentConversationId = '';
             } catch (e) { /* ignore */ }
             document.getElementById('chat-messages').innerHTML = '';
-            const readyMsgLoad = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : '系统已就绪。请输入您的测试需求，系统将自动执行相应的安全测试。';
+            const readyMsgLoad = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System is ready. Please enter your test requirements, and the system will automatically perform the corresponding security tests.';
             addMessage('assistant', readyMsgLoad, null, null, null, { systemReadyMessage: true });
             addAttackChainButton(null);
         }
@@ -4053,8 +5281,8 @@ async function deleteConversation(conversationId, skipConfirm = false) {
             document.dispatchEvent(new CustomEvent('conversation-deleted', { detail: { conversationId } }));
         } catch (e) { /* ignore */ }
     } catch (error) {
-        console.error('删除对话失败:', error);
-        alert('删除对话失败: ' + error.message);
+        console.error('delete turn failed:', error);
+        alert('Failed to delete conversation: ' + error.message);
     }
 }
 
@@ -4144,7 +5372,7 @@ async function showAttackChain(conversationId) {
         // 如果模态框已经打开且显示的是同一个对话，不重复打开
         const modal = document.getElementById('attack-chain-modal');
         if (modal && isAppModalOpen('attack-chain-modal')) {
-            console.log('攻击链正在加载中，模态框已打开');
+            console.log('The attack chain is loading; the modal is already open.');
             return;
         }
     }
@@ -4152,7 +5380,7 @@ async function showAttackChain(conversationId) {
     currentAttackChainConversationId = conversationId;
     const modal = document.getElementById('attack-chain-modal');
     if (!modal) {
-        console.error('攻击链模态框未找到');
+        console.error('Attack-chain modal not found.');
         return;
     }
     
@@ -4162,7 +5390,7 @@ async function showAttackChain(conversationId) {
     // 清空容器
     const container = document.getElementById('attack-chain-container');
     if (container) {
-        container.innerHTML = '<div class="loading-spinner">' + (typeof window.t === 'function' ? window.t('chat.loading') : '加载中...') + '</div>';
+        container.innerHTML = '<div class="loading-spinner">' + (typeof window.t === 'function' ? window.t('chat.loading') : 'Loading...') + '</div>';
     }
     
     // 隐藏详情面板
@@ -4204,10 +5432,10 @@ async function loadAttackChain(conversationId) {
                         <div style="text-align: center; padding: 28px 24px; color: var(--text-secondary);">
                             <div style="display: inline-flex; align-items: center; gap: 8px; font-size: 0.95rem; color: var(--text-primary);">
                                 <span role="presentation" aria-hidden="true">⏳</span>
-                                <span>攻击链生成中，请稍候</span>
+                                <span>Attack chain is being generated. Please wait.</span>
                             </div>
                             <button class="btn-secondary" onclick="refreshAttackChain()" style="margin-top: 12px; font-size: 0.78rem; padding: 4px 12px;">
-                                刷新
+                                Refresh
                             </button>
                         </div>
                     `;
@@ -4234,14 +5462,14 @@ async function loadAttackChain(conversationId) {
             }
             
             const error = await response.json();
-            throw new Error(error.error || '加载攻击链失败');
+            throw new Error(error.error || 'Failed to load attack chain');
         }
         
         const chainData = await response.json();
         
         // 检查当前显示的对话ID是否匹配，防止串台
         if (currentAttackChainConversationId !== conversationId) {
-            console.log('攻击链数据已返回，但当前显示的对话已切换，忽略此次渲染', {
+            console.log('Attack-chain data returned, but the displayed conversation changed; ignoring this render.', {
                 returned: conversationId,
                 current: currentAttackChainConversationId
             });
@@ -4259,10 +5487,10 @@ async function loadAttackChain(conversationId) {
         setAttackChainLoading(conversationId, false);
         
     } catch (error) {
-        console.error('加载攻击链失败:', error);
+        console.error('delete turn failed:', error);
         const container = document.getElementById('attack-chain-container');
         if (container) {
-            container.innerHTML = '<div class="error-message">' + (typeof window.t === 'function' ? window.t('chat.loadFailed', { message: error.message }) : '加载失败: ' + error.message) + '</div>';
+            container.innerHTML = '<div class="error-message">' + (typeof window.t === 'function' ? window.t('chat.loadFailed', { message: error.message }) : 'Load failed: ' + escapeHtml(error.message)) + '</div>';
         }
         // 错误时也重置加载状态
         setAttackChainLoading(conversationId, false);
@@ -4288,7 +5516,7 @@ function renderAttackChain(chainData) {
     container.innerHTML = '';
     
     if (!chainData.nodes || chainData.nodes.length === 0) {
-        container.innerHTML = '<div class="empty-message">' + (typeof window.t === 'function' ? window.t('chat.noAttackChainData') : '暂无攻击链数据') + '</div>';
+        container.innerHTML = '<div class="empty-message">' + (typeof window.t === 'function' ? window.t('chat.noAttackChainData') : 'No attack chain data') + '</div>';
         return;
     }
     
@@ -4331,7 +5559,7 @@ function renderAttackChain(chainData) {
         const metadata = node.metadata || {};
 
         // 统一的主题系统（与导出一致）
-        let typeLabel = '节点';
+        let typeLabel = 'Node';
         let typeEn = 'NODE';
         let typeColor = '#334155';      // 主文字色
         let accentColor = '#94a3b8';    // 强调色（图标/边框）
@@ -4341,7 +5569,7 @@ function renderAttackChain(chainData) {
         let iconType = 'default';       // 图标类型
 
         if (nodeType === 'target') {
-            typeLabel = '目标';
+            typeLabel = 'Target';
             typeEn = 'TARGET';
             typeColor = '#312E81';
             accentColor = '#4F46E5';
@@ -4350,7 +5578,7 @@ function renderAttackChain(chainData) {
             bgGradientEnd = '#F5F3FF';
             iconType = 'target';
         } else if (nodeType === 'action') {
-            typeLabel = '行动';
+            typeLabel = 'Action';
             typeEn = 'ACTION';
             const findings = metadata.findings || [];
             const hasFindings = Array.isArray(findings) && findings.length > 0;
@@ -4370,7 +5598,7 @@ function renderAttackChain(chainData) {
             }
             iconType = 'action';
         } else if (nodeType === 'vulnerability') {
-            typeLabel = '漏洞';
+            typeLabel = 'Vulnerability';
             typeEn = 'VULNERABILITY';
             if (riskScore >= 80) {
                 typeColor = '#881337';
@@ -4429,17 +5657,17 @@ function renderAttackChain(chainData) {
         // 计算徽章文本（右上角）
         let badgeText = '';
         if (nodeType === 'vulnerability' && riskScore > 0) {
-            const rl = riskScore >= 80 ? '严重' : riskScore >= 60 ? '高' : riskScore >= 40 ? '中' : '低';
+            const rl = riskScore >= 80 ? 'Critical' : riskScore >= 60 ? 'High' : riskScore >= 40 ? 'Medium' : 'Low';
             badgeText = rl + ' · ' + riskScore;
         } else if (nodeType === 'action') {
             const findings = metadata.findings || [];
             if (Array.isArray(findings) && findings.length > 0 && metadata.status !== 'failed_insight') {
-                badgeText = '发现 ' + findings.length;
+                badgeText = findings.length + ' finding(s)';
             } else if (metadata.status === 'failed_insight') {
-                badgeText = '有线索';
+                badgeText = 'Clues found';
             }
         } else if (nodeType === 'target') {
-            badgeText = '主目标';
+            badgeText = 'Primary target';
         }
 
         elements.push({
@@ -4484,7 +5712,7 @@ function renderAttackChain(chainData) {
                 }
             });
         } else {
-            console.warn('跳过无效的边：源节点或目标节点不存在', {
+            console.warn('Skipping invalid edge: source or target node does not exist.', {
                 edgeId: edge.id,
                 source: edge.source,
                 target: edge.target,
@@ -4680,7 +5908,7 @@ function renderAttackChain(chainData) {
         try {
             elkInstance = new ELK();
         } catch (e) {
-            console.warn('ELK初始化失败:', e);
+            console.warn('ELK initialization failed:', e);
         }
     }
     
@@ -4756,10 +5984,10 @@ function renderAttackChain(chainData) {
                         centerAttackChain();
                     }, 150);
                 } else {
-                    throw new Error('ELK布局返回无效结果');
+                    throw new Error('execCommand copy failed');
                 }
             }).catch(err => {
-                console.warn('ELK布局计算失败，使用默认布局:', err);
+                console.warn('ELK layout calculation failed; using the default layout:', err);
                 // 回退到默认布局
                 const layout = attackChainCytoscape.layout(layoutOptions);
                 layout.one('layoutstop', () => {
@@ -4770,7 +5998,7 @@ function renderAttackChain(chainData) {
                 layout.run();
             });
         } catch (e) {
-            console.warn('ELK布局初始化失败，使用默认布局:', e);
+            console.warn('ELK layout initialization failed; using the default layout:', e);
             // 回退到默认布局
             const layout = attackChainCytoscape.layout(layoutOptions);
             layout.one('layoutstop', () => {
@@ -4781,7 +6009,7 @@ function renderAttackChain(chainData) {
             layout.run();
         }
     } else {
-        console.warn('ELK.js未加载，使用默认布局。请检查elkjs库是否正确加载。');
+        console.warn('ELK.js is not loaded; using the default layout. Check that the elkjs library loaded correctly.');
         // 使用默认布局
         const layout = attackChainCytoscape.layout(layoutOptions);
         layout.one('layoutstop', () => {
@@ -4841,7 +6069,7 @@ function renderAttackChain(chainData) {
                 attackChainCytoscape.center();
             }, 60);
         } catch (error) {
-            console.warn('居中图表时出错:', error);
+            console.warn('Error centering the graph:', error);
         }
     }
     
@@ -4908,7 +6136,7 @@ function getEdgeNodes(edge) {
         
         return { source: source, target: target, valid: true };
     } catch (error) {
-        console.warn('获取边的节点时出错:', error, edge.id());
+        console.warn('Error getting edge nodes:', error, edge.id());
         return { source: null, target: null, valid: false };
     }
 }
@@ -5122,16 +6350,16 @@ function showNodeDetails(nodeData) {
     
     let html = `
         <div class="node-detail-item">
-            <strong>节点ID:</strong> <code>${nodeData.id}</code>
+            <strong>Node ID:</strong> <code>${nodeData.id}</code>
         </div>
         <div class="node-detail-item">
-            <strong>类型:</strong> ${getNodeTypeLabel(nodeData.type)}
+            <strong>Type:</strong> ${getNodeTypeLabel(nodeData.type)}
         </div>
         <div class="node-detail-item">
-            <strong>标签:</strong> ${escapeHtml(nodeData.originalLabel || nodeData.label)}
+            <strong>Label:</strong> ${escapeHtml(nodeData.originalLabel || nodeData.label)}
         </div>
         <div class="node-detail-item">
-            <strong>风险评分:</strong> ${nodeData.riskScore}/100
+            <strong>Risk score:</strong> ${nodeData.riskScore}/100
         </div>
     `;
     
@@ -5140,35 +6368,35 @@ function showNodeDetails(nodeData) {
         if (nodeData.metadata.tool_name) {
             html += `
                 <div class="node-detail-item">
-                    <strong>工具名称:</strong> <code>${escapeHtml(nodeData.metadata.tool_name)}</code>
+                    <strong>Tool name:</strong> <code>${escapeHtml(nodeData.metadata.tool_name)}</code>
                 </div>
             `;
         }
         if (nodeData.metadata.tool_intent) {
             html += `
                 <div class="node-detail-item">
-                    <strong>工具意图:</strong> <span style="color: #0066ff; font-weight: bold;">${escapeHtml(nodeData.metadata.tool_intent)}</span>
+                    <strong>Tool intent:</strong> <span style="color: #0066ff; font-weight: bold;">${escapeHtml(nodeData.metadata.tool_intent)}</span>
                 </div>
             `;
         }
         if (nodeData.metadata.status === 'failed_insight') {
             html += `
                 <div class="node-detail-item">
-                    <strong>执行状态:</strong> <span style="color: #ff9800; font-weight: bold;">失败但有线索</span>
+                    <strong>Execution status:</strong> <span style="color: #ff9800; font-weight: bold;">Failed, but clues were found</span>
                 </div>
             `;
         }
         if (nodeData.metadata.ai_analysis) {
             html += `
                 <div class="node-detail-item">
-                    <strong>AI分析:</strong> <div class="node-detail-ai-analysis">${escapeHtml(nodeData.metadata.ai_analysis)}</div>
+                    <strong>AI analysis:</strong> <div class="node-detail-ai-analysis">${escapeHtml(nodeData.metadata.ai_analysis)}</div>
                 </div>
             `;
         }
         if (nodeData.metadata.findings && Array.isArray(nodeData.metadata.findings) && nodeData.metadata.findings.length > 0) {
             html += `
                 <div class="node-detail-item">
-                    <strong>关键发现:</strong>
+                    <strong>Key findings:</strong>
                     <ul style="margin: 5px 0; padding-left: 20px;">
                         ${nodeData.metadata.findings.map(f => `<li>${escapeHtml(f)}</li>`).join('')}
                     </ul>
@@ -5181,7 +6409,7 @@ function showNodeDetails(nodeData) {
     if (nodeData.type === 'target' && nodeData.metadata && nodeData.metadata.target) {
         html += `
             <div class="node-detail-item">
-                <strong>测试目标:</strong> <code>${escapeHtml(nodeData.metadata.target)}</code>
+                <strong>Test target:</strong> <code>${escapeHtml(nodeData.metadata.target)}</code>
             </div>
         `;
     }
@@ -5191,28 +6419,28 @@ function showNodeDetails(nodeData) {
         if (nodeData.metadata.vulnerability_type) {
             html += `
                 <div class="node-detail-item">
-                    <strong>漏洞类型:</strong> ${escapeHtml(nodeData.metadata.vulnerability_type)}
+                    <strong>Vulnerability type:</strong> ${escapeHtml(nodeData.metadata.vulnerability_type)}
                 </div>
             `;
         }
         if (nodeData.metadata.description) {
             html += `
                 <div class="node-detail-item">
-                    <strong>描述:</strong> ${escapeHtml(nodeData.metadata.description)}
+                    <strong>Description:</strong> ${escapeHtml(nodeData.metadata.description)}
                 </div>
             `;
         }
         if (nodeData.metadata.severity) {
             html += `
                 <div class="node-detail-item">
-                    <strong>严重程度:</strong> <span style="color: ${getSeverityColor(nodeData.metadata.severity)}; font-weight: bold;">${escapeHtml(nodeData.metadata.severity)}</span>
+                    <strong>Severity:</strong> <span style="color: ${getSeverityColor(nodeData.metadata.severity)}; font-weight: bold;">${escapeHtml(nodeData.metadata.severity)}</span>
                 </div>
             `;
         }
         if (nodeData.metadata.location) {
             html += `
                 <div class="node-detail-item">
-                    <strong>位置:</strong> <code>${escapeHtml(nodeData.metadata.location)}</code>
+                    <strong>Location:</strong> <code>${escapeHtml(nodeData.metadata.location)}</code>
                 </div>
             `;
         }
@@ -5221,7 +6449,7 @@ function showNodeDetails(nodeData) {
     if (nodeData.toolExecutionId) {
         html += `
             <div class="node-detail-item">
-                <strong>工具执行ID:</strong> <code>${nodeData.toolExecutionId}</code>
+                <strong>Tool execution ID:</strong> <code>${nodeData.toolExecutionId}</code>
             </div>
         `;
     }
@@ -5255,9 +6483,9 @@ function getSeverityColor(severity) {
 // 获取节点类型标签
 function getNodeTypeLabel(type) {
     const labels = {
-        'action': '行动',
-        'vulnerability': '漏洞',
-        'target': '目标'
+        'action': '#ff8800',
+        'vulnerability': '#ff8800',
+        'target': '#ffbb00'
     };
     return labels[type] || type;
 }
@@ -5356,7 +6584,7 @@ async function regenerateAttackChain() {
     
     // 防止重复点击（只检查当前对话的加载状态）
     if (isAttackChainLoading(currentAttackChainConversationId)) {
-        console.log('攻击链正在生成中，请稍候...');
+        console.log('The attack chain is being generated. Please wait...');
         return;
     }
     
@@ -5366,7 +6594,7 @@ async function regenerateAttackChain() {
     
     const container = document.getElementById('attack-chain-container');
     if (container) {
-        container.innerHTML = '<div class="loading-spinner">重新生成中...</div>';
+        container.innerHTML = '<div class="loading-spinner">Regenerating...</div>';
     }
     
     // 禁用重新生成按钮
@@ -5390,12 +6618,12 @@ async function regenerateAttackChain() {
                 if (container) {
                     container.innerHTML = `
                         <div class="loading-spinner" style="text-align: center; padding: 40px;">
-                            <div style="margin-bottom: 16px;">⏳ 攻击链正在生成中...</div>
+                            <div style="margin-bottom: 16px;">⏳ The attack chain is being generated...</div>
                             <div style="color: var(--text-secondary); font-size: 0.875rem;">
-                                请稍候，生成完成后将自动显示
+                                Please wait. It will appear automatically when generation is complete.
                             </div>
                             <button class="btn-secondary" onclick="refreshAttackChain()" style="margin-top: 16px;">
-                                刷新查看进度
+                                Refresh to view progress
                             </button>
                         </div>
                     `;
@@ -5413,14 +6641,14 @@ async function regenerateAttackChain() {
             }
             
             const error = await response.json();
-            throw new Error(error.error || '重新生成攻击链失败');
+            throw new Error(error.error || 'Failed to regenerate attack chain');
         }
         
         const chainData = await response.json();
         
         // 检查当前显示的对话ID是否匹配，防止串台
         if (currentAttackChainConversationId !== savedConversationId) {
-            console.log('攻击链数据已返回，但当前显示的对话已切换，忽略此次渲染', {
+            console.log('Attack-chain data returned, but the displayed conversation changed; ignoring this render.', {
                 returned: savedConversationId,
                 current: currentAttackChainConversationId
             });
@@ -5435,9 +6663,9 @@ async function regenerateAttackChain() {
         updateAttackChainStats(chainData);
         
     } catch (error) {
-        console.error('重新生成攻击链失败:', error);
+        console.error('delete turn failed:', error);
         if (container) {
-            container.innerHTML = `<div class="error-message">重新生成失败: ${error.message}</div>`;
+            container.innerHTML = `<div class="error-message">Regeneration failed: ${error.message}</div>`;
         }
     } finally {
         setAttackChainLoading(savedConversationId, false);
@@ -5614,17 +6842,17 @@ function _acGetNodeIconPath(type) {
 
 // 获取节点风险等级标签（漏洞节点用）
 function _acGetRiskLabel(score) {
-    if (score >= 80) return '严重';
-    if (score >= 60) return '高';
-    if (score >= 40) return '中';
-    if (score > 0) return '低';
+    if (score >= 80) return 'Critical';
+    if (score >= 60) return 'High';
+    if (score >= 40) return 'Medium';
+    if (score > 0) return 'Low';
     return '';
 }
 
 // 生成精美 SVG 字符串（高端商业报告风格）
 function _acBuildSvgString() {
     const data = _acCollectExportData();
-    if (!data || data.nodes.length === 0) throw new Error('没有可导出的数据');
+    if (!data || data.nodes.length === 0) throw new Error('No exportable data');
 
     const { nodes, edges } = data;
 
@@ -5702,13 +6930,13 @@ function _acBuildSvgString() {
 
     // 类型主题色（高级感配色）
     const typeTheme = {
-        'target': { primary: '#4F46E5', light: '#EEF2FF', dark: '#3730A3', text: '#312E81', label: '目标' },
-        'action-success': { primary: '#10B981', light: '#ECFDF5', dark: '#047857', text: '#064E3B', label: '行动' },
-        'action-neutral': { primary: '#64748B', light: '#F8FAFC', dark: '#475569', text: '#334155', label: '行动' },
-        'vuln-critical': { primary: '#E11D48', light: '#FFF1F2', dark: '#BE123C', text: '#881337', label: '漏洞' },
-        'vuln-high': { primary: '#EA580C', light: '#FFF7ED', dark: '#C2410C', text: '#7C2D12', label: '漏洞' },
-        'vuln-med': { primary: '#CA8A04', light: '#FEFCE8', dark: '#A16207', text: '#713F12', label: '漏洞' },
-        'vuln-low': { primary: '#0D9488', light: '#F0FDFA', dark: '#0F766E', text: '#134E4A', label: '漏洞' }
+        'target': { primary: '#4F46E5', light: '#EEF2FF', dark: '#3730A3', text: '#312E81', label: 'Target' },
+        'action-success': { primary: '#10B981', light: '#ECFDF5', dark: '#047857', text: '#064E3B', label: 'Action' },
+        'action-neutral': { primary: '#64748B', light: '#F8FAFC', dark: '#475569', text: '#334155', label: 'Action' },
+        'vuln-critical': { primary: '#E11D48', light: '#FFF1F2', dark: '#BE123C', text: '#881337', label: 'Vulnerability' },
+        'vuln-high': { primary: '#EA580C', light: '#FFF7ED', dark: '#C2410C', text: '#7C2D12', label: 'Vulnerability' },
+        'vuln-med': { primary: '#CA8A04', light: '#FEFCE8', dark: '#A16207', text: '#713F12', label: 'Vulnerability' },
+        'vuln-low': { primary: '#0D9488', light: '#F0FDFA', dark: '#0F766E', text: '#134E4A', label: 'Vulnerability' }
     };
 
     function themeFor(n) {
@@ -5846,7 +7074,7 @@ function _acBuildSvgString() {
     parts.push(`</g>`);
 
     // 主标题（超大、粗体）
-    parts.push(`<text x="${tX + 56}" y="${tY + 26}" font-size="26" font-weight="800" fill="#0F172A" letter-spacing="-0.6px">攻击链可视化报告</text>`);
+    parts.push(`</svg>`);
 
     // 副标题（小字、次要色）
     parts.push(`<text x="${tX + 56}" y="${tY + 50}" font-size="13" font-weight="500" fill="#64748B" letter-spacing="0.1px">Attack Chain Analysis · ${_acEscapeXml(ts)}</text>`);
@@ -5857,9 +7085,9 @@ function _acBuildSvgString() {
     const kpiGap = 12;
     const kpiW = 110;
     const kpiItems = [
-        { label: '节点', value: nodeCount, color: '#4F46E5' },
-        { label: '连线', value: edgeCount, color: '#06B6D4' },
-        { label: '严重漏洞', value: criticalCount, color: criticalCount > 0 ? '#E11D48' : '#94A3B8' }
+        { label: 'Nodes', value: nodeCount, color: '#4F46E5' },
+        { label: 'Edges', value: edgeCount, color: '#06B6D4' },
+        { label: 'Critical vulnerabilities', value: criticalCount, color: criticalCount > 0 ? '#E11D48' : '#94A3B8' }
     ];
     let kpiXStart = OUTER_PAD + contentW - 40 - (kpiW * kpiItems.length + kpiGap * (kpiItems.length - 1));
     kpiItems.forEach((kpi, i) => {
@@ -5982,7 +7210,7 @@ function _acBuildSvgString() {
             const hasFindings = Array.isArray(findings) && findings.length > 0;
             const isFailed = m.status === 'failed_insight';
             if (hasFindings || isFailed) {
-                const text = isFailed ? '有线索' : `发现 ${findings.length}`;
+                const text = isFailed ? 'Clues found' : `${findings.length} finding(s)`;
                 const badgeW = 70;
                 const bx = x + n.w - badgeW - padX;
                 parts.push(`<rect x="${bx}" y="${badgeY}" width="${badgeW}" height="${badgeH}" rx="${badgeH / 2}" fill="${theme.primary}" fill-opacity="0.12" stroke="${theme.primary}" stroke-opacity="0.4" stroke-width="1"/>`);
@@ -5995,7 +7223,7 @@ function _acBuildSvgString() {
             const badgeW = 60;
             const bx = x + n.w - badgeW - padX;
             parts.push(`<rect x="${bx}" y="${badgeY}" width="${badgeW}" height="${badgeH}" rx="${badgeH / 2}" fill="${theme.primary}" fill-opacity="0.12" stroke="${theme.primary}" stroke-opacity="0.4" stroke-width="1"/>`);
-            parts.push(`<text x="${bx + badgeW / 2}" y="${badgeY + badgeH / 2 + 4.5}" text-anchor="middle" font-size="11.5" font-weight="700" fill="${theme.dark}" letter-spacing="0.3px">主目标</text>`);
+            parts.push(`<text x="${metaX}" y="${metaY + 3}" font-size="11.5" font-weight="500" fill="#64748B">${_acEscapeXml(mi.text)}</text>`);
         }
 
         // ========== 主标题 ==========
@@ -6080,16 +7308,16 @@ function _acBuildSvgString() {
     let curY = ly + 26;
 
     // --- 节点类型 ---
-    parts.push(`<text x="${lx + 24}" y="${curY}" font-size="10.5" font-weight="800" fill="#64748B" letter-spacing="1.5px">NODE TYPES · 节点类型</text>`);
+    parts.push(`</svg>`);
     curY += 22;
     const typeSummary = [
-        { key: 'target', count: targetNodes.length, text: '目标' },
-        { key: 'action-success', count: actionNodes.filter(a => { const m = a.metadata || {}; return Array.isArray(m.findings) && m.findings.length > 0 && m.status !== 'failed_insight'; }).length, text: '行动（有发现）' },
-        { key: 'action-neutral', count: actionNodes.filter(a => { const m = a.metadata || {}; const f = Array.isArray(m.findings) ? m.findings : []; return f.length === 0 || m.status === 'failed_insight'; }).length, text: '行动（其他）' },
-        { key: 'vuln-critical', count: criticalCount, text: '严重漏洞' },
-        { key: 'vuln-high', count: highCount, text: '高风险漏洞' },
-        { key: 'vuln-med', count: medCount, text: '中风险漏洞' },
-        { key: 'vuln-low', count: lowCount, text: '低风险漏洞' }
+        { key: 'target', count: targetNodes.length, text: 'Target' },
+        { key: 'action-success', count: actionNodes.filter(a => { const m = a.metadata || {}; return Array.isArray(m.findings) && m.findings.length > 0 && m.status !== 'failed_insight'; }).length, text: 'Action (findings)' },
+        { key: 'action-neutral', count: actionNodes.filter(a => { const m = a.metadata || {}; const f = Array.isArray(m.findings) ? m.findings : []; return f.length === 0 || m.status === 'failed_insight'; }).length, text: 'Action (other)' },
+        { key: 'vuln-critical', count: criticalCount, text: 'Critical vulnerabilities' },
+        { key: 'vuln-high', count: highCount, text: 'High-risk vulnerabilities' },
+        { key: 'vuln-med', count: medCount, text: 'Medium-risk vulnerabilities' },
+        { key: 'vuln-low', count: lowCount, text: 'Low-risk vulnerabilities' }
     ];
     typeSummary.forEach(item => {
         const t = typeTheme[item.key];
@@ -6105,13 +7333,13 @@ function _acBuildSvgString() {
     curY += 10;
 
     // --- 连线含义 ---
-    parts.push(`<text x="${lx + 24}" y="${curY}" font-size="10.5" font-weight="800" fill="#64748B" letter-spacing="1.5px">CONNECTIONS · 连线含义</text>`);
+    parts.push(`</svg>`);
     curY += 22;
     const lineItems = [
-        { label: '行动发现漏洞', color: '#4F46E5', dash: '' },
-        { label: '使能 / 促成关系', color: '#E11D48', dash: '' },
-        { label: '逻辑顺序', color: '#64748B', dash: '' },
-        { label: '目标定位', color: '#4F46E5', dash: '6,3' }
+        { label: 'Action discovers vulnerability', color: '#4F46E5', dash: '' },
+        { label: 'Enables / contributes to', color: '#E11D48', dash: '' },
+        { label: 'Logical order', color: '#64748B', dash: '' },
+        { label: 'Targeting', color: '#4F46E5', dash: '6,3' }
     ];
     lineItems.forEach(l => {
         const dashAttr = l.dash ? `stroke-dasharray="${l.dash}"` : '';
@@ -6123,20 +7351,20 @@ function _acBuildSvgString() {
     curY += 10;
 
     // --- 风险等级条 ---
-    parts.push(`<text x="${lx + 24}" y="${curY}" font-size="10.5" font-weight="800" fill="#64748B" letter-spacing="1.5px">RISK LEVELS · 风险等级</text>`);
+    parts.push(`</svg>`);
     curY += 22;
     const riskBar = [
-        { label: '严重', range: '80-100', color: '#E11D48' },
-        { label: '高', range: '60-79', color: '#EA580C' },
-        { label: '中', range: '40-59', color: '#CA8A04' },
-        { label: '低', range: '0-39', color: '#0D9488' }
+        { label: 'Critical', range: '80-100', color: '#E11D48' },
+        { label: 'High', range: '60-79', color: '#EA580C' },
+        { label: 'Medium', range: '40-59', color: '#CA8A04' },
+        { label: 'Low', range: '0-39', color: '#0D9488' }
     ];
     riskBar.forEach(r => {
         // 风险等级胶囊
         parts.push(`<rect x="${lx + 24}" y="${curY - 10}" width="46" height="18" rx="9" fill="${r.color}"/>`);
         parts.push(`<text x="${lx + 47}" y="${curY + 2}" text-anchor="middle" font-size="10.5" font-weight="700" fill="#FFFFFF" letter-spacing="0.3px">${_acEscapeXml(r.label)}</text>`);
         // 分数范围
-        parts.push(`<text x="${lx + 80}" y="${curY + 1}" font-size="12" font-weight="500" fill="#64748B">分数 ${_acEscapeXml(r.range)}</text>`);
+        parts.push(`<text x="${lx + 47}" y="${curY + 2}" text-anchor="middle" font-size="10.5" font-weight="700" fill="#FFFFFF" letter-spacing="0.3px">${_acEscapeXml(r.label)}</text>`);
         curY += 26;
     });
 
@@ -6192,7 +7420,7 @@ function _acSvgToPng(svgString, scale) {
                     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                     URL.revokeObjectURL(url);
                     canvas.toBlob(pngBlob => {
-                        if (!pngBlob) reject(new Error('PNG 生成失败'));
+        if (!pngBlob) reject(new Error('PNG generation failed'));
                         else resolve(pngBlob);
                     }, 'image/png', 0.95);
                 } catch (err) {
@@ -6202,7 +7430,7 @@ function _acSvgToPng(svgString, scale) {
             };
             img.onerror = function (e) {
                 URL.revokeObjectURL(url);
-                reject(new Error('SVG 加载失败'));
+                reject(new Error('SVG loading failed'));
             };
             img.src = url;
         } catch (e) {
@@ -6214,7 +7442,7 @@ function _acSvgToPng(svgString, scale) {
 // 导出攻击链（美化版）
 function exportAttackChain(format) {
     if (!attackChainCytoscape) {
-        alert(typeof window.t === 'function' ? window.t('chat.pleaseLoadAttackChainFirst', {}, '请先加载攻击链') : '请先加载攻击链');
+        alert(typeof window.t === 'function' ? window.t('chat.pleaseLoadAttackChainFirst', {}, 'Please load an attack chain first') : 'Please load an attack chain first');
         return;
     }
 
@@ -6232,28 +7460,28 @@ function exportAttackChain(format) {
                 _acSvgToPng(svgString, 2)
                     .then(pngBlob => _acDownloadBlob(pngBlob, `attack-chain-${convId}-${tsName}.png`))
                     .catch(err => {
-                        console.error('导出 PNG 失败，回退到 Cytoscape 原生导出:', err);
+                        console.error('PNG export failed; falling back to Cytoscape native export:', err);
                         // 回退方案：使用 Cytoscape 自带导出
                         try {
                             const p = attackChainCytoscape.png({ output: 'blob', bg: '#ffffff', full: true, scale: 2 });
                             if (p && typeof p.then === 'function') {
                                 p.then(b => _acDownloadBlob(b, `attack-chain-${convId}-${tsName}.png`))
-                                    .catch(e => alert('导出 PNG 失败: ' + (e && e.message || e)));
+                                    .catch(e => alert('PNG export failed: ' + (e && e.message || e)));
                             } else if (p) {
                                 _acDownloadBlob(p, `attack-chain-${convId}-${tsName}.png`);
                             } else {
-                                alert('导出 PNG 失败');
+                                alert('PNG export failed');
                             }
                         } catch (e2) {
-                            alert('导出 PNG 失败: ' + (e2 && e2.message || e2));
+                            alert('PNG export failed: ' + (e2 && e2.message || e2));
                         }
                     });
             } else {
-                alert('不支持的导出格式: ' + format);
+                alert('Unsupported export format: ' + format);
             }
         } catch (error) {
-            console.error('导出失败:', error);
-            alert('导出失败: ' + (error && error.message || '未知错误'));
+            console.error('Export failed:', error);
+            alert('Export failed: ' + (error && error.message || 'Unknown error'));
         }
     }, 80);
 }
@@ -6279,6 +7507,9 @@ const CONVERSATION_PROJECT_FILTER_NONE = '__none__';
 const CONVERSATION_PROJECT_FILTER_SELECT_ID = 'conversation-project-filter';
 const CONVERSATION_PROJECT_FILTER_CARET = '<svg class="conversation-project-filter-caret" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const BATCH_PROJECT_FILTER_SELECT_ID = 'batch-project-filter';
+const BATCH_GROUP_FILTER_SELECT_ID = 'batch-move-group-select';
+const BATCH_GROUP_HEADER_FILTER_SELECT_ID = 'batch-group-filter';
+const BATCH_GROUP_NONE = '__none__';
 const projectFilterCustomSelectRegistry = {};
 let projectFilterCustomSelectDocBound = false;
 
@@ -6320,7 +7551,7 @@ function ensureProjectFilterSearchUi(reg) {
     searchInput.setAttribute('autocomplete', 'off');
     searchInput.setAttribute('data-i18n', 'chat.filterProjectSearch');
     searchInput.setAttribute('data-i18n-attr', 'placeholder');
-    searchInput.placeholder = projectFilterT('chat.filterProjectSearch', '搜索项目…');
+    searchInput.placeholder = projectFilterT('chat.filterProjectSearch', 'chat.filterProjectSearch');
     searchWrap.appendChild(searchInput);
     dropdown.appendChild(searchWrap);
     reg.searchInput = searchInput;
@@ -6406,7 +7637,7 @@ async function loadProjectFilterLocalOptions(selectId) {
         loadingEl = appendProjectFilterStatusMessage(
             reg.optionsList,
             'conversation-project-filter-status',
-            projectFilterT('common.loading', '加载中…')
+            projectFilterT('common.loading', 'Loading…')
         );
     }
 
@@ -6437,7 +7668,7 @@ async function loadProjectFilterLocalOptions(selectId) {
             appendProjectFilterStatusMessage(
                 reg.optionsList,
                 'conversation-project-filter-empty',
-                projectFilterT('chat.filterProjectSearchEmpty', '没有匹配的项目')
+                projectFilterT('chat.filterProjectSearchEmpty', 'No matching projects')
             );
         }
     } catch (e) {
@@ -6446,7 +7677,7 @@ async function loadProjectFilterLocalOptions(selectId) {
         appendProjectFilterStatusMessage(
             reg.optionsList,
             'conversation-project-filter-empty',
-            projectFilterT('chat.filterProjectSearchFailed', '加载项目失败，请重试')
+            projectFilterT('chat.filterProjectSearchFailed', 'Failed to load projects. Try again.')
         );
     } finally {
         if (loadingEl && loadingEl.parentNode) loadingEl.remove();
@@ -6465,6 +7696,117 @@ function syncProjectFilterCustomSelect(selectId) {
         valueSpan.textContent = selectedText;
         valueSpan.title = selectedText;
     }
+}
+
+function ensureSimpleCustomSelectOptionsUi(reg) {
+    if (reg.optionsList) return;
+    reg.dropdown.innerHTML = '';
+    const optionsList = document.createElement('div');
+    optionsList.className = 'conversation-project-filter-options';
+    reg.dropdown.appendChild(optionsList);
+    reg.optionsList = optionsList;
+}
+
+function renderSimpleCustomSelectOptions(reg) {
+    ensureSimpleCustomSelectOptionsUi(reg);
+    const { select, optionsList } = reg;
+    optionsList.innerHTML = '';
+    Array.prototype.forEach.call(select.options, (opt) => {
+        optionsList.appendChild(createProjectFilterOptionButton(opt.value, opt.textContent || '', select.value));
+    });
+}
+
+function syncSimpleCustomSelect(selectId) {
+    const reg = projectFilterCustomSelectRegistry[selectId];
+    if (!reg) return;
+    const { select, trigger } = reg;
+    const valueSpan = trigger.querySelector('.conversation-project-filter-value');
+    const selectedOpt = select.options[select.selectedIndex];
+    const selectedText = selectedOpt ? (selectedOpt.textContent || '') : '';
+    if (valueSpan) {
+        valueSpan.textContent = selectedText;
+        valueSpan.title = selectedText;
+    }
+}
+
+function initSimpleCustomSelect(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    if (select.dataset.projectCustomSelect === '1') {
+        syncSimpleCustomSelect(selectId);
+        return;
+    }
+    select.dataset.projectCustomSelect = '1';
+    select.classList.add('conversation-project-filter-native');
+    select.tabIndex = -1;
+    select.setAttribute('aria-hidden', 'true');
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'conversation-project-filter-ui';
+
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'conversation-project-filter-trigger';
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    const valueSpan = document.createElement('span');
+    valueSpan.className = 'conversation-project-filter-value';
+    trigger.appendChild(valueSpan);
+    trigger.insertAdjacentHTML('beforeend', CONVERSATION_PROJECT_FILTER_CARET);
+
+    const dropdown = document.createElement('div');
+    dropdown.className = 'conversation-project-filter-dropdown';
+    dropdown.setAttribute('role', 'listbox');
+
+    const parent = select.parentNode;
+    parent.insertBefore(wrapper, select);
+    wrapper.appendChild(trigger);
+    wrapper.appendChild(dropdown);
+    wrapper.appendChild(select);
+
+    projectFilterCustomSelectRegistry[selectId] = { wrapper, trigger, dropdown, select };
+
+    trigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = wrapper.classList.contains('open');
+        closeAllProjectFilterCustomSelects();
+        if (!open) {
+            wrapper.classList.add('open');
+            trigger.setAttribute('aria-expanded', 'true');
+            renderSimpleCustomSelectOptions(projectFilterCustomSelectRegistry[selectId]);
+        }
+    });
+
+    dropdown.addEventListener('click', (e) => {
+        const opt = e.target.closest('.conversation-project-filter-option');
+        if (!opt) return;
+        e.stopPropagation();
+        const val = opt.getAttribute('data-value');
+        if (val === null) return;
+        if (select.value !== val) {
+            select.value = val;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        closeProjectFilterCustomSelect(selectId);
+        syncSimpleCustomSelect(selectId);
+    });
+
+    if (!projectFilterCustomSelectDocBound) {
+        projectFilterCustomSelectDocBound = true;
+        document.addEventListener('click', closeAllProjectFilterCustomSelects);
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeAllProjectFilterCustomSelects();
+        });
+    }
+    syncSimpleCustomSelect(selectId);
+}
+
+function initBatchGroupCustomSelect() {
+    initSimpleCustomSelect(BATCH_GROUP_FILTER_SELECT_ID);
+}
+
+function initBatchGroupHeaderFilterCustomSelect() {
+    initSimpleCustomSelect(BATCH_GROUP_HEADER_FILTER_SELECT_ID);
 }
 
 function initProjectFilterCustomSelect(selectId) {
@@ -6577,8 +7919,8 @@ function setConversationProjectFilter(projectId) {
 
 function appendProjectFilterPinnedNativeOptions(sel) {
     const tFn = typeof window.t === 'function' ? window.t.bind(window) : null;
-    const allLabel = tFn ? tFn('chat.filterAllProjects') : '全部项目';
-    const unboundLabel = tFn ? tFn('chat.filterUnboundProjects') : '未绑定项目';
+    const allLabel = tFn ? tFn('chat.filterAllProjects') : 'chat.filterAllProjects';
+    const unboundLabel = tFn ? tFn('chat.filterUnboundProjects') : 'chat.filterUnboundProjects';
     sel.innerHTML = '';
     const allOpt = document.createElement('option');
     allOpt.value = '';
@@ -6652,13 +7994,13 @@ function updateConversationSidebarFilterUI() {
     const tFn = typeof window.t === 'function' ? window.t.bind(window) : null;
     if (filter && filter !== CONVERSATION_PROJECT_FILTER_NONE) {
         const name = (window.projectNameById && window.projectNameById[filter]) || filter;
-        const fullTitle = tFn ? tFn('chat.projectConversationsTitle', { name }) : `${name} · 对话`;
+        const fullTitle = tFn ? tFn('chat.projectConversationsTitle', { name }) : `${name} · Conversations`;
         titleEl.textContent = fullTitle;
         titleEl.title = fullTitle;
         titleEl.classList.add('section-title--filtered');
         titleEl.removeAttribute('data-i18n');
     } else if (filter === CONVERSATION_PROJECT_FILTER_NONE) {
-        const fullTitle = tFn ? tFn('chat.unboundConversationsTitle') : '未绑定项目';
+        const fullTitle = tFn ? tFn('chat.unboundConversationsTitle') : 'Unbound conversations';
         titleEl.textContent = fullTitle;
         titleEl.title = fullTitle;
         titleEl.classList.add('section-title--filtered');
@@ -6667,7 +8009,7 @@ function updateConversationSidebarFilterUI() {
         titleEl.classList.remove('section-title--filtered');
         titleEl.removeAttribute('title');
         titleEl.setAttribute('data-i18n', 'chat.recentConversations');
-        if (tFn) titleEl.textContent = tFn('chat.recentConversations');
+        titleEl.textContent = tFn ? tFn('chat.recentConversations') : 'Recent conversations';
     }
 }
 
@@ -7111,7 +8453,7 @@ async function loadGroups() {
                 const pinIcon = document.createElement('span');
                 pinIcon.className = 'group-item-pinned';
                 pinIcon.innerHTML = '📌';
-                pinIcon.title = '已置顶';
+                pinIcon.title = 'Pinned';
                 name.appendChild(pinIcon);
             }
             groupItem.appendChild(content);
@@ -7132,7 +8474,7 @@ async function loadGroups() {
             groupsList.appendChild(groupItem);
         });
     } catch (error) {
-        console.error('加载分组列表失败:', error);
+        console.error('delete turn failed:', error);
     }
 }
 
@@ -7298,10 +8640,10 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
 
         const tFn = typeof window.t === 'function' ? window.t.bind(window) : null;
         const groupOrder = [
-            { key: 'today', label: tFn ? tFn('chat.historyGroupToday') : '今天' },
-            { key: 'yesterday', label: tFn ? tFn('chat.yesterday') : '昨天' },
-            { key: 'last7Days', label: tFn ? tFn('chat.historyGroupLast7Days') : '过去七天' },
-            { key: 'earlier', label: tFn ? tFn('chat.historyGroupEarlier') : '更早' },
+            { key: 'today', label: tFn ? tFn('chat.historyGroupToday') : 'Today' },
+            { key: 'yesterday', label: tFn ? tFn('chat.yesterday') : 'Yesterday' },
+            { key: 'last7Days', label: tFn ? tFn('chat.historyGroupLast7Days') : 'Past 7 days' },
+            { key: 'earlier', label: tFn ? tFn('chat.historyGroupEarlier') : 'Older' },
         ];
 
         const groups = {
@@ -7379,7 +8721,7 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
         }
     } catch (error) {
         if (isStaleConversationListLoad(loadSeq, intentPage, navigateGenAtStart, activePage)) return;
-        console.error('加载对话列表失败:', error);
+        console.error('delete turn failed:', error);
         // 错误时显示空状态，而不是错误提示（更友好的用户体验）
         const listContainer = document.getElementById('conversations-list');
         if (listContainer) {
@@ -7409,7 +8751,7 @@ function createConversationListItemWithMenu(conversation, isPinned) {
 
     const title = document.createElement('div');
     title.className = 'conversation-title';
-    const titleText = conversation.title || '未命名对话';
+    const titleText = conversation.title || 'Untitled conversation';
     title.textContent = safeTruncateText(titleText, 60);
     title.title = titleText; // 设置完整标题以便悬停查看
     titleWrapper.appendChild(title);
@@ -7418,7 +8760,7 @@ function createConversationListItemWithMenu(conversation, isPinned) {
         const pinIcon = document.createElement('span');
         pinIcon.className = 'conversation-item-pinned';
         pinIcon.innerHTML = '📌';
-        pinIcon.title = '已置顶';
+        pinIcon.title = 'Pinned';
         titleWrapper.appendChild(pinIcon);
     }
 
@@ -7438,7 +8780,7 @@ function createConversationListItemWithMenu(conversation, isPinned) {
             const groupTag = document.createElement('div');
             groupTag.className = 'conversation-group-tag';
             groupTag.innerHTML = `<span class="group-tag-icon">${group.icon || '📁'}</span><span class="group-tag-name">${group.name}</span>`;
-            groupTag.title = `分组: ${group.name}`;
+            groupTag.title = `Group: ${group.name}`;
             contentWrapper.appendChild(groupTag);
         }
     }
@@ -7501,18 +8843,18 @@ async function showConversationContextMenu(event) {
                 attackChainMenuItem.style.opacity = '0.5';
                 attackChainMenuItem.style.cursor = 'not-allowed';
                 attackChainMenuItem.onclick = null;
-                attackChainMenuItem.title = '当前对话正在执行，请稍后再生成攻击链';
+                attackChainMenuItem.title = 'This conversation is still running. Generate the attack chain later.';
             } else {
                 attackChainMenuItem.style.opacity = '1';
                 attackChainMenuItem.style.cursor = 'pointer';
                 attackChainMenuItem.onclick = showAttackChainFromContext;
-                attackChainMenuItem.title = (typeof window.t === 'function' ? window.t('chat.viewAttackChainCurrentConv') : '查看当前对话的攻击链');
+                attackChainMenuItem.title = (typeof window.t === 'function' ? window.t('chat.viewAttackChainCurrentConv') : 'View attack chain of current conversation');
             }
         } else {
             attackChainMenuItem.style.opacity = '0.5';
             attackChainMenuItem.style.cursor = 'not-allowed';
             attackChainMenuItem.onclick = null;
-            attackChainMenuItem.title = (typeof window.t === 'function' ? window.t('chat.viewAttackChainSelectConv') : '请选择一个对话以查看攻击链');
+            attackChainMenuItem.title = (typeof window.t === 'function' ? window.t('chat.viewAttackChainSelectConv') : 'Please select a conversation to view attack chain');
         }
     }
     
@@ -7548,15 +8890,15 @@ async function showConversationContextMenu(event) {
             if (pinMenuText && typeof window.t === 'function') {
                 pinMenuText.textContent = isPinned ? window.t('contextMenu.unpinConversation') : window.t('contextMenu.pinConversation');
             } else if (pinMenuText) {
-                pinMenuText.textContent = isPinned ? '取消置顶' : '置顶此对话';
+                pinMenuText.textContent = isPinned ? 'Unpin conversation' : 'Pin conversation';
             }
         } catch (error) {
-            console.error('获取对话置顶状态失败:', error);
+            console.error('Failed to get conversation pin status:', error);
             const pinMenuText = document.getElementById('pin-conversation-menu-text');
             if (pinMenuText && typeof window.t === 'function') {
                 pinMenuText.textContent = window.t('contextMenu.pinConversation');
             } else if (pinMenuText) {
-                pinMenuText.textContent = '置顶此对话';
+                pinMenuText.textContent = 'Pin conversation';
             }
         }
     } else {
@@ -7564,7 +8906,7 @@ async function showConversationContextMenu(event) {
         if (pinMenuText && typeof window.t === 'function') {
             pinMenuText.textContent = window.t('contextMenu.pinConversation');
         } else if (pinMenuText) {
-            pinMenuText.textContent = '置顶此对话';
+            pinMenuText.textContent = 'Pin conversation';
         }
     }
 
@@ -7693,15 +9035,15 @@ async function showGroupContextMenu(event, groupId) {
         if (pinMenuText && typeof window.t === 'function') {
             pinMenuText.textContent = isPinned ? window.t('contextMenu.unpinGroup') : window.t('contextMenu.pinGroup');
         } else if (pinMenuText) {
-            pinMenuText.textContent = isPinned ? '取消置顶' : '置顶此分组';
+            pinMenuText.textContent = isPinned ? 'Unpin group' : 'Pin group';
         }
     } catch (error) {
-        console.error('获取分组置顶状态失败:', error);
+        console.error('delete turn failed:', error);
         const pinMenuText = document.getElementById('pin-group-menu-text');
         if (pinMenuText && typeof window.t === 'function') {
             pinMenuText.textContent = window.t('contextMenu.pinGroup');
         } else if (pinMenuText) {
-            pinMenuText.textContent = '置顶此分组';
+            pinMenuText.textContent = 'Pin group';
         }
     }
 
@@ -7761,7 +9103,7 @@ async function renameConversation() {
     const convId = contextMenuConversationId;
     if (!convId) return;
 
-    const newTitle = prompt('请输入新标题:', '');
+    const newTitle = prompt('Enter a new title:', '');
     if (newTitle === null || !newTitle.trim()) {
         closeContextMenu();
         return;
@@ -7778,7 +9120,7 @@ async function renameConversation() {
 
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.error || '更新失败');
+            throw new Error(error.error || 'Update failed');
         }
 
         // 更新前端显示
@@ -7807,9 +9149,9 @@ async function renameConversation() {
         // 重新加载对话列表
         loadConversationsWithGroups();
     } catch (error) {
-        console.error('重命名对话失败:', error);
-        const failedLabel = typeof window.t === 'function' ? window.t('chat.renameFailed') : '重命名失败';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : '未知错误';
+        console.error('delete turn failed:', error);
+        const failedLabel = typeof window.t === 'function' ? window.t('chat.renameFailed') : 'Rename failed';
+        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
         alert(failedLabel + ': ' + (error.message || unknownErr));
     }
 
@@ -7868,8 +9210,8 @@ async function pinConversation() {
             loadConversationsWithGroups();
         }
     } catch (error) {
-        console.error('置顶对话失败:', error);
-        alert('置顶失败: ' + (error.message || '未知错误'));
+        console.error('delete turn failed:', error);
+        alert('Failed to pin conversation: ' + (error.message || 'Unknown error'));
     }
 
     closeContextMenu();
@@ -7915,13 +9257,13 @@ async function showMoveToGroupSubmenu() {
                 }
             } catch (err) {
                 // 如果刷新失败，使用缓存的数据
-                console.warn('刷新分组列表失败，使用缓存数据:', err);
+                console.warn('Failed to refresh the group list; using cached data:', err);
             }
         }
         
         // 再次验证缓存
         if (!Array.isArray(groupsCache)) {
-            console.warn('groupsCache 不是有效数组，重置为空数组');
+            console.warn('groupsCache is not a valid array; resetting it to an empty array.');
             groupsCache = [];
             // 如果仍然无效，尝试重新加载
             if (groupsCache.length === 0) {
@@ -7929,7 +9271,7 @@ async function showMoveToGroupSubmenu() {
             }
         }
     } catch (error) {
-        console.error('加载分组列表失败:', error);
+        console.error('delete turn failed:', error);
         // 即使加载失败，也继续显示菜单，使用现有缓存
     }
 
@@ -7945,7 +9287,7 @@ async function showMoveToGroupSubmenu() {
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                     <path d="M9 12l6 6M15 12l-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
-                <span>移出本组</span>
+                 <span>Remove from this group</span>
             `;
             removeItem.onclick = () => {
                 removeConversationFromGroup(contextMenuConversationId, currentGroupId);
@@ -7961,7 +9303,7 @@ async function showMoveToGroupSubmenu() {
 
     // 验证 groupsCache 是否为有效数组
     if (!Array.isArray(groupsCache)) {
-        console.warn('groupsCache 不是有效数组，重置为空数组');
+        console.warn('groupsCache is not a valid array; resetting it to an empty array.');
         groupsCache = [];
     }
 
@@ -7975,7 +9317,7 @@ async function showMoveToGroupSubmenu() {
         groupsCache.forEach(group => {
             // 验证分组对象是否有效
             if (!group || !group.id || !group.name) {
-                console.warn('无效的分组对象:', group);
+                console.warn('Invalid group object:', group);
                 return;
             }
             
@@ -7999,11 +9341,11 @@ async function showMoveToGroupSubmenu() {
         });
     } else {
         // 如果仍然没有分组，记录日志以便调试
-        console.warn('showMoveToGroupSubmenu: groupsCache 为空，无法显示分组列表');
+        console.warn('showMoveToGroupSubmenu: groupsCache is empty; unable to display the group list.');
     }
 
     // 始终显示"创建分组"选项
-    const addGroupLabel = typeof window.t === 'function' ? window.t('chat.addNewGroup') : '+ 新增分组';
+    const addGroupLabel = typeof window.t === 'function' ? window.t('chat.addNewGroup') : '+ New group';
     const addItem = document.createElement('div');
     addItem.className = 'context-submenu-item add-group-item';
     addItem.innerHTML = `
@@ -8211,8 +9553,8 @@ async function moveConversationToGroup(convId, groupId) {
         // 刷新分组列表，更新高亮状态
         await loadGroups();
     } catch (error) {
-        console.error('移动对话到分组失败:', error);
-        alert('移动失败: ' + (error.message || '未知错误'));
+        console.error('delete turn failed:', error);
+        alert('Failed to move conversation: ' + (error.message || 'Unknown error'));
     }
 
     closeContextMenu();
@@ -8253,8 +9595,8 @@ async function removeConversationFromGroup(convId, groupId) {
         await loadConversationsWithGroups();
         currentGroupId = savedGroupId;
     } catch (error) {
-        console.error('从分组中移除对话失败:', error);
-        alert('移除失败: ' + (error.message || '未知错误'));
+        console.error('delete turn failed:', error);
+        alert('Failed to remove conversation: ' + (error.message || 'Unknown error'));
     }
 
     closeContextMenu();
@@ -8287,7 +9629,7 @@ async function loadConversationGroupMapping() {
         // 恢复待保留的映射（这些是后端API尚未同步的映射）
         Object.assign(conversationGroupMappingCache, preservedMappings);
     } catch (error) {
-        console.error('加载对话分组映射失败:', error);
+        console.error('delete turn failed:', error);
     }
 }
 
@@ -8435,8 +9777,8 @@ async function downloadConversationMarkdownFromContext(includeToolDetails = fals
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
     } catch (error) {
-        console.error('下载对话 Markdown 失败:', error);
-        const failedLabel = typeof window.t === 'function' ? window.t('chat.downloadConversationFailed') : '下载失败';
+        console.error('delete turn failed:', error);
+        const failedLabel = typeof window.t === 'function' ? window.t('chat.downloadConversationFailed') : 'Failed to download conversation';
         const errMsg = error && error.message ? error.message : 'unknown error';
         alert(failedLabel + ': ' + errMsg);
     }
@@ -8457,10 +9799,11 @@ function navigateToVulnerabilitiesForContextConversation() {
 
 // 从上下文菜单删除对话
 function deleteConversationFromContext() {
+    if (typeof requirePermission === 'function' && !requirePermission('chat:delete')) return;
     const convId = contextMenuConversationId;
     if (!convId) return;
 
-    const confirmMsg = typeof window.t === 'function' ? window.t('chat.deleteConversationConfirm') : '确定要删除此对话吗？';
+    const confirmMsg = typeof window.t === 'function' ? window.t('chat.deleteConversationConfirm') : 'Delete this conversation? Chat messages cannot be recovered, but recorded vulnerabilities will remain in the vulnerability library.';
     if (confirm(confirmMsg)) {
         deleteConversation(convId, true); // 跳过内部确认，因为这里已经确认过了
     }
@@ -8500,11 +9843,27 @@ function getConversationProjectId(conv) {
 function getConversationProjectLabel(conv) {
     const pid = getConversationProjectId(conv);
     if (!pid) {
-        return typeof window.t === 'function' ? window.t('batchManageModal.noProject') : '无项目';
+        return typeof window.t === 'function' ? window.t('batchManageModal.noProject') : 'No project';
     }
     const name = window.projectNameById && window.projectNameById[pid];
     if (name) return name;
-    return typeof window.t === 'function' ? window.t('batchManageModal.unknownProject') : '未知项目';
+    return typeof window.t === 'function' ? window.t('batchManageModal.unknownProject') : 'Unknown project';
+}
+
+function getConversationGroupId(conv) {
+    return (conv && conversationGroupMappingCache[conv.id]) || '';
+}
+
+function getConversationGroupLabel(conv) {
+    const groupId = getConversationGroupId(conv);
+    if (!groupId) {
+        return typeof window.t === 'function' ? window.t('batchManageModal.noGroup') : 'Ungrouped';
+    }
+    const group = Array.isArray(groupsCache) ? groupsCache.find(g => g.id === groupId) : null;
+    if (group) {
+        return `${group.icon || '📁'} ${group.name}`;
+    }
+    return typeof window.t === 'function' ? window.t('batchManageModal.unknownGroup') : 'Unknown group';
 }
 
 async function prefetchProjectNamesForConversations(conversations) {
@@ -8536,9 +9895,83 @@ async function refreshBatchProjectFilter() {
     syncProjectFilterCustomSelect(BATCH_PROJECT_FILTER_SELECT_ID);
 }
 
+async function refreshBatchGroupSelect() {
+    const sel = document.getElementById('batch-move-group-select');
+    if (!sel) return;
+
+    if (!Array.isArray(groupsCache) || groupsCache.length === 0) {
+        await loadGroups();
+    }
+
+    const saved = sel.value || BATCH_GROUP_NONE;
+    sel.innerHTML = '';
+
+    const noneOpt = document.createElement('option');
+    noneOpt.value = BATCH_GROUP_NONE;
+    noneOpt.textContent = projectFilterT('batchManageModal.noGroupOption', 'Ungrouped');
+    sel.appendChild(noneOpt);
+
+    (groupsCache || []).forEach((group) => {
+        const opt = document.createElement('option');
+        opt.value = group.id;
+        opt.textContent = `${group.icon || '📁'} ${group.name}`;
+        sel.appendChild(opt);
+    });
+
+    if (saved === BATCH_GROUP_NONE || (groupsCache || []).some((group) => group.id === saved)) {
+        sel.value = saved;
+    } else {
+        sel.value = BATCH_GROUP_NONE;
+    }
+    syncSimpleCustomSelect(BATCH_GROUP_FILTER_SELECT_ID);
+}
+
+function appendBatchGroupHeaderFilterNativeOptions(sel) {
+    const allLabel = projectFilterT('batchManageModal.filterAllGroups', 'All groups');
+    const ungroupedLabel = projectFilterT('batchManageModal.filterUngrouped', 'Ungrouped');
+    sel.innerHTML = '';
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = allLabel;
+    allOpt.setAttribute('data-i18n', 'batchManageModal.filterAllGroups');
+    sel.appendChild(allOpt);
+    const ungroupedOpt = document.createElement('option');
+    ungroupedOpt.value = BATCH_GROUP_NONE;
+    ungroupedOpt.textContent = ungroupedLabel;
+    ungroupedOpt.setAttribute('data-i18n', 'batchManageModal.filterUngrouped');
+    sel.appendChild(ungroupedOpt);
+}
+
+async function refreshBatchGroupHeaderFilter() {
+    const sel = document.getElementById(BATCH_GROUP_HEADER_FILTER_SELECT_ID);
+    if (!sel) return;
+
+    if (!Array.isArray(groupsCache) || groupsCache.length === 0) {
+        await loadGroups();
+    }
+
+    const saved = sel.value || '';
+    appendBatchGroupHeaderFilterNativeOptions(sel);
+
+    (groupsCache || []).forEach((group) => {
+        const opt = document.createElement('option');
+        opt.value = group.id;
+        opt.textContent = `${group.icon || '📁'} ${group.name}`;
+        sel.appendChild(opt);
+    });
+
+    if (saved === '' || saved === BATCH_GROUP_NONE || (groupsCache || []).some((group) => group.id === saved)) {
+        sel.value = saved;
+    } else {
+        sel.value = '';
+    }
+    syncSimpleCustomSelect(BATCH_GROUP_HEADER_FILTER_SELECT_ID);
+}
+
 function getBatchFilteredConversations() {
     const query = (document.getElementById('batch-search-input')?.value || '').trim().toLowerCase();
     const projectFilter = (document.getElementById('batch-project-filter')?.value || '').trim();
+    const groupFilter = (document.getElementById(BATCH_GROUP_HEADER_FILTER_SELECT_ID)?.value || '').trim();
     return allConversationsForBatch.filter((conv) => {
         const pid = getConversationProjectId(conv);
         if (projectFilter) {
@@ -8548,10 +9981,19 @@ function getBatchFilteredConversations() {
                 return false;
             }
         }
+        const gid = getConversationGroupId(conv);
+        if (groupFilter) {
+            if (groupFilter === BATCH_GROUP_NONE) {
+                if (gid) return false;
+            } else if (gid !== groupFilter) {
+                return false;
+            }
+        }
         if (!query) return true;
         const title = (conv.title || '').toLowerCase();
         const projectName = getConversationProjectLabel(conv).toLowerCase();
-        return title.includes(query) || projectName.includes(query);
+        const groupName = getConversationGroupLabel(conv).toLowerCase();
+        return title.includes(query) || projectName.includes(query) || groupName.includes(query);
     });
 }
 
@@ -8574,8 +10016,16 @@ async function showBatchManageModal() {
     try {
         initProjectFilterCustomSelect(BATCH_PROJECT_FILTER_SELECT_ID);
         allConversationsForBatch = await fetchAllConversations('');
-        await prefetchProjectNamesForConversations(allConversationsForBatch);
+        await Promise.all([
+            prefetchProjectNamesForConversations(allConversationsForBatch),
+            loadGroups(),
+            loadConversationGroupMapping(),
+        ]);
         await refreshBatchProjectFilter();
+        initBatchGroupHeaderFilterCustomSelect();
+        await refreshBatchGroupHeaderFilter();
+        initBatchGroupCustomSelect();
+        await refreshBatchGroupSelect();
         const sidebarFilter = getConversationProjectFilter();
         const batchSel = document.getElementById('batch-project-filter');
         if (batchSel && sidebarFilter && (
@@ -8589,10 +10039,12 @@ async function showBatchManageModal() {
         applyBatchConversationFilters();
         openAppModal('batch-manage-modal', { focus: false });
     } catch (error) {
-        console.error('加载对话列表失败:', error);
+        console.error('delete turn failed:', error);
         initProjectFilterCustomSelect(BATCH_PROJECT_FILTER_SELECT_ID);
+        initBatchGroupHeaderFilterCustomSelect();
+        initBatchGroupCustomSelect();
         allConversationsForBatch = [];
-        await refreshBatchProjectFilter();
+        await Promise.all([refreshBatchProjectFilter(), refreshBatchGroupHeaderFilter(), refreshBatchGroupSelect()]);
         applyBatchConversationFilters();
         openAppModal('batch-manage-modal', { focus: false });
     }
@@ -8652,7 +10104,7 @@ function renderBatchConversations(filtered = null) {
 
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
-        checkbox.className = 'batch-conversation-checkbox';
+        checkbox.className = 'batch-conversation-checkbox theme-checkbox';
         checkbox.dataset.conversationId = conv.id;
         checkbox.addEventListener('change', syncSelectAllBatchCheckbox);
 
@@ -8662,7 +10114,7 @@ function renderBatchConversations(filtered = null) {
 
         const name = document.createElement('div');
         name.className = 'batch-table-col-name';
-        const originalTitle = conv.title || (typeof window.t === 'function' ? window.t('batchManageModal.unnamedConversation') : '未命名对话');
+        const originalTitle = conv.title || (typeof window.t === 'function' ? window.t('batchManageModal.unnamedConversation') : 'Unnamed conversation');
         const truncatedTitle = safeTruncateText(originalTitle, 36);
         name.textContent = truncatedTitle;
         name.title = originalTitle;
@@ -8675,6 +10127,16 @@ function renderBatchConversations(filtered = null) {
         project.title = projectLabel;
         if (!getConversationProjectId(conv)) {
             project.classList.add('is-unbound');
+        }
+
+        const group = document.createElement('div');
+        group.className = 'batch-table-col-group';
+        const groupLabel = getConversationGroupLabel(conv);
+        const truncatedGroup = safeTruncateText(groupLabel, 24);
+        group.textContent = truncatedGroup;
+        group.title = groupLabel;
+        if (!getConversationGroupId(conv)) {
+            group.classList.add('is-unbound');
         }
 
         const time = document.createElement('div');
@@ -8700,7 +10162,7 @@ function renderBatchConversations(filtered = null) {
                       stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
         `;
-        const deleteLabel = typeof window.t === 'function' ? window.t('contextMenu.deleteConversation') : '删除此对话';
+        const deleteLabel = typeof window.t === 'function' ? window.t('contextMenu.deleteConversation') : 'Delete conversation';
         deleteBtn.title = deleteLabel;
         deleteBtn.setAttribute('aria-label', deleteLabel);
         deleteBtn.onclick = (e) => {
@@ -8712,6 +10174,7 @@ function renderBatchConversations(filtered = null) {
         row.appendChild(checkboxCol);
         row.appendChild(name);
         row.appendChild(project);
+        row.appendChild(group);
         row.appendChild(time);
         row.appendChild(action);
 
@@ -8759,15 +10222,143 @@ function syncSelectAllBatchCheckbox() {
     }
 }
 
-// 删除选中的对话
-async function deleteSelectedConversations() {
+// 批量设置对话分组（选「无分组」即移出）
+async function applyBatchGroupChange() {
     const checkboxes = document.querySelectorAll('.batch-conversation-checkbox:checked');
     if (checkboxes.length === 0) {
-        alert(typeof window.t === 'function' ? window.t('batchManageModal.confirmDeleteNone') : '请先选择要删除的对话');
+        alert(typeof window.t === 'function' ? window.t('batchManageModal.confirmGroupChangeNone') : 'Please select at least one conversation');
         return;
     }
 
-    const confirmMsg = typeof window.t === 'function' ? window.t('batchManageModal.confirmDeleteN', { count: checkboxes.length }) : '确定要删除选中的 ' + checkboxes.length + ' 条对话吗？';
+    const groupSelect = document.getElementById('batch-move-group-select');
+    const groupId = (groupSelect?.value || BATCH_GROUP_NONE).trim();
+
+    if (groupId === BATCH_GROUP_NONE) {
+        const items = Array.from(checkboxes).map((cb) => ({
+            id: cb.dataset.conversationId,
+            groupId: conversationGroupMappingCache[cb.dataset.conversationId] || '',
+        })).filter((item) => item.groupId);
+
+        if (items.length === 0) {
+            alert(typeof window.t === 'function' ? window.t('batchManageModal.confirmRemoveNoGroup') : 'None of the selected conversations belong to a group');
+            return;
+        }
+
+        const confirmMsg = typeof window.t === 'function'
+            ? window.t('batchManageModal.confirmRemoveN', { count: items.length })
+            : `Remove the selected ${items.length} conversation(s) from their groups?`;
+        if (!confirm(confirmMsg)) {
+            return;
+        }
+
+        try {
+            for (const item of items) {
+                await apiFetch(`/api/groups/${item.groupId}/conversations/${item.id}`, {
+                    method: 'DELETE',
+                });
+
+                delete conversationGroupMappingCache[item.id];
+                delete pendingGroupMappings[item.id];
+
+                if (currentConversationId === item.id) {
+                    currentConversationGroupId = null;
+                }
+            }
+
+            await finishBatchGroupChangeAfterRemove();
+        } catch (error) {
+        console.error('Failed to remove conversations from the group in bulk:', error);
+            await loadConversationGroupMapping();
+            applyBatchConversationFilters();
+            const failedMsg = typeof window.t === 'function' ? window.t('batchManageModal.removeFailed') : 'Remove failed';
+            const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
+            alert(failedMsg + ': ' + (error.message || unknownErr));
+        }
+        return;
+    }
+
+    const targetGroup = (groupsCache || []).find((group) => group.id === groupId);
+    const groupName = targetGroup ? targetGroup.name : groupId;
+    const confirmMsg = typeof window.t === 'function'
+        ? window.t('batchManageModal.confirmMoveN', { count: checkboxes.length, group: groupName })
+        : `${page}/${totalPages}`;
+    if (!confirm(confirmMsg)) {
+        return;
+    }
+
+    const ids = Array.from(checkboxes).map((cb) => cb.dataset.conversationId);
+
+    try {
+        for (const id of ids) {
+            await apiFetch('/api/groups/conversations', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    conversationId: id,
+                    groupId,
+                }),
+            });
+
+            conversationGroupMappingCache[id] = groupId;
+            pendingGroupMappings[id] = groupId;
+
+            if (currentConversationId === id) {
+                currentConversationGroupId = groupId;
+            }
+        }
+
+        if (currentGroupId) {
+            await loadGroupConversations(currentGroupId);
+        }
+        await loadConversationsWithGroups();
+        await loadGroups();
+        resetBatchSelectionAfterGroupChange();
+    } catch (error) {
+        console.error('delete turn failed:', error);
+        await loadConversationGroupMapping();
+        applyBatchConversationFilters();
+        const failedMsg = typeof window.t === 'function' ? window.t('batchManageModal.moveFailed') : 'Move failed';
+        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
+        alert(failedMsg + ': ' + (error.message || unknownErr));
+    }
+}
+
+function resetBatchSelectionAfterGroupChange() {
+    applyBatchConversationFilters();
+    const selectAll = document.getElementById('batch-select-all');
+    if (selectAll) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+    }
+}
+
+async function finishBatchGroupChangeAfterRemove() {
+    if (currentGroupId) {
+        await loadGroupConversations(currentGroupId);
+    }
+    await loadConversationGroupMapping();
+    await loadGroups();
+
+    const savedGroupId = currentGroupId;
+    currentGroupId = null;
+    await loadConversationsWithGroups();
+    currentGroupId = savedGroupId;
+
+    resetBatchSelectionAfterGroupChange();
+}
+
+// 删除选中的对话
+async function deleteSelectedConversations() {
+    if (typeof requirePermission === 'function' && !requirePermission('chat:delete')) return;
+    const checkboxes = document.querySelectorAll('.batch-conversation-checkbox:checked');
+    if (checkboxes.length === 0) {
+        alert(typeof window.t === 'function' ? window.t('batchManageModal.confirmDeleteNone') : 'Please select at least one conversation to delete');
+        return;
+    }
+
+    const confirmMsg = typeof window.t === 'function' ? window.t('batchManageModal.confirmDeleteN', { count: checkboxes.length }) : 'Delete the selected ' + checkboxes.length + ' conversation(s)?';
     if (!confirm(confirmMsg)) {
         return;
     }
@@ -8785,15 +10376,16 @@ async function deleteSelectedConversations() {
             selectAll.indeterminate = false;
         }
     } catch (error) {
-        console.error('删除失败:', error);
-        const failedMsg = typeof window.t === 'function' ? window.t('batchManageModal.deleteFailed') : '删除失败';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : '未知错误';
+        console.error('delete turn failed:', error);
+        const failedMsg = typeof window.t === 'function' ? window.t('batchManageModal.deleteFailed') : 'Delete failed';
+        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
         alert(failedMsg + ': ' + (error.message || unknownErr));
     }
 }
 
 // 关闭批量管理模态框
 function closeBatchManageModal() {
+    closeAllProjectFilterCustomSelects();
     closeAppModal('batch-manage-modal');
     const selectAll = document.getElementById('batch-select-all');
     if (selectAll) {
@@ -8804,6 +10396,12 @@ function closeBatchManageModal() {
     if (searchInput) searchInput.value = '';
     const batchProj = document.getElementById('batch-project-filter');
     if (batchProj) batchProj.value = '';
+    const batchGroupFilter = document.getElementById(BATCH_GROUP_HEADER_FILTER_SELECT_ID);
+    if (batchGroupFilter) batchGroupFilter.value = '';
+    syncSimpleCustomSelect(BATCH_GROUP_HEADER_FILTER_SELECT_ID);
+    const batchGroup = document.getElementById('batch-move-group-select');
+    if (batchGroup) batchGroup.value = BATCH_GROUP_NONE;
+    syncSimpleCustomSelect(BATCH_GROUP_FILTER_SELECT_ID);
     allConversationsForBatch = [];
 }
 
@@ -8884,6 +10482,12 @@ document.addEventListener('languagechange', function () {
                 applyBatchConversationFilters();
             }
         });
+    }
+    if (typeof refreshBatchGroupSelect === 'function') {
+        refreshBatchGroupSelect().then(() => syncSimpleCustomSelect(BATCH_GROUP_FILTER_SELECT_ID));
+    }
+    if (typeof refreshBatchGroupHeaderFilter === 'function') {
+        refreshBatchGroupHeaderFilter();
     }
     // 侧边栏最近对话等列表的时间戳会随语言变化（24h/12h 等），重新拉列表以统一格式
     if (typeof loadConversationsWithGroups === 'function') {
@@ -9016,6 +10620,8 @@ function applyCustomIcon() {
 
 // 自定义图标输入框回车键处理
 document.addEventListener('DOMContentLoaded', function() {
+    initSessionSettingsSelects();
+    initChatReasoningBarHeightSync();
     const customInput = document.getElementById('custom-icon-input');
     if (customInput) {
         customInput.addEventListener('keydown', function(e) {
@@ -9075,6 +10681,7 @@ document.addEventListener('click', function(event) {
 
 // 创建分组
 async function createGroup(event) {
+    if (typeof requirePermission === 'function' && !requirePermission('group:write')) return;
     // 阻止事件冒泡
     if (event) {
         event.preventDefault();
@@ -9083,13 +10690,13 @@ async function createGroup(event) {
 
     const input = document.getElementById('create-group-name-input');
     if (!input) {
-        console.error('找不到输入框');
+        console.error('Input field not found.');
         return;
     }
 
     const name = input.value.trim();
     if (!name) {
-        alert(typeof window.t === 'function' ? window.t('createGroupModal.groupNamePlaceholder') : '请输入分组名称');
+        alert(typeof window.t === 'function' ? window.t('createGroupModal.groupNamePlaceholder') : 'Enter group name');
         return;
     }
 
@@ -9110,11 +10717,11 @@ async function createGroup(event) {
         
         const nameExists = groups.some(g => g.name === name);
         if (nameExists) {
-            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : '分组名称已存在，请使用其他名称');
+            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name.');
             return;
         }
     } catch (error) {
-        console.error('检查分组名称失败:', error);
+        console.error('delete turn failed:', error);
     }
 
     // 获取选中的图标
@@ -9135,12 +10742,12 @@ async function createGroup(event) {
 
         if (!response.ok) {
             const error = await response.json();
-            const nameExistsMsg = typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : '分组名称已存在，请使用其他名称';
+            const nameExistsMsg = typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name.';
             if (error.error && error.error.includes('已存在')) {
                 alert(nameExistsMsg);
                 return;
             }
-            const createFailedMsg = typeof window.t === 'function' ? window.t('createGroupModal.createFailed') : '创建失败';
+            const createFailedMsg = typeof window.t === 'function' ? window.t('createGroupModal.createFailed') : 'Create failed';
             throw new Error(error.error || createFailedMsg);
         }
 
@@ -9166,9 +10773,9 @@ async function createGroup(event) {
             await showMoveToGroupSubmenu();
         }
     } catch (error) {
-        console.error('创建分组失败:', error);
-        const createFailedMsg = typeof window.t === 'function' ? window.t('createGroupModal.createFailed') : '创建失败';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : '未知错误';
+        console.error('delete turn failed:', error);
+        const createFailedMsg = typeof window.t === 'function' ? window.t('createGroupModal.createFailed') : 'Create failed';
+        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
         alert(createFailedMsg + ': ' + (error.message || unknownErr));
     }
 }
@@ -9208,7 +10815,7 @@ async function enterGroupDetail(groupId) {
         // 加载分组对话（如果有搜索查询则使用搜索查询）
         loadGroupConversations(groupId, currentGroupSearchQuery);
     } catch (error) {
-        console.error('加载分组失败:', error);
+        console.error('delete turn failed:', error);
         currentGroupId = null;
     }
 }
@@ -9259,9 +10866,9 @@ async function loadGroupConversations(groupId, searchQuery = '') {
         
         // 显示加载状态
         if (searchQuery) {
-            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.searching') : '搜索中...') + '</div>';
+            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.searching') : 'Searching...') + '</div>';
         } else {
-            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.loading') : '加载中...') + '</div>';
+            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.loading') : 'Loading...') + '</div>';
         }
 
         // 构建URL，如果有搜索关键词则添加search参数
@@ -9273,7 +10880,7 @@ async function loadGroupConversations(groupId, searchQuery = '') {
         const response = await apiFetch(url);
         if (!response.ok) {
             console.error(`Failed to load conversations for group ${groupId}:`, response.statusText);
-            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.loadFailedRetry') : '加载失败，请重试') + '</div>';
+            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.loadFailedRetry') : 'Load failed, please retry') + '</div>';
             return;
         }
         
@@ -9287,7 +10894,7 @@ async function loadGroupConversations(groupId, searchQuery = '') {
         // 验证返回的数据类型
         if (!Array.isArray(groupConvs)) {
             console.error(`Invalid response for group ${groupId}:`, groupConvs);
-            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.dataFormatError') : '数据格式错误') + '</div>';
+            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.dataFormatError') : 'Data format error') + '</div>';
             return;
         }
         
@@ -9311,12 +10918,12 @@ async function loadGroupConversations(groupId, searchQuery = '') {
         list.innerHTML = '';
 
         if (groupConvs.length === 0) {
-            const emptyMsg = typeof window.t === 'function' ? window.t('chat.emptyGroupConversations') : '该分组暂无对话';
-            const noMatchMsg = typeof window.t === 'function' ? window.t('chat.noMatchingConversationsInGroup') : '未找到匹配的对话';
+            const emptyMsg = typeof window.t === 'function' ? window.t('chat.emptyGroupConversations') : 'This group has no conversations yet.';
+            const noMatchMsg = typeof window.t === 'function' ? window.t('chat.noMatchingConversationsInGroup') : 'No matching conversations found.';
             if (searchQuery && searchQuery.trim()) {
-                list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (noMatchMsg || '未找到匹配的对话') + '</div>';
+                list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (noMatchMsg || 'No matching conversations found.') + '</div>';
             } else {
-                list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (emptyMsg || '该分组暂无对话') + '</div>';
+                list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (emptyMsg || 'This group has no conversations yet.') + '</div>';
             }
             return;
         }
@@ -9360,7 +10967,7 @@ async function loadGroupConversations(groupId, searchQuery = '') {
 
                 const title = document.createElement('div');
                 title.className = 'group-conversation-title';
-                const titleText = fullConv.title || conv.title || '未命名对话';
+        const titleText = fullConv.title || conv.title || 'Untitled conversation';
                 title.textContent = safeTruncateText(titleText, 60);
                 title.title = titleText; // 设置完整标题以便悬停查看
                 titleWrapper.appendChild(title);
@@ -9370,7 +10977,7 @@ async function loadGroupConversations(groupId, searchQuery = '') {
                     const pinIcon = document.createElement('span');
                     pinIcon.className = 'conversation-item-pinned';
                     pinIcon.innerHTML = '📌';
-                    pinIcon.title = '在分组中已置顶';
+                    pinIcon.title = 'Pinned in group';
                     titleWrapper.appendChild(pinIcon);
                 }
 
@@ -9431,11 +11038,11 @@ async function loadGroupConversations(groupId, searchQuery = '') {
 
                 list.appendChild(item);
             } catch (err) {
-                console.error(`加载对话 ${conv.id} 失败:`, err);
+                console.error(`Failed to load conversation ${conv.id}:`, err);
             }
         }
     } catch (error) {
-        console.error('加载分组对话失败:', error);
+        console.error('delete turn failed:', error);
     }
 }
 
@@ -9448,7 +11055,7 @@ async function editGroup() {
         const group = await response.json();
         if (!group) return;
 
-        const renamePrompt = typeof window.t === 'function' ? window.t('chat.renameGroupPrompt') : '请输入新名称：';
+        const renamePrompt = typeof window.t === 'function' ? window.t('chat.renameGroupPrompt') : 'Please enter new name:';
         const newName = prompt(renamePrompt, group.name);
         if (newName === null || !newName.trim()) return;
 
@@ -9470,7 +11077,7 @@ async function editGroup() {
         
         const nameExists = groups.some(g => g.name === trimmedName && g.id !== currentGroupId);
         if (nameExists) {
-            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : '分组名称已存在，请使用其他名称');
+            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name.');
             return;
         }
 
@@ -9488,10 +11095,10 @@ async function editGroup() {
         if (!updateResponse.ok) {
             const error = await updateResponse.json();
             if (error.error && error.error.includes('已存在')) {
-                alert('分组名称已存在，请使用其他名称');
+                alert('Group name already exists. Please use another name.');
                 return;
             }
-            throw new Error(error.error || '更新失败');
+            throw new Error(error.error || 'Update failed');
         }
 
         loadGroups();
@@ -9501,16 +11108,17 @@ async function editGroup() {
             titleEl.textContent = trimmedName;
         }
     } catch (error) {
-        console.error('编辑分组失败:', error);
-        alert('编辑失败: ' + (error.message || '未知错误'));
+        console.error('delete turn failed:', error);
+        alert('Failed to edit group: ' + (error.message || 'Unknown error'));
     }
 }
 
 // 删除分组
 async function deleteGroup() {
+    if (typeof requirePermission === 'function' && !requirePermission('group:delete')) return;
     if (!currentGroupId) return;
 
-    const deleteConfirmMsg = typeof window.t === 'function' ? window.t('chat.deleteGroupConfirm') : '确定要删除此分组吗？分组中的对话不会被删除，但会从分组中移除。';
+    const deleteConfirmMsg = typeof window.t === 'function' ? window.t('chat.deleteGroupConfirm') : 'Are you sure you want to delete this group? Conversations in the group will not be deleted, but will be removed from the group.';
     if (!confirm(deleteConfirmMsg)) {
         return;
     }
@@ -9542,8 +11150,8 @@ async function deleteGroup() {
         // 刷新对话列表，确保之前被分组的对话能立即显示
         await loadConversationsWithGroups();
     } catch (error) {
-        console.error('删除分组失败:', error);
-        alert('删除失败: ' + (error.message || '未知错误'));
+        console.error('delete turn failed:', error);
+        alert('Failed to delete group: ' + (error.message || 'Unknown error'));
     }
 }
 
@@ -9557,7 +11165,7 @@ async function renameGroupFromContext() {
         const group = await response.json();
         if (!group) return;
 
-        const renamePrompt = typeof window.t === 'function' ? window.t('chat.renameGroupPrompt') : '请输入新名称：';
+        const renamePrompt = typeof window.t === 'function' ? window.t('chat.renameGroupPrompt') : 'Please enter new name:';
         const newName = prompt(renamePrompt, group.name);
         if (newName === null || !newName.trim()) {
             closeGroupContextMenu();
@@ -9582,7 +11190,7 @@ async function renameGroupFromContext() {
         
         const nameExists = groups.some(g => g.name === trimmedName && g.id !== groupId);
         if (nameExists) {
-            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : '分组名称已存在，请使用其他名称');
+            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name.');
             return;
         }
 
@@ -9600,10 +11208,10 @@ async function renameGroupFromContext() {
         if (!updateResponse.ok) {
             const error = await updateResponse.json();
             if (error.error && error.error.includes('已存在')) {
-                alert('分组名称已存在，请使用其他名称');
+                alert('Group name already exists. Please use another name.');
                 return;
             }
-            throw new Error(error.error || '更新失败');
+            throw new Error(error.error || 'Update failed');
         }
 
         loadGroups();
@@ -9616,9 +11224,9 @@ async function renameGroupFromContext() {
             }
         }
     } catch (error) {
-        console.error('重命名分组失败:', error);
-        const failedLabel = typeof window.t === 'function' ? window.t('chat.renameFailed') : '重命名失败';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : '未知错误';
+        console.error('delete turn failed:', error);
+        const failedLabel = typeof window.t === 'function' ? window.t('chat.renameFailed') : 'Rename failed';
+        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
         alert(failedLabel + ': ' + (error.message || unknownErr));
     }
 
@@ -9651,14 +11259,14 @@ async function pinGroupFromContext() {
 
         if (!updateResponse.ok) {
             const error = await updateResponse.json();
-            throw new Error(error.error || '更新失败');
+            throw new Error(error.error || 'Update failed');
         }
 
         // 重新加载分组列表以更新显示顺序
         loadGroups();
     } catch (error) {
-        console.error('置顶分组失败:', error);
-        alert('置顶失败: ' + (error.message || '未知错误'));
+        console.error('delete turn failed:', error);
+        alert('Failed to pin group: ' + (error.message || 'Unknown error'));
     }
 
     closeGroupContextMenu();
@@ -9666,10 +11274,11 @@ async function pinGroupFromContext() {
 
 // 从上下文菜单删除分组
 async function deleteGroupFromContext() {
+    if (typeof requirePermission === 'function' && !requirePermission('group:delete')) return;
     const groupId = contextMenuGroupId;
     if (!groupId) return;
 
-    const deleteConfirmMsg = typeof window.t === 'function' ? window.t('chat.deleteGroupConfirm') : '确定要删除此分组吗？分组中的对话不会被删除，但会从分组中移除。';
+    const deleteConfirmMsg = typeof window.t === 'function' ? window.t('chat.deleteGroupConfirm') : 'Are you sure you want to delete this group? Conversations in the group will not be deleted, but will be removed from the group.';
     if (!confirm(deleteConfirmMsg)) {
         closeGroupContextMenu();
         return;
@@ -9705,8 +11314,8 @@ async function deleteGroupFromContext() {
         // 刷新对话列表，确保之前被分组的对话能立即显示
         await loadConversationsWithGroups();
     } catch (error) {
-        console.error('删除分组失败:', error);
-        alert('删除失败: ' + (error.message || '未知错误'));
+        console.error('delete turn failed:', error);
+        alert('Failed to delete group: ' + (error.message || 'Unknown error'));
     }
 
     closeGroupContextMenu();
@@ -9863,7 +11472,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             } catch (e) { /* ignore */ }
             const messagesDiv = document.getElementById('chat-messages');
             if (messagesDiv) messagesDiv.innerHTML = '';
-            const readyMsg = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : '系统已就绪。请输入您的测试需求，系统将自动执行相应的安全测试。';
+            const readyMsg = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System is ready. Please enter your test requirements, and the system will automatically perform the corresponding security tests.';
             addMessage('assistant', readyMsg, null, null, null, { systemReadyMessage: true });
             addAttackChainButton(null);
         }

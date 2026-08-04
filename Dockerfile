@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
-FROM golang:1.24-bookworm AS app-builder
+FROM golang:1.25-bookworm AS app-builder
+
+ARG APP_VERSION=v1.7.11
 
 WORKDIR /src
 
@@ -15,7 +17,7 @@ COPY . .
 
 RUN go build -o /out/cyberstrike-ai ./cmd/server/main.go
 
-FROM golang:1.24-bookworm AS tools-builder
+FROM golang:1.25-bookworm AS tools-builder
 
 ARG TARGETARCH
 
@@ -68,7 +70,10 @@ RUN npm install -g @stoplight/spectral-cli tslib \
 
 FROM debian:bookworm-slim AS runtime
 
+ARG APP_VERSION=v1.7.11
+
 ENV APP_HOME=/app \
+    CYBERSTRIKE_APP_VERSION=${APP_VERSION} \
     PATH=/opt/cyberstrike/bin:/opt/radare2/bin:$PATH \
     LD_LIBRARY_PATH=/opt/radare2/lib \
     NODE_PATH=/usr/local/lib/node_modules \
@@ -76,6 +81,12 @@ ENV APP_HOME=/app \
     PYTHONUNBUFFERED=1
 
 WORKDIR ${APP_HOME}
+
+LABEL org.opencontainers.image.title="CyberStrikeAI" \
+      org.opencontainers.image.description="AI-powered cybersecurity testing platform" \
+      org.opencontainers.image.source="https://github.com/ramon-victor/CyberStrikeAI" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${APP_VERSION}"
 
 ARG TARGETARCH
 

@@ -58,6 +58,7 @@ type DB struct {
 	checkpointDone           chan struct{}
 	closeOnce                sync.Once
 	closeErr                 error
+	vulnerabilityCreatedHook func(*Vulnerability)
 }
 
 // startPassiveCheckpointLoop 启动后台 PASSIVE checkpoint 循环。
@@ -113,10 +114,10 @@ func (db *DB) runPassiveCheckpoint(trigger string) {
 		return
 	}
 	if busy > 0 {
-		db.logger.Info("SQLite PASSIVE checkpoint 完成（部分推进）", fields...)
+		db.logger.Debug("SQLite PASSIVE checkpoint 完成（部分推进）", fields...)
 		return
 	}
-	db.logger.Info("SQLite PASSIVE checkpoint 完成（成功）", fields...)
+	db.logger.Debug("SQLite PASSIVE checkpoint 完成（成功）", fields...)
 }
 
 // NewDB 创建数据库连接
@@ -182,6 +183,8 @@ func (db *DB) initTables() error {
 		title TEXT NOT NULL,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
+		role_name TEXT NOT NULL DEFAULT '默认',
+		agent_mode TEXT NOT NULL DEFAULT 'eino_single',
 		last_react_input TEXT,
 		last_react_output TEXT
 	);`
@@ -225,6 +228,12 @@ func (db *DB) initTables() error {
 		start_time DATETIME NOT NULL,
 		end_time DATETIME,
 		duration_ms INTEGER,
+		partial_output TEXT,
+		partial_output_bytes INTEGER NOT NULL DEFAULT 0,
+		partial_output_truncated INTEGER NOT NULL DEFAULT 0,
+		partial_output_updated_at DATETIME,
+		owner_user_id TEXT,
+		conversation_id TEXT,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);`
 
@@ -300,6 +309,7 @@ func (db *DB) initTables() error {
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
 		icon TEXT,
+		owner_user_id TEXT,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);`
@@ -322,6 +332,7 @@ func (db *DB) initTables() error {
 		session_key TEXT PRIMARY KEY,
 		conversation_id TEXT NOT NULL,
 		role_name TEXT NOT NULL DEFAULT '默认',
+		agent_mode TEXT NOT NULL DEFAULT 'eino_single',
 		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 	);`
@@ -400,6 +411,49 @@ func (db *DB) initTables() error {
 		FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
 	);`
 
+	createAssetsTable := `
+	CREATE TABLE IF NOT EXISTS assets (
+		id TEXT PRIMARY KEY,
+		dedup_key TEXT NOT NULL UNIQUE, project_id TEXT,
+		host TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '', port INTEGER NOT NULL DEFAULT 0,
+		domain TEXT NOT NULL DEFAULT '', protocol TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '',
+		server TEXT NOT NULL DEFAULT '', country TEXT NOT NULL DEFAULT '', province TEXT NOT NULL DEFAULT '', city TEXT NOT NULL DEFAULT '',
+		responsible_person TEXT NOT NULL DEFAULT '', department TEXT NOT NULL DEFAULT '', business_system TEXT NOT NULL DEFAULT '',
+		environment TEXT NOT NULL DEFAULT '', criticality TEXT NOT NULL DEFAULT '',
+		source TEXT NOT NULL DEFAULT 'manual', source_query TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active',
+		vulnerability_count INTEGER NOT NULL DEFAULT 0, risk_score INTEGER NOT NULL DEFAULT 0, risk_level TEXT NOT NULL DEFAULT 'unassessed',
+		tags_json TEXT NOT NULL DEFAULT '[]', first_seen_at DATETIME NOT NULL, last_seen_at DATETIME NOT NULL,
+		created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, owner_user_id TEXT,
+		FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
+	);`
+
+	createVulnerabilityAlertSubscriptionsTable := `
+	CREATE TABLE IF NOT EXISTS vulnerability_alert_subscriptions (
+		user_id TEXT PRIMARY KEY,
+		enabled INTEGER NOT NULL DEFAULT 0,
+		min_severity TEXT NOT NULL DEFAULT 'high',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (user_id) REFERENCES rbac_users(id) ON DELETE CASCADE
+	);`
+	createVulnerabilityAlertDeliveriesTable := `
+	CREATE TABLE IF NOT EXISTS vulnerability_alert_deliveries (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		vulnerability_id TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		platform TEXT NOT NULL,
+		external_user_id TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending',
+		attempts INTEGER NOT NULL DEFAULT 0,
+		next_attempt_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		last_error TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(vulnerability_id, platform, external_user_id),
+		FOREIGN KEY (vulnerability_id) REFERENCES vulnerabilities(id) ON DELETE CASCADE,
+		FOREIGN KEY (user_id) REFERENCES rbac_users(id) ON DELETE CASCADE
+	);`
+
 	// 创建批量任务队列表
 	createBatchTaskQueuesTable := `
 	CREATE TABLE IF NOT EXISTS batch_task_queues (
@@ -442,6 +496,7 @@ func (db *DB) initTables() error {
 	createWebshellConnectionsTable := `
 	CREATE TABLE IF NOT EXISTS webshell_connections (
 		id TEXT PRIMARY KEY,
+		project_id TEXT,
 		url TEXT NOT NULL,
 		password TEXT NOT NULL DEFAULT '',
 		type TEXT NOT NULL DEFAULT 'php',
@@ -468,6 +523,7 @@ func (db *DB) initTables() error {
 	createC2ListenersTable := `
 	CREATE TABLE IF NOT EXISTS c2_listeners (
 		id TEXT PRIMARY KEY,
+		project_id TEXT,
 		name TEXT NOT NULL,
 		type TEXT NOT NULL,
 		bind_host TEXT NOT NULL DEFAULT '127.0.0.1',
@@ -478,6 +534,7 @@ func (db *DB) initTables() error {
 		status TEXT NOT NULL DEFAULT 'stopped',
 		config_json TEXT NOT NULL DEFAULT '{}',
 		remark TEXT NOT NULL DEFAULT '',
+		owner_user_id TEXT,
 		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		started_at DATETIME,
 		last_error TEXT
@@ -634,6 +691,28 @@ func (db *DB) initTables() error {
 		FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 	);`
 
+	createWorkflowPackageInspectionsTable := `
+	CREATE TABLE IF NOT EXISTS workflow_package_inspections (
+		id TEXT PRIMARY KEY, package_hash TEXT NOT NULL, manifest_json TEXT NOT NULL,
+		workflow_payload_json TEXT NOT NULL, inspection_json TEXT NOT NULL,
+		source_workflow_id TEXT NOT NULL, source_revision INTEGER NOT NULL,
+		source_content_hash TEXT NOT NULL, source_graph_hash TEXT NOT NULL,
+		local_conflict_state TEXT NOT NULL CHECK (local_conflict_state IN ('none','identical','id_conflict')),
+		local_workflow_id TEXT, local_content_hash TEXT, local_graph_hash TEXT,
+		created_by TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready','consumed','expired')),
+		created_at DATETIME NOT NULL, expires_at DATETIME NOT NULL, consumed_at DATETIME
+	);`
+	createWorkflowPackageImportsTable := `
+	CREATE TABLE IF NOT EXISTS workflow_package_imports (
+		id TEXT PRIMARY KEY, inspection_id TEXT NOT NULL, request_hash TEXT NOT NULL,
+		idempotency_key TEXT NOT NULL, actor_user_id TEXT NOT NULL,
+		action TEXT NOT NULL CHECK (action IN ('create','keep_existing','overwrite','rename')),
+		source_workflow_id TEXT NOT NULL, target_workflow_id TEXT NOT NULL, resulting_workflow_id TEXT,
+		result TEXT NOT NULL CHECK (result IN ('created','overwritten','renamed','kept_existing','skipped_identical','failed')),
+		error_code TEXT, error_message TEXT, created_at DATETIME NOT NULL, applied_at DATETIME,
+		FOREIGN KEY (inspection_id) REFERENCES workflow_package_inspections(id)
+	);`
+
 	// 创建索引
 	createIndexes := `
 	CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
@@ -660,6 +739,16 @@ func (db *DB) initTables() error {
 	CREATE INDEX IF NOT EXISTS idx_vulnerabilities_severity ON vulnerabilities(severity);
 	CREATE INDEX IF NOT EXISTS idx_vulnerabilities_status ON vulnerabilities(status);
 	CREATE INDEX IF NOT EXISTS idx_vulnerabilities_created_at ON vulnerabilities(created_at);
+	CREATE INDEX IF NOT EXISTS idx_assets_last_seen ON assets(last_seen_at);
+	CREATE INDEX IF NOT EXISTS idx_assets_last_scan ON assets(last_scan_at);
+	CREATE INDEX IF NOT EXISTS idx_assets_ip ON assets(ip);
+	CREATE INDEX IF NOT EXISTS idx_assets_domain ON assets(domain);
+	CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status);
+	CREATE INDEX IF NOT EXISTS idx_assets_owner ON assets(owner_user_id);
+	CREATE INDEX IF NOT EXISTS idx_assets_project ON assets(project_id);
+	CREATE INDEX IF NOT EXISTS idx_assets_vulnerability_count ON assets(vulnerability_count);
+	CREATE INDEX IF NOT EXISTS idx_assets_risk_score ON assets(risk_score);
+	CREATE INDEX IF NOT EXISTS idx_assets_risk_level ON assets(risk_level);
 	CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
 	CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at);
 	CREATE INDEX IF NOT EXISTS idx_project_facts_project_id ON project_facts(project_id);
@@ -674,8 +763,10 @@ func (db *DB) initTables() error {
 	CREATE INDEX IF NOT EXISTS idx_batch_task_queues_created_at ON batch_task_queues(created_at);
 	CREATE INDEX IF NOT EXISTS idx_batch_task_queues_title ON batch_task_queues(title);
 	CREATE INDEX IF NOT EXISTS idx_webshell_connections_created_at ON webshell_connections(created_at);
+	CREATE INDEX IF NOT EXISTS idx_webshell_connections_project_id ON webshell_connections(project_id);
 	CREATE INDEX IF NOT EXISTS idx_webshell_connection_states_updated_at ON webshell_connection_states(updated_at);
 	CREATE INDEX IF NOT EXISTS idx_c2_listeners_created_at ON c2_listeners(created_at);
+	CREATE INDEX IF NOT EXISTS idx_c2_listeners_project_id ON c2_listeners(project_id);
 	CREATE INDEX IF NOT EXISTS idx_c2_listeners_status ON c2_listeners(status);
 	CREATE INDEX IF NOT EXISTS idx_c2_sessions_listener ON c2_sessions(listener_id);
 	CREATE INDEX IF NOT EXISTS idx_c2_sessions_status ON c2_sessions(status);
@@ -698,6 +789,9 @@ func (db *DB) initTables() error {
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_conversation ON workflow_runs(conversation_id);
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
 	CREATE INDEX IF NOT EXISTS idx_workflow_node_runs_run ON workflow_node_runs(run_id);
+	CREATE INDEX IF NOT EXISTS idx_workflow_package_inspections_creator_expiry ON workflow_package_inspections(created_by, expires_at);
+	CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_package_imports_actor_key ON workflow_package_imports(actor_user_id, idempotency_key);
+	CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_package_imports_inspection_success ON workflow_package_imports(inspection_id) WHERE result IN ('created','overwritten','renamed','kept_existing','skipped_identical');
 	`
 
 	if _, err := db.Exec(createConversationsTable); err != nil {
@@ -746,6 +840,9 @@ func (db *DB) initTables() error {
 	if _, err := db.Exec(createRobotUserSessionsTable); err != nil {
 		return fmt.Errorf("创建robot_user_sessions表失败: %w", err)
 	}
+	if err := db.migrateRobotUserSessionsTable(); err != nil {
+		return fmt.Errorf("迁移robot_user_sessions表失败: %w", err)
+	}
 
 	if _, err := db.Exec(createProjectsTable); err != nil {
 		return fmt.Errorf("创建projects表失败: %w", err)
@@ -761,6 +858,12 @@ func (db *DB) initTables() error {
 
 	if _, err := db.Exec(createVulnerabilitiesTable); err != nil {
 		return fmt.Errorf("创建vulnerabilities表失败: %w", err)
+	}
+	if _, err := db.Exec(createAssetsTable); err != nil {
+		return fmt.Errorf("创建assets表失败: %w", err)
+	}
+	if err := db.migrateAssetsTable(); err != nil {
+		return fmt.Errorf("迁移assets表失败: %w", err)
 	}
 
 	if _, err := db.Exec(createBatchTaskQueuesTable); err != nil {
@@ -783,10 +886,22 @@ func (db *DB) initTables() error {
 		return fmt.Errorf("创建audit_logs表失败: %w", err)
 	}
 
+	if err := db.initRBACTables(); err != nil {
+		return fmt.Errorf("创建RBAC表失败: %w", err)
+	}
+	if _, err := db.Exec(createVulnerabilityAlertSubscriptionsTable); err != nil {
+		return fmt.Errorf("创建漏洞提醒订阅表失败: %w", err)
+	}
+	if _, err := db.Exec(createVulnerabilityAlertDeliveriesTable); err != nil {
+		return fmt.Errorf("创建漏洞提醒投递表失败: %w", err)
+	}
+
 	for tableName, ddl := range map[string]string{
-		"workflow_definitions": createWorkflowDefinitionsTable,
-		"workflow_runs":        createWorkflowRunsTable,
-		"workflow_node_runs":   createWorkflowNodeRunsTable,
+		"workflow_definitions":         createWorkflowDefinitionsTable,
+		"workflow_runs":                createWorkflowRunsTable,
+		"workflow_node_runs":           createWorkflowNodeRunsTable,
+		"workflow_package_inspections": createWorkflowPackageInspectionsTable,
+		"workflow_package_imports":     createWorkflowPackageImportsTable,
 	} {
 		if _, err := db.Exec(ddl); err != nil {
 			return fmt.Errorf("创建%s表失败: %w", tableName, err)
@@ -850,15 +965,86 @@ func (db *DB) initTables() error {
 		db.logger.Warn("迁移webshell_connections表失败", zap.Error(err))
 		// 不返回错误，允许继续运行
 	}
+	if err := db.migrateC2ListenersTable(); err != nil {
+		db.logger.Warn("迁移c2_listeners表失败", zap.Error(err))
+	}
 	if err := db.migrateWorkflowRunsTable(); err != nil {
 		db.logger.Warn("迁移workflow_runs表失败", zap.Error(err))
+	}
+	if err := db.migrateToolExecutionsPartialOutputColumns(); err != nil {
+		db.logger.Warn("迁移tool_executions partial output字段失败", zap.Error(err))
+	}
+	if err := db.migrateRBACOwnershipColumns(); err != nil {
+		db.logger.Warn("迁移RBAC资源归属字段失败", zap.Error(err))
 	}
 
 	if _, err := db.Exec(createIndexes); err != nil {
 		return fmt.Errorf("创建索引失败: %w", err)
 	}
+	db.logger.Debug("数据库表初始化完成")
+	return nil
+}
 
-	db.logger.Info("数据库表初始化完成")
+func (db *DB) migrateRobotUserSessionsTable() error {
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('robot_user_sessions') WHERE name='agent_mode'").Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		_, err := db.Exec("ALTER TABLE robot_user_sessions ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'eino_single'")
+		return err
+	}
+	return nil
+}
+
+func (db *DB) migrateToolExecutionsPartialOutputColumns() error {
+	for _, col := range []struct {
+		name string
+		stmt string
+	}{
+		{"partial_output", "ALTER TABLE tool_executions ADD COLUMN partial_output TEXT"},
+		{"partial_output_bytes", "ALTER TABLE tool_executions ADD COLUMN partial_output_bytes INTEGER NOT NULL DEFAULT 0"},
+		{"partial_output_truncated", "ALTER TABLE tool_executions ADD COLUMN partial_output_truncated INTEGER NOT NULL DEFAULT 0"},
+		{"partial_output_updated_at", "ALTER TABLE tool_executions ADD COLUMN partial_output_updated_at DATETIME"},
+	} {
+		if err := db.addColumnIfMissing("tool_executions", col.name, col.stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateAssetsTable keeps databases created by the first asset-management release compatible.
+func (db *DB) migrateAssetsTable() error {
+	columns := []struct {
+		name string
+		ddl  string
+	}{
+		{"project_id", "ALTER TABLE assets ADD COLUMN project_id TEXT"},
+		{"last_scan_at", "ALTER TABLE assets ADD COLUMN last_scan_at DATETIME"},
+		{"last_scan_conversation_id", "ALTER TABLE assets ADD COLUMN last_scan_conversation_id TEXT NOT NULL DEFAULT ''"},
+		{"last_scan_queue_id", "ALTER TABLE assets ADD COLUMN last_scan_queue_id TEXT NOT NULL DEFAULT ''"},
+		{"last_scan_task_id", "ALTER TABLE assets ADD COLUMN last_scan_task_id TEXT NOT NULL DEFAULT ''"},
+		{"responsible_person", "ALTER TABLE assets ADD COLUMN responsible_person TEXT NOT NULL DEFAULT ''"},
+		{"department", "ALTER TABLE assets ADD COLUMN department TEXT NOT NULL DEFAULT ''"},
+		{"business_system", "ALTER TABLE assets ADD COLUMN business_system TEXT NOT NULL DEFAULT ''"},
+		{"environment", "ALTER TABLE assets ADD COLUMN environment TEXT NOT NULL DEFAULT ''"},
+		{"criticality", "ALTER TABLE assets ADD COLUMN criticality TEXT NOT NULL DEFAULT ''"},
+		{"vulnerability_count", "ALTER TABLE assets ADD COLUMN vulnerability_count INTEGER NOT NULL DEFAULT 0"},
+		{"risk_score", "ALTER TABLE assets ADD COLUMN risk_score INTEGER NOT NULL DEFAULT 0"},
+		{"risk_level", "ALTER TABLE assets ADD COLUMN risk_level TEXT NOT NULL DEFAULT 'unassessed'"},
+	}
+	for _, column := range columns {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('assets') WHERE name=?", column.name).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			if _, err := db.Exec(column.ddl); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -977,6 +1163,36 @@ func (db *DB) migrateConversationsTable() error {
 	} else if count == 0 {
 		if _, err := db.Exec("ALTER TABLE conversations ADD COLUMN webshell_connection_id TEXT"); err != nil {
 			db.logger.Warn("添加webshell_connection_id字段失败", zap.Error(err))
+		}
+	}
+
+	// 检查 role_name 字段是否存在（对话绑定的业务角色，用于历史任务切换时恢复角色上下文）
+	err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name='role_name'").Scan(&count)
+	if err != nil {
+		if _, addErr := db.Exec("ALTER TABLE conversations ADD COLUMN role_name TEXT NOT NULL DEFAULT '默认'"); addErr != nil {
+			errMsg := strings.ToLower(addErr.Error())
+			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+				db.logger.Warn("添加role_name字段失败", zap.Error(addErr))
+			}
+		}
+	} else if count == 0 {
+		if _, err := db.Exec("ALTER TABLE conversations ADD COLUMN role_name TEXT NOT NULL DEFAULT '默认'"); err != nil {
+			db.logger.Warn("添加role_name字段失败", zap.Error(err))
+		}
+	}
+
+	// 检查 agent_mode 字段是否存在（对话绑定的执行模式，用于历史任务切换时恢复对话模式）
+	err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name='agent_mode'").Scan(&count)
+	if err != nil {
+		if _, addErr := db.Exec("ALTER TABLE conversations ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'eino_single'"); addErr != nil {
+			errMsg := strings.ToLower(addErr.Error())
+			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+				db.logger.Warn("添加agent_mode字段失败", zap.Error(addErr))
+			}
+		}
+	} else if count == 0 {
+		if _, err := db.Exec("ALTER TABLE conversations ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'eino_single'"); err != nil {
+			db.logger.Warn("添加agent_mode字段失败", zap.Error(err))
 		}
 	}
 
@@ -1423,6 +1639,7 @@ func (db *DB) migrateWebshellConnectionsTable() error {
 		name string
 		stmt string
 	}{
+		{name: "project_id", stmt: "ALTER TABLE webshell_connections ADD COLUMN project_id TEXT"},
 		{name: "encoding", stmt: "ALTER TABLE webshell_connections ADD COLUMN encoding TEXT NOT NULL DEFAULT ''"},
 		{name: "os", stmt: "ALTER TABLE webshell_connections ADD COLUMN os TEXT NOT NULL DEFAULT ''"},
 	}
@@ -1446,6 +1663,10 @@ func (db *DB) migrateWebshellConnectionsTable() error {
 		}
 	}
 	return nil
+}
+
+func (db *DB) migrateC2ListenersTable() error {
+	return db.addColumnIfMissing("c2_listeners", "project_id", "ALTER TABLE c2_listeners ADD COLUMN project_id TEXT")
 }
 
 // NewKnowledgeDB 创建知识库数据库连接（只包含知识库相关的表）

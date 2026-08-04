@@ -2,13 +2,39 @@ package mcp
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"cyberstrike-ai/internal/authctx"
 	"cyberstrike-ai/internal/config"
 
 	"go.uber.org/zap"
 )
+
+func TestExternalManagerEnforcesConfiguredAuthorizer(t *testing.T) {
+	manager := NewExternalMCPManager(zap.NewNop())
+	t.Cleanup(manager.StopAll)
+	manager.SetToolAuthorizer(func(context.Context, string, map[string]interface{}) error {
+		return errors.New("denied by policy")
+	})
+	ctx := authctx.WithPrincipal(context.Background(), authctx.NewPrincipal("u1", "user", "assigned", map[string]bool{"agent:execute": true}))
+	_, executionID, err := manager.CallTool(ctx, "server::tool", map[string]interface{}{})
+	if err == nil || !strings.Contains(err.Error(), "authorization denied") {
+		t.Fatalf("external call bypassed authorizer: %v", err)
+	}
+	if executionID == "" {
+		t.Fatal("denied external call should still return an execution id")
+	}
+	execution, ok := manager.GetExecution(executionID)
+	if !ok || execution == nil {
+		t.Fatalf("missing denied external execution %q", executionID)
+	}
+	if execution.Status != ToolExecutionStatusFailed || !strings.Contains(execution.Error, "denied by policy") {
+		t.Fatalf("denied external execution = %#v, want failed with policy error", execution)
+	}
+}
 
 func TestExternalMCPManager_AddOrUpdateConfig(t *testing.T) {
 	logger := zap.NewNop()

@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"cyberstrike-ai/internal/agent"
+	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/multiagent"
 )
 
@@ -44,7 +46,7 @@ func runBuiltinNode(ctx context.Context, args RunArgs, node graphNode, state *Wo
 	case "hitl":
 		return runHITLNode(args, node, state)
 	default:
-		reason := "未知节点类型"
+		reason := "unknown node type"
 		out := outputMap(envelope("unknown", node.ID, node.Type, "skipped", ""), map[string]any{"skipped": true, "reason": reason})
 		return out, true, "skipped", reason
 	}
@@ -53,20 +55,20 @@ func runBuiltinNode(ctx context.Context, args RunArgs, node graphNode, state *Wo
 func runToolNode(ctx context.Context, args RunArgs, node graphNode, state *WorkflowLocalState) (map[string]any, bool, string, string) {
 	toolName := cfgString(node.Config, "tool_name")
 	if toolName == "" {
-		errText := "工具节点未选择 MCP 工具"
+		errText := "tool node has no MCP tool selected"
 		return outputMap(envelope("tool", node.ID, node.Type, "failed", ""), map[string]any{"error": errText}), false, "failed", errText
 	}
 	if args.Agent == nil {
-		errText := "工具节点执行失败：Agent 为空"
+		errText := "tool node execution failed: agent is nil"
 		return outputMap(envelope("tool", node.ID, node.Type, "failed", ""), map[string]any{"tool_name": toolName, "error": errText}), false, "failed", errText
 	}
 	toolArgs, err := resolveToolArguments(node.Config, state)
 	if err != nil {
-		errText := fmt.Sprintf("工具参数不是合法 JSON：%v", err)
+		errText := fmt.Sprintf("tool arguments are not valid JSON: %v", err)
 		return outputMap(envelope("tool", node.ID, node.Type, "failed", ""), map[string]any{"tool_name": toolName, "error": errText}), false, "failed", errText
 	}
 	if args.Progress != nil {
-		args.Progress("workflow_tool_start", fmt.Sprintf("调用工具：%s", toolName), map[string]any{
+		args.Progress("workflow_tool_start", fmt.Sprintf("Calling tool: %s", toolName), map[string]any{
 			"nodeId": node.ID,
 			"tool":   toolName,
 			"args":   toolArgs,
@@ -85,6 +87,11 @@ func runToolNode(ctx context.Context, args RunArgs, node graphNode, state *Workf
 		executionID = result.ExecutionID
 		isError = result.IsError
 	}
+	maxToolOutputBytes := config.MultiAgentEinoMiddlewareConfig{}.ReductionMaxLengthForTruncEffective()
+	if args.AppCfg != nil {
+		maxToolOutputBytes = args.AppCfg.MultiAgent.EinoMiddleware.ReductionMaxLengthForTruncEffective()
+	}
+	output = truncateWorkflowToolOutput(output, maxToolOutputBytes, executionID)
 	out := toolOutputMap(node, output, toolName, toolArgs, executionID, isError)
 	if key := cfgString(node.Config, "output_key"); key != "" {
 		state.Outputs[key] = output
@@ -92,16 +99,40 @@ func runToolNode(ctx context.Context, args RunArgs, node graphNode, state *Workf
 	if isError {
 		errText := strings.TrimSpace(output)
 		if errText == "" {
-			errText = "工具返回错误"
+			errText = "tool returned an error"
 		}
 		return out, false, "failed", errText
 	}
 	return out, true, "completed", ""
 }
 
+func truncateWorkflowToolOutput(output string, maxBytes int, executionID string) string {
+	if maxBytes <= 0 || len(output) <= maxBytes {
+		return output
+	}
+	marker := fmt.Sprintf("\n\n...[workflow tool output truncated; full result is stored in execution %s]...\n\n", strings.TrimSpace(executionID))
+	if strings.TrimSpace(executionID) == "" {
+		marker = "\n\n...[workflow tool output truncated; full result remains in the tool execution record]...\n\n"
+	}
+	budget := maxBytes - len(marker)
+	if budget <= 0 {
+		return marker
+	}
+	head := budget / 2
+	tail := budget - head
+	for head > 0 && !utf8.RuneStart(output[head]) {
+		head--
+	}
+	tailStart := len(output) - tail
+	for tailStart < len(output) && !utf8.RuneStart(output[tailStart]) {
+		tailStart++
+	}
+	return output[:head] + marker + output[tailStart:]
+}
+
 func runAgentNode(ctx context.Context, args RunArgs, node graphNode, state *WorkflowLocalState) (map[string]any, bool, string, string) {
 	if args.AppCfg == nil || args.Agent == nil {
-		errText := "Agent 节点执行失败：应用配置或 Agent 为空"
+		errText := "agent node execution failed: application config or agent is nil"
 		return outputMap(envelope("agent", node.ID, node.Type, "failed", ""), map[string]any{"error": errText}), false, "failed", errText
 	}
 	mode := strings.ToLower(cfgString(node.Config, "agent_mode"))
@@ -185,14 +216,14 @@ func buildAgentNodeMessage(node graphNode, state *WorkflowLocalState, upstreamIn
 	upstreamInput = strings.TrimSpace(upstreamInput)
 	if instruction == "" {
 		if upstreamInput != "" {
-			return fmt.Sprintf("请基于上游节点输出继续处理：\n%s", upstreamInput)
+			return fmt.Sprintf("Continue based on the upstream node output:\n%s", upstreamInput)
 		}
-		return fmt.Sprintf("请基于上游节点输出继续处理：\n%v", state.LastOutput["output"])
+		return fmt.Sprintf("Continue based on the upstream node output:\n%v", state.LastOutput["output"])
 	}
 	if upstreamInput == "" {
 		return instruction
 	}
-	return strings.TrimSpace(fmt.Sprintf("上游输入：\n%s\n\n节点指令：\n%s", upstreamInput, instruction))
+	return strings.TrimSpace(fmt.Sprintf("Upstream input:\n%s\n\nNode instruction:\n%s", upstreamInput, instruction))
 }
 
 func workflowAgentProgress(progress agent.ProgressCallback, state *WorkflowLocalState, node graphNode) agent.ProgressCallback {
@@ -279,7 +310,7 @@ func runHITLNode(args RunArgs, node graphNode, state *WorkflowLocalState) (map[s
 		}
 	}
 	if !approved {
-		reason := "人工审批已拒绝"
+		reason := "human approval was rejected"
 		if state != nil && state.Inputs != nil {
 			if v, ok := state.Inputs["_hitl_comment"]; ok {
 				if s := strings.TrimSpace(fmt.Sprint(v)); s != "" {
@@ -290,7 +321,7 @@ func runHITLNode(args RunArgs, node graphNode, state *WorkflowLocalState) (map[s
 		return hitlOutputMap(node, "failed", "", prompt, reviewer, false), false, "failed", reason
 	}
 	if args.Progress != nil {
-		args.Progress("workflow_hitl_checkpoint", "人工确认节点已通过", map[string]any{
+		args.Progress("workflow_hitl_checkpoint", "Human approval node passed", map[string]any{
 			"nodeId":   node.ID,
 			"prompt":   prompt,
 			"reviewer": reviewer,

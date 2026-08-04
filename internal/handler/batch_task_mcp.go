@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"cyberstrike-ai/internal/authctx"
 	"cyberstrike-ai/internal/config"
+	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/mcp/builtin"
 
@@ -29,27 +31,27 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- list ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskList,
-		Description:      "List batch task queues (concise summary, saves context). Includes queue metadata, subtask id/status/truncated message, and counts per status. For full subtasks (with result/error/conversationId/time, etc.), use batch_task_get(queue_id).\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly mentions viewing/managing batch tasks or task queues. Do not call it on your own when the user has not asked.",
-		ShortDescription: "List batch task queues",
+		Description:      "List batch-task queues using concise summaries to conserve context. Includes queue metadata, child-task id/status/truncated message, and counts by status. Use batch_task_get(queue_id) for complete child tasks, including result, error, conversationId, and timestamps.\n\nInvocation constraint: this tool belongs to task management. Call it only when the user explicitly asks to view or manage batch tasks or task queues. Do not call it proactively.",
+		ShortDescription: "List batch-task queues",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"status": map[string]interface{}{
 					"type":        "string",
-					"description": "Filter by status: all (default), pending, running, paused, completed, cancelled",
+					"description": "Filter status: all (default), pending, running, paused, completed, or cancelled",
 					"enum":        []string{"all", "pending", "running", "paused", "completed", "cancelled"},
 				},
 				"keyword": map[string]interface{}{
 					"type":        "string",
-					"description": "Fuzzy search by queue ID or title",
+					"description": "Fuzzy-search by queue ID or title",
 				},
 				"page": map[string]interface{}{
 					"type":        "integer",
-					"description": "Page number, starting from 1, default 1",
+					"description": "Page number starting at 1; default 1",
 				},
 				"page_size": map[string]interface{}{
 					"type":        "integer",
-					"description": "Page size, default 20, max 100",
+					"description": "Items per page; default 20, maximum 100",
 				},
 			},
 		},
@@ -74,7 +76,14 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		if offset > 100000 {
 			offset = 100000
 		}
-		queues, total, err := h.batchTaskManager.ListQueues(pageSize, offset, status, keyword)
+		queues := []*BatchTaskQueue{}
+		total := 0
+		var err error
+		if principal, ok := authctx.PrincipalFromContext(ctx); ok {
+			queues, total, err = h.batchTaskManager.ListQueuesForAccess(pageSize, offset, status, keyword, principal.UserID, principal.ScopeFor("tasks:read"))
+		} else {
+			return batchMCPTextResult("Missing authenticated identity", true), nil
+		}
 		if err != nil {
 			return batchMCPTextResult(fmt.Sprintf("Failed to list queues: %v", err), true), nil
 		}
@@ -103,8 +112,8 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- get ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskGet,
-		Description:      "Get details of a single batch task queue by queue_id (including subtask list, Cron, schedule switch and recent error info).\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly mentions viewing/managing batch tasks or task queues. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Get batch task queue details",
+		Description:      "Get one batch-task queue by queue_id, including child tasks, Cron configuration, scheduling state, and the latest error.\n\nInvocation constraint: call this task-management tool only when the user explicitly asks to view or manage batch tasks or task queues. Do not call it proactively.",
+		ShortDescription: "Get batch-task queue details",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -130,53 +139,61 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- create ---
 	reg(mcp.Tool{
 		Name: builtin.ToolBatchTaskCreate,
-		Description: "⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to create a batch task or task queue. Do not call it on your own when the user has not mentioned keywords like 'batch task', 'task queue', or 'scheduled task'. If the user is just asking you to do something, complete it directly in the current conversation; do not create a task queue on your own initiative.\n\n[Purpose] In-app 'Task Management / Batch Task Queue': register multiple independent user instructions as a queue, so you can view progress, pause/resume, schedule reruns, etc. in the UI. This is a queue data and scheduling entry point, not a 'sub-agent session' to explore the current question for you.\n\n[When to use] Call when the user explicitly wants batch queued execution, periodic Cron runs of the same batch of instructions, or alignment with the Task Management page. For questions needing immediate follow-up or analysis/coding that strongly depends on the current conversation context, complete directly in this conversation; do not create a queue for the sake of 'delegation'.\n\n[Parameters] tasks (string array) or tasks_text (multi-line, one per line); choose one; each item is an instruction to be executed by the system in queue order. agent_mode: eino_single (Eino ADK, default), deep / plan_execute / supervisor (requires multi-agent enabled). It is not 'splitting the main conversation into sub-agents'. schedule_mode: manual (default) or cron; cron requires cron_expr (5 fields, e.g., \"0 */6 * * *\").\n\n[Execution] Defaults to pending after creation, does not run automatically. execute_now=true starts immediately after creation; otherwise call batch_task_start later. Cron auto next round requires schedule_enabled to be true (use batch_task_schedule_enabled).",
-		ShortDescription: "Task management: create batch task queue (register multiple instructions, optional immediate or Cron)",
+		Description: `Invocation constraint: this tool belongs to task management. Call it only when the user explicitly requests creation of batch tasks or a task queue. Never call it when the user has not mentioned batch tasks, task queues, scheduled tasks, or an equivalent concept. If the user merely asks you to do something, complete it in the current conversation instead of creating a queue.
+
+Purpose: register multiple independent user instructions as one queue in the application's task manager so progress, pause/resume, and scheduled reruns can be managed in the UI. This is queue data and a scheduling entry point, not a way to open a sub-agent conversation to explore the current problem.
+
+When to use: when the user explicitly requests queued batch execution, periodic Cron execution of the same instruction set, or coordination with the task-management page. Analysis or coding that needs immediate questions or depends heavily on current conversation context must be completed in this conversation; do not create a queue merely to delegate.
+
+Parameters: provide either tasks (string array) or tasks_text (one instruction per line). Each item is an instruction the system will execute later in queue order. agent_mode is eino_single (Eino ADK single agent, default), deep, plan_execute, or supervisor (multi-agent must be enabled). This does not split the main conversation into sub-agents. schedule_mode is manual (default) or cron; cron requires a five-field cron_expr such as "0 */6 * * *".
+
+Execution: a new queue is pending and does not run automatically. Set execute_now=true to run immediately; otherwise call batch_task_start later. Automatic Cron runs require schedule_enabled=true, configurable with batch_task_schedule_enabled.`,
+		ShortDescription: "Create a batch-task queue with optional immediate or Cron execution",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"title": map[string]interface{}{
 					"type":        "string",
-					"description": "Optional queue title, for easy identification in task management",
+					"description": "Optional queue title for identification in task management",
 				},
 				"role": map[string]interface{}{
 					"type":        "string",
-					"description": "Role name used by the queue; empty means default",
+					"description": "Role name used by the queue; empty means the default role",
 				},
 				"tasks": map[string]interface{}{
 					"type":        "array",
-					"description": "Subtask instructions in the queue, each one is an independent pending instruction (mutually exclusive with tasks_text)",
+					"description": "Child-task instructions, one independent instruction per item; mutually exclusive with tasks_text",
 					"items":       map[string]interface{}{"type": "string"},
 				},
 				"tasks_text": map[string]interface{}{
 					"type":        "string",
-					"description": "Multi-line text, each line is a subtask instruction (mutually exclusive with tasks)",
+					"description": "Multiline text with one child-task instruction per line; mutually exclusive with tasks",
 				},
 				"agent_mode": map[string]interface{}{
 					"type":        "string",
-					"description": "Execution mode: eino_single (Eino ADK, default), deep/plan_execute/supervisor (Eino orchestration, requires multi-agent enabled)",
+					"description": "Execution mode: eino_single (Eino ADK, default), or deep/plan_execute/supervisor (Eino orchestration; multi-agent must be enabled)",
 					"enum":        []string{"eino_single", "deep", "plan_execute", "supervisor"},
 				},
 				"schedule_mode": map[string]interface{}{
 					"type":        "string",
-					"description": "manual (only manual/start runs) or cron (triggered by expression)",
+					"description": "manual (run only when started) or cron (triggered by expression)",
 					"enum":        []string{"manual", "cron"},
 				},
 				"cron_expr": map[string]interface{}{
 					"type":        "string",
-					"description": "Required when schedule_mode is cron. Standard 5 fields: minute hour day month weekday, e.g., \"0 */6 * * *\", \"30 2 * * 1-5\"",
+					"description": "Required when schedule_mode is cron. Standard five fields: minute hour day month weekday; for example, \"0 */6 * * *\" or \"30 2 * * 1-5\"",
 				},
 				"execute_now": map[string]interface{}{
 					"type":        "boolean",
-					"description": "Whether to start executing the queue immediately after creation, default false (pending, requires batch_task_start)",
+					"description": "Whether to start the queue immediately after creation; default false (pending until batch_task_start)",
 				},
 				"project_id": map[string]interface{}{
 					"type":        "string",
-					"description": "Project ID bound to sub-conversations within the queue (optional; if not specified, config.project.default_project_id is used)",
+					"description": "Optional project ID bound to child conversations; config.project.default_project_id is used when omitted",
 				},
 				"concurrency": map[string]interface{}{
 					"type":        "integer",
-					"description": "Number of subtasks running concurrently, default 1 (serial), max 8. Recommended 1-2 when scan-type tools are included.",
+					"description": "Concurrent child tasks; default 1 (serial), maximum 8. Use 1-2 for queues containing scanning tools.",
 				},
 			},
 		},
@@ -193,11 +210,11 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		var nextRunAt *time.Time
 		if scheduleMode == "cron" {
 			if cronExpr == "" {
-				return batchMCPTextResult("cron_expr cannot be empty in cron schedule mode", true), nil
+				return batchMCPTextResult("cron_expr cannot be empty in Cron scheduling mode", true), nil
 			}
 			sch, err := h.batchCronParser.Parse(cronExpr)
 			if err != nil {
-				return batchMCPTextResult("Invalid cron expression: "+err.Error(), true), nil
+				return batchMCPTextResult("Invalid Cron expression: "+err.Error(), true), nil
 			}
 			n := sch.Next(time.Now())
 			nextRunAt = &n
@@ -207,10 +224,19 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 			executeNow = false
 		}
 		projectID := strings.TrimSpace(mcpArgString(args, "project_id"))
+		if principal, ok := authctx.PrincipalFromContext(ctx); ok && projectID != "" && principal.ScopeFor("tasks:write") != database.RBACScopeAll {
+			if h.db == nil || !h.db.UserCanAccessResource(principal.UserID, principal.ScopeFor("tasks:write"), "project", projectID) {
+				return batchMCPTextResult("Access to the target project is denied", true), nil
+			}
+		}
 		concurrency := int(mcpArgFloat(args, "concurrency"))
 		queue, createErr := h.batchTaskManager.CreateBatchQueue(title, role, agentMode, scheduleMode, cronExpr, projectID, nextRunAt, concurrency, tasks)
 		if createErr != nil {
 			return batchMCPTextResult("Failed to create queue: "+createErr.Error(), true), nil
+		}
+		if principal, ok := authctx.PrincipalFromContext(ctx); ok && h.db != nil {
+			_ = h.db.SetResourceOwner("batch_task", queue.ID, principal.UserID)
+			_ = h.db.AssignResourceToUser(principal.UserID, "batch_task", queue.ID)
 		}
 		started := false
 		if executeNow {
@@ -219,7 +245,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 				return batchMCPTextResult("Queue does not exist: "+queue.ID, true), nil
 			}
 			if err != nil {
-				return batchMCPTextResult("Created successfully but failed to start: "+err.Error(), true), nil
+				return batchMCPTextResult("Queue created, but failed to start: "+err.Error(), true), nil
 			}
 			started = true
 			if refreshed, exists := h.batchTaskManager.GetBatchQueue(queue.ID); exists {
@@ -234,9 +260,9 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 			"execute_now": executeNow,
 			"reminder": func() string {
 				if started {
-					return "Queue has been created and started immediately."
+					return "The queue was created and started immediately."
 				}
-				return "Queue has been created, currently pending. To start execution, call the MCP tool batch_task_start (queue_id same as above). Cron auto-scheduling requires schedule_enabled to be true; use batch_task_schedule_enabled."
+				return "The queue was created and is pending. Call batch_task_start with the queue_id above to begin execution. Automatic Cron scheduling requires schedule_enabled=true; use batch_task_schedule_enabled to configure it."
 			}(),
 		})
 	})
@@ -244,8 +270,11 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- start ---
 	reg(mcp.Tool{
 		Name: builtin.ToolBatchTaskStart,
-		Description: "Start or continue executing a batch task queue (pending / paused).\nUsed together with batch_task_create: creating a queue alone will not run it automatically; you must call this tool to start running the subtasks.\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to start/continue a batch task. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Start/continue batch task queue (must be called after creation to execute)",
+		Description: `Start or resume a pending or paused batch-task queue.
+Use with batch_task_create: creating a queue alone does not execute it; call this tool to start its child tasks.
+
+Invocation constraint: call this task-management tool only when the user explicitly asks to start or resume a batch task. Do not call it proactively.`,
+		ShortDescription: "Start or resume a batch-task queue",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -269,14 +298,14 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 			return batchMCPTextResult("Failed to start: "+err.Error(), true), nil
 		}
 		logger.Info("MCP batch_task_start", zap.String("queueId", qid))
-		return batchMCPTextResult("Start submitted; the queue will begin executing.", false), nil
+		return batchMCPTextResult("Start submitted; the queue will begin execution.", false), nil
 	})
 
 	// --- rerun (reset + start for completed/cancelled queues) ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskRerun,
-		Description:      "Rerun a completed or cancelled batch task queue. Will reset all subtask states and execute a new round.\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to rerun a batch task. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Rerun batch task queue",
+		Description:      "Rerun a completed or cancelled batch-task queue by resetting all child-task states and executing another run.\n\nInvocation constraint: call this task-management tool only when the user explicitly asks to rerun a batch task. Do not call it proactively.",
+		ShortDescription: "Rerun a batch-task queue",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -310,14 +339,14 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 			return batchMCPTextResult("Failed to start: "+err.Error(), true), nil
 		}
 		logger.Info("MCP batch_task_rerun", zap.String("queueId", qid))
-		return batchMCPTextResult("Queue has been reset and restarted.", false), nil
+		return batchMCPTextResult("The queue was reset and restarted.", false), nil
 	})
 
 	// --- pause ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskPause,
-		Description:      "Pause a running batch task queue (the current subtask will be cancelled).\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to pause a batch task. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Pause batch task queue",
+		Description:      "Pause a running batch-task queue; the current child tasks will be cancelled.\n\nInvocation constraint: call this task-management tool only when the user explicitly asks to pause a batch task. Do not call it proactively.",
+		ShortDescription: "Pause a batch-task queue",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -334,17 +363,17 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 			return batchMCPTextResult("queue_id cannot be empty", true), nil
 		}
 		if !h.batchTaskManager.PauseQueue(qid) {
-			return batchMCPTextResult("Cannot pause: queue does not exist or is not in running state", true), nil
+			return batchMCPTextResult("Cannot pause: the queue does not exist or is not running", true), nil
 		}
 		logger.Info("MCP batch_task_pause", zap.String("queueId", qid))
-		return batchMCPTextResult("Queue has been paused.", false), nil
+		return batchMCPTextResult("The queue was paused.", false), nil
 	})
 
 	// --- delete queue ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskDelete,
-		Description:      "Delete a batch task queue and its subtask records.\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to delete a batch task queue. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Delete batch task queue",
+		Description:      "Delete a batch-task queue and its child-task records.\n\nInvocation constraint: call this task-management tool only when the user explicitly asks to delete a batch-task queue. Do not call it proactively.",
+		ShortDescription: "Delete a batch-task queue",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -365,22 +394,22 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 			case errors.Is(err, ErrBatchQueueNotFound):
 				return batchMCPTextResult("Delete failed: queue does not exist", true), nil
 			case errors.Is(err, ErrBatchQueueExecutorActive):
-				return batchMCPTextResult("Delete failed: queue executor is still running, please try again later", true), nil
+				return batchMCPTextResult("Delete failed: the queue executor is still running; try again later", true), nil
 			case errors.Is(err, ErrBatchQueueStillRunning):
-				return batchMCPTextResult("Delete failed: queue is currently running", true), nil
+				return batchMCPTextResult("Delete failed: the queue is running", true), nil
 			default:
 				return batchMCPTextResult("Delete failed: "+err.Error(), true), nil
 			}
 		}
 		logger.Info("MCP batch_task_delete", zap.String("queueId", qid))
-		return batchMCPTextResult("Queue has been deleted.", false), nil
+		return batchMCPTextResult("The queue was deleted.", false), nil
 	})
 
 	// --- update metadata (title/role/agentMode) ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskUpdateMetadata,
-		Description:      "Modify the title, role, and agent mode of a batch task queue. Only modifiable when the queue is not in the running state.\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to modify batch task queue properties. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Modify batch task queue title/role/agent mode",
+		Description:      "Change a batch-task queue's title, role, agent mode, or concurrency. A running queue cannot be changed.\n\nInvocation constraint: call this task-management tool only when the user explicitly asks to change batch-task queue properties. Do not call it proactively.",
+		ShortDescription: "Update batch-task queue metadata",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -390,20 +419,20 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 				},
 				"title": map[string]interface{}{
 					"type":        "string",
-					"description": "New title (empty string clears the title)",
+					"description": "New title; an empty string clears it",
 				},
 				"role": map[string]interface{}{
 					"type":        "string",
-					"description": "New role name (empty string uses default role)",
+					"description": "New role name; an empty string uses the default role",
 				},
 				"agent_mode": map[string]interface{}{
 					"type":        "string",
-					"description": "Agent mode: eino_single, deep, plan_execute, supervisor",
+					"description": "Agent mode: eino_single, deep, plan_execute, or supervisor",
 					"enum":        []string{"eino_single", "deep", "plan_execute", "supervisor"},
 				},
 				"concurrency": map[string]interface{}{
 					"type":        "integer",
-					"description": "Number of subtasks running concurrently, default 1, max 8",
+					"description": "Concurrent child tasks; default 1, maximum 8",
 				},
 			},
 			"required": []string{"queue_id"},
@@ -432,8 +461,11 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- update schedule ---
 	reg(mcp.Tool{
 		Name: builtin.ToolBatchTaskUpdateSchedule,
-		Description: "Modify the schedule mode and Cron expression of a batch task queue. Only modifiable when the queue is not in the running state.\nWhen schedule_mode is cron, a valid cron_expr must be provided; when manual, the Cron config will be cleared.\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to modify batch task schedule config. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Modify batch task schedule config (Cron expression)",
+		Description: `Change a batch-task queue's scheduling mode and Cron expression. A running queue cannot be changed.
+schedule_mode=cron requires a valid cron_expr; manual clears the Cron configuration.
+
+Invocation constraint: call this task-management tool only when the user explicitly asks to change batch-task scheduling. Do not call it proactively.`,
+		ShortDescription: "Update batch-task scheduling",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -448,7 +480,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 				},
 				"cron_expr": map[string]interface{}{
 					"type":        "string",
-					"description": "Cron expression (required when schedule_mode is cron). Standard 5 fields: minute hour day month weekday, e.g., \"0 */6 * * *\" (every 6 hours), \"30 2 * * 1-5\" (weekday 2:30 AM)",
+					"description": "Cron expression, required when schedule_mode=cron. Standard five fields: minute hour day month weekday, such as \"0 */6 * * *\" (every six hours) or \"30 2 * * 1-5\" (weekdays at 02:30)",
 				},
 			},
 			"required": []string{"queue_id", "schedule_mode"},
@@ -463,18 +495,18 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 			return batchMCPTextResult("Queue does not exist: "+qid, true), nil
 		}
 		if queue.Status == "running" {
-			return batchMCPTextResult("Queue is currently running; schedule config cannot be modified", true), nil
+			return batchMCPTextResult("The queue is running; scheduling cannot be changed", true), nil
 		}
 		scheduleMode := normalizeBatchQueueScheduleMode(mcpArgString(args, "schedule_mode"))
 		cronExpr := strings.TrimSpace(mcpArgString(args, "cron_expr"))
 		var nextRunAt *time.Time
 		if scheduleMode == "cron" {
 			if cronExpr == "" {
-				return batchMCPTextResult("cron_expr cannot be empty in cron schedule mode", true), nil
+				return batchMCPTextResult("cron_expr cannot be empty in Cron scheduling mode", true), nil
 			}
 			sch, err := h.batchCronParser.Parse(cronExpr)
 			if err != nil {
-				return batchMCPTextResult("Invalid cron expression: "+err.Error(), true), nil
+				return batchMCPTextResult("Invalid Cron expression: "+err.Error(), true), nil
 			}
 			n := sch.Next(time.Now())
 			nextRunAt = &n
@@ -488,8 +520,11 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- schedule enabled ---
 	reg(mcp.Tool{
 		Name: builtin.ToolBatchTaskScheduleEnabled,
-		Description: "Set whether to allow Cron to auto-trigger this queue. When disabled, the Cron expression is preserved but scheduled auto-runs are stopped; manual 'Start' can still execute it.\nOnly meaningful for queues whose schedule_mode is cron.\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to toggle batch task auto-scheduling. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Toggle batch task Cron auto-schedule",
+		Description: `Set whether Cron may trigger this queue automatically. Disabling it retains the Cron expression but stops scheduled runs; the queue can still be started manually.
+This is meaningful only for queues with schedule_mode=cron.
+
+Invocation constraint: call this task-management tool only when the user explicitly asks to enable or disable automatic batch-task scheduling. Do not call it proactively.`,
+		ShortDescription: "Toggle automatic batch-task scheduling",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -499,7 +534,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 				},
 				"schedule_enabled": map[string]interface{}{
 					"type":        "boolean",
-					"description": "true allows scheduled trigger, false is manual only",
+					"description": "true allows scheduled triggers; false permits manual execution only",
 				},
 			},
 			"required": []string{"queue_id", "schedule_enabled"},
@@ -511,7 +546,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		}
 		en, ok := mcpArgBool(args, "schedule_enabled")
 		if !ok {
-			return batchMCPTextResult("schedule_enabled must be a boolean value", true), nil
+			return batchMCPTextResult("schedule_enabled must be a boolean", true), nil
 		}
 		if _, exists := h.batchTaskManager.GetBatchQueue(qid); !exists {
 			return batchMCPTextResult("Queue does not exist", true), nil
@@ -527,8 +562,8 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- add task ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskAdd,
-		Description:      "Append a subtask to a queue in the pending state.\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to add a subtask to a batch task queue. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Add subtask to batch queue",
+		Description:      "Append one child task to a pending queue.\n\nInvocation constraint: call this task-management tool only when the user explicitly asks to add a child task to a batch-task queue. Do not call it proactively.",
+		ShortDescription: "Add a child task to a batch queue",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -538,7 +573,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 				},
 				"message": map[string]interface{}{
 					"type":        "string",
-					"description": "Task instruction content",
+					"description": "Task instruction",
 				},
 			},
 			"required": []string{"queue_id", "message"},
@@ -547,7 +582,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		qid := mcpArgString(args, "queue_id")
 		msg := strings.TrimSpace(mcpArgString(args, "message"))
 		if qid == "" || msg == "" {
-			return batchMCPTextResult("queue_id and message cannot both be empty", true), nil
+			return batchMCPTextResult("queue_id and message cannot be empty", true), nil
 		}
 		task, err := h.batchTaskManager.AddTaskToQueue(qid, msg)
 		if err != nil {
@@ -561,8 +596,8 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- update task ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskUpdate,
-		Description:      "Modify the message of a subtask that is still pending in a pending queue.\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to modify batch subtask content. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Update batch subtask content",
+		Description:      "Update the instruction of a pending child task in a pending queue.\n\nInvocation constraint: call this task-management tool only when the user explicitly asks to change batch-task content. Do not call it proactively.",
+		ShortDescription: "Update batch child-task content",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -572,7 +607,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 				},
 				"task_id": map[string]interface{}{
 					"type":        "string",
-					"description": "Subtask ID",
+					"description": "Child-task ID",
 				},
 				"message": map[string]interface{}{
 					"type":        "string",
@@ -586,7 +621,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		tid := mcpArgString(args, "task_id")
 		msg := strings.TrimSpace(mcpArgString(args, "message"))
 		if qid == "" || tid == "" || msg == "" {
-			return batchMCPTextResult("queue_id, task_id, message cannot all be empty", true), nil
+			return batchMCPTextResult("queue_id, task_id, and message cannot be empty", true), nil
 		}
 		if err := h.batchTaskManager.UpdateTaskMessage(qid, tid, msg); err != nil {
 			return batchMCPTextResult(err.Error(), true), nil
@@ -599,8 +634,8 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 	// --- remove task ---
 	reg(mcp.Tool{
 		Name:             builtin.ToolBatchTaskRemove,
-		Description:      "Delete a subtask that is still pending from a pending queue.\n\n⚠️ Call constraint: this tool belongs to the 'Task Management' module; only call it when the user explicitly asks to delete a batch subtask. Do not call it on your own when the user has not asked.",
-		ShortDescription: "Delete batch subtask",
+		Description:      "Remove a pending child task from a pending queue.\n\nInvocation constraint: call this task-management tool only when the user explicitly asks to delete a batch child task. Do not call it proactively.",
+		ShortDescription: "Delete a batch child task",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -610,7 +645,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 				},
 				"task_id": map[string]interface{}{
 					"type":        "string",
-					"description": "Subtask ID",
+					"description": "Child-task ID",
 				},
 			},
 			"required": []string{"queue_id", "task_id"},
@@ -619,7 +654,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		qid := mcpArgString(args, "queue_id")
 		tid := mcpArgString(args, "task_id")
 		if qid == "" || tid == "" {
-			return batchMCPTextResult("queue_id and task_id cannot both be empty", true), nil
+			return batchMCPTextResult("queue_id and task_id cannot be empty", true), nil
 		}
 		if err := h.batchTaskManager.DeleteTask(qid, tid); err != nil {
 			return batchMCPTextResult(err.Error(), true), nil
@@ -629,7 +664,7 @@ func RegisterBatchTaskMCPTools(mcpServer *mcp.Server, h *AgentHandler, logger *z
 		return batchMCPJSONResult(queue)
 	})
 
-	logger.Info("batch task MCP tools registered", zap.Int("count", 12))
+	logger.Debug("批量任务 MCP 工具已注册", zap.Int("count", 12))
 }
 
 // --- batch_task_list 精简结构（避免把每条子任务的 result 等大段文本塞进列表上下文） ---
@@ -683,7 +718,7 @@ func truncateStringRunes(s string, maxRunes int) string {
 	return s
 }
 
-const mcpBatchListMaxTasksPerQueue = 200 // maximum number of subtask summaries returned per queue in the list
+const mcpBatchListMaxTasksPerQueue = 200 // 列表中每个队列最多返回的子任务摘要数
 
 func toBatchTaskQueueMCPListItem(q *BatchTaskQueue) batchTaskQueueMCPListItem {
 	counts := map[string]int{
@@ -699,7 +734,7 @@ func toBatchTaskQueueMCPListItem(q *BatchTaskQueue) batchTaskQueueMCPListItem {
 			continue
 		}
 		counts[t.Status]++
-		// List view limits the number of subtask summaries; for the full list use batch_task_get
+		// 列表视图限制子任务摘要数量，完整列表通过 batch_task_get 查看
 		if len(tasks) < mcpBatchListMaxTasksPerQueue {
 			tasks = append(tasks, batchTaskMCPListSummary{
 				ID:      t.ID,
@@ -774,7 +809,7 @@ func batchMCPTasksFromArgs(args map[string]interface{}) ([]string, string) {
 			return out, ""
 		}
 	}
-	return nil, "need to provide tasks (string array) or tasks_text (multi-line text, one task per line)"
+	return nil, "Provide either tasks (a string array) or tasks_text (multiline text with one task per line)"
 }
 
 func mcpArgString(args map[string]interface{}, key string) string {

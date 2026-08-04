@@ -30,11 +30,13 @@ func WireRetrieverPipeline(ctx context.Context, r *Retriever, openAI *config.Ope
 	r.wireOpenAI = openAI
 
 	httpClient := openai.NewEinoHTTPClient(openAI, &http.Client{Timeout: 120 * time.Second})
+	maxCompletionTokens := openAI.MaxCompletionTokensEffective()
 	chatCfg := &einoopenai.ChatModelConfig{
-		APIKey:     strings.TrimSpace(openAI.APIKey),
-		BaseURL:    strings.TrimSuffix(strings.TrimSpace(openAI.BaseURL), "/"),
-		Model:      strings.TrimSpace(openAI.Model),
-		HTTPClient: httpClient,
+		APIKey:              strings.TrimSpace(openAI.APIKey),
+		BaseURL:             strings.TrimSuffix(strings.TrimSpace(openAI.BaseURL), "/"),
+		Model:               strings.TrimSpace(openAI.Model),
+		HTTPClient:          httpClient,
+		MaxCompletionTokens: &maxCompletionTokens,
 	}
 	if chatCfg.Model == "" {
 		chatCfg.Model = "gpt-4o"
