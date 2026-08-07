@@ -1,6 +1,6 @@
 ---
 name: cyberstrike-eino-demo
-description: Full example skill package: SKILL.md + optional scripts/, references/, assets/, and other directories; validates Eino skills and HTTP package paths (authorized security testing and education only).
+description: "Full example skill package: SKILL.md + optional scripts/, references/, assets/, and other directories; validates Eino skills and HTTP package paths (authorized security testing and education only)."
 ---
 
 # CyberStrike × Eino Full Skill Demonstration

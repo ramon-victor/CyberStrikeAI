@@ -96,6 +96,7 @@ apt-get install -y --no-install-recommends \
     unzip \
     wget \
     xz-utils \
+    kmod \
     foremost \
     tshark \
     tcpdump \
@@ -108,19 +109,52 @@ printf 'deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.githu
 apt-get update
 apt-get install -y --no-install-recommends trivy
 
+log "installing Falco CLI tool from official release binary"
+falco_arch="x86_64"
+case "${TARGETARCH:-amd64}" in
+    amd64) falco_arch="x86_64" ;;
+    arm64) falco_arch="aarch64" ;;
+esac
+falco_ver="0.38.0"
+if curl -fsSL "https://download.falco.org/packages/bin/${falco_arch}/falco-${falco_ver}-${falco_arch}.tar.gz" -o /tmp/falco.tar.gz 2>/dev/null; then
+    mkdir -p /tmp/falco_bin /etc/falco
+    tar -xzf /tmp/falco.tar.gz -C /tmp/falco_bin
+    cp /tmp/falco_bin/falco-${falco_ver}-${falco_arch}/usr/bin/falco /usr/local/bin/falco 2>/dev/null || cp /tmp/falco_bin/*/usr/bin/falco /usr/local/bin/falco 2>/dev/null || true
+    if [ -d /tmp/falco_bin/falco-${falco_ver}-${falco_arch}/etc/falco ]; then
+        cp -r /tmp/falco_bin/falco-${falco_ver}-${falco_arch}/etc/falco/* /etc/falco/ 2>/dev/null || true
+    fi
+    chmod +x /usr/local/bin/falco 2>/dev/null || true
+    rm -rf /tmp/falco.tar.gz /tmp/falco_bin
+    log "Falco CLI installed successfully"
+else
+    warn "failed to download falco binary"
+fi
+
+log "installing Metasploit Framework (msfconsole / msfvenom)"
+curl -fsSL https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb -o /tmp/msfinstall
+chmod +x /tmp/msfinstall
+/tmp/msfinstall || warn "failed to install Metasploit Framework"
+rm -f /tmp/msfinstall
+
 log "installing best-effort security packages from apt"
 for package in \
     binwalk \
+    checksec \
     dirb \
     dnsenum \
+    dotdotpwn \
     gdb \
     hashcat \
+    hydra \
     john \
     libimage-exiftool-perl \
     masscan \
+    nbtscan \
     nikto \
     sqlmap \
-    steghide
+    steghide \
+    xxd \
+    xsser
 do
     apt_install_optional "${package}"
 done
@@ -151,6 +185,30 @@ log "installing extra best-effort Python tooling"
 pip_install_optional \
     checkov \
     wafw00f
+
+log "installing NetExec from GitHub in an isolated virtualenv"
+if git clone --depth=1 https://github.com/PennyPath/NetExec.git /opt/NetExec 2>/dev/null; then
+    create_venv netexec
+    /opt/cyberstrike/venvs/netexec/bin/python -m pip install --no-cache-dir /opt/NetExec || true
+    if [ -f /opt/cyberstrike/venvs/netexec/bin/nxc ]; then
+        ln -sf /opt/cyberstrike/venvs/netexec/bin/nxc /usr/local/bin/nxc
+        ln -sf /opt/cyberstrike/venvs/netexec/bin/nxc /usr/local/bin/netexec
+        log "netexec/nxc installed"
+    fi
+else
+    warn "failed to install NetExec"
+fi
+
+log "installing CloudMapper from GitHub in an isolated virtualenv"
+if git clone --depth=1 https://github.com/duo-labs/cloudmapper.git /opt/cloudmapper 2>/dev/null; then
+    create_venv cloudmapper
+    /opt/cyberstrike/venvs/cloudmapper/bin/python -m pip install --no-cache-dir -r /opt/cloudmapper/requirements.txt || true
+    printf '#!/usr/bin/env bash\nexec /opt/cyberstrike/venvs/cloudmapper/bin/python /opt/cloudmapper/cloudmapper.py "$@"\n' > /usr/local/bin/cloudmapper
+    chmod +x /usr/local/bin/cloudmapper
+    log "cloudmapper installed"
+else
+    warn "failed to install cloudmapper"
+fi
 
 log "installing Prowler in an isolated virtualenv"
 install_venv_package prowler prowler prowler
@@ -240,7 +298,7 @@ else
 fi
 
 log "installing extra best-effort Ruby tooling"
-gem_install_optional wpscan
+gem_install_optional wpscan zsteg
 
 log "installing nikto from GitHub (ensures latest version with all dependencies)"
 if ! command -v nikto >/dev/null 2>&1; then

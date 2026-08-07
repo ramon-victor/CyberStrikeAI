@@ -18,3 +18,14 @@ go install github.com/projectdiscovery/katana/cmd/katana@v1.1.0
 CGO_ENABLED=0 go install -v github.com/owasp-amass/amass/v5/cmd/amass@v5.0.1
 go install github.com/tomnomnom/waybackurls@latest
 go install github.com/lc/gau/v2/cmd/gau@latest
+go install github.com/jaeles-project/jaeles@latest
+
+terrascan_arch="x86_64"
+case "${TARGETARCH:-amd64}" in
+    arm64) terrascan_arch="arm64" ;;
+esac
+terrascan_ver="1.19.9"
+curl -fsSL "https://github.com/tenable/terrascan/releases/download/v${terrascan_ver}/terrascan_${terrascan_ver}_Linux_${terrascan_arch}.tar.gz" -o /tmp/terrascan.tar.gz
+tar -xzf /tmp/terrascan.tar.gz -C "${DEST_DIR}" terrascan
+chmod +x "${DEST_DIR}/terrascan"
+rm -f /tmp/terrascan.tar.gz

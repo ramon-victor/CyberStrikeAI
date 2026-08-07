@@ -1607,7 +1607,7 @@ func PrintMCPConfigJSON(mcp MCPConfig) {
 	fmt.Println("----------------------------------------------------------------")
 }
 
-// ResolveToolsDir 将 tools_dir 解析为绝对路径（相对路径相对于 configPath 所在目录）。
+// ResolveToolsDir 将 tools_dir 解析为绝对路径（相对路径相对于 configPath 真实所在目录）。
 func ResolveToolsDir(toolsDir, configPath string) string {
 	toolsDir = strings.TrimSpace(toolsDir)
 	if toolsDir == "" {
@@ -1616,7 +1616,25 @@ func ResolveToolsDir(toolsDir, configPath string) string {
 	if filepath.IsAbs(toolsDir) {
 		return toolsDir
 	}
-	return filepath.Join(filepath.Dir(configPath), toolsDir)
+	// 解析 symlink 获取真正的配置文件目录，避免符号链接导致相对路径（如 ../tools）解析错位
+	realConfigPath := configPath
+	if evalPath, err := filepath.EvalSymlinks(configPath); err == nil {
+		realConfigPath = evalPath
+	}
+	resolved := filepath.Join(filepath.Dir(realConfigPath), toolsDir)
+	if _, err := os.Stat(resolved); os.IsNotExist(err) {
+		// 回退尝试：如果基于 EvalSymlinks 的目录不存在，尝试基于原始 configPath
+		altResolved := filepath.Join(filepath.Dir(configPath), toolsDir)
+		if _, altErr := os.Stat(altResolved); altErr == nil {
+			return altResolved
+		}
+		// 回退尝试：若都不存在，尝试工作目录下的相对路径（如 "tools"）
+		cleanBase := filepath.Base(toolsDir)
+		if _, pwdErr := os.Stat(cleanBase); pwdErr == nil {
+			return cleanBase
+		}
+	}
+	return resolved
 }
 
 // MergeToolsFromDir 从目录加载工具并与 inline 列表合并：目录中的工具优先，主配置中的工具作为补充。

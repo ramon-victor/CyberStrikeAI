@@ -3,19 +3,19 @@ command: "falco"
 enabled: true
 short_description: "Runtime security monitoring tool"
 description: |
-  Falco is a runtime security monitoring tool, used for detecting abnormal behavior in containers and hosts.
+  Falco is a runtime security monitoring tool used for detecting abnormal behavior, syscall anomalies, and security events in containers and host systems.
 
-  **Key Features：**
-  - Runtime monitoring
-  - Anomaly detection
-  - Rule engine
-  - Real-time alerting
+  **Falco CLI Usage for AI / Assistant:**
+  - **Rule Validation**: `falco -r /etc/falco/falco_rules.yaml -V` (validate syntax of Falco rule files)
+  - **Live Runtime Detection (No Driver / Userspace mode)**: `falco -r /etc/falco/falco_rules.yaml -o engine.kind=nodriver` (run without kernel module)
+  - **Modern eBPF Engine**: `falco -o engine.kind=modern_ebpf` (use eBPF probe for kernel event capture)
+  - **Replay Scap Trace File**: `falco -e /path/to/tracefile.scap` (analyze saved capture file for threats)
+  - **JSON Output**: `falco -o json_output=true -o json_include_output_property=true` (structured output for downstream automation)
 
-  **Use Cases：**
-  - Runtime security monitoring
-  - Anomaly detection
-  - Security incident response
-  - Compliance monitoring
+  **Key Features:**
+  - Syscall runtime event capture & rule evaluation
+  - Detection of privilege escalation, shell spawns, sensitive file access, and container drift
+  - Real-time alerting with configurable severity levels (Emergency to Informational)
 parameters:
   - name: "config_file"
     type: "string"
