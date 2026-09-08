@@ -49,4 +49,10 @@ func TestBuildWorkspaceBlockMentionsPath(t *testing.T) {
 	if !strings.Contains(block, "/tmp") {
 		t.Fatalf("block should warn about /tmp: %s", block)
 	}
+	if !strings.Contains(block, "current directory") || !strings.Contains(block, "server process working directory") {
+		t.Fatalf("block should distinguish current/project dir from workspace: %s", block)
+	}
+	if !strings.Contains(block, "do not mistake the empty session workspace for the project root") {
+		t.Fatalf("block should warn about empty workspace confusion: %s", block)
+	}
 }

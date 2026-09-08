@@ -1,5 +1,55 @@
 let currentConversationId = null;
+
+/** Persist the visible chat in the URL so a reload can restore and reconnect it. */
+function syncChatConversationHash(conversationId) {
+    const normalizedConversationId = String(conversationId || '').trim();
+    if (!normalizedConversationId || window.location.hash.split('?')[0] !== '#chat') return;
+    const targetHash = '#chat?conversation=' + encodeURIComponent(normalizedConversationId);
+    if (window.location.hash !== targetHash) {
+        window.history.replaceState(null, '', targetHash);
+    }
+}
+window.syncChatConversationHash = syncChatConversationHash;
+
+function clearChatConversationHash() {
+    if (window.location.hash.split('?')[0] !== '#chat' || window.location.hash === '#chat') return;
+    window.history.replaceState(null, '', '#chat');
+}
+window.clearChatConversationHash = clearChatConversationHash;
 let loadConversationRequestSeq = 0;
+let loadConversationAbortController = null;
+let loadConversationPendingId = '';
+let chatConversationNavigationSeq = 0;
+
+function isChatConversationLoadPending(conversationId) {
+    const id = String(conversationId || '').trim();
+    return !!id && loadConversationPendingId === id;
+}
+window.isChatConversationLoadPending = isChatConversationLoadPending;
+
+function markChatConversationNavigation(nextConversationId, force = false) {
+    const nextId = String(nextConversationId || '').trim();
+    const visibleId = String(currentConversationId || '').trim();
+    if (force || nextId !== visibleId) {
+        chatConversationNavigationSeq++;
+    }
+    return chatConversationNavigationSeq;
+}
+
+/**
+ * 离开聊天页时立即让尚在初始化的发送请求失去页面所有权。
+ * 后端任务仍会继续执行；这里只中止浏览器前台流，避免首个 conversation
+ * 事件在用户已经切到其他页面后再次抢占当前会话。
+ */
+function abandonChatConversationForPageNavigation() {
+    markChatConversationNavigation('', true);
+    if (typeof window.cancelScheduledChatConversationFromHash === 'function') {
+        window.cancelScheduledChatConversationFromHash();
+    }
+    cancelPendingConversationLoad();
+    detachLiveChatStreamForNavigation('', true);
+}
+window.abandonChatConversationForPageNavigation = abandonChatConversationForPageNavigation;
 
 /**
  * 轻量会话 LRU 缓存。
@@ -60,6 +110,7 @@ let compositionEndTimer = null;
 
 // 输入框草稿保存相关
 const DRAFT_STORAGE_KEY = 'cyberstrike-chat-draft';
+const RECENT_CONVERSATIONS_EXPANDED_KEY = 'cyberstrike-chat-recent-conversations-expanded';
 let draftSaveTimer = null;
 const DRAFT_SAVE_DELAY = 500; // 500ms防抖延迟
 
@@ -95,18 +146,31 @@ let multiAgentAPIEnabled = false;
 let chatAIChannels = {};
 let chatDefaultAIChannel = '';
 let chatAIChannelIdByNormalizedId = {};
+let chatHitlAuditModelName = '';
+let chatSystemModelRequestSeq = 0;
+let chatSystemModelSaving = false;
+let chatSystemModelCloseTimer = null;
+let chatSystemModelOptions = [];
+let chatSystemModelCurrent = '';
+let chatSystemModelLoadError = '';
+const CHAT_SYSTEM_MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
+const chatSystemModelCache = new Map();
 
 // 人机协同（HITL）会话级配置
 const HITL_STORAGE_PREFIX = 'cyberstrike-chat-hitl';
-const HITL_DRAFT_KEY = 'cyberstrike-chat-hitl-draft';
-/** 跨会话记忆：用户最近一次在侧栏选择的 HITL 偏好（与 hitl.js 中 readHitlGlobalLast 使用同一 key） */
-const HITL_GLOBAL_LAST_KEY = `${HITL_STORAGE_PREFIX}:__last__`;
 const HITL_MODE_OFF = 'off';
 const HITL_MODE_APPROVAL = 'approval';
 const HITL_MODE_REVIEW_EDIT = 'review_edit';
 const HITL_MODE_OPTIONS = [HITL_MODE_OFF, HITL_MODE_APPROVAL, HITL_MODE_REVIEW_EDIT];
+const DEFAULT_HITL_TIMEOUT_SECONDS = 300;
+// Agent orchestration/control tools are safe baseline exemptions for every
+// conversation. Keep this separate from config.tool_whitelist: the latter is
+// enforced globally by the backend and must not be copied into this field.
+const DEFAULT_HITL_SESSION_TOOL_WHITELIST = 'tool_search, skill, task, write_todos, transfer_to_agent, exit, TaskCreate, TaskGet, TaskUpdate, TaskList, upsert_project_fact, get_project_fact';
 let hitlApplyFeedbackTimer = null;
 let hitlAutoSaveTimer = null;
+let hitlConfigSyncConversationId = '';
+let hitlConfigSyncPromise = Promise.resolve();
 const sessionSettingsSelects = new Map();
 let sessionSettingsSelectDocBound = false;
 
@@ -272,16 +336,41 @@ function refreshSessionSettingsSelects() {
 }
 
 function syncChatReasoningBarHeight() {
-    const inputBar = document.getElementById('chat-input-container');
     const reasoning = document.getElementById('chat-reasoning-wrapper');
-    if (!inputBar || !reasoning) return;
-    const h = Math.ceil(inputBar.getBoundingClientRect().height || 0);
-    if (h > 0) {
-        reasoning.style.setProperty('--chat-input-bar-height', h + 'px');
+    const inputBar = document.getElementById('chat-input-container');
+    if (!reasoning || !inputBar) return;
+    // The composer is now a two-layer surface and is intentionally taller than
+    // the sidebar trigger. Do not mirror its height into the settings card.
+    reasoning.style.removeProperty('--chat-input-bar-height');
+    const chatContainer = inputBar.closest('.chat-container');
+    const height = Math.ceil(inputBar.getBoundingClientRect().height || 0);
+    if (chatContainer && height > 0) {
+        chatContainer.style.setProperty('--chat-composer-total-height', height + 'px');
     }
 }
 
+function mountChatSessionSettingsPopover() {
+    const wrap = document.getElementById('chat-reasoning-wrapper');
+    const composerSurface = document.querySelector('.chat-composer-surface');
+    if (!wrap || !composerSurface) return;
+    if (wrap.parentElement !== composerSurface) {
+        composerSurface.appendChild(wrap);
+    }
+    wrap.classList.add('chat-session-settings-popover');
+    syncChatSessionSettingsLayerState();
+}
+
+function syncChatSessionSettingsLayerState() {
+    const wrap = document.getElementById('chat-reasoning-wrapper');
+    const inputBar = document.getElementById('chat-input-container');
+    if (!inputBar) return;
+    const open = !!wrap && wrap.style.display !== 'none' &&
+        !wrap.classList.contains('conversation-reasoning-collapsed');
+    inputBar.classList.toggle('is-session-settings-open', open);
+}
+
 function initChatReasoningBarHeightSync() {
+    mountChatSessionSettingsPopover();
     syncChatReasoningBarHeight();
     window.addEventListener('resize', syncChatReasoningBarHeight);
     const inputBar = document.getElementById('chat-input-container');
@@ -337,14 +426,24 @@ function normalizeHitlMode(mode) {
     return HITL_MODE_OFF;
 }
 
+function normalizeHitlTimeoutForChat(value, fallback) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.min(86400, Math.round(n)));
+}
+
 function defaultHitlConfig() {
-    const serverReviewer = (typeof window !== 'undefined' && window.csaiHitlDefaultReviewer)
+    const serverDefault = (typeof window !== 'undefined' && window.csaiHitlDefaultConfig && typeof window.csaiHitlDefaultConfig === 'object')
+        ? window.csaiHitlDefaultConfig
+        : {};
+    const serverReviewer = serverDefault.reviewer || ((typeof window !== 'undefined' && window.csaiHitlDefaultReviewer)
         ? window.csaiHitlDefaultReviewer
-        : 'human';
+        : 'human');
     return {
-        mode: HITL_MODE_OFF,
+        mode: normalizeHitlMode(serverDefault.mode || HITL_MODE_OFF),
         reviewer: normalizeHitlReviewer(serverReviewer),
-        sensitiveTools: '',
+        sensitiveTools: DEFAULT_HITL_SESSION_TOOL_WHITELIST,
+        timeoutSeconds: normalizeHitlTimeoutForChat(serverDefault.timeoutSeconds, DEFAULT_HITL_TIMEOUT_SECONDS),
         updatedAt: ''
     };
 }
@@ -405,45 +504,23 @@ function getHitlStorageKeyByConversation(conversationId) {
     return `${HITL_STORAGE_PREFIX}:${String(conversationId || '').trim()}`;
 }
 
+function chatTranslate(key, fallback) {
+    if (typeof window.t === 'function') {
+        const translated = window.t(key);
+        if (translated && translated !== key) return translated;
+    }
+    return fallback;
+}
+
 function getHitlModeLabel(mode) {
     const safeMode = normalizeHitlMode(mode);
-    if (typeof window.t === 'function') {
-        switch (safeMode) {
-            case HITL_MODE_APPROVAL:
-                return window.t('chat.hitlModeApproval');
-            case HITL_MODE_REVIEW_EDIT:
-                return window.t('chat.hitlModeReviewEdit');
-            default:
-                return window.t('chat.hitlModeOff');
-        }
-    }
-    return safeMode;
-}
-
-function getHitlLastGlobalConfig() {
-    const fallback = defaultHitlConfig();
-    try {
-        const raw = localStorage.getItem(HITL_GLOBAL_LAST_KEY);
-        if (!raw) return null;
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== 'object') return null;
-        return {
-            mode: normalizeHitlMode(parsed.mode),
-            reviewer: normalizeHitlReviewer(parsed.reviewer),
-            sensitiveTools: typeof parsed.sensitiveTools === 'string' ? parsed.sensitiveTools : fallback.sensitiveTools,
-            updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : ''
-        };
-    } catch (e) {
-        return null;
-    }
-}
-
-function saveHitlLastGlobalConfig(payload) {
-    if (!payload || typeof payload !== 'object') return;
-    try {
-        localStorage.setItem(HITL_GLOBAL_LAST_KEY, JSON.stringify(payload));
-    } catch (e) {
-        console.warn('saveHitlLastGlobalConfig failed', e);
+    switch (safeMode) {
+        case HITL_MODE_APPROVAL:
+            return chatTranslate('chat.hitlModeApproval', 'Approval mode');
+        case HITL_MODE_REVIEW_EDIT:
+            return chatTranslate('chat.hitlModeReviewEdit', 'Review & edit');
+        default:
+            return chatTranslate('chat.hitlModeOff', 'Off');
     }
 }
 
@@ -451,55 +528,27 @@ function getHitlConfigForConversation(conversationId) {
     const fallback = defaultHitlConfig();
     const cid = conversationId ? String(conversationId).trim() : '';
     if (!cid) {
-        const globalLast = getHitlLastGlobalConfig();
-        let draftCfg = null;
-        try {
-            const raw = localStorage.getItem(HITL_DRAFT_KEY);
-            if (raw) {
-                const parsed = JSON.parse(raw);
-                if (parsed && typeof parsed === 'object') {
-                    draftCfg = {
-                        mode: normalizeHitlMode(parsed.mode),
-                        reviewer: normalizeHitlReviewer(parsed.reviewer),
-                        sensitiveTools: typeof parsed.sensitiveTools === 'string' ? parsed.sensitiveTools : fallback.sensitiveTools,
-                        updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : ''
-                    };
-                }
-            }
-        } catch (e) {
-            draftCfg = null;
-        }
-        const g = globalLast ? {
-            mode: normalizeHitlMode(globalLast.mode),
-            reviewer: normalizeHitlReviewer(globalLast.reviewer),
-            sensitiveTools: typeof globalLast.sensitiveTools === 'string' ? globalLast.sensitiveTools : fallback.sensitiveTools,
-            updatedAt: typeof globalLast.updatedAt === 'string' ? globalLast.updatedAt : ''
-        } : null;
-        if (!draftCfg && !g) return fallback;
-        if (!draftCfg) return g;
-        if (!g) return draftCfg;
-        const tg = Date.parse(g.updatedAt) || 0;
-        const td = Date.parse(draftCfg.updatedAt) || 0;
-        return tg > td ? g : draftCfg;
+        return fallback;
     }
     const key = getHitlStorageKeyByConversation(cid);
     try {
         const raw = localStorage.getItem(key);
         if (!raw) {
-            return getHitlLastGlobalConfig() || fallback;
+            return fallback;
         }
         const parsed = JSON.parse(raw);
         if (!parsed || typeof parsed !== 'object') {
-            return getHitlLastGlobalConfig() || fallback;
+            return fallback;
         }
         return {
             mode: normalizeHitlMode(parsed.mode),
             reviewer: normalizeHitlReviewer(parsed.reviewer),
             sensitiveTools: typeof parsed.sensitiveTools === 'string' ? parsed.sensitiveTools : fallback.sensitiveTools,
+            timeoutSeconds: normalizeHitlTimeoutForChat(parsed.timeoutSeconds, fallback.timeoutSeconds),
             updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : ''
         };
     } catch (e) {
-        return getHitlLastGlobalConfig() || fallback;
+        return fallback;
     }
 }
 
@@ -516,12 +565,15 @@ function setHitlReviewerUI(reviewer) {
 
 async function onHitlReviewerChanged(reviewer) {
     setHitlReviewerUI(reviewer);
+    updateChatReasoningSummary();
     const cfg = readHitlConfigFromForm();
     const cid = typeof currentConversationId === 'string' ? currentConversationId.trim() : '';
     saveHitlConfigForConversation(cid, cfg, { syncGlobalLast: true });
     try {
         if (cid && typeof window.saveHitlConversationConfig === 'function') {
             await window.saveHitlConversationConfig(cid, cfg);
+        } else if (typeof window.putHitlDefaultConfig === 'function') {
+            await window.putHitlDefaultConfig(cfg);
         } else if (typeof window.putHitlDefaultReviewer === 'function') {
             await window.putHitlDefaultReviewer(cfg.reviewer);
         }
@@ -547,19 +599,20 @@ function bindHitlReviewerToggleListeners() {
 }
 
 function saveHitlConfigForConversation(conversationId, cfg, opts) {
-    const syncGlobalLast = !!(opts && opts.syncGlobalLast);
+    void opts;
+    if (!conversationId) {
+        return;
+    }
     const payload = {
         mode: normalizeHitlMode(cfg && cfg.mode),
         reviewer: normalizeHitlReviewer(cfg && cfg.reviewer),
         sensitiveTools: typeof (cfg && cfg.sensitiveTools) === 'string' ? cfg.sensitiveTools : '',
+        timeoutSeconds: normalizeHitlTimeoutForChat(cfg && cfg.timeoutSeconds, DEFAULT_HITL_TIMEOUT_SECONDS),
         updatedAt: typeof (cfg && cfg.updatedAt) === 'string' ? cfg.updatedAt : ''
     };
-    const key = conversationId ? getHitlStorageKeyByConversation(conversationId) : HITL_DRAFT_KEY;
+    const key = getHitlStorageKeyByConversation(conversationId);
     try {
         localStorage.setItem(key, JSON.stringify(payload));
-        if (syncGlobalLast) {
-            saveHitlLastGlobalConfig(payload);
-        }
     } catch (e) {
         console.warn('saveHitlConfigForConversation failed', e);
     }
@@ -569,6 +622,7 @@ function readHitlConfigFromForm() {
     const modeEl = document.getElementById('hitl-mode-select');
     const reviewerEl = document.getElementById('hitl-reviewer-select');
     const toolsEl = document.getElementById('hitl-sensitive-tools');
+    const timeoutEl = document.getElementById('hitl-timeout-select');
     const mode = normalizeHitlMode(modeEl ? modeEl.value : HITL_MODE_OFF);
     const reviewer = normalizeHitlReviewer(reviewerEl ? reviewerEl.value : 'human');
     let sensitiveTools = toolsEl ? String(toolsEl.value || '').trim() : '';
@@ -580,47 +634,76 @@ function readHitlConfigFromForm() {
         mode,
         reviewer,
         sensitiveTools,
+        timeoutSeconds: normalizeHitlTimeoutForChat(timeoutEl ? timeoutEl.value : DEFAULT_HITL_TIMEOUT_SECONDS, DEFAULT_HITL_TIMEOUT_SECONDS),
         updatedAt: new Date().toISOString()
     };
 }
 
 function updateHitlStatusUI(_cfg) {
-    /* 侧栏已改为自动保存，不再用角标展示模式 */
+    /* 侧栏已改为自动保存；同步更新输入框快捷摘要。 */
+    updateChatReasoningSummary();
 }
 
 function applyHitlConfigToUI(cfg) {
     const conf = cfg || defaultHitlConfig();
     const modeEl = document.getElementById('hitl-mode-select');
     const toolsEl = document.getElementById('hitl-sensitive-tools');
+    const timeoutEl = document.getElementById('hitl-timeout-select');
     const uiMode = normalizeHitlMode(conf.mode);
     if (modeEl) modeEl.value = uiMode;
     setHitlReviewerUI(conf.reviewer);
-    let toolsVal = conf.sensitiveTools || '';
-    const g = typeof window !== 'undefined' ? window.csaiHitlGlobalToolWhitelist : null;
-    if (Array.isArray(g) && g.length > 0) {
-        const sessionArr = hitlToolsSplitToArray(toolsVal);
-        toolsVal = hitlMergeToolsForDisplay(g, sessionArr);
+    // Keep this field scoped to the current conversation. The config-level
+    // allowlist is applied by the backend and must not be copied into the
+    // editable session value. Empty/legacy sessions receive only the stable
+    // Agent control-tool baseline shown by the original UI.
+    const toolsVal = typeof conf.sensitiveTools === 'string' && conf.sensitiveTools.trim()
+        ? conf.sensitiveTools.trim()
+        : DEFAULT_HITL_SESSION_TOOL_WHITELIST;
+    if (toolsEl) {
+        toolsEl.value = toolsVal;
     }
-    if (toolsEl) toolsEl.value = toolsVal;
+    if (timeoutEl) {
+        const timeoutSeconds = normalizeHitlTimeoutForChat(conf.timeoutSeconds, DEFAULT_HITL_TIMEOUT_SECONDS);
+        const supported = Array.from(timeoutEl.options || []).some(function (option) {
+            return Number(option.value) === timeoutSeconds;
+        });
+        timeoutEl.value = String(supported ? timeoutSeconds : DEFAULT_HITL_TIMEOUT_SECONDS);
+    }
     updateHitlStatusUI(conf);
     refreshSessionSettingsSelects();
 }
 
 function bindHitlSidebarModeListener() {
     const modeEl = document.getElementById('hitl-mode-select');
-    if (!modeEl || modeEl.dataset.hitlModeBound === '1') return;
-    modeEl.dataset.hitlModeBound = '1';
-    modeEl.addEventListener('change', function () {
-        applyHitlConfigToUI(readHitlConfigFromForm());
-        refreshSessionSettingsSelects();
-        scheduleHitlSidebarAutosave(0);
-        updateChatReasoningSummary();
+    const timeoutEl = document.getElementById('hitl-timeout-select');
+    [modeEl, timeoutEl].forEach(function (el) {
+        if (!el || el.dataset.hitlModeBound === '1') return;
+        el.dataset.hitlModeBound = '1';
+        el.addEventListener('change', function () {
+            applyHitlConfigToUI(readHitlConfigFromForm());
+            refreshSessionSettingsSelects();
+            scheduleHitlSidebarAutosave(0);
+            updateChatReasoningSummary();
+        });
     });
 }
 
 function refreshHitlConfigByCurrentConversation() {
     const cfg = getHitlConfigForConversation(currentConversationId || '');
     applyHitlConfigToUI(cfg);
+}
+
+async function waitForHitlConfigReady(conversationId) {
+    const cid = String(conversationId || '').trim();
+    if (cid && hitlConfigSyncConversationId === cid) {
+        await hitlConfigSyncPromise;
+        return;
+    }
+    const defaultReady = window.csaiHitlDefaultConfigReady || window.csaiHitlDefaultReviewerReady;
+    if (!cid && defaultReady && typeof defaultReady.then === 'function') {
+        await defaultReady.catch(function () {});
+        if (!currentConversationId) refreshHitlConfigByCurrentConversation();
+    }
 }
 
 function showHitlApplyFeedback(text, isError, partial) {
@@ -683,6 +766,10 @@ async function applyHitlSidebarConfig() {
             await window.saveHitlConversationConfig(cid, cfg);
             const ok = typeof window.t === 'function' ? window.t('chat.hitlApplyOkSync') : 'HITL settings saved and synced to the server.';
             showHitlApplyFeedback(ok, false);
+        } else if (typeof window.putHitlDefaultConfig === 'function') {
+            await window.putHitlDefaultConfig(cfg);
+            const okDefault = typeof window.t === 'function' ? window.t('chat.hitlApplyOkDefaultConfig') : 'HITL default configuration written to config.yaml and applied.';
+            showHitlApplyFeedback(okDefault, false);
         } else if (yamlMerged) {
             const okYaml = typeof window.t === 'function' ? window.t('chat.hitlApplyOkWhitelistYaml') : 'Tool whitelist merged into config.yaml and active. Session settings are saved automatically.';
             showHitlApplyFeedback(okYaml, false);
@@ -778,6 +865,11 @@ function applyConversationAgentMode(conversationId, conversation) {
 
 if (typeof window !== 'undefined') {
     window.csaiHitlGlobalToolWhitelist = window.csaiHitlGlobalToolWhitelist || [];
+    window.csaiHitlDefaultConfig = window.csaiHitlDefaultConfig || {
+        mode: HITL_MODE_OFF,
+        reviewer: 'human',
+        timeoutSeconds: DEFAULT_HITL_TIMEOUT_SECONDS
+    };
     window.csaiHitlDefaultReviewer = window.csaiHitlDefaultReviewer || 'human';
     window.csaiChatAgentMode = {
         EINO_MODES: CHAT_AGENT_EINO_MODES,
@@ -799,7 +891,6 @@ if (typeof window !== 'undefined') {
     window.setHitlReviewerUI = setHitlReviewerUI;
     window.onHitlReviewerChanged = onHitlReviewerChanged;
     window.bindHitlReviewerToggleListeners = bindHitlReviewerToggleListeners;
-    window.getHitlLastGlobalConfig = getHitlLastGlobalConfig;
     window.hitlMergeToolsForDisplay = hitlMergeToolsForDisplay;
     window.hitlStripGlobalToolsFromFormString = hitlStripGlobalToolsFromFormString;
     window.hitlToolsSplitToArray = hitlToolsSplitToArray;
@@ -866,14 +957,18 @@ function getAgentModeLabelForValue(mode) {
     }
 }
 
-function getAgentModeIconForValue(mode) {
+function getAgentModeIconClassForValue(mode) {
     switch (mode) {
-        case CHAT_AGENT_MODE_EINO_SINGLE: return '⚡';
-        case 'deep': return '🧩';
-        case 'plan_execute': return '📋';
-        case 'supervisor': return '🎯';
-        default: return '🤖';
+        case CHAT_AGENT_MODE_EINO_SINGLE: return 'eino';
+        case 'deep': return 'deep';
+        case 'plan_execute': return 'plan';
+        case 'supervisor': return 'supervisor';
+        default: return 'default';
     }
+}
+
+function renderAgentModeLogoMarkup() {
+    return '<svg class="agent-mode-logo__svg" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><path d="M8 16h.01"/><path d="M16 16h.01"/></svg>';
 }
 
 function syncAgentModeFromValue(value) {
@@ -882,7 +977,10 @@ function syncAgentModeFromValue(value) {
     const icon = document.getElementById('agent-mode-icon');
     if (hid) hid.value = value;
     if (label) label.textContent = getAgentModeLabelForValue(value);
-    if (icon) icon.textContent = getAgentModeIconForValue(value);
+    if (icon) {
+        icon.className = 'role-selector-icon agent-mode-logo agent-mode-logo--' + getAgentModeIconClassForValue(value);
+        icon.innerHTML = renderAgentModeLogoMarkup();
+    }
     document.querySelectorAll('.agent-mode-option').forEach(function (el) {
         const v = el.getAttribute('data-value');
         el.classList.toggle('selected', v === value);
@@ -891,6 +989,7 @@ function syncAgentModeFromValue(value) {
 }
 
 function syncReasoningRowVisibility(modeVal) {
+    mountChatSessionSettingsPopover();
     const wrap = document.getElementById('chat-reasoning-wrapper');
     if (!wrap) return;
     const show = modeVal === CHAT_AGENT_MODE_EINO_SINGLE || (multiAgentAPIEnabled && chatAgentModeIsEino(modeVal));
@@ -957,9 +1056,580 @@ function currentChatAIChannelLabel() {
     const id = selectedChatAIChannelId() || chatDefaultAIChannel;
     const ch = id ? chatAIChannels[id] : null;
     if (!ch) {
-        return typeof window.t === 'function' ? window.t('chat.aiChannelDefaultShort') : 'Default channel';
+        return chatTranslate('chat.aiChannelDefaultShort', 'Default channel');
     }
     return ch.name || id;
+}
+
+function currentChatModelLabel() {
+    const id = selectedChatAIChannelId() || chatDefaultAIChannel;
+    const ch = id ? chatAIChannels[id] : null;
+    const model = ch && typeof ch.model === 'string' ? ch.model.trim() : '';
+    return model || currentChatAIChannelLabel();
+}
+
+function currentSystemModelLabel() {
+    const ch = chatDefaultAIChannel ? chatAIChannels[chatDefaultAIChannel] : null;
+    const model = ch && typeof ch.model === 'string' ? ch.model.trim() : '';
+    return model || (ch && (ch.name || chatDefaultAIChannel)) || currentChatModelLabel();
+}
+
+function currentHitlAuditModelLabel() {
+    return chatHitlAuditModelName || currentSystemModelLabel();
+}
+
+function resolveChatPickerChannelId() {
+    return selectedChatAIChannelId() || chatDefaultAIChannel;
+}
+
+function chatSystemModelConfigState(cfg, preferredChannelId) {
+    const source = cfg && typeof cfg === 'object' ? cfg : {};
+    const sourceAI = source.ai && typeof source.ai === 'object' ? source.ai : {};
+    const channels = sourceAI.channels && typeof sourceAI.channels === 'object'
+        ? { ...sourceAI.channels }
+        : {};
+    const resolveFromChannels = function (value) {
+        const raw = String(value || '').trim();
+        if (raw && channels[raw]) return raw;
+        const normalized = normalizeChatAIChannelId(raw);
+        return normalized
+            ? Object.keys(channels).find(function (id) {
+                return normalizeChatAIChannelId(id) === normalized;
+            }) || ''
+            : '';
+    };
+    let defaultChannelId = resolveFromChannels(sourceAI.default_channel);
+    let channelId = resolveFromChannels(preferredChannelId) || defaultChannelId;
+    if (!channels[channelId]) {
+        channelId = Object.keys(channels)[0] || 'default';
+    }
+    if (!channels[channelId]) {
+        const legacy = source.openai && typeof source.openai === 'object' ? source.openai : {};
+        channels[channelId] = {
+            name: channelId === 'default' ? 'Default' : channelId,
+            provider: legacy.provider || 'openai',
+            api_key: legacy.api_key || '',
+            base_url: legacy.base_url || '',
+            model: legacy.model || ''
+        };
+    }
+    if (!defaultChannelId) defaultChannelId = channelId;
+    return {
+        ai: { ...sourceAI, default_channel: defaultChannelId, channels: channels },
+        channelId: channelId,
+        channel: channels[channelId]
+    };
+}
+
+function chatSystemModelElements() {
+    return {
+        wrap: document.getElementById('chat-model-shortcut-wrap'),
+        button: document.getElementById('chat-model-shortcut'),
+        menu: document.getElementById('chat-system-model-menu'),
+        main: document.getElementById('chat-system-model-main'),
+        subview: document.getElementById('chat-system-model-subview'),
+        subviewTitle: document.getElementById('chat-system-model-subview-title'),
+        list: document.getElementById('chat-system-model-list'),
+        status: document.getElementById('chat-system-model-status'),
+        subviewStatus: document.getElementById('chat-system-model-subview-status'),
+        channelValue: document.getElementById('chat-system-model-channel-value'),
+        currentValue: document.getElementById('chat-system-model-current-value'),
+        modeValue: document.getElementById('chat-system-model-mode-value'),
+        effortValue: document.getElementById('chat-system-model-effort-value')
+    };
+}
+
+function setChatSystemModelStatus(message, tone) {
+    const ui = chatSystemModelElements();
+    [ui.status, ui.subviewStatus].forEach(function (status) {
+        if (!status) return;
+        status.textContent = message || '';
+        status.dataset.tone = tone || '';
+    });
+}
+
+function chatReasoningEffortLabel(value) {
+    switch (String(value || '').trim()) {
+        case 'low': return 'low';
+        case 'medium': return 'medium';
+        case 'high': return 'high';
+        case 'xhigh': return 'xhigh';
+        case 'max': return 'max';
+        default: return chatTranslate('chat.reasoningEffortUnset', 'Unset');
+    }
+}
+
+function currentChatReasoningEffort() {
+    const effort = document.getElementById('chat-reasoning-effort');
+    return effort ? String(effort.value || '').trim() : '';
+}
+
+function currentChatReasoningMode() {
+    const mode = document.getElementById('chat-reasoning-mode');
+    const value = mode ? String(mode.value || 'default').trim() : 'default';
+    return ['default', 'off', 'on', 'auto'].includes(value) ? value : 'default';
+}
+
+function currentChatReasoningMenuLabel() {
+    const modeValue = currentChatReasoningMode();
+    if (modeValue === 'off') return chatTranslate('chat.reasoningModeOff', 'Off');
+    const effort = currentChatReasoningEffort();
+    return effort ? chatReasoningEffortLabel(effort) : reasoningSummaryModeLabel(modeValue);
+}
+
+function updateChatSystemModelPickerValues() {
+    const ui = chatSystemModelElements();
+    const channel = currentChatAIChannelLabel();
+    const model = currentChatModelLabel();
+    const mode = reasoningSummaryModeLabel(currentChatReasoningMode());
+    const effort = currentChatReasoningMenuLabel();
+    if (ui.channelValue) ui.channelValue.textContent = channel;
+    if (ui.currentValue) ui.currentValue.textContent = model;
+    if (ui.modeValue) ui.modeValue.textContent = mode;
+    if (ui.effortValue) ui.effortValue.textContent = effort;
+    const composerEffort = document.getElementById('chat-model-shortcut-effort');
+    if (composerEffort) composerEffort.textContent = effort;
+}
+
+function closeChatSystemModelPicker(force) {
+    if (chatSystemModelSaving && !force) return;
+    const ui = chatSystemModelElements();
+    if (ui.menu) ui.menu.hidden = true;
+    if (ui.button) {
+        ui.button.classList.remove('active');
+        ui.button.setAttribute('aria-expanded', 'false');
+    }
+    if (ui.main) ui.main.hidden = false;
+    if (ui.subview) ui.subview.hidden = true;
+    chatSystemModelRequestSeq += 1;
+}
+
+async function readChatSystemModelError(response, fallback) {
+    try {
+        const body = await response.json();
+        return body.error || body.message || fallback;
+    } catch (_) {
+        return fallback;
+    }
+}
+
+function renderChatSystemModelOptions(models, currentModel) {
+    const ui = chatSystemModelElements();
+    if (!ui.list) return 0;
+    ui.list.innerHTML = '';
+    const unique = [];
+    const seen = new Set();
+    [currentModel].concat(Array.isArray(models) ? models : []).forEach(function (value) {
+        const model = String(value || '').trim();
+        if (!model || seen.has(model)) return;
+        seen.add(model);
+        unique.push(model);
+    });
+    unique.forEach(function (model) {
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'chat-system-model-option';
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', model === currentModel ? 'true' : 'false');
+        option.dataset.model = model;
+
+        const label = document.createElement('span');
+        label.className = 'chat-system-model-option-label';
+        label.textContent = model;
+        option.appendChild(label);
+
+        if (model === currentModel) {
+            option.classList.add('is-selected');
+            const current = document.createElement('span');
+            current.className = 'chat-system-model-current';
+            current.textContent = chatTranslate('chat.systemModelCurrent', 'Current');
+            option.appendChild(current);
+        }
+        option.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            selectChatSystemModel(model);
+        });
+        ui.list.appendChild(option);
+    });
+    return unique.length;
+}
+
+function renderChatReasoningEffortOptions() {
+    const ui = chatSystemModelElements();
+    if (!ui.list) return;
+    ui.list.innerHTML = '';
+    const currentEffort = currentChatReasoningEffort();
+    ['', 'low', 'medium', 'high', 'xhigh', 'max'].forEach(function (effort) {
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'chat-system-model-option';
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', effort === currentEffort ? 'true' : 'false');
+        if (effort === currentEffort) option.classList.add('is-selected');
+
+        const label = document.createElement('span');
+        label.className = 'chat-system-model-option-label chat-system-effort-option-label';
+        label.textContent = chatReasoningEffortLabel(effort);
+        option.appendChild(label);
+
+        if (effort === currentEffort) {
+            const current = document.createElement('span');
+            current.className = 'chat-system-model-current';
+            current.textContent = chatTranslate('chat.systemModelCurrent', 'Current');
+            option.appendChild(current);
+        }
+        option.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            selectChatReasoningEffort(effort);
+        });
+        ui.list.appendChild(option);
+    });
+}
+
+function renderChatReasoningModeOptions() {
+    const ui = chatSystemModelElements();
+    if (!ui.list) return;
+    ui.list.innerHTML = '';
+    const currentMode = currentChatReasoningMode();
+    ['default', 'off', 'on', 'auto'].forEach(function (mode) {
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'chat-system-model-option';
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', mode === currentMode ? 'true' : 'false');
+        if (mode === currentMode) option.classList.add('is-selected');
+        const label = document.createElement('span');
+        label.className = 'chat-system-model-option-label chat-system-effort-option-label';
+        label.textContent = reasoningSummaryModeLabel(mode);
+        option.appendChild(label);
+        if (mode === currentMode) {
+            const current = document.createElement('span');
+            current.className = 'chat-system-model-current';
+            current.textContent = chatTranslate('chat.systemModelCurrent', 'Current');
+            option.appendChild(current);
+        }
+        option.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            selectChatReasoningMode(mode);
+        });
+        ui.list.appendChild(option);
+    });
+}
+
+function finishChatReasoningPickerUpdate() {
+    persistChatReasoningPrefs();
+    setChatSystemModelStatus(chatTranslate('chat.reasoningSessionUpdated', 'Session reasoning settings updated'), 'success');
+    if (chatSystemModelCloseTimer) window.clearTimeout(chatSystemModelCloseTimer);
+    chatSystemModelCloseTimer = window.setTimeout(function () {
+        chatSystemModelSaving = false;
+        closeChatSystemModelPicker(true);
+    }, 450);
+}
+
+function selectChatReasoningMode(mode) {
+    if (chatSystemModelSaving) return;
+    const chosen = ['default', 'off', 'on', 'auto'].includes(String(mode || '').trim())
+        ? String(mode || '').trim()
+        : 'default';
+    const modeControl = document.getElementById('chat-reasoning-mode');
+    if (!modeControl) return;
+    chatSystemModelSaving = true;
+    modeControl.value = chosen;
+    finishChatReasoningPickerUpdate();
+}
+
+function selectChatReasoningEffort(effort) {
+    if (chatSystemModelSaving) return;
+    const raw = String(effort || '').trim();
+    const chosen = ['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(raw) ? raw : '';
+    const effortControl = document.getElementById('chat-reasoning-effort');
+    if (!effortControl) return;
+    chatSystemModelSaving = true;
+    effortControl.value = chosen;
+    finishChatReasoningPickerUpdate();
+}
+
+function renderChatSystemModelRetry() {
+    const ui = chatSystemModelElements();
+    if (!ui.list) return;
+    ui.list.innerHTML = '';
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'chat-system-model-retry';
+    retry.textContent = chatTranslate('chat.systemModelRetry', 'Reload');
+    retry.addEventListener('click', function (retryEvent) {
+        retryEvent.preventDefault();
+        retryEvent.stopPropagation();
+        fetchChatSystemModelsForChannel(resolveChatPickerChannelId(), { force: true });
+    });
+    ui.list.appendChild(retry);
+}
+
+function renderChatAIChannelOptions() {
+    const ui = chatSystemModelElements();
+    if (!ui.list) return;
+    ui.list.innerHTML = '';
+    const selected = selectedChatAIChannelId();
+    const choices = [{ id: '', label: chatTranslate('chat.aiChannelDefault', 'Follow default channel') }]
+        .concat(Object.keys(chatAIChannels).sort().map(function (id) {
+            const channel = chatAIChannels[id] || {};
+            return { id: id, label: channel.name || id };
+        }));
+    choices.forEach(function (choice) {
+        const option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'chat-system-model-option';
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', choice.id === selected ? 'true' : 'false');
+        if (choice.id === selected) option.classList.add('is-selected');
+        const label = document.createElement('span');
+        label.className = 'chat-system-model-option-label chat-system-channel-option-label';
+        label.textContent = choice.label;
+        option.appendChild(label);
+        if (choice.id === selected) {
+            const current = document.createElement('span');
+            current.className = 'chat-system-model-current';
+            current.textContent = chatTranslate('chat.systemModelCurrent', 'Current');
+            option.appendChild(current);
+        }
+        option.addEventListener('click', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            selectChatAIChannel(choice.id);
+        });
+        ui.list.appendChild(option);
+    });
+}
+
+async function selectChatAIChannel(channelId) {
+    const select = document.getElementById('chat-ai-channel-select');
+    if (!select) return;
+    const resolved = resolveChatAIChannelId(channelId);
+    select.value = resolved || '';
+    persistChatAIChannelPref();
+    refreshSessionSettingsSelects();
+    updateChatSystemModelPickerValues();
+    openChatSystemModelView('main');
+    setChatSystemModelStatus(chatTranslate('chat.systemModelLoading', 'Loading model list…'), 'loading');
+    await fetchChatSystemModelsForChannel(resolveChatPickerChannelId(), { force: true });
+}
+
+function openChatSystemModelView(view, event) {
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    const ui = chatSystemModelElements();
+    if (!ui.main || !ui.subview || !ui.list) return;
+    if (view === 'main') {
+        ui.main.hidden = false;
+        ui.subview.hidden = true;
+        updateChatSystemModelPickerValues();
+        return;
+    }
+    ui.main.hidden = true;
+    ui.subview.hidden = false;
+    ui.subview.dataset.view = view;
+    if (view === 'channel') {
+        if (ui.subviewTitle) ui.subviewTitle.textContent = chatTranslate('chat.aiChannelLabel', 'AI channel');
+        setChatSystemModelStatus('', '');
+        renderChatAIChannelOptions();
+        return;
+    }
+    if (view === 'mode') {
+        if (ui.subviewTitle) ui.subviewTitle.textContent = chatTranslate('chat.reasoningModeLabel', 'Reasoning mode');
+        setChatSystemModelStatus('', '');
+        renderChatReasoningModeOptions();
+        return;
+    }
+    if (view === 'effort') {
+        if (ui.subviewTitle) ui.subviewTitle.textContent = chatTranslate('chat.reasoningEffortLabel', 'Reasoning effort');
+        setChatSystemModelStatus('', '');
+        renderChatReasoningEffortOptions();
+        return;
+    }
+    if (ui.subviewTitle) ui.subviewTitle.textContent = chatTranslate('chat.systemModelField', 'Model');
+    if (chatSystemModelOptions.length) {
+        const count = renderChatSystemModelOptions(chatSystemModelOptions, chatSystemModelCurrent);
+        setChatSystemModelStatus(
+            chatTranslate('chat.systemModelLoaded', '{count} models loaded').replace('{count}', String(count)),
+            'success'
+        );
+    } else if (chatSystemModelLoadError) {
+        renderChatSystemModelRetry();
+        setChatSystemModelStatus(chatSystemModelLoadError, 'error');
+    } else {
+        ui.list.innerHTML = '';
+        setChatSystemModelStatus(chatTranslate('chat.systemModelLoading', 'Loading model list…'), 'loading');
+    }
+}
+
+async function selectChatSystemModel(model) {
+    if (chatSystemModelSaving) return;
+    if (typeof requirePermission === 'function' && !requirePermission('config:write')) return;
+    const chosen = String(model || '').trim();
+    if (!chosen) return;
+    const ui = chatSystemModelElements();
+    chatSystemModelSaving = true;
+    if (ui.list) {
+        ui.list.querySelectorAll('button').forEach(function (button) { button.disabled = true; });
+    }
+    setChatSystemModelStatus(chatTranslate('chat.systemModelSaving', 'Saving…'), 'loading');
+    try {
+        const latestResponse = await apiFetch('/api/config');
+        if (!latestResponse.ok) {
+            throw new Error(await readChatSystemModelError(latestResponse, chatTranslate('chat.systemModelSaveFailed', 'Save failed')));
+        }
+        const latest = await latestResponse.json();
+        const state = chatSystemModelConfigState(latest, resolveChatPickerChannelId());
+        state.ai.channels[state.channelId] = { ...state.channel, model: chosen };
+        const updateResponse = await apiFetch('/api/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ai: state.ai })
+        });
+        if (!updateResponse.ok) {
+            throw new Error(await readChatSystemModelError(updateResponse, chatTranslate('chat.systemModelSaveFailed', 'Save failed')));
+        }
+        const applyResponse = await apiFetch('/api/config/apply', { method: 'POST' });
+        if (!applyResponse.ok) {
+            throw new Error(await readChatSystemModelError(applyResponse, chatTranslate('chat.systemModelApplyFailed', 'Failed to apply model')));
+        }
+        chatAIChannels = state.ai.channels;
+        chatDefaultAIChannel = resolveChatAIChannelId(state.ai.default_channel) || state.channelId;
+        updateChatComposerSessionShortcuts();
+        await initChatAgentModeFromConfig();
+        chatSystemModelCurrent = chosen;
+        chatSystemModelOptions = [chosen].concat(chatSystemModelOptions);
+        updateChatSystemModelPickerValues();
+        renderChatSystemModelOptions(chatSystemModelOptions, chosen);
+        setChatSystemModelStatus(chatTranslate('chat.systemModelSaved', 'Saved automatically'), 'success');
+        if (chatSystemModelCloseTimer) window.clearTimeout(chatSystemModelCloseTimer);
+        chatSystemModelCloseTimer = window.setTimeout(function () {
+            chatSystemModelSaving = false;
+            closeChatSystemModelPicker(true);
+        }, 650);
+        return;
+    } catch (error) {
+        console.error('selectChatSystemModel', error);
+        setChatSystemModelStatus(error.message || chatTranslate('chat.systemModelSaveFailed', 'Save failed'), 'error');
+    }
+    chatSystemModelSaving = false;
+    if (ui.list) {
+        ui.list.querySelectorAll('button').forEach(function (button) { button.disabled = false; });
+    }
+}
+
+function chatSystemModelCacheKey(channelId, channel) {
+    return [
+        String(channelId || ''),
+        String(channel && channel.provider || 'openai'),
+        String(channel && channel.base_url || '').trim()
+    ].join('|');
+}
+
+async function fetchChatSystemModelsForChannel(channelId, options) {
+    const opts = options || {};
+    const ui = chatSystemModelElements();
+    if (!ui.menu || !ui.list || ui.menu.hidden) return;
+    const resolvedChannelId = resolveChatAIChannelId(channelId) || chatDefaultAIChannel;
+    const channel = resolvedChannelId ? chatAIChannels[resolvedChannelId] || {} : {};
+    const cacheKey = chatSystemModelCacheKey(resolvedChannelId, channel);
+    const cached = chatSystemModelCache.get(cacheKey);
+    const requestId = ++chatSystemModelRequestSeq;
+    chatSystemModelCurrent = String(channel.model || '').trim();
+    chatSystemModelOptions = [];
+    chatSystemModelLoadError = '';
+    if (!opts.force && cached && Date.now() - cached.fetchedAt < CHAT_SYSTEM_MODEL_CACHE_TTL_MS) {
+        chatSystemModelOptions = cached.models.slice();
+        if (ui.subview && !ui.subview.hidden && ui.subview.dataset.view === 'model') {
+            renderChatSystemModelOptions(chatSystemModelOptions, chatSystemModelCurrent);
+        }
+        const cachedCount = [chatSystemModelCurrent].concat(chatSystemModelOptions)
+            .map(function (model) { return String(model || '').trim(); })
+            .filter(function (model, index, all) { return model && all.indexOf(model) === index; })
+            .length;
+        setChatSystemModelStatus(
+            chatTranslate('chat.systemModelLoaded', '{count} models loaded').replace('{count}', String(cachedCount)),
+            'success'
+        );
+        return;
+    }
+    if (ui.subview && !ui.subview.hidden && ui.subview.dataset.view === 'model') {
+        ui.list.innerHTML = '';
+    }
+    setChatSystemModelStatus(chatTranslate('chat.systemModelLoading', 'Loading model list…'), 'loading');
+    try {
+        if (!String(channel.api_key || '').trim()) {
+            throw new Error(chatTranslate('chat.systemModelNeedApiKey', 'Configure an API Key in system settings first'));
+        }
+        const listResponse = await apiFetch('/api/config/list-models', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                provider: channel.provider || 'openai',
+                base_url: String(channel.base_url || '').trim(),
+                api_key: String(channel.api_key || '').trim()
+            })
+        });
+        const result = await listResponse.json().catch(function () { return {}; });
+        if (!listResponse.ok || !result.success) {
+            throw new Error(result.error || chatTranslate('chat.systemModelLoadFailed', 'Failed to load models'));
+        }
+        if (requestId !== chatSystemModelRequestSeq || ui.menu.hidden) return;
+        chatSystemModelOptions = Array.isArray(result.models) ? result.models.slice() : [];
+        chatSystemModelCache.set(cacheKey, {
+            models: chatSystemModelOptions.slice(),
+            fetchedAt: Date.now()
+        });
+        const count = [chatSystemModelCurrent].concat(chatSystemModelOptions)
+            .map(function (model) { return String(model || '').trim(); })
+            .filter(function (model, index, all) { return model && all.indexOf(model) === index; })
+            .length;
+        if (ui.subview && !ui.subview.hidden && ui.subview.dataset.view === 'model') {
+            renderChatSystemModelOptions(chatSystemModelOptions, chatSystemModelCurrent);
+        }
+        setChatSystemModelStatus(
+            chatTranslate('chat.systemModelLoaded', '{count} models loaded').replace('{count}', String(count)),
+            'success'
+        );
+    } catch (error) {
+        if (requestId !== chatSystemModelRequestSeq || ui.menu.hidden) return;
+        chatSystemModelLoadError = error.message || chatTranslate('chat.systemModelLoadFailed', 'Failed to load models');
+        if (ui.subview && !ui.subview.hidden && ui.subview.dataset.view === 'model') {
+            renderChatSystemModelRetry();
+        }
+        setChatSystemModelStatus(chatSystemModelLoadError, 'error');
+    }
+}
+
+async function openChatSystemModelPicker(event) {
+    if (event) {
+        event.preventDefault();
+        event.stopPropagation();
+    }
+    const ui = chatSystemModelElements();
+    if (!ui.menu || !ui.button || !ui.list) return;
+    if (!ui.menu.hidden) {
+        closeChatSystemModelPicker();
+        return;
+    }
+    if (chatSystemModelCloseTimer) {
+        window.clearTimeout(chatSystemModelCloseTimer);
+        chatSystemModelCloseTimer = null;
+    }
+    if (typeof closeChatReasoningPanel === 'function') closeChatReasoningPanel();
+    ui.menu.hidden = false;
+    ui.button.classList.add('active');
+    ui.button.setAttribute('aria-expanded', 'true');
+    if (ui.main) ui.main.hidden = false;
+    if (ui.subview) ui.subview.hidden = true;
+    ui.list.innerHTML = '';
+    updateChatSystemModelPickerValues();
+    await fetchChatSystemModelsForChannel(resolveChatPickerChannelId());
 }
 
 function truncateChatAIChannelSummaryLabel(label) {
@@ -975,16 +1645,16 @@ function persistChatAIChannelPref() {
         else localStorage.removeItem(AI_CHANNEL_STORAGE_KEY);
     } catch (e) {}
     updateChatReasoningSummary();
+    updateChatSystemModelPickerValues();
 }
 
 function reasoningSummaryModeLabel(mode) {
     const m = (mode || 'default').trim();
-    const t = (typeof window.t === 'function') ? window.t : function (k) { return k; };
     switch (m) {
-        case 'off': return t('chat.reasoningModeOff');
-        case 'on': return t('chat.reasoningModeOn');
-        case 'auto': return t('chat.reasoningModeAuto');
-        default: return t('chat.reasoningSummaryFollow');
+        case 'off': return chatTranslate('chat.reasoningModeOff', 'Off');
+        case 'on': return chatTranslate('chat.reasoningModeOn', 'On');
+        case 'auto': return chatTranslate('chat.reasoningModeAuto', 'Auto');
+        default: return chatTranslate('chat.reasoningSummaryFollow', 'System');
     }
 }
 
@@ -1006,15 +1676,232 @@ function updateChatReasoningSummary() {
         hitlPart = '';
     }
     const channelPart = currentChatAIChannelLabel();
-    const parts = [truncateChatAIChannelSummaryLabel(channelPart), reasoningPart, hitlPart].filter(Boolean);
-    el.textContent = parts.join(' / ');
-    el.title = [channelPart, reasoningPart, hitlPart].filter(Boolean).join(' / ');
+    const modelPart = currentChatModelLabel();
+    el.textContent = hitlPart;
+    el.title = hitlPart;
+    updateChatComposerSessionShortcuts({
+        channel: channelPart,
+        model: modelPart,
+        reasoning: reasoningPart,
+        hitl: hitlPart
+    });
 }
+
+function updateChatComposerSessionShortcuts(summary) {
+    const data = summary || {};
+    const modelEl = document.getElementById('chat-model-shortcut-text');
+    const hitlEl = document.getElementById('chat-hitl-shortcut-text');
+    if (modelEl) {
+        // 输入框右侧展示当前会话通道的模型；审批模型只出现在 HITL 入口。
+        const label = currentChatModelLabel();
+        modelEl.textContent = truncateChatAIChannelSummaryLabel(label);
+        modelEl.title = label;
+        const shortcut = document.getElementById('chat-model-shortcut');
+        if (shortcut) {
+            const channel = currentChatAIChannelLabel();
+            const effort = currentChatReasoningMenuLabel();
+            const action = chatTranslate('chat.modelSettingsAria', 'Select AI channel, model and reasoning settings');
+            shortcut.setAttribute('aria-label', action + ': ' + channel + ' · ' + label + ' · ' + effort);
+            shortcut.title = action + ': ' + channel + ' · ' + label + ' · ' + effort;
+        }
+        updateChatSystemModelPickerValues();
+    }
+    if (hitlEl) {
+        const cfg = readHitlConfigFromForm();
+        const auditAgent = normalizeHitlReviewer(cfg.reviewer) === 'audit_agent';
+        const prefix = auditAgent
+            ? chatTranslate('chat.sessionShortcutAuditAgent', 'Agent review')
+            : chatTranslate('chat.sessionShortcutHuman', 'Human approval');
+        const modeLabel = data.hitl || getHitlModeLabel(cfg.mode);
+        const approvalModel = auditAgent ? currentHitlAuditModelLabel() : '';
+        const label = prefix + '：' + modeLabel + (approvalModel ? ' · ' + approvalModel : '');
+        hitlEl.textContent = label;
+        hitlEl.title = label;
+    }
+}
+
+function openChatSessionSettings(section, event) {
+    if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+    mountChatSessionSettingsPopover();
+    const wrap = document.getElementById('chat-reasoning-wrapper');
+    const toggle = document.getElementById('conversation-reasoning-toggle');
+    if (!wrap || !toggle || wrap.style.display === 'none') return;
+    syncChatReasoningBarHeight();
+    wrap.classList.remove('conversation-reasoning-collapsed');
+    syncChatSessionSettingsLayerState();
+    toggle.setAttribute('aria-expanded', 'true');
+    if (typeof closeAgentModePanel === 'function') closeAgentModePanel();
+    if (typeof closeRoleSelectionPanel === 'function') closeRoleSelectionPanel();
+    if (typeof closeChatProjectPanel === 'function') closeChatProjectPanel();
+    updateChatReasoningSummary();
+
+    let target = null;
+    if (section === 'hitl') target = document.getElementById('hitl-mode-select');
+    else if (section === 'reasoning') target = document.getElementById('chat-reasoning-mode');
+    else target = document.getElementById('chat-ai-channel-select');
+    const group = target && target.closest('.session-settings-group');
+    if (group && typeof group.scrollIntoView === 'function') {
+        group.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+    const customTrigger = target && target.closest('.session-settings-select')
+        ? target.closest('.session-settings-select').querySelector('.session-settings-select-trigger')
+        : null;
+    window.setTimeout(function () {
+        if (customTrigger) customTrigger.focus({ preventScroll: true });
+        else if (target) target.focus({ preventScroll: true });
+    }, 180);
+}
+
+function getVisibleChatConversationId() {
+    return typeof currentConversationId === 'string' && currentConversationId.trim()
+        ? currentConversationId.trim()
+        : '';
+}
+
+function shouldTreatLiveChatTaskAsCurrent(liveConversationId, visibleConversationId, hasVisibleProgress) {
+    const liveId = String(liveConversationId || '').trim();
+    const visibleId = String(visibleConversationId || '').trim();
+    if (liveId) return !!visibleId && liveId === visibleId;
+    return hasVisibleProgress === true;
+}
+
+function ownsLiveChatStream(liveStream) {
+    return !!liveStream && window.__csAgentLiveStream === liveStream;
+}
+
+function shouldIgnoreLiveChatStreamEvent(
+    liveStream,
+    activeLiveStream = window.__csAgentLiveStream,
+    navigationSeq = chatConversationNavigationSeq
+) {
+    return !liveStream ||
+        activeLiveStream !== liveStream ||
+        liveStream.active !== true ||
+        liveStream.detached === true ||
+        liveStream.navigationSeq !== navigationSeq;
+}
+
+function clearLiveChatStreamIfOwned(liveStream) {
+    if (!ownsLiveChatStream(liveStream)) return false;
+    liveStream.active = false;
+    window.__csAgentLiveStream = { active: false, conversationId: null, progressId: null };
+    updateChatPrimaryActionState();
+    return true;
+}
+
+/**
+ * 离开正在读取主 POST 流的对话时，只断开浏览器侧响应流，不停止后端任务。
+ * 后端任务使用 detachedAgentContext，仍会继续运行；重新进入该对话时由
+ * task-events 镜像流接管。这样同时运行多个对话也只占用一个前台长连接，
+ * 不会耗尽浏览器对同一主机的连接槽位而卡住普通 GET/POST 请求。
+ */
+function detachLiveChatStreamForNavigation(nextConversationId, force = false) {
+    const liveStream = window.__csAgentLiveStream;
+    if (!liveStream || !liveStream.active) return false;
+    const liveConversationId = String(liveStream.conversationId || '').trim();
+    const nextId = String(nextConversationId || '').trim();
+    if (!force && liveConversationId && liveConversationId === nextId) return false;
+    if (!force && !liveConversationId && !nextId) return false;
+
+    liveStream.detached = true;
+    liveStream.active = false;
+    const controller = liveStream.abortController;
+    if (controller && !controller.signal.aborted) {
+        controller.abort();
+    }
+    if (ownsLiveChatStream(liveStream)) {
+        updateChatPrimaryActionState();
+    }
+    return true;
+}
+
+function cancelPendingConversationLoad() {
+    if (!loadConversationAbortController) return false;
+    if (!loadConversationAbortController.signal.aborted) {
+        loadConversationAbortController.abort();
+    }
+    loadConversationAbortController = null;
+    return true;
+}
+
+function isLiveChatTaskVisible(live, visibleConversationId) {
+    if (!live || !live.active) return false;
+    const progress = live.progressId ? document.getElementById(live.progressId) : null;
+    const hasVisibleProgress = !!(progress && progress.closest('#chat-messages'));
+    return shouldTreatLiveChatTaskAsCurrent(
+        live.conversationId,
+        visibleConversationId,
+        hasVisibleProgress
+    );
+}
+
+function getCurrentChatTaskConversationId() {
+    const visibleConversationId = getVisibleChatConversationId();
+    if (visibleConversationId) return visibleConversationId;
+    return '';
+}
+
+function isCurrentChatTaskActive() {
+    const live = window.__csAgentLiveStream;
+    const visibleConversationId = getVisibleChatConversationId();
+    if (isLiveChatTaskVisible(live, visibleConversationId)) return true;
+    return !!visibleConversationId &&
+        typeof isConversationTaskRunning === 'function' &&
+        isConversationTaskRunning(visibleConversationId);
+}
+
+function updateChatPrimaryActionState() {
+    const button = document.getElementById('chat-send-btn');
+    if (!button) return;
+    const running = isCurrentChatTaskActive();
+    const label = running
+        ? chatTranslate('tasks.stopTask', 'Stop task')
+        : chatTranslate('chat.send', 'Send');
+    button.classList.toggle('is-task-running', running);
+    button.setAttribute('aria-label', label);
+    button.setAttribute('title', label);
+    const labelElement = button.querySelector('.send-btn-label');
+    if (labelElement) labelElement.textContent = label;
+}
+
+function handleChatPrimaryAction(event) {
+    if (event) event.preventDefault();
+    if (!isCurrentChatTaskActive()) {
+        sendMessage();
+        return;
+    }
+
+    const live = window.__csAgentLiveStream;
+    const conversationId = getCurrentChatTaskConversationId();
+    if (conversationId && typeof cancelActiveTask === 'function') {
+        cancelActiveTask(conversationId);
+        return;
+    }
+    if (live && live.progressId && typeof cancelProgressTask === 'function') {
+        cancelProgressTask(live.progressId);
+    }
+}
+
+function initChatPrimaryActionButton() {
+    const button = document.getElementById('chat-send-btn');
+    if (!button) return;
+    if (!button.querySelector('.send-btn-stop-icon')) {
+        const stopIcon = document.createElement('span');
+        stopIcon.className = 'send-btn-stop-icon';
+        stopIcon.setAttribute('aria-hidden', 'true');
+        button.appendChild(stopIcon);
+    }
+    button.onclick = handleChatPrimaryAction;
+    updateChatPrimaryActionState();
+}
+
+document.addEventListener('DOMContentLoaded', initChatPrimaryActionButton);
 
 function closeChatReasoningPanel() {
     const wrap = document.getElementById('chat-reasoning-wrapper');
     const toggle = document.getElementById('conversation-reasoning-toggle');
     if (wrap) wrap.classList.add('conversation-reasoning-collapsed');
+    syncChatSessionSettingsLayerState();
     if (toggle) toggle.setAttribute('aria-expanded', 'false');
 }
 
@@ -1024,6 +1911,7 @@ function toggleConversationReasoningCard() {
     if (!wrap || !toggle) return;
     syncChatReasoningBarHeight();
     wrap.classList.toggle('conversation-reasoning-collapsed');
+    syncChatSessionSettingsLayerState();
     const collapsed = wrap.classList.contains('conversation-reasoning-collapsed');
     toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     if (!collapsed) {
@@ -1102,7 +1990,13 @@ if (typeof window !== 'undefined') {
     window.toggleChatReasoningPanel = toggleChatReasoningPanel;
     window.toggleConversationReasoningCard = toggleConversationReasoningCard;
     window.updateChatReasoningSummary = updateChatReasoningSummary;
+    window.updateChatComposerSessionShortcuts = updateChatComposerSessionShortcuts;
+    window.openChatSessionSettings = openChatSessionSettings;
+    window.openChatSystemModelPicker = openChatSystemModelPicker;
+    window.openChatSystemModelView = openChatSystemModelView;
+    window.closeChatSystemModelPicker = closeChatSystemModelPicker;
     window.refreshSessionSettingsSelects = refreshSessionSettingsSelects;
+    window.updateChatPrimaryActionState = updateChatPrimaryActionState;
 }
 
 function closeAgentModePanel() {
@@ -1179,6 +2073,11 @@ async function initChatAgentModeFromConfig() {
         const cfg = await r.json();
         multiAgentAPIEnabled = !!(cfg.multi_agent && cfg.multi_agent.enabled);
         populateChatAIChannelSelect(cfg.ai || {});
+        const hitlAuditModel = cfg.hitl && cfg.hitl.audit_model;
+        chatHitlAuditModelName = hitlAuditModel && typeof hitlAuditModel.model === 'string'
+            ? hitlAuditModel.model.trim()
+            : '';
+        updateChatReasoningSummary();
         if (typeof window !== 'undefined') {
             window.__csaiMultiAgentPublic = cfg.multi_agent || null;
             const tw = cfg.hitl && cfg.hitl.tool_whitelist;
@@ -1228,7 +2127,7 @@ function saveChatDraftDebounced(content) {
     if (draftSaveTimer) {
         clearTimeout(draftSaveTimer);
     }
-    
+
     // 设置新的定时器
     draftSaveTimer = setTimeout(() => {
         saveChatDraft(content);
@@ -1271,7 +2170,7 @@ function restoreChatDraft() {
         if (chatInput.value && chatInput.value.trim().length > 0) {
             return;
         }
-        
+
         const draft = localStorage.getItem(DRAFT_STORAGE_KEY);
         const trimmedDraft = draft ? draft.trim() : '';
 
@@ -1302,17 +2201,17 @@ function clearChatDraft() {
 // 调整textarea高度以适应内容
 function adjustTextareaHeight(textarea) {
     if (!textarea) return;
-    
+
     // 先重置高度为auto，然后立即设置为固定值，确保能准确获取scrollHeight
     textarea.style.height = 'auto';
     // 强制浏览器重新计算布局
     void textarea.offsetHeight;
-    
+
     // 计算新高度（最小40px，最大不超过300px）
     const scrollHeight = textarea.scrollHeight;
     const newHeight = Math.min(Math.max(scrollHeight, 40), 300);
     textarea.style.height = newHeight + 'px';
-    
+
     // 如果内容为空或只有很少内容，立即重置到最小高度
     if (!textarea.value || textarea.value.trim().length === 0) {
         textarea.style.height = '40px';
@@ -1324,8 +2223,30 @@ async function sendMessage() {
     const input = document.getElementById('chat-input');
     let message = input.value.trim();
     const hasAttachments = chatAttachments && chatAttachments.length > 0;
+    const requestConversationId = currentConversationId;
+    const requestNavigationSeq = chatConversationNavigationSeq;
 
     if (!message && !hasAttachments) {
+        return;
+    }
+
+    // A restored conversation renders from the local cache first, while its
+    // authoritative HITL config is fetched separately. Do not let a fast send
+    // reuse the temporary/default reviewer (historically "human") before that
+    // fetch completes, otherwise refreshing could turn Audit Agent review into
+    // a human approval for the next tool call.
+    const hitlConversationAtSendStart = String(currentConversationId || '').trim();
+    await waitForHitlConfigReady(hitlConversationAtSendStart);
+    if (String(currentConversationId || '').trim() !== hitlConversationAtSendStart) return;
+
+    // Enter 会直接调用 sendMessage；同一会话在其他标签页已启动任务时，
+    // 必须在渲染用户气泡和发起 POST 前做一次权威状态同步，避免生成一轮“已有任务执行中”伪对话。
+    if (currentConversationId && typeof loadActiveTasks === 'function') {
+        await loadActiveTasks();
+    }
+    if (isCurrentChatTaskActive()) {
+        updateChatPrimaryActionState();
+        showChatToast(chatTranslate('chat.taskAlreadyRunning', 'A task is already running in this conversation; wait for it to finish or stop it first.'), 'info');
         return;
     }
 
@@ -1357,6 +2278,12 @@ async function sendMessage() {
         message = CHAT_FILE_DEFAULT_PROMPT;
     }
 
+    // 发送前的任务状态/附件检查可能包含异步等待。若用户已主动切换会话，
+    // 保留当前页面，不再把这次尚未发出的请求写入新的可见对话。
+    if (requestNavigationSeq !== chatConversationNavigationSeq) {
+        return;
+    }
+
     // 显示用户消息（含附件名，便于用户确认）
     const displayMessage = hasAttachments
         ? message + '\n' + chatAttachments.map(a => '📎 ' + a.fileName).join('\n')
@@ -1368,13 +2295,13 @@ async function sendMessage() {
     if (currentConversationId) {
         invalidateConversationLiteCache(currentConversationId);
     }
-    
+
     // 清除防抖定时器，防止在清空输入框后重新保存草稿
     if (draftSaveTimer) {
         clearTimeout(draftSaveTimer);
         draftSaveTimer = null;
     }
-    
+
     // 立即清除草稿，防止页面刷新时恢复
     clearChatDraft();
     // 使用同步方式确保草稿被清除
@@ -1383,7 +2310,7 @@ async function sendMessage() {
     } catch (e) {
         // 忽略错误
     }
-    
+
     // 立即清空输入框并清除草稿（在发送请求之前）
     input.value = '';
     // 强制重置输入框高度为初始高度（40px）
@@ -1392,7 +2319,7 @@ async function sendMessage() {
     // 构建请求体（含附件）
     const body = {
         message: message,
-        conversationId: currentConversationId,
+        conversationId: requestConversationId,
         role: typeof getCurrentRole === 'function' ? getCurrentRole() : ''
     };
     if (window.__csNextChatFinalizationPolicy && typeof window.__csNextChatFinalizationPolicy === 'object') {
@@ -1420,7 +2347,8 @@ async function sendMessage() {
             enabled: true,
             mode: normalizeHitlMode(hitlCfg.mode),
             reviewer: normalizeHitlReviewer(hitlCfg.reviewer),
-            sensitiveTools: sensitiveTools
+            sensitiveTools: sensitiveTools,
+            timeoutSeconds: normalizeHitlTimeoutForChat(hitlCfg.timeoutSeconds, DEFAULT_HITL_TIMEOUT_SECONDS)
         };
     }
     if (hasAttachments) {
@@ -1446,10 +2374,24 @@ async function sendMessage() {
     }
     const progressElement = document.getElementById(progressId);
     registerProgressTask(progressId, streamConversationId);
+    const requestAbortController = new AbortController();
+    const liveStreamState = {
+        active: true,
+        conversationId: streamConversationId || null,
+        progressId: progressId,
+        abortController: requestAbortController,
+        detached: false,
+        navigationSeq: requestNavigationSeq
+    };
+    window.__csAgentLiveStream = liveStreamState;
+    if (streamConversationId && typeof window.notifyConversationTaskStarted === 'function') {
+        window.notifyConversationTaskStarted(streamConversationId);
+    }
+    updateChatPrimaryActionState();
     loadActiveTasks();
     let assistantMessageId = null;
     let mcpExecutionIds = [];
-    
+
     try {
         const modeSel = document.getElementById('agent-mode-select');
         let modeVal = modeSel ? modeSel.value : CHAT_AGENT_MODE_EINO_SINGLE;
@@ -1465,17 +2407,14 @@ async function sendMessage() {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify(body),
+            signal: requestAbortController.signal,
         });
-        
+
         if (!response.ok) {
             throw new Error('Request failed: ' + response.status);
         }
 
-        window.__csAgentLiveStream = {
-            active: true,
-            conversationId: streamConversationId || null,
-            progressId: progressId
-        };
+        liveStreamState.conversationId = streamConversationId || null;
         try {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
@@ -1493,10 +2432,17 @@ async function sendMessage() {
                     if (streamConversationId && streamConversationId !== eventConvId) {
                         return;
                     }
-                    if (!streamConversationId && eventData.type === 'conversation') {
+                    if (!streamConversationId) {
                         streamConversationId = eventConvId;
+                        liveStreamState.conversationId = eventConvId;
                         justBoundConversation = true;
                     }
+                }
+                // 切换对话后仍可能收到旧响应流中已缓冲的 conversation、response_start
+                // 或 response 事件。它们只能补齐后台任务归属，不能重新抢占当前对话。
+                if (shouldIgnoreLiveChatStreamEvent(liveStreamState)) {
+                    if (eventConvId) updateProgressConversation(progressId, eventConvId);
+                    return;
                 }
                 if (!justBoundConversation && !isStreamStillVisibleForRequest()) {
                     return;
@@ -1544,8 +2490,14 @@ async function sendMessage() {
                 }
                 const convId = streamConversationId || (body && body.conversationId) || null;
                 let attached = false;
-                if (convId && typeof window.attachRunningTaskEventStream === 'function') {
-                    window.__csAgentLiveStream = { active: false, conversationId: null, progressId: null };
+                if (
+                    convId &&
+                    ownsLiveChatStream(liveStreamState) &&
+                    !liveStreamState.detached &&
+                    isStreamStillVisibleForRequest() &&
+                    typeof window.attachRunningTaskEventStream === 'function'
+                ) {
+                    clearLiveChatStreamIfOwned(liveStreamState);
                     attached = await window.attachRunningTaskEventStream(convId).catch(() => false);
                 }
                 if (!attached && isStreamStillVisibleForRequest()) {
@@ -1556,8 +2508,8 @@ async function sendMessage() {
                 }
             }
         } finally {
-            window.__csAgentLiveStream = { active: false, conversationId: null, progressId: null };
-            if (window.CyberStrikeChatScroll) {
+            const clearedOwnedStream = clearLiveChatStreamIfOwned(liveStreamState);
+            if (clearedOwnedStream && !liveStreamState.detached && window.CyberStrikeChatScroll) {
                 window.CyberStrikeChatScroll.onStreamEnd();
             }
         }
@@ -1569,9 +2521,10 @@ async function sendMessage() {
         } catch (e) {
             // 忽略错误
         }
-        
+
     } catch (error) {
-        if (!isStreamStillVisibleForRequest()) {
+        clearLiveChatStreamIfOwned(liveStreamState);
+        if (liveStreamState.detached || !isStreamStillVisibleForRequest()) {
             if (typeof loadActiveTasks === 'function') {
                 loadActiveTasks();
             }
@@ -1619,7 +2572,7 @@ function renderChatFileChips() {
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'chat-file-chip-remove';
-        remove.title = typeof window.t === 'function' ? window.t('chatGroup.remove') : 'Remove';
+        remove.title = typeof window.t === 'function' ? window.t('common.remove') : 'Remove';
         remove.innerHTML = '×';
         remove.setAttribute('aria-label', 'Remove ' + a.fileName);
         remove.addEventListener('click', () => removeChatAttachment(i));
@@ -1843,7 +2796,7 @@ function ensureMentionToolsLoaded() {
         mentionTools = [];
         delete window._mentionToolsRoleChanged;
     }
-    
+
     if (mentionToolsLoaded) {
         return Promise.resolve(mentionTools);
     }
@@ -1885,7 +2838,7 @@ async function fetchMentionTools() {
                 externalMcpNames = Object.keys(mcpData.servers || {}).filter(name => {
                     const server = mcpData.servers[name];
                     // 只包含已连接且已启用的MCP
-                    return server.status === 'connected' && 
+                    return server.status === 'connected' &&
                            (server.config.external_mcp_enable || (server.config.enabled && !server.config.disabled));
                 });
             }
@@ -1997,9 +2950,10 @@ function handleChatInputKeydown(event) {
         }
     }
 
+    // Enter 直接发送；Shift+Enter 保留 textarea 原生换行行为。
     if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
-        sendMessage();
+        void sendMessage();
     }
 }
 
@@ -2068,7 +3022,7 @@ function updateMentionCandidates() {
 
     if (normalizedQuery) {
         // 检查是否精确匹配外部MCP名称
-        const exactMatchedMcp = externalMcpNames.find(mcpName => 
+        const exactMatchedMcp = externalMcpNames.find(mcpName =>
             mcpName.toLowerCase() === normalizedQuery
         );
 
@@ -2079,21 +3033,21 @@ function updateMentionCandidates() {
             });
         } else {
             // 检查是否部分匹配MCP名称
-            const partialMatchedMcps = externalMcpNames.filter(mcpName => 
+            const partialMatchedMcps = externalMcpNames.filter(mcpName =>
                 mcpName.toLowerCase().includes(normalizedQuery)
             );
-            
+
             // 正常匹配：按工具名称和描述过滤，同时也匹配MCP名称
             filtered = mentionTools.filter(tool => {
                 const nameMatch = tool.name.toLowerCase().includes(normalizedQuery);
                 const descMatch = tool.description && tool.description.toLowerCase().includes(normalizedQuery);
                 const mcpMatch = tool.externalMcp && tool.externalMcp.toLowerCase().includes(normalizedQuery);
-                
+
                 // 如果部分匹配到MCP名称，也包含该MCP下的所有工具
-                const mcpPartialMatch = partialMatchedMcps.some(mcpName => 
+                const mcpPartialMatch = partialMatchedMcps.some(mcpName =>
                     tool.externalMcp && tool.externalMcp.toLowerCase() === mcpName.toLowerCase()
                 );
-                
+
                 return nameMatch || descMatch || mcpMatch || mcpPartialMatch;
             });
         }
@@ -2116,7 +3070,7 @@ function updateMentionCandidates() {
             if (aMcpExact !== bMcpExact) {
                 return aMcpExact ? -1 : 1;
             }
-            
+
             const aStarts = a.name.toLowerCase().startsWith(normalizedQuery);
             const bStarts = b.name.toLowerCase().startsWith(normalizedQuery);
             if (aStarts !== bStarts) {
@@ -2322,7 +3276,7 @@ function applyMentionSelection() {
     const newCaret = before.length + insertText.length;
     textarea.focus();
     textarea.setSelectionRange(newCaret, newCaret);
-    
+
     // 调整输入框高度并保存草稿
     adjustTextareaHeight(textarea);
     saveChatDraftDebounced(textarea.value);
@@ -2371,8 +3325,7 @@ function initializeChatUI() {
 
     const messagesDiv = document.getElementById('chat-messages');
     if (messagesDiv && messagesDiv.childElementCount === 0) {
-        const readyMsg = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System is ready. Please enter your test requirements, and the system will automatically perform the corresponding security tests.';
-        addMessage('assistant', readyMsg, null, null, null, { systemReadyMessage: true });
+        renderChatWelcomeEmptyState();
     }
 
     addAttackChainButton(currentConversationId);
@@ -2397,23 +3350,107 @@ function wrapTablesInBubble(bubble) {
         if (table.parentElement && table.parentElement.classList.contains('table-wrapper')) {
             return;
         }
-        
+
         // 创建表格包装容器
         const wrapper = document.createElement('div');
         wrapper.className = 'table-wrapper';
-        
+
         // 将表格移动到包装容器中
         table.parentNode.insertBefore(wrapper, table);
         wrapper.appendChild(table);
     });
 }
 
-/**
- * 将「系统已就绪」类文案按当前语言重新渲染进气泡（与 addMessage 助手分支一致的安全处理）
- */
+const PROJECT_NAME_DISPLAY_MAX_CHARACTERS = 12;
+
+/** 仅限制项目名的界面展示，不修改实际保存的名称。 */
+function formatProjectNameForDisplay(value) {
+    const fullName = String(value == null ? '' : value);
+    const characters = Array.from(fullName);
+    if (characters.length <= PROJECT_NAME_DISPLAY_MAX_CHARACTERS) return fullName;
+    return `${characters.slice(0, PROJECT_NAME_DISPLAY_MAX_CHARACTERS).join('')}…`;
+}
+
+function applyProjectNameDisplay(element, value, fallback = '') {
+    if (!element) return '';
+    const fullName = String(value || fallback || '');
+    element.textContent = formatProjectNameForDisplay(fullName);
+    element.dataset.fullName = fullName;
+    element.title = fullName;
+    return fullName;
+}
+
+window.formatProjectNameForDisplay = formatProjectNameForDisplay;
+window.applyProjectNameDisplay = applyProjectNameDisplay;
+
+function getChatWelcomeProjectName() {
+    const projectElement = document.getElementById('chat-project-text');
+    const projectText = (projectElement?.dataset?.fullName || projectElement?.textContent || '').trim();
+    return projectText || (typeof window.t === 'function' ? window.t('projects.noProject') : 'No project');
+}
+
+function getChatWelcomeText() {
+    const project = getChatWelcomeProjectName();
+    const noProject = typeof window.t === 'function' ? window.t('projects.noProject') : 'No project';
+    if (!project || project === noProject) {
+        return typeof window.t === 'function'
+            ? window.t('chat.noProjectWelcomeMessage')
+            : 'No project selected. Enter your test requirements, and the system will automatically perform the corresponding security tests.';
+    }
+    return typeof window.t === 'function'
+        ? window.t('chat.projectWelcomeMessage', { project })
+        : `Current ${project} project. Enter your test requirements, and the system will automatically perform the corresponding security tests.`;
+}
+
+function updateChatWelcomeTitle(title) {
+    if (!title) return;
+    const project = getChatWelcomeProjectName();
+    const noProject = typeof window.t === 'function' ? window.t('projects.noProject') : 'No project';
+    const subtitle = title.parentElement?.querySelector('.chat-welcome-empty-state-subtitle');
+
+    if (project === noProject) {
+        title.textContent = typeof window.t === 'function'
+            ? window.t('chat.noProjectWelcomeTitle')
+            : 'What would you like to test?';
+    } else {
+        const prefix = typeof window.t === 'function'
+            ? window.t('chat.projectWelcomeTitlePrefix')
+            : 'What would you like to test in ';
+        const suffix = typeof window.t === 'function'
+            ? window.t('chat.projectWelcomeTitleSuffix')
+            : ' ?';
+        const projectName = document.createElement('span');
+        projectName.className = 'chat-welcome-project-name';
+        applyProjectNameDisplay(projectName, project);
+        title.replaceChildren(document.createTextNode(prefix), projectName, document.createTextNode(suffix));
+    }
+
+    if (subtitle) {
+        subtitle.textContent = typeof window.t === 'function'
+            ? window.t('chat.welcomeSubtitle')
+            : 'Enter your test requirements, and the system will automatically perform the corresponding security tests.';
+    }
+}
+
+function renderChatWelcomeEmptyState() {
+    const messagesDiv = document.getElementById('chat-messages');
+    if (!messagesDiv) return null;
+    messagesDiv.querySelectorAll('.chat-welcome-empty-state').forEach((node) => node.remove());
+    const state = document.createElement('div');
+    state.className = 'chat-welcome-empty-state';
+    state.setAttribute('role', 'status');
+    state.setAttribute('aria-live', 'polite');
+    state.innerHTML = '<p class="chat-welcome-empty-state-title"></p><p class="chat-welcome-empty-state-subtitle"></p>';
+    updateChatWelcomeTitle(state.querySelector('.chat-welcome-empty-state-title'));
+    messagesDiv.appendChild(state);
+    return state;
+}
+
+/** 更新新对话欢迎空状态，并兼容刷新旧版本遗留的系统就绪消息。 */
 function refreshSystemReadyMessageBubbles() {
-    if (typeof window.t !== 'function') return;
-    const text = window.t('chat.systemReadyMessage');
+    const text = getChatWelcomeText();
+    const welcome = document.querySelector('.chat-welcome-empty-state-title');
+    if (welcome) updateChatWelcomeTitle(welcome);
     const escapeHtmlLocal = (s) => {
         if (!s) return '';
         const div = document.createElement('div');
@@ -2435,30 +3472,59 @@ function refreshSystemReadyMessageBubbles() {
         bubble.innerHTML = formattedContent;
         if (typeof wrapTablesInBubble === 'function') wrapTablesInBubble(bubble);
         messageDiv.dataset.originalContent = text;
-        const copyBtnNew = document.createElement('button');
-        copyBtnNew.className = 'message-copy-btn';
-        copyBtnNew.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span>' + window.t('common.copy') + '</span>';
-        copyBtnNew.title = window.t('chat.copyMessageTitle');
-        copyBtnNew.onclick = function (e) {
-            e.stopPropagation();
-            copyMessageToClipboard(messageDiv, this);
-        };
-        bubble.appendChild(copyBtnNew);
+        appendMessageCopyButton(messageDiv);
     });
 }
 
-function createMessageAvatar(role) {
-    const avatar = document.createElement('div');
-    avatar.className = 'message-avatar';
-    if (role === 'user') {
-        avatar.innerHTML = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="7" r="4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    } else if (role === 'assistant') {
-        avatar.innerHTML = '<img src="/static/logo.png" alt="" class="message-avatar-img">';
+function ensureMessageMetaFooter(content) {
+    if (!content) return null;
+    let footer = content.querySelector('.message-meta-footer');
+    if (footer) return footer;
+    const timeDiv = content.querySelector('.message-time');
+    footer = document.createElement('div');
+    footer.className = 'message-meta-footer';
+    if (timeDiv && timeDiv.parentNode === content) {
+        timeDiv.parentNode.insertBefore(footer, timeDiv);
+        footer.appendChild(timeDiv);
     } else {
-        avatar.textContent = 'S';
+        content.appendChild(footer);
     }
-    return avatar;
+    return footer;
 }
+
+function appendMessageCopyButton(messageDiv) {
+    if (!messageDiv) return null;
+    if (!messageDiv.classList || (!messageDiv.classList.contains('assistant') && !messageDiv.classList.contains('user'))) {
+        return null;
+    }
+    const content = messageDiv.querySelector('.message-content');
+    const footer = ensureMessageMetaFooter(content);
+    if (!footer) return null;
+
+    messageDiv.querySelectorAll('.message-bubble .message-copy-btn').forEach((btn) => btn.remove());
+    let copyBtn = footer.querySelector('.message-copy-btn');
+    if (copyBtn) return copyBtn;
+
+    copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'message-copy-btn';
+    copyBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span>' + (typeof window.t === 'function' ? window.t('common.copy') : 'Copy') + '</span>';
+    copyBtn.title = typeof window.t === 'function' ? window.t('chat.copyMessageTitle') : 'Copy message';
+    copyBtn.setAttribute('aria-label', copyBtn.title);
+    copyBtn.onclick = function(e) {
+        e.stopPropagation();
+        copyMessageToClipboard(messageDiv, this);
+    };
+    const deleteBtn = footer.querySelector('.message-delete-turn-btn');
+    if (deleteBtn) {
+        footer.insertBefore(copyBtn, deleteBtn);
+    } else {
+        footer.appendChild(copyBtn);
+    }
+    return copyBtn;
+}
+window.appendMessageCopyButton = appendMessageCopyButton;
+window.ensureMessageMetaFooter = ensureMessageMetaFooter;
 
 // 添加消息（options.systemReadyMessage 为 true 时，语言切换会刷新该条文案）
 function addMessage(role, content, mcpExecutionIds = null, progressId = null, createdAt = null, options = null) {
@@ -2468,18 +3534,17 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     const id = 'msg-' + Date.now() + '-' + messageCounter + '-' + Math.random().toString(36).substr(2, 9);
     messageDiv.id = id;
     messageDiv.className = 'message ' + role;
-    
-    // 创建头像
-    messageDiv.appendChild(createMessageAvatar(role));
-    
+
+    messagesDiv.querySelector('.chat-welcome-empty-state')?.remove();
+
     // 创建消息内容容器
     const contentWrapper = document.createElement('div');
     contentWrapper.className = 'message-content';
-    
+
     // 创建消息气泡
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
-    
+
     // 解析 Markdown 或 HTML 格式
     let formattedContent;
     const escapeHtml = (text) => {
@@ -2488,7 +3553,7 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
         div.textContent = text;
         return div.innerHTML;
     };
-    
+
     // 助手消息中的已知中文错误前缀做国际化替换（后端固定返回中文）
     let displayContent = content;
     if (role === 'assistant' && typeof displayContent === 'string' && typeof window.t === 'function') {
@@ -2512,36 +3577,30 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
         const rawForEscape = role === 'assistant' ? displayContent : content;
         formattedContent = escapeHtml(rawForEscape).replace(/\n/g, '<br>');
     }
-    
+
     bubble.innerHTML = formattedContent;
-    
+
+    // 刷新恢复运行中会话时，后端正文可能仍是持久化占位值“处理中...”。
+    // 保留消息节点供迭代详情和最终回复复用，但不要把占位值显示成助手正文。
+    if (role === 'assistant' && options && options.hideAssistantPlaceholder) {
+        messageDiv.classList.add('assistant-placeholder-content');
+        bubble.hidden = true;
+    }
+
     if (typeof window.csMarkdownSanitize !== 'undefined') {
         window.csMarkdownSanitize.stripSuspiciousImages(bubble);
     }
-    
+
     // 为每个表格添加独立的滚动容器
     wrapTablesInBubble(bubble);
-    
+
     contentWrapper.appendChild(bubble);
-    
+
     // 保存原始内容到消息元素，用于复制功能
-    if (role === 'assistant') {
+    if (role === 'assistant' || role === 'user') {
         messageDiv.dataset.originalContent = content;
     }
-    
-    // 为助手消息添加复制按钮（复制整个回复内容）- 放在消息气泡右下角
-    if (role === 'assistant') {
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'message-copy-btn';
-        copyBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg><span>' + (typeof window.t === 'function' ? window.t('common.copy') : 'Copy') + '</span>';
-        copyBtn.title = typeof window.t === 'function' ? window.t('chat.copyMessageTitle') : 'Copy message';
-        copyBtn.onclick = function(e) {
-            e.stopPropagation();
-            copyMessageToClipboard(messageDiv, this);
-        };
-        bubble.appendChild(copyBtn);
-    }
-    
+
     // 添加时间戳
     const timeDiv = document.createElement('div');
     timeDiv.className = 'message-time';
@@ -2570,9 +3629,17 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     try {
         timeDiv.dataset.messageTime = messageTime.toISOString();
     } catch (e) { /* ignore */ }
-    contentWrapper.appendChild(timeDiv);
+    const metaFooter = document.createElement('div');
+    metaFooter.className = 'message-meta-footer';
+    metaFooter.appendChild(timeDiv);
+    contentWrapper.appendChild(metaFooter);
     messageDiv.appendChild(contentWrapper);
-    
+
+    // 为用户和助手消息添加复制按钮（复制整条消息内容）
+    if (role === 'assistant' || role === 'user') {
+        appendMessageCopyButton(messageDiv);
+    }
+
     // 有 MCP 执行记录且非流式占位消息时展示调用按钮；带 progressId 的流式占位不挂此条（与进度卡片一致，结束时 integrate 再创建）
     if (role === 'assistant' && (mcpExecutionIds && Array.isArray(mcpExecutionIds) && mcpExecutionIds.length > 0) && !progressId) {
         if (options && options.deferMcpButtons) {
@@ -2584,7 +3651,7 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
             setMcpCallExecutionIds(messageDiv, mcpExecutionIds);
         }
     }
-    
+
     // 标记「系统就绪」占位消息，便于切换语言后刷新文案
     if (options && options.systemReadyMessage) {
         messageDiv.setAttribute('data-system-ready-message', '1');
@@ -2653,13 +3720,13 @@ function copyMessageToClipboard(messageDiv, button) {
             if (bubble) {
                 const tempDiv = document.createElement('div');
                 tempDiv.innerHTML = bubble.innerHTML;
-                
+
                 // 移除复制按钮本身（避免复制按钮文本）
                 const copyBtnInTemp = tempDiv.querySelector('.message-copy-btn');
                 if (copyBtnInTemp) {
                     copyBtnInTemp.remove();
                 }
-                
+
                 // 提取纯文本内容
                 let textContent = tempDiv.textContent || tempDiv.innerText || '';
                 textContent = textContent.replace(/\n{3,}/g, '\n\n').trim();
@@ -2668,7 +3735,7 @@ function copyMessageToClipboard(messageDiv, button) {
             }
             return;
         }
-        
+
         // 使用原始Markdown内容
         doCopy(originalContent);
     } catch (error) {
@@ -2803,10 +3870,71 @@ function isEinoAgentHeartbeatProgress(detail) {
     return /^\[Eino\]\s+\S/.test(msg);
 }
 
+function hasModelOutputRecoveryMarker(value) {
+    if (!value) return false;
+    let obj = value;
+    if (typeof obj === 'string') {
+        const text = obj.trim();
+        if (!text || text.indexOf('_cyberstrike_model_output_recovery') === -1) return false;
+        try {
+            obj = JSON.parse(text);
+        } catch (e) {
+            return false;
+        }
+    }
+    return !!(obj && typeof obj === 'object' && obj._cyberstrike_model_output_recovery);
+}
+
+function isModelOutputRecoveryToolCallDetail(detail) {
+    if (!detail || detail.eventType !== 'tool_call') return false;
+    const data = detail.data && typeof detail.data === 'object' ? detail.data : {};
+    return hasModelOutputRecoveryMarker(data.argumentsObj) || hasModelOutputRecoveryMarker(data.arguments);
+}
+
+function isAnonymousTaskFragmentToolCallDetail(detail) {
+    if (!detail || detail.eventType !== 'tool_call') return false;
+    const data = detail.data && typeof detail.data === 'object' ? detail.data : {};
+    const toolName = String(data.toolName || '').trim().toLowerCase();
+    if (toolName && toolName !== 'task' && toolName !== 'unknown') return false;
+
+    let raw = null;
+    const argsObj = data.argumentsObj && typeof data.argumentsObj === 'object' ? data.argumentsObj : null;
+    if (argsObj) {
+        const keys = Object.keys(argsObj);
+        if (keys.length === 1 && keys[0] === '_raw') {
+            raw = String(argsObj._raw != null ? argsObj._raw : '').trim();
+        }
+    }
+    if (raw == null && typeof data.arguments === 'string') {
+        raw = data.arguments.trim();
+    }
+    if (raw == null) return false;
+    if (!raw) return true;
+    return !(raw.startsWith('{') && raw.endsWith('}'));
+}
+
+function isInternalEinoDiagnosticDetail(detail) {
+    if (!detail) return false;
+    if (detail.eventType === 'model_output_rejected') return true;
+    if (detail.eventType !== 'progress') return false;
+    const msg = String(detail.message != null ? detail.message : '').trim();
+    if (msg === 'Eino TurnLoop persistent multi-turn runtime has taken over this conversation.' ||
+        msg === 'Eino TurnLoop switched to the next turn with the user supplement at a safe point.' ||
+        msg === 'Pushed the user supplement into the Eino TurnLoop; waiting for a safe point to switch…') {
+        return true;
+    }
+    const data = detail.data && typeof detail.data === 'object' ? detail.data : {};
+    const kind = String(data.kind || '').trim();
+    return kind === 'turn_loop_takeover' || kind === 'turn_loop_preempted';
+}
+
 function filterNoiseProcessDetails(details) {
     if (!Array.isArray(details)) return details;
     return details.filter(function (d) {
         if (isEinoAgentHeartbeatProgress(d)) return false;
+        if (isModelOutputRecoveryToolCallDetail(d)) return false;
+        if (isAnonymousTaskFragmentToolCallDetail(d)) return false;
+        if (isInternalEinoDiagnosticDetail(d)) return false;
         return !(d && d.eventType === 'tool_calls_detected');
     });
 }
@@ -2877,6 +4005,9 @@ function syncProcessDetailButtonLabels(messageId, expanded) {
     document.querySelectorAll('#' + messageId + ' .process-detail-btn').forEach((btn) => {
         btn.innerHTML = '<span>' + label + '</span>';
     });
+    if (typeof window.syncAssistantTurnSummary === 'function') {
+        window.syncAssistantTurnSummary(document.getElementById(messageId));
+    }
 }
 
 /** 懒加载占位提示可点击，与工具栏「展开详情」行为一致 */
@@ -2931,12 +4062,12 @@ function renderProcessDetails(messageId, processDetails, options) {
         pruneEmptyMcpCallSection(messageElement);
         return;
     }
-    
+
     // 查找或创建 MCP 区域（工具栏 + 工具列表 + 迭代时间线 分区）
     const chrome = ensureMcpCallSectionChrome(messageElement, messageId);
     if (!chrome) return;
     const { mcpSection, toolbar: buttonsContainer } = chrome;
-    
+
     // 添加过程详情按钮（如果还没有）
     let processDetailBtn = buttonsContainer.querySelector('.process-detail-btn');
     if (!processDetailBtn) {
@@ -2947,12 +4078,12 @@ function renderProcessDetails(messageId, processDetails, options) {
         buttonsContainer.appendChild(processDetailBtn);
     }
     syncMcpToolsToggleButton(messageElement);
-    
+
     // 创建过程详情容器（放在工具列表之后）
     const detailsId = 'process-details-' + messageId;
     let detailsContainer = document.getElementById(detailsId);
     const toolListEl = chrome.toolList;
-    
+
     if (!detailsContainer) {
         detailsContainer = document.createElement('div');
         detailsContainer.id = detailsId;
@@ -2965,23 +4096,26 @@ function renderProcessDetails(messageId, processDetails, options) {
             mcpSection.appendChild(detailsContainer);
         }
     }
-    
+
     // 创建时间线（即使没有processDetails也要创建，以便展开详情按钮能正常工作）
     const timelineId = detailsId + '-timeline';
     let timeline = document.getElementById(timelineId);
-    
+
     if (!timeline) {
         const contentDiv = document.createElement('div');
         contentDiv.className = 'process-details-content';
-        
+
         timeline = document.createElement('div');
         timeline.id = timelineId;
         timeline.className = 'progress-timeline';
-        
+
         contentDiv.appendChild(timeline);
         detailsContainer.appendChild(contentDiv);
     }
-    
+    if (typeof window.ensureProcessDetailsReturnLatestControl === 'function') {
+        window.ensureProcessDetailsReturnLatestControl(timeline);
+    }
+
     // processDetails === null 表示“尚未加载（懒加载）”；messages.reasoningContent 可先展示
     const isLazyNotLoaded = isLazyRequest;
     if (isLazyNotLoaded && !reasoningFromMessage) {
@@ -2992,6 +4126,9 @@ function renderProcessDetails(messageId, processDetails, options) {
         timeline.innerHTML = '<div class="progress-timeline-empty">' + lazyHint + '</div>';
         bindProcessDetailsLazyHint(timeline, messageId);
         timeline.classList.remove('expanded');
+        if (typeof window.updateProcessDetailsReturnLatestControl === 'function') {
+            window.updateProcessDetailsReturnLatestControl(timeline);
+        }
         prefetchProcessDetailsSummaryHint(messageId, messageElement);
         return;
     }
@@ -3006,16 +4143,17 @@ function renderProcessDetails(messageId, processDetails, options) {
         detailsContainer.dataset.lazyNotLoaded = '0';
         detailsContainer.dataset.loaded = '1';
     }
+    const turnUsageFromDetails = extractAssistantTurnTokenUsage(processDetails);
+    if (turnUsageFromDetails) {
+        setAssistantTurnTokenUsage(messageElement, turnUsageFromDetails);
+    }
     processDetails = mergeMessageReasoningContentIntoProcessDetails(processDetails, reasoningFromMessage);
     processDetails = filterNoiseProcessDetails(processDetails);
     processDetails = dedupeConsecutiveProcessDetailRows(processDetails);
     const renderedMcpIds = collectMcpExecutionIdsFromProcessDetails(processDetails);
     if (renderedMcpIds.length > 0) {
         setPendingMcpExecutionIds(messageElement, renderedMcpIds);
-    }
-    const renderedToolCount = processDetails.filter((d) => d && d.eventType === 'tool_call').length;
-    if (renderedToolCount > 0) {
-        setMcpExecutionSummaryCount(messageElement, renderedToolCount);
+        setMcpExecutionSummaryCount(messageElement, renderedMcpIds.length);
     }
     if (typeof window.coalesceProcessDetailsToolPairs === 'function') {
         processDetails = window.coalesceProcessDetailsToolPairs(processDetails);
@@ -3028,10 +4166,13 @@ function renderProcessDetails(messageId, processDetails, options) {
             if (!isProcessDetailsUserExpanded(messageId)) {
                 timeline.classList.remove('expanded');
             }
+            if (typeof window.updateProcessDetailsReturnLatestControl === 'function') {
+                window.updateProcessDetailsReturnLatestControl(timeline);
+            }
         }
         return;
     }
-    
+
     const prependAnchor = prependMode ? timeline.firstChild : null;
     const prependScrollBox = prependMode ? document.getElementById('chat-messages') : null;
     const prependScrollHeight = prependScrollBox ? prependScrollBox.scrollHeight : 0;
@@ -3041,8 +4182,8 @@ function renderProcessDetails(messageId, processDetails, options) {
     if (!appendMode && !prependMode) {
         timeline.innerHTML = '';
     }
-    
-    
+
+
     function processDetailAgentPrefix(d) {
         if (!d || d.einoAgent == null) return '';
         const s = String(d.einoAgent).trim();
@@ -3131,7 +4272,7 @@ function renderProcessDetails(messageId, processDetails, options) {
         const title = detail.message || '';
         const data = detail.data || {};
         const agPx = processDetailAgentPrefix(data);
-        
+
         let itemTitle = title;
         if (eventType === 'workflow_start') {
             const name = data.workflowName || data.workflowId || '';
@@ -3220,8 +4361,10 @@ function renderProcessDetails(messageId, processDetails, options) {
                 : { kind: (data.success !== false ? 'success' : 'error'), isError: data.success === false };
             const backgroundRunning = displayState.kind === 'background_running';
             const success = !displayState.isError && !backgroundRunning;
-            const statusIcon = backgroundRunning ? '⏳' : (success ? '✅' : '❌');
-            const execText = backgroundRunning
+            const statusIcon = displayState.kind === 'blocked' ? '🛡' : (backgroundRunning ? '⏳' : (success ? '✅' : '❌'));
+            const execText = displayState.kind === 'blocked'
+                ? (typeof window.t === 'function' ? window.t('chat.toolExecBlocked', { name: escapeHtml(toolName) }) : 'Tool ' + escapeHtml(toolName) + ' blocked')
+                : backgroundRunning
                 ? ((typeof window.getBackgroundRunningToolLabel === 'function' ? window.getBackgroundRunningToolLabel() : 'Running in background') + ': ' + escapeHtml(toolName))
                 : (success ? (typeof window.t === 'function' ? window.t('chat.toolExecComplete', { name: escapeHtml(toolName) }) : 'Tool ' + escapeHtml(toolName) + ' completed') : (typeof window.t === 'function' ? window.t('chat.toolExecFailed', { name: escapeHtml(toolName) }) : 'Tool ' + escapeHtml(toolName) + ' failed'));
             let execLine = statusIcon + ' ' + execText;
@@ -3247,6 +4390,14 @@ function renderProcessDetails(messageId, processDetails, options) {
         } else if (eventType === 'hitl_interrupt') {
             const hitlMsg = (detail.message && String(detail.message).trim()) ? String(detail.message).trim() : (typeof window.t === 'function' ? window.t('hitl.pendingTitle') : 'Pending approvals');
             itemTitle = agPx + '🧑‍⚖️ HITL · ' + hitlMsg;
+        } else if (eventType === 'hitl_audit_agent_started') {
+            itemTitle = agPx + 'Auditor agent reviewing';
+        } else if (eventType === 'hitl_audit_agent') {
+            itemTitle = agPx + 'Auditor agent review complete';
+        } else if (eventType === 'hitl_resumed') {
+            itemTitle = agPx + 'Approval granted';
+        } else if (eventType === 'hitl_rejected') {
+            itemTitle = agPx + 'Approval rejected';
         } else if (eventType === 'progress') {
             itemTitle = typeof window.translateProgressMessage === 'function' ? window.translateProgressMessage(detail.message || '') : (detail.message || '');
         } else if (eventType === 'user_interrupt_continue') {
@@ -3254,12 +4405,35 @@ function renderProcessDetails(messageId, processDetails, options) {
                 ? window.t('chat.userInterruptContinueTitle')
                 : '⏸️ User interrupted and continued';
         }
-        
+
+        if (eventType === 'hitl_interrupt' || eventType === 'hitl_audit_agent_started' ||
+            eventType === 'hitl_audit_agent' || eventType === 'hitl_resumed' || eventType === 'hitl_rejected') {
+            const hitlTarget = typeof findToolCallItemForHitl === 'function'
+                ? findToolCallItemForHitl(timeline, data)
+                : null;
+            if (hitlTarget && hitlTarget.id) {
+                if (eventType === 'hitl_interrupt' || eventType === 'hitl_audit_agent_started') {
+                    renderInlineHitlApproval(hitlTarget.id, Object.assign({}, data, {
+                        reviewer: eventType === 'hitl_audit_agent_started' ? 'audit_agent' : (data.reviewer || 'human'),
+                        status: eventType === 'hitl_audit_agent_started' ? 'audit_running' : (data.status || 'pending')
+                    }));
+                } else {
+                    const decision = eventType === 'hitl_rejected' || data.decision === 'reject' ? 'reject' : 'approve';
+                    resolveInlineHitlDecision(timeline, Object.assign({}, data, {
+                        reviewer: data.reviewer || data.decidedBy || (eventType === 'hitl_audit_agent' ? 'audit_agent' : 'human'),
+                        status: 'decided'
+                    }), decision, detail.message || '');
+                }
+                return;
+            }
+        }
+
+        const processDetailId = detail.id || data.processDetailId || '';
         const timelineOpts = {
             title: itemTitle,
             message: detail.message || '',
             data: data,
-            processDetailId: detail.id || '',
+            processDetailId: processDetailId,
             createdAt: detail.createdAt
         };
         if (eventType === 'tool_call' && data._mergedResult) {
@@ -3271,10 +4445,23 @@ function renderProcessDetails(messageId, processDetails, options) {
                 }
             }
         }
-        if (!timelineOpts.toolStatus && eventType === 'tool_call' && detail.id && toolStatusByProcessDetailId.has(String(detail.id))) {
+        if (eventType === 'tool_call' && detail.id && toolStatusByProcessDetailId.has(String(detail.id))) {
             timelineOpts.toolStatus = toolStatusByProcessDetailId.get(String(detail.id));
         }
         const itemId = addTimelineItem(timeline, eventType, timelineOpts);
+        if (itemId && (eventType === 'hitl_interrupt' || eventType === 'hitl_audit_agent_started')) {
+            renderInlineHitlApproval(itemId, Object.assign({}, data, {
+                reviewer: eventType === 'hitl_audit_agent_started' ? 'audit_agent' : (data.reviewer || 'human'),
+                status: eventType === 'hitl_audit_agent_started' ? 'audit_running' : (data.status || 'pending')
+            }));
+        } else if (itemId && (eventType === 'hitl_audit_agent' || eventType === 'hitl_resumed' || eventType === 'hitl_rejected')) {
+            renderInlineHitlApproval(itemId, Object.assign({}, data, {
+                resolved: true,
+                decision: eventType === 'hitl_rejected' || data.decision === 'reject' ? 'reject' : 'approve',
+                reviewer: data.reviewer || data.decidedBy || (eventType === 'hitl_audit_agent' ? 'audit_agent' : 'human'),
+                status: 'decided'
+            }));
+        }
         if (prependMode && itemId) {
             prependedIds.push(itemId);
         }
@@ -3329,10 +4516,10 @@ function finishProcessDetailsRender(messageElement, processDetails, isLazyNotLoa
         timeline.appendChild(lazyHint);
         bindProcessDetailsLazyHint(lazyHint, messageElement.id);
     }
-    
+
     const hasPendingHitlInDetails = processDetails.some(d => d && d.eventType === 'hitl_interrupt');
     const hasPendingWorkflowHitl = processDetails.some(d => d && d.eventType === 'workflow_hitl_waiting');
-    const hasErrorOrCancelled = processDetails.some(d => 
+    const hasErrorOrCancelled = processDetails.some(d =>
         d.eventType === 'error' || d.eventType === 'cancelled'
     );
     const userExpanded = isProcessDetailsUserExpanded(messageElement.id);
@@ -3349,6 +4536,12 @@ function finishProcessDetailsRender(messageElement, processDetails, isLazyNotLoa
             window.restoreWorkflowHitlInlineForConversation(convId);
         }
     }
+    if (typeof window.ensureProcessDetailsReturnLatestControl === 'function') {
+        window.ensureProcessDetailsReturnLatestControl(timeline);
+    }
+    if (typeof window.updateProcessDetailsReturnLatestControl === 'function') {
+        window.updateProcessDetailsReturnLatestControl(timeline);
+    }
 }
 
 /** 懒加载折叠态：后台拉摘要，提示迭代规模而不加载全量详情 */
@@ -3364,7 +4557,14 @@ function prefetchProcessDetailsSummaryHint(messageId, messageElement) {
             const j = await res.json().catch(() => ({}));
             if (!res.ok || !j.summary) return;
             const s = j.summary;
-            const toolCount = parseInt(s.toolCount, 10) || 0;
+            if (typeof window.setAssistantTurnTiming === 'function') {
+                window.setAssistantTurnTiming(messageElement, {
+                    startedAt: s.startedAt,
+                    completedAt: s.completedAt,
+                    durationMs: s.durationMs,
+                    status: s.status || 'completed'
+                });
+            }
             const summaryMcpIds = Array.isArray(s.mcpExecutionIds) ? s.mcpExecutionIds : [];
             const summaryTools = Array.isArray(s.toolExecutions) ? s.toolExecutions : [];
             if (summaryTools.length > 0) {
@@ -3373,7 +4573,11 @@ function prefetchProcessDetailsSummaryHint(messageId, messageElement) {
             if (summaryMcpIds.length > 0) {
                 setPendingMcpExecutionIds(messageElement, summaryMcpIds);
             }
-            const buttonToolCount = summaryTools.length > 0 ? summaryTools.length : (toolCount || summaryMcpIds.length);
+            const summaryToolExecutionCount = summaryTools
+                .map(normalizeToolExecutionSummaryForButton)
+                .filter((item) => item.executionId)
+                .length;
+            const buttonToolCount = summaryToolExecutionCount > 0 ? summaryToolExecutionCount : summaryMcpIds.length;
             if (buttonToolCount > 0) {
                 setMcpExecutionSummaryCount(messageElement, buttonToolCount);
             }
@@ -3403,7 +4607,7 @@ function removeMessage(id) {
     }
 }
 
-// 输入框事件绑定（回车发送 / @提及）
+// 输入框事件绑定（Enter 发送、Shift+Enter 换行 / @提及）
 const chatInput = document.getElementById('chat-input');
 if (chatInput) {
     chatInput.addEventListener('keydown', handleChatInputKeydown);
@@ -3467,7 +4671,9 @@ function getPendingToolExecutionSummaryCount(messageElement) {
     }
     try {
         const tools = JSON.parse(messageElement.dataset.pendingToolExecutionSummaries);
-        return Array.isArray(tools) ? tools.length : 0;
+        return Array.isArray(tools)
+            ? tools.map(normalizeToolExecutionSummaryForButton).filter((item) => item.executionId).length
+            : 0;
     } catch (e) {
         return 0;
     }
@@ -3602,7 +4808,7 @@ function cacheToolExecutionSummaries(messageElement, summaries) {
     if (!messageElement || !messageElement.dataset || !Array.isArray(summaries)) return [];
     const normalized = summaries
         .map(normalizeToolExecutionSummaryForButton)
-        .filter((item) => item.toolName || item.executionId || item.toolCallId);
+        .filter((item) => item.executionId);
     if (normalized.length > 0) {
         messageElement.dataset.toolExecutionSummaries = JSON.stringify(normalized);
     } else {
@@ -3678,6 +4884,291 @@ function formatMcpToolsToggleLabel(count, expanded) {
     return count + ' tool execution(s)';
 }
 
+function formatAssistantTurnDuration(durationMs) {
+    const totalSeconds = Math.max(0, Math.floor((Number(durationMs) || 0) / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) {
+        return typeof window.t === 'function'
+            ? window.t('chat.turnDurationHours', { hours: hours, minutes: minutes })
+            : hours + 'h ' + minutes + 'm';
+    }
+    if (minutes > 0) {
+        return typeof window.t === 'function'
+            ? window.t('chat.turnDurationMinutes', { minutes: minutes, seconds: seconds })
+            : minutes + 'm ' + seconds + 's';
+    }
+    return typeof window.t === 'function'
+        ? window.t('chat.turnDurationSeconds', { seconds: seconds })
+        : seconds + 's';
+}
+
+function assistantTurnUsageNumber(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+}
+
+function normalizeAssistantTurnTokenUsage(data) {
+    const source = data && typeof data === 'object' ? data : {};
+    const usage = {
+        modelCalls: assistantTurnUsageNumber(source.modelCalls),
+        promptTokens: assistantTurnUsageNumber(source.promptTokens),
+        completionTokens: assistantTurnUsageNumber(source.completionTokens),
+        totalTokens: assistantTurnUsageNumber(source.totalTokens),
+        cachedTokens: assistantTurnUsageNumber(source.cachedTokens),
+        reasoningTokens: assistantTurnUsageNumber(source.reasoningTokens),
+        model: source.model != null ? String(source.model).trim() : ''
+    };
+    if (usage.totalTokens <= 0 && (usage.promptTokens > 0 || usage.completionTokens > 0)) {
+        usage.totalTokens = usage.promptTokens + usage.completionTokens;
+    }
+    return usage.totalTokens > 0 ? usage : null;
+}
+
+function mergeAssistantTurnTokenUsage(target, usage) {
+    if (!usage) return target || null;
+    const out = target || {
+        modelCalls: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        cachedTokens: 0,
+        reasoningTokens: 0,
+        model: ''
+    };
+    out.modelCalls += usage.modelCalls || 0;
+    out.promptTokens += usage.promptTokens || 0;
+    out.completionTokens += usage.completionTokens || 0;
+    out.totalTokens += usage.totalTokens || 0;
+    out.cachedTokens += usage.cachedTokens || 0;
+    out.reasoningTokens += usage.reasoningTokens || 0;
+    if (!out.model && usage.model) out.model = usage.model;
+    return out.totalTokens > 0 ? out : null;
+}
+
+function extractAssistantTurnTokenUsage(processDetails) {
+    if (!Array.isArray(processDetails)) return null;
+    let total = null;
+    processDetails.forEach((detail) => {
+        if (!detail || String(detail.eventType || '').trim() !== 'eino_usage_summary') return;
+        const usage = normalizeAssistantTurnTokenUsage(detail.data);
+        total = mergeAssistantTurnTokenUsage(total, usage);
+    });
+    return total;
+}
+
+function setAssistantTurnTokenUsage(messageElementOrId, usage) {
+    const messageElement = typeof messageElementOrId === 'string'
+        ? document.getElementById(messageElementOrId)
+        : messageElementOrId;
+    if (!messageElement || !messageElement.dataset) return;
+    const normalized = normalizeAssistantTurnTokenUsage(usage);
+    if (!normalized) {
+        delete messageElement.dataset.turnModelCalls;
+        delete messageElement.dataset.turnPromptTokens;
+        delete messageElement.dataset.turnCompletionTokens;
+        delete messageElement.dataset.turnTotalTokens;
+        delete messageElement.dataset.turnCachedTokens;
+        delete messageElement.dataset.turnReasoningTokens;
+        delete messageElement.dataset.turnModel;
+        syncAssistantTurnSummary(messageElement);
+        return;
+    }
+    messageElement.dataset.turnModelCalls = String(normalized.modelCalls || 0);
+    messageElement.dataset.turnPromptTokens = String(normalized.promptTokens || 0);
+    messageElement.dataset.turnCompletionTokens = String(normalized.completionTokens || 0);
+    messageElement.dataset.turnTotalTokens = String(normalized.totalTokens || 0);
+    messageElement.dataset.turnCachedTokens = String(normalized.cachedTokens || 0);
+    messageElement.dataset.turnReasoningTokens = String(normalized.reasoningTokens || 0);
+    if (normalized.model) {
+        messageElement.dataset.turnModel = normalized.model;
+    } else {
+        delete messageElement.dataset.turnModel;
+    }
+    syncAssistantTurnSummary(messageElement);
+}
+
+function getAssistantTurnTokenUsage(messageElement) {
+    if (!messageElement || !messageElement.dataset) return null;
+    return normalizeAssistantTurnTokenUsage({
+        modelCalls: messageElement.dataset.turnModelCalls,
+        promptTokens: messageElement.dataset.turnPromptTokens,
+        completionTokens: messageElement.dataset.turnCompletionTokens,
+        totalTokens: messageElement.dataset.turnTotalTokens,
+        cachedTokens: messageElement.dataset.turnCachedTokens,
+        reasoningTokens: messageElement.dataset.turnReasoningTokens,
+        model: messageElement.dataset.turnModel
+    });
+}
+
+function formatAssistantTurnTokenCount(value) {
+    const n = assistantTurnUsageNumber(value);
+    if (n >= 1000000) return (n / 1000000).toFixed(n >= 10000000 ? 0 : 1).replace(/\.0$/, '') + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(n >= 100000 ? 0 : 1).replace(/\.0$/, '') + 'K';
+    return String(n);
+}
+
+function formatAssistantTurnTokenUsageLabel(usage) {
+    const tokens = formatAssistantTurnTokenCount(usage && usage.totalTokens);
+    return typeof window.t === 'function'
+        ? window.t('chat.turnTokenUsageLabel', { tokens: tokens })
+        : tokens + ' tokens';
+}
+
+function formatAssistantTurnTokenUsageTitle(usage) {
+    const safeUsage = usage || {};
+    const values = {
+        total: formatAssistantTurnTokenCount(safeUsage.totalTokens),
+        prompt: formatAssistantTurnTokenCount(safeUsage.promptTokens),
+        completion: formatAssistantTurnTokenCount(safeUsage.completionTokens),
+        cached: formatAssistantTurnTokenCount(safeUsage.cachedTokens),
+        reasoning: formatAssistantTurnTokenCount(safeUsage.reasoningTokens),
+        calls: formatAssistantTurnTokenCount(safeUsage.modelCalls),
+        model: safeUsage.model || ''
+    };
+    return typeof window.t === 'function'
+        ? window.t('chat.turnTokenUsageTitle', values)
+        : 'Token usage: ' + values.total + ' (input ' + values.prompt + ', output ' + values.completion + ')';
+}
+
+function assistantTurnTimestamp(value) {
+    if (value == null || value === '') return NaN;
+    const n = new Date(value).getTime();
+    return Number.isFinite(n) ? n : NaN;
+}
+
+function assistantTurnTerminalState(processDetails) {
+    if (!Array.isArray(processDetails)) return null;
+    for (let i = processDetails.length - 1; i >= 0; i--) {
+        const detail = processDetails[i] || {};
+        const eventType = String(detail.eventType || '').trim().toLowerCase();
+        if (eventType === 'cancelled') {
+            return { status: 'cancelled', completedAt: detail.createdAt || null, detail: detail };
+        }
+        if (eventType === 'timeout') {
+            return { status: 'timeout', completedAt: detail.createdAt || null, detail: detail };
+        }
+        if (eventType === 'error') {
+            return { status: 'failed', completedAt: detail.createdAt || null, detail: detail };
+        }
+    }
+    return null;
+}
+
+let assistantTurnElapsedTimer = null;
+
+function syncRunningAssistantTurnSummaries() {
+    const runningTurns = document.querySelectorAll('#chat-messages .message.assistant[data-turn-status="running"]');
+    runningTurns.forEach((messageElement) => syncAssistantTurnSummary(messageElement));
+    if (runningTurns.length === 0 && assistantTurnElapsedTimer) {
+        clearInterval(assistantTurnElapsedTimer);
+        assistantTurnElapsedTimer = null;
+    }
+}
+
+function syncAssistantTurnElapsedClock() {
+    const hasRunningTurn = !!document.querySelector('#chat-messages .message.assistant[data-turn-status="running"]');
+    if (hasRunningTurn && !assistantTurnElapsedTimer) {
+        assistantTurnElapsedTimer = setInterval(syncRunningAssistantTurnSummaries, 1000);
+    } else if (!hasRunningTurn && assistantTurnElapsedTimer) {
+        clearInterval(assistantTurnElapsedTimer);
+        assistantTurnElapsedTimer = null;
+    }
+}
+
+function setAssistantTurnTiming(messageElementOrId, timing) {
+    const messageElement = typeof messageElementOrId === 'string'
+        ? document.getElementById(messageElementOrId)
+        : messageElementOrId;
+    if (!messageElement || !messageElement.dataset) return;
+    const value = timing || {};
+    if (value.startedAt) messageElement.dataset.turnStartedAt = String(value.startedAt);
+    if (value.completedAt) messageElement.dataset.turnCompletedAt = String(value.completedAt);
+    if (value.status) messageElement.dataset.turnStatus = String(value.status);
+    const status = String(messageElement.dataset.turnStatus || 'completed');
+    if (status === 'running') {
+        // 摘要接口对运行中任务返回 durationMs=0。刷新页面时不能把这个快照
+        // 当作固定耗时保存，否则后续渲染会一直显示“已处理 0 秒”。
+        delete messageElement.dataset.turnDurationMs;
+        delete messageElement.dataset.turnCompletedAt;
+    } else {
+        const explicitDuration = Number(value.durationMs);
+        if (Number.isFinite(explicitDuration) && explicitDuration >= 0) {
+            messageElement.dataset.turnDurationMs = String(Math.round(explicitDuration));
+        }
+        const startedAt = assistantTurnTimestamp(messageElement.dataset.turnStartedAt);
+        const completedAt = assistantTurnTimestamp(messageElement.dataset.turnCompletedAt);
+        if ((!Number.isFinite(explicitDuration) || explicitDuration < 0) &&
+            Number.isFinite(startedAt) && Number.isFinite(completedAt) && completedAt >= startedAt) {
+            messageElement.dataset.turnDurationMs = String(completedAt - startedAt);
+        }
+    }
+    syncAssistantTurnSummary(messageElement);
+    syncAssistantTurnElapsedClock();
+}
+
+function syncAssistantTurnSummary(messageElementOrId) {
+    const messageElement = typeof messageElementOrId === 'string'
+        ? document.getElementById(messageElementOrId)
+        : messageElementOrId;
+    if (!messageElement) return;
+    const label = messageElement.querySelector('.mcp-call-label.turn-process-summary');
+    if (!label) return;
+    const details = messageElement.querySelector('.process-details-container');
+    const timeline = details && details.querySelector('.progress-timeline');
+    const expanded = !!(timeline && timeline.classList.contains('expanded'));
+    const status = String(messageElement.dataset.turnStatus || 'completed');
+    let durationMs = Number(messageElement.dataset.turnDurationMs);
+    if (!Number.isFinite(durationMs) || durationMs < 0) {
+        const startedAt = assistantTurnTimestamp(messageElement.dataset.turnStartedAt);
+        const completedAt = status === 'running'
+            ? Date.now()
+            : assistantTurnTimestamp(messageElement.dataset.turnCompletedAt);
+        durationMs = Number.isFinite(startedAt) && Number.isFinite(completedAt)
+            ? Math.max(0, completedAt - startedAt)
+            : 0;
+    }
+    const duration = formatAssistantTurnDuration(durationMs);
+    const tokenUsage = getAssistantTurnTokenUsage(messageElement);
+    const tokenUsageHtml = tokenUsage
+        ? '<span class="turn-process-token-chip" title="' + escapeHtml(formatAssistantTurnTokenUsageTitle(tokenUsage)) + '">' +
+            escapeHtml(formatAssistantTurnTokenUsageLabel(tokenUsage)) +
+          '</span>'
+        : '';
+    let text;
+    if (status === 'running') {
+        text = typeof window.t === 'function' ? window.t('chat.turnElapsedRunning', { duration: duration }) : 'Processed ' + duration;
+    } else if (status === 'cancelled') {
+        text = typeof window.t === 'function' ? window.t('chat.turnElapsedCancelled', { duration: duration }) : 'Interrupted · took ' + duration;
+    } else if (status === 'timeout') {
+        text = typeof window.t === 'function' ? window.t('chat.turnElapsedTimeout', { duration: duration }) : 'Timed out · took ' + duration;
+    } else if (status === 'failed') {
+        text = typeof window.t === 'function' ? window.t('chat.turnElapsedFailed', { duration: duration }) : 'Failed · took ' + duration;
+    } else {
+        text = typeof window.t === 'function' ? window.t('chat.turnElapsedComplete', { duration: duration }) : 'Took ' + duration;
+    }
+    label.innerHTML = `
+        <span class="turn-process-leading">
+            <span class="turn-process-status-dot${status === 'running' ? ' is-running' : ''}" aria-hidden="true"></span>
+            <span class="turn-process-summary-text">${escapeHtml(text)}</span>
+            ${tokenUsageHtml}
+        </span>
+        <svg class="turn-process-chevron" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M7.5 5.5L12 10l-4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    `;
+    label.classList.toggle('is-expanded', expanded);
+    label.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    label.setAttribute('aria-label', typeof window.t === 'function'
+        ? window.t('chat.turnProcessAria', { state: text })
+        : text + ', expand or collapse execution process');
+}
+
+window.setAssistantTurnTiming = setAssistantTurnTiming;
+window.setAssistantTurnTokenUsage = setAssistantTurnTokenUsage;
+window.syncAssistantTurnSummary = syncAssistantTurnSummary;
+window.formatAssistantTurnDuration = formatAssistantTurnDuration;
+window.extractAssistantTurnTokenUsage = extractAssistantTurnTokenUsage;
+
 /** 渗透测试区：工具栏（展开详情 | N次工具执行）+ 独立工具列表 + 迭代时间线 */
 function ensureMcpCallSectionChrome(messageElement, messageId) {
     const contentWrapper = messageElement && messageElement.querySelector('.message-content');
@@ -3687,18 +5178,26 @@ function ensureMcpCallSectionChrome(messageElement, messageId) {
     if (!mcpSection) {
         mcpSection = document.createElement('div');
         mcpSection.className = 'mcp-call-section';
-        const mcpLabel = document.createElement('div');
-        mcpLabel.className = 'mcp-call-label';
-        mcpLabel.textContent = '📋 ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : 'Task execution details');
+        const mcpLabel = document.createElement('button');
+        mcpLabel.type = 'button';
+        mcpLabel.className = 'mcp-call-label turn-process-summary';
+        mcpLabel.onclick = function (event) {
+            event.stopPropagation();
+            toggleProcessDetails(null, messageId || messageElement.id);
+        };
         mcpSection.appendChild(mcpLabel);
-        contentWrapper.appendChild(mcpSection);
-    } else {
-        const mcpLabel = mcpSection.querySelector('.mcp-call-label');
-        const labelText = '📋 ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestDetail') : 'Task execution details');
-        if (mcpLabel && mcpLabel.textContent !== labelText) {
-            mcpLabel.textContent = labelText;
+        const resultBubble = contentWrapper.querySelector(':scope > .message-bubble');
+        contentWrapper.insertBefore(mcpSection, resultBubble || contentWrapper.firstChild);
+    } else if (mcpSection.parentNode === contentWrapper) {
+        const resultBubble = contentWrapper.querySelector(':scope > .message-bubble');
+        if (resultBubble && mcpSection.nextSibling !== resultBubble) {
+            contentWrapper.insertBefore(mcpSection, resultBubble);
         }
     }
+
+    messageElement.classList.add('assistant-turn-with-process');
+    const resultBubble = contentWrapper.querySelector(':scope > .message-bubble');
+    if (resultBubble) resultBubble.classList.add('assistant-final-result');
 
     let toolbar = mcpSection.querySelector('.mcp-call-toolbar');
     if (!toolbar) {
@@ -3728,6 +5227,7 @@ function ensureMcpCallSectionChrome(messageElement, messageId) {
         toolbar.appendChild(processDetailBtn);
     }
 
+    syncAssistantTurnSummary(messageElement);
     return { mcpSection, toolbar, toolList };
 }
 
@@ -3762,128 +5262,6 @@ function syncMcpToolsToggleButton(messageElement) {
     toolsToggle.innerHTML = '<span>' + formatMcpToolsToggleLabel(count, expanded) + '</span>';
 }
 
-function cssEscapeValue(value) {
-    const s = String(value || '');
-    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
-        return CSS.escape(s);
-    }
-    return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-}
-
-async function ensureProcessDetailsForToolFocus(messageElement, anchorId) {
-    if (!messageElement || !messageElement.id) return null;
-    const detailsId = 'process-details-' + messageElement.id;
-    let detailsContainer = document.getElementById(detailsId);
-    const backendId = messageElement.dataset ? String(messageElement.dataset.backendMessageId || '').trim() : '';
-    if (detailsContainer && detailsContainer.dataset && detailsContainer.dataset.lazyNotLoaded === '1' && backendId && typeof window.loadProcessDetailsPaginated === 'function') {
-        await window.loadProcessDetailsPaginated(messageElement.id, backendId, { autoLoadAll: false, anchorId: anchorId || '' });
-        detailsContainer = document.getElementById(detailsId);
-    } else if (!detailsContainer && backendId && typeof renderProcessDetails === 'function') {
-        renderProcessDetails(messageElement.id, null);
-        detailsContainer = document.getElementById(detailsId);
-        if (detailsContainer && typeof window.loadProcessDetailsPaginated === 'function') {
-            await window.loadProcessDetailsPaginated(messageElement.id, backendId, { autoLoadAll: false, anchorId: anchorId || '' });
-            detailsContainer = document.getElementById(detailsId);
-        }
-    }
-    if (typeof window.expandProcessDetailsTimeline === 'function') {
-        window.expandProcessDetailsTimeline(messageElement.id);
-    } else if (typeof toggleProcessDetails === 'function') {
-        const timeline = detailsContainer && detailsContainer.querySelector('.progress-timeline');
-        if (!timeline || !timeline.classList.contains('expanded')) {
-            toggleProcessDetails(null, messageElement.id);
-        }
-    }
-    return document.getElementById(detailsId);
-}
-
-async function focusToolExecutionInProcessDetails(messageElement, summary, index) {
-    const item = normalizeToolExecutionSummaryForButton(summary);
-    let detailsContainer = await ensureProcessDetailsForToolFocus(messageElement, item.processDetailId || '');
-    let timeline = detailsContainer && detailsContainer.querySelector('.progress-timeline');
-    if (!timeline) return;
-    let target = null;
-    if (item.processDetailId) {
-        target = timeline.querySelector('[data-process-detail-id="' + cssEscapeValue(item.processDetailId) + '"]');
-    }
-    if (!target && item.toolCallId) {
-        target = timeline.querySelector('[data-tool-call-id="' + cssEscapeValue(item.toolCallId) + '"]');
-    }
-    if (!target) {
-        const toolItems = timeline.querySelectorAll('.timeline-item-tool_call');
-        target = toolItems[index] || null;
-    }
-    if (!target && item.processDetailId && messageElement.dataset && messageElement.dataset.backendMessageId && typeof window.loadProcessDetailsPaginated === 'function') {
-        await window.loadProcessDetailsPaginated(messageElement.id, messageElement.dataset.backendMessageId, {
-            autoLoadAll: false,
-            anchorId: item.processDetailId
-        });
-        detailsContainer = document.getElementById('process-details-' + messageElement.id);
-        timeline = detailsContainer && detailsContainer.querySelector('.progress-timeline');
-        target = timeline ? timeline.querySelector('[data-process-detail-id="' + cssEscapeValue(item.processDetailId) + '"]') : null;
-    }
-    if (!target) return;
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    target.classList.remove('timeline-item-focus-pulse');
-    void target.offsetWidth;
-    target.classList.add('timeline-item-focus-pulse');
-    setTimeout(() => {
-        target.classList.remove('timeline-item-focus-pulse');
-    }, 2200);
-}
-
-async function findToolExecutionTimelineItem(messageElement, summary, index) {
-    const item = normalizeToolExecutionSummaryForButton(summary);
-    let detailsContainer = await ensureProcessDetailsForToolFocus(messageElement, item.processDetailId || '');
-    let timeline = detailsContainer && detailsContainer.querySelector('.progress-timeline');
-    if (!timeline) return null;
-    let target = null;
-    if (item.processDetailId) {
-        target = timeline.querySelector('[data-process-detail-id="' + cssEscapeValue(item.processDetailId) + '"]');
-    }
-    if (!target && item.toolCallId) {
-        target = timeline.querySelector('[data-tool-call-id="' + cssEscapeValue(item.toolCallId) + '"]');
-    }
-    if (!target && item.processDetailId && messageElement.dataset && messageElement.dataset.backendMessageId && typeof window.loadProcessDetailsPaginated === 'function') {
-        await window.loadProcessDetailsPaginated(messageElement.id, messageElement.dataset.backendMessageId, {
-            autoLoadAll: false,
-            anchorId: item.processDetailId
-        });
-        detailsContainer = document.getElementById('process-details-' + messageElement.id);
-        timeline = detailsContainer && detailsContainer.querySelector('.progress-timeline');
-        target = timeline ? timeline.querySelector('[data-process-detail-id="' + cssEscapeValue(item.processDetailId) + '"]') : null;
-    }
-    return target;
-}
-
-async function resolveToolExecutionSummaryForFocus(messageElement, executionId, index) {
-    const wantedExecutionId = executionId == null ? '' : String(executionId).trim();
-    let summaries = getCachedToolExecutionSummaries(messageElement);
-    let item = wantedExecutionId
-        ? summaries.find((summary) => summary.executionId === wantedExecutionId)
-        : summaries[index];
-    if (item && (item.processDetailId || item.toolCallId)) return item;
-
-    const backendId = messageElement && messageElement.dataset
-        ? String(messageElement.dataset.backendMessageId || '').trim()
-        : '';
-    if (!backendId || typeof apiFetch !== 'function') return item || null;
-    try {
-        const res = await apiFetch('/api/messages/' + encodeURIComponent(backendId) + '/process-details?summary=1');
-        const payload = await res.json().catch(() => ({}));
-        if (!res.ok || !payload.summary || !Array.isArray(payload.summary.toolExecutions)) {
-            return item || null;
-        }
-        summaries = cacheToolExecutionSummaries(messageElement, payload.summary.toolExecutions);
-        item = wantedExecutionId
-            ? summaries.find((summary) => summary.executionId === wantedExecutionId)
-            : summaries[index];
-        return item || null;
-    } catch (e) {
-        return item || null;
-    }
-}
-
 function toggleMcpToolList(assistantMessageId) {
     const messageEl = document.getElementById(assistantMessageId);
     if (!messageEl) return;
@@ -3895,9 +5273,7 @@ function toggleMcpToolList(assistantMessageId) {
         !getPendingToolExecutionSummaryCount(messageEl) &&
         !toolList.querySelector('.mcp-detail-btn')
     ) {
-        if (typeof toggleProcessDetails === 'function') {
-            toggleProcessDetails(null, assistantMessageId);
-        }
+        syncMcpToolsToggleButton(messageEl);
         return;
     }
     const willExpand = !toolList.classList.contains('expanded');
@@ -3919,174 +5295,16 @@ window.setMcpExecutionSummaryCount = setMcpExecutionSummaryCount;
 window.setPendingMcpExecutionIds = setPendingMcpExecutionIds;
 window.setPendingToolExecutionSummaries = setPendingToolExecutionSummaries;
 
-async function fetchProcessDetailDataForModal(detailId) {
-    const id = detailId != null ? String(detailId).trim() : '';
-    if (!id || typeof apiFetch !== 'function') return null;
-    const res = await apiFetch('/api/process-details/' + encodeURIComponent(id));
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok) return null;
-    const detail = j && j.processDetail ? j.processDetail : null;
-    return detail && detail.data ? detail.data : null;
-}
-
-async function fetchProcessDetailForModal(detailId) {
-    const id = detailId != null ? String(detailId).trim() : '';
-    if (!id || typeof apiFetch !== 'function') return null;
-    const res = await apiFetch('/api/process-details/' + encodeURIComponent(id));
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok) return null;
-    return j && j.processDetail ? j.processDetail : null;
-}
-
-function processToolResultTextFromData(resultData) {
-    if (!resultData) return '';
-    const noResultText = typeof window.t === 'function' ? window.t('timeline.noResult') : 'No result';
-    const result = resultData.result != null
-        ? resultData.result
-        : (resultData.error != null ? resultData.error : (resultData.resultPreview != null ? resultData.resultPreview : noResultText));
-    return typeof result === 'string' ? result : JSON.stringify(result);
-}
-
-function processToolResultToMCPResult(resultData, rawText) {
-    if (!resultData) return null;
-    const displayState = typeof window.getToolResultDisplayState === 'function'
-        ? window.getToolResultDisplayState(resultData, { rawText: rawText })
-        : { kind: ((resultData.isError || resultData.success === false) ? 'error' : 'success'), isError: !!(resultData.isError || resultData.success === false) };
-    const isError = !!displayState.isError;
-    let text = rawText;
-    if (text == null || String(text) === '') {
-        text = processToolResultTextFromData(resultData);
-    }
-    return {
-        content: [{ type: 'text', text: String(text || '') }],
-        isError: isError
-    };
-}
-
-async function showMCPDetailFromProcessToolItem(messageElement, summary, index) {
-    const item = normalizeToolExecutionSummaryForButton(summary);
-    if (item.processDetailId) {
-        const callDetail = await fetchProcessDetailForModal(item.processDetailId);
-        const callData = callDetail && callDetail.data ? callDetail.data : null;
-        if (callData) {
-            const args = typeof window.parseToolCallArgsFromData === 'function'
-                ? window.parseToolCallArgsFromData(callData)
-                : (callData.argumentsObj || {});
-            let resultData = callData._mergedResult || null;
-            let resultDetailId = item.resultDetailId || callData._mergedResultDetailId || '';
-            let rawText = resultData ? processToolResultTextFromData(resultData) : '';
-            const resultPayloadDeferred = resultData && resultData._payloadDeferred === true;
-            const resultOnlyHasPreview = resultData && resultData.result == null && resultData.error == null && resultData.resultPreview != null;
-            if (resultDetailId && (!resultData || resultPayloadDeferred || resultOnlyHasPreview)) {
-                const resultDetail = await fetchProcessDetailForModal(resultDetailId);
-                const fullResult = resultDetail && resultDetail.data ? resultDetail.data : null;
-                if (fullResult) {
-                    resultData = fullResult;
-                    rawText = processToolResultTextFromData(fullResult);
-                }
-            }
-            const displayState = resultData && typeof window.getToolResultDisplayState === 'function'
-                ? window.getToolResultDisplayState(resultData, { rawText: rawText })
-                : null;
-            const backgroundRunning = (displayState && displayState.kind === 'background_running') || String(item.status || '').toLowerCase() === 'background_running';
-            const success = resultData
-                ? !(displayState ? displayState.isError : (resultData.isError || resultData.success === false))
-                : String(item.status || '').toLowerCase() !== 'failed';
-            const status = backgroundRunning
-                ? 'background_running'
-                : (resultData || item.status
-                    ? (success ? 'completed' : 'failed')
-                    : 'running');
-            const exec = {
-                id: (resultData && resultData.executionId) || item.executionId || callData.executionId || '',
-                toolName: item.toolName || callData.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : 'Unknown tool'),
-                status: status,
-                startTime: callDetail.createdAt || '',
-                arguments: args || {},
-                result: processToolResultToMCPResult(resultData, rawText),
-                error: resultData && resultData.error ? String(resultData.error) : ''
-            };
-            openAppModal('mcp-detail-modal', { focus: false });
-            deferModalContent(function () {
-                renderMCPDetailModal(exec);
-            });
-            return;
-        }
-    }
-
-    const target = await findToolExecutionTimelineItem(messageElement, summary, index);
-    if (!target) {
-        alert(typeof window.t === 'function'
-            ? window.t('chat.toolExecutionDetailPending')
-            : 'Tool execution details are not synchronized yet. Please try again later.');
-        return;
-    }
-    const state = typeof window.getToolCallDetailState === 'function'
-        ? window.getToolCallDetailState(target)
-        : {};
-    let args = state.args;
-    let resultData = state.resultData;
-    let rawText = state.rawText;
-    if ((!args || Object.keys(args).length === 0) && state.processDetailId) {
-        const fullCall = await fetchProcessDetailDataForModal(state.processDetailId);
-        if (fullCall) {
-            args = typeof window.parseToolCallArgsFromData === 'function'
-                ? window.parseToolCallArgsFromData(fullCall)
-                : (fullCall.argumentsObj || {});
-        }
-    }
-    const resultDetailId = state.resultDetailId || target.dataset.toolResultDetailId || '';
-    const resultPayloadDeferred = resultData && resultData._payloadDeferred === true;
-    const resultOnlyHasPreview = resultData && resultData.result == null && resultData.error == null && resultData.resultPreview != null;
-    if (resultDetailId && (!resultData || resultPayloadDeferred || resultOnlyHasPreview)) {
-        const fullResult = await fetchProcessDetailDataForModal(resultDetailId);
-        if (fullResult) {
-            resultData = fullResult;
-            rawText = processToolResultTextFromData(fullResult);
-        }
-    }
-    const toolName = (summary && summary.toolName) || target.dataset.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : 'Unknown tool');
-    const displayState = resultData && typeof window.getToolResultDisplayState === 'function'
-        ? window.getToolResultDisplayState(resultData, { rawText: rawText })
-        : null;
-    const backgroundRunning = (displayState && displayState.kind === 'background_running') || target.dataset.toolDisplayStatus === 'background_running';
-    const success = resultData ? !(displayState ? displayState.isError : (resultData.isError || resultData.success === false)) : target.dataset.toolSuccess !== '0';
-    const status = backgroundRunning
-        ? 'background_running'
-        : (resultData || target.classList.contains('tool-call-completed') || target.classList.contains('tool-call-failed')
-            ? (success ? 'completed' : 'failed')
-            : 'running');
-    const exec = {
-        id: (resultData && resultData.executionId) || (summary && summary.executionId) || '',
-        toolName: toolName,
-        status: status,
-        startTime: target.dataset.createdAtIso || '',
-        arguments: args || {},
-        result: processToolResultToMCPResult(resultData, rawText),
-        error: resultData && resultData.error ? String(resultData.error) : ''
-    };
-    openAppModal('mcp-detail-modal', { focus: false });
-    deferModalContent(function () {
-        renderMCPDetailModal(exec);
-    });
-}
 
 async function openTaskToolExecutionDetail(messageElement, item, index) {
-    let detailItem = item;
-    if (!detailItem.executionId) {
-        const refreshedItem = await resolveToolExecutionSummaryForFocus(messageElement, '', index);
-        detailItem = refreshedItem || detailItem;
-    }
-    if (detailItem.executionId) {
-        await showMCPDetail(detailItem.executionId);
-        return;
-    }
-    await showMCPDetailFromProcessToolItem(messageElement, detailItem, index);
+    const detailItem = normalizeToolExecutionSummaryForButton(item);
+    if (!detailItem.executionId) return;
+    await showMCPDetail(detailItem.executionId);
 }
 
 /**
  * 声明式渲染工具调用列表。
- * 过程摘要提供完整展示入口；executionIds 只补充可直接打开监控详情的 ID。
+ * 工具详情只以 executionId 作为稳定入口；缺少 executionId 的历史摘要不渲染为工具详情入口。
  * 每次更新整体替换列表，避免增量追加产生双重状态。
  */
 function renderMcpCallButtons(messageElement) {
@@ -4096,7 +5314,8 @@ function renderMcpCallButtons(messageElement) {
     const toolList = chrome.toolList;
     const executionIds = getCachedMcpExecutionIds(messageElement);
     const summaries = getCachedToolExecutionSummaries(messageElement);
-    const items = selectToolExecutionSummariesForButtons(summaries, executionIds);
+    const items = selectToolExecutionSummariesForButtons(summaries, executionIds)
+        .filter((item) => item && item.executionId);
 
     const renderVersion = String((parseInt(toolList.dataset.renderVersion, 10) || 0) + 1);
     toolList.dataset.renderVersion = renderVersion;
@@ -4189,7 +5408,7 @@ function normalizeToolExecutionSummary(raw) {
     if (raw && typeof raw === 'object') {
         return {
             toolName: raw.toolName || raw.name || '',
-            status: raw.status || ''
+            status: typeof window.getToolExecutionDisplayStatus === 'function' ? window.getToolExecutionDisplayStatus(raw) : (raw.status || '')
         };
     }
     return { toolName: '', status: '' };
@@ -4201,6 +5420,7 @@ function getToolExecutionStatusLabel(status) {
         const keyMap = {
             completed: 'mcpMonitor.statusSuccess',
             failed: 'mcpMonitor.statusFailed',
+            blocked: 'mcpMonitor.statusBlocked',
             running: 'mcpMonitor.statusRunning',
             cancelled: 'mcpMonitor.statusCancelled',
             pending: 'mcpMonitor.statusPending',
@@ -4215,6 +5435,7 @@ function getToolExecutionStatusLabel(status) {
     const fallback = {
         completed: 'Succeeded',
         failed: 'Failed',
+        blocked: 'Blocked',
         running: 'Running',
         cancelled: 'Cancelled',
         pending: 'Pending',
@@ -4294,7 +5515,8 @@ function formatMCPResultJsonForDisplay(result) {
     if (!result) return '{}';
     const payload = {
         content: result.content,
-        isError: !!result.isError
+        isError: !!result.isError,
+        ...(result.blocked === true ? { blocked: true } : {})
     };
     return JSON.stringify(payload, null, 2);
 }
@@ -4342,12 +5564,13 @@ function renderMCPDetailModal(exec) {
     document.getElementById('detail-tool-name').textContent = exec.toolName || (typeof window.t === 'function' ? window.t('mcpDetailModal.unknown') : 'Unknown');
     document.getElementById('detail-execution-id').textContent = exec.id || 'N/A';
     const statusEl = document.getElementById('detail-status');
-    const normalizedStatus = (exec.status || 'unknown').toLowerCase();
-    statusEl.textContent = getStatusText(exec.status);
+    const normalizedStatus = typeof window.getToolExecutionDisplayStatus === 'function' ? window.getToolExecutionDisplayStatus(exec) : (exec.status || 'unknown').toLowerCase();
+    const blocked = normalizedStatus === 'blocked';
+    statusEl.textContent = getStatusText(normalizedStatus);
     const statusClass = normalizedStatus === 'background_running' ? 'running' : normalizedStatus;
     statusEl.className = `status-chip status-${statusClass}`;
     try {
-        statusEl.dataset.detailStatus = (exec.status || '') + '';
+        statusEl.dataset.detailStatus = normalizedStatus;
     } catch (e) { /* ignore */ }
     const detailTimeLocale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
     const detailTimeEl = document.getElementById('detail-time');
@@ -4382,12 +5605,26 @@ function renderMCPDetailModal(exec) {
         errorElement.textContent = '';
     }
     setMCPResultDetailTabs('raw', false);
+    const resultTabLabel = document.querySelector('#detail-result-tab-success [data-i18n]');
+    if (resultTabLabel) {
+        const key = blocked ? 'mcpDetailModal.blockReason' : 'mcpDetailModal.correctInfo';
+        resultTabLabel.dataset.i18n = key;
+        resultTabLabel.textContent = typeof window.t === 'function' ? window.t(key) : (blocked ? 'Block reason' : 'Expected result');
+    }
 
     if (exec.result) {
         const agentVisibleText = formatMCPDetailText(extractMCPResultText(exec.result));
         const emptyText = typeof window.t === 'function' ? window.t('mcpDetailModal.execSuccessNoContent') : 'Execution succeeded with no displayable content.';
 
-        if (exec.result.isError) {
+        if (blocked) {
+            responseElement.className = 'code-block blocked';
+            responseElement.textContent = formatMCPResultJsonForDisplay(exec.result);
+            if (successElement) {
+                successElement.className = 'code-block blocked';
+                successElement.textContent = agentVisibleText || exec.error || getStatusText('blocked');
+            }
+            setMCPResultDetailTabs('success', true);
+        } else if (exec.result.isError) {
             responseElement.className = 'code-block error';
             responseElement.textContent = formatMCPResultJsonForDisplay(exec.result);
             if (successElement) {
@@ -4638,41 +5875,47 @@ function copyDetailBlock(elementId, triggerBtn = null) {
 
 
 // 开始新对话
-async function startNewConversation() {
-    // 如果当前在分组详情页面，先退出分组详情
-    if (currentGroupId) {
-        const groupDetailPage = document.getElementById('group-detail-page');
-        const chatContainer = document.querySelector('.chat-container');
-        if (groupDetailPage) groupDetailPage.style.display = 'none';
-        if (chatContainer) chatContainer.style.display = 'flex';
-        currentGroupId = null;
-        // 刷新对话列表
-        loadConversationsWithGroups();
+async function startNewConversation(options = {}) {
+    const hasExplicitProjectId = !!options
+        && Object.prototype.hasOwnProperty.call(options, 'projectId');
+    const inheritedProjectId = typeof resolveChatProjectSelection === 'function'
+        ? resolveChatProjectSelection()
+        : (window._loadedConversationProjectId || '');
+    const requestedProjectId = hasExplicitProjectId
+        ? String(options.projectId || '').trim()
+        : String(inheritedProjectId || '').trim();
+    markChatConversationNavigation('', true);
+    if (typeof window.cancelScheduledChatConversationFromHash === 'function') {
+        window.cancelScheduledChatConversationFromHash();
     }
-    
+    clearChatConversationHash();
+    cancelPendingConversationLoad();
+    detachLiveChatStreamForNavigation('', true);
+    if (typeof window.cancelRunningTaskEventStream === 'function') {
+        window.cancelRunningTaskEventStream('');
+    }
+    if (typeof window.clearChatHitlApprovalDock === 'function') {
+        window.clearChatHitlApprovalDock();
+    }
     currentConversationId = null;
     window._loadedConversationProjectId = '';
     try {
         window.currentConversationId = '';
     } catch (e) { /* ignore */ }
-    currentConversationGroupId = null; // 新对话不属于任何分组
-    if (typeof ensureDefaultActiveProjectForNewChat === 'function') {
-        try {
-            await ensureDefaultActiveProjectForNewChat();
-        } catch (e) { /* ignore */ }
-    }
+    window.dispatchEvent(new CustomEvent('conversation-changed', { detail: { conversationId: '' } }));
+    updateChatPrimaryActionState();
+    // 顶部“新任务”继承当前文件夹；文件夹内的“+”仍可显式指定（包括无项目）。
+    if (typeof setActiveProjectId === 'function') setActiveProjectId(requestedProjectId);
     if (typeof refreshChatProjectSelector === 'function') {
         await refreshChatProjectSelector();
     }
     document.getElementById('chat-messages').innerHTML = '';
-    const readyMsgNew = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System is ready. Please enter your test requirements, and the system will automatically perform the corresponding security tests.';
-    addMessage('assistant', readyMsgNew, null, null, null, { systemReadyMessage: true });
+    updateChatPrimaryActionState();
+    renderChatWelcomeEmptyState();
     addAttackChainButton(null);
     updateActiveConversation();
-    // 刷新分组列表，清除分组高亮
-    await loadGroups();
     // 刷新对话列表，确保显示最新的历史对话
-    loadConversationsWithGroups();
+    loadConversations();
     // 清除防抖定时器，防止恢复草稿时触发保存
     if (draftSaveTimer) {
         clearTimeout(draftSaveTimer);
@@ -4686,19 +5929,7 @@ async function startNewConversation() {
         chatInput.value = '';
         adjustTextareaHeight(chatInput);
     }
-    // 把当前侧栏人机协同选项写入草稿与「最近应用」记忆，避免刷新时被旧草稿里的「关闭」覆盖
-    try {
-        if (typeof readHitlConfigFromForm === 'function' && typeof saveHitlConfigForConversation === 'function') {
-            const snap = readHitlConfigFromForm();
-            saveHitlConfigForConversation('', snap, { syncGlobalLast: true });
-        }
-    } catch (e) { /* ignore */ }
     refreshHitlConfigByCurrentConversation();
-}
-
-// 与 loadConversationsWithGroups 合并实现，避免并发加载时重复追加列表项
-async function loadConversations(searchQuery = '') {
-    return loadConversationsWithGroups(searchQuery);
 }
 
 function createConversationListItem(conversation) {
@@ -4742,7 +5973,7 @@ function createConversationListItem(conversation) {
     deleteBtn.className = 'conversation-delete-btn';
     deleteBtn.innerHTML = `
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14zM10 11v6M14 11v6" 
+            <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14zM10 11v6M14 11v6"
                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
     `;
@@ -4756,7 +5987,8 @@ function createConversationListItem(conversation) {
     item.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        loadConversation(conversation.id);
+        const targetConversationId = String(item.dataset.conversationId || '').trim();
+        if (targetConversationId) loadConversation(targetConversationId);
     };
     return item;
 }
@@ -4770,10 +6002,10 @@ function handleConversationSearch(query) {
     if (conversationSearchTimer) {
         clearTimeout(conversationSearchTimer);
     }
-    
+
     const searchInput = document.getElementById('conversation-search-input');
     const clearBtn = document.getElementById('conversation-search-clear');
-    
+
     if (clearBtn) {
         if (query && query.trim()) {
             clearBtn.style.display = 'block';
@@ -4781,7 +6013,7 @@ function handleConversationSearch(query) {
             clearBtn.style.display = 'none';
         }
     }
-    
+
     conversationSearchTimer = setTimeout(() => {
         loadConversations(query);
     }, 300); // 300ms防抖延迟
@@ -4791,17 +6023,204 @@ function handleConversationSearch(query) {
 function clearConversationSearch() {
     const searchInput = document.getElementById('conversation-search-input');
     const clearBtn = document.getElementById('conversation-search-clear');
-    
+
     if (searchInput) {
         searchInput.value = '';
     }
     if (clearBtn) {
         clearBtn.style.display = 'none';
     }
-    
+
     commitConversationsPage(1, { bumpNavigateGen: true });
     conversationsSearchQuery = '';
     loadConversations('');
+}
+
+function conversationSidebarText(key, fallback) {
+    if (typeof window.t === 'function') {
+        const translated = window.t(key);
+        if (translated && translated !== key) return translated;
+    }
+    return fallback;
+}
+
+/**
+ * Go 进程会嵌入 index.html。开发时即使进程尚未重启，也通过新版静态 JS
+ * 将旧侧栏升级为项目文件夹结构；新模板已包含结构时该函数保持幂等。
+ */
+function ensureProjectSidebarStructure() {
+    const sidebar = document.getElementById('conversation-sidebar');
+    const sidebarContent = sidebar && sidebar.querySelector('.sidebar-content');
+    if (!sidebar || !sidebarContent) return;
+
+    const newTaskLabel = sidebar.querySelector('.new-chat-btn span:last-child');
+    if (newTaskLabel) {
+        newTaskLabel.setAttribute('data-i18n', 'chat.newTask');
+        newTaskLabel.textContent = conversationSidebarText('chat.newTask', 'New task');
+    }
+
+    const searchInput = document.getElementById('conversation-search-input');
+    if (searchInput) {
+        searchInput.setAttribute('data-i18n', 'projects.searchProjectsPlaceholder');
+        searchInput.setAttribute('data-i18n-attr', 'placeholder');
+        searchInput.setAttribute('oninput', 'handleProjectFolderSearch(this.value)');
+        searchInput.setAttribute('onkeypress', "if(event.key === 'Enter') handleProjectFolderSearch(this.value)");
+        searchInput.placeholder = conversationSidebarText('projects.searchProjectsPlaceholder', 'Search projects…');
+    }
+    const searchClear = document.getElementById('conversation-search-clear');
+    if (searchClear) searchClear.setAttribute('onclick', 'clearProjectFolderSearch()');
+
+    const projectFilter = sidebarContent.querySelector('.conversation-project-filter');
+    if (projectFilter) projectFilter.hidden = true;
+
+    let projectSection = sidebarContent.querySelector('.project-folders-section');
+    const legacyTaskSection = sidebarContent.querySelector('.task-folders-section');
+    if (!projectSection && legacyTaskSection) {
+        projectSection = legacyTaskSection;
+        projectSection.className = 'project-folders-section';
+        projectSection.setAttribute('aria-labelledby', 'project-folders-title');
+        const legacyHeader = projectSection.querySelector('.task-folders-header');
+        if (legacyHeader) legacyHeader.className = 'section-header project-folders-header';
+        const legacyTitle = projectSection.querySelector('#task-folders-title');
+        if (legacyTitle) {
+            legacyTitle.id = 'project-folders-title';
+            legacyTitle.setAttribute('data-i18n', 'chat.projectFolders');
+            legacyTitle.textContent = conversationSidebarText('chat.projectFolders', 'Projects');
+        }
+        const legacyList = projectSection.querySelector('#task-folders-list');
+        if (legacyList) {
+            legacyList.id = 'project-folders-list';
+            legacyList.className = 'project-folders-list';
+            legacyList.removeAttribute('role');
+            legacyList.innerHTML = '';
+        }
+    }
+    if (!projectSection) {
+        projectSection = document.createElement('section');
+        projectSection.className = 'project-folders-section';
+        projectSection.setAttribute('aria-labelledby', 'project-folders-title');
+        projectSection.innerHTML =
+            '<div class="section-header project-folders-header">' +
+                '<span id="project-folders-title" class="section-title" data-i18n="chat.projectFolders">项目</span>' +
+                '<button type="button" class="add-group-btn project-folders-add-btn" data-require-permission="project:write" onclick="showNewProjectModalFromChatSidebar()" data-i18n="projects.newProject" data-i18n-attr="title,aria-label" data-i18n-skip-text="true" title="新建项目" aria-label="新建项目">' +
+                    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+                '</button>' +
+            '</div>' +
+            '<div id="project-folders-list" class="project-folders-list"></div>';
+        const searchBox = sidebarContent.querySelector('.conversation-search-box');
+        if (searchBox) searchBox.insertAdjacentElement('afterend', projectSection);
+        else sidebarContent.insertBefore(projectSection, sidebarContent.firstChild);
+    }
+
+    const projectHeader = projectSection.querySelector('.project-folders-header');
+    if (projectHeader && !projectHeader.querySelector('.project-folders-add-btn')) {
+        const addProjectButton = document.createElement('button');
+        addProjectButton.type = 'button';
+        addProjectButton.className = 'add-group-btn project-folders-add-btn';
+        addProjectButton.dataset.requirePermission = 'project:write';
+        addProjectButton.setAttribute('onclick', 'showNewProjectModalFromChatSidebar()');
+        addProjectButton.setAttribute('data-i18n', 'projects.newProject');
+        addProjectButton.setAttribute('data-i18n-attr', 'title,aria-label');
+        addProjectButton.setAttribute('data-i18n-skip-text', 'true');
+        addProjectButton.title = conversationSidebarText('projects.newProject', 'New project');
+        addProjectButton.setAttribute('aria-label', addProjectButton.title);
+        addProjectButton.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        projectHeader.appendChild(addProjectButton);
+    }
+
+    const recentSection = sidebarContent.querySelector('.recent-conversations-section');
+    if (recentSection) {
+        recentSection.id = 'recent-conversations-section';
+        recentSection.classList.add('is-collapsed');
+        let toggle = document.getElementById('recent-conversations-toggle');
+        let body = document.getElementById('recent-conversations-body');
+        if (!toggle) {
+            const oldHeader = recentSection.querySelector(':scope > .section-header');
+            const title = oldHeader && oldHeader.querySelector('.section-title');
+            const actions = oldHeader && oldHeader.querySelector('.section-header-actions');
+            const list = recentSection.querySelector('#conversations-list');
+
+            toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.id = 'recent-conversations-toggle';
+            toggle.className = 'section-header recent-conversations-toggle';
+            toggle.setAttribute('aria-expanded', 'false');
+            toggle.setAttribute('aria-controls', 'recent-conversations-body');
+            toggle.setAttribute('data-i18n', 'chat.toggleRecentConversations');
+            toggle.setAttribute('data-i18n-attr', 'title,aria-label');
+            toggle.setAttribute('data-i18n-skip-text', 'true');
+            toggle.title = conversationSidebarText('chat.toggleRecentConversations', 'Expand/collapse recent conversations');
+            toggle.setAttribute('aria-label', toggle.title);
+            toggle.addEventListener('click', toggleRecentConversations);
+            if (title) toggle.appendChild(title);
+            else toggle.innerHTML = '<span class="section-title" data-i18n="chat.recentConversations">最近对话</span>';
+
+            const meta = document.createElement('span');
+            meta.className = 'recent-conversations-toggle-meta';
+            meta.innerHTML =
+                '<span id="recent-conversations-count" class="recent-conversations-count">0</span>' +
+                '<svg class="recent-conversations-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+            toggle.appendChild(meta);
+
+            body = document.createElement('div');
+            body.id = 'recent-conversations-body';
+            body.className = 'recent-conversations-body';
+            body.hidden = true;
+            if (actions) {
+                actions.classList.add('recent-conversations-actions');
+                body.appendChild(actions);
+            }
+            if (list) body.appendChild(list);
+            if (oldHeader) oldHeader.remove();
+            recentSection.prepend(toggle);
+            recentSection.appendChild(body);
+        }
+    }
+
+    if (typeof window.applyTranslations === 'function') {
+        window.applyTranslations(sidebar);
+    }
+}
+
+function setRecentConversationsExpanded(expanded, options = {}) {
+    const section = document.getElementById('recent-conversations-section');
+    const toggle = document.getElementById('recent-conversations-toggle');
+    const body = document.getElementById('recent-conversations-body');
+    const pagination = document.getElementById('conversations-pagination');
+    const open = !!expanded;
+    if (section) section.classList.toggle('is-collapsed', !open);
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (body) body.hidden = !open;
+    if (pagination) pagination.hidden = !open;
+    if (options.persist !== false) {
+        try {
+            localStorage.setItem(RECENT_CONVERSATIONS_EXPANDED_KEY, open ? '1' : '0');
+        } catch (e) { /* ignore */ }
+    }
+}
+
+function restoreRecentConversationsState() {
+    let expanded = false;
+    try {
+        expanded = localStorage.getItem(RECENT_CONVERSATIONS_EXPANDED_KEY) === '1';
+    } catch (e) { /* ignore */ }
+    setRecentConversationsExpanded(expanded, { persist: false });
+}
+
+function toggleRecentConversations() {
+    const toggle = document.getElementById('recent-conversations-toggle');
+    const expanded = toggle && toggle.getAttribute('aria-expanded') === 'true';
+    setRecentConversationsExpanded(!expanded);
+}
+
+function updateRecentConversationsCount(total) {
+    const count = document.getElementById('recent-conversations-count');
+    if (count) count.textContent = String(Math.max(0, Number(total) || 0));
+}
+
+if (typeof window !== 'undefined') {
+    window.toggleRecentConversations = toggleRecentConversations;
+    window.setRecentConversationsExpanded = setRecentConversationsExpanded;
 }
 
 function formatConversationTimestamp(dateObj, todayStart, yesterdayStart) {
@@ -4884,16 +6303,90 @@ async function prefetchLastAssistantProcessDetails() {
     }
 }
 
+async function hydrateConversationTokenUsage(conversationId, expectedSeq, signal) {
+    const id = String(conversationId || '').trim();
+    if (!id || typeof apiFetch !== 'function' || typeof window.setAssistantTurnTokenUsage !== 'function') return;
+    if (signal && signal.aborted) return;
+    const params = new URLSearchParams();
+    params.set('since', '1970-01-01');
+    params.set('limit', '500');
+    const res = await apiFetch(
+        '/api/conversations/' + encodeURIComponent(id) + '/token-usage?' + params.toString(),
+        signal ? { signal: signal } : undefined
+    );
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || (signal && signal.aborted)) return;
+    if (expectedSeq != null && expectedSeq !== loadConversationRequestSeq) return;
+    if (currentConversationId !== id) return;
+    const rows = Array.isArray(payload && payload.recent) ? payload.recent : [];
+    if (rows.length === 0) return;
+    const byMessage = new Map();
+    rows.forEach((row) => {
+        const messageId = row && row.messageId != null ? String(row.messageId).trim() : '';
+        if (!messageId) return;
+        const usage = normalizeAssistantTurnTokenUsage(row);
+        if (!usage) return;
+        byMessage.set(messageId, mergeAssistantTurnTokenUsage(byMessage.get(messageId) || null, usage));
+    });
+    if (byMessage.size === 0) return;
+    document.querySelectorAll('#chat-messages .message.assistant[data-backend-message-id]').forEach((messageElement) => {
+        const backendMessageId = messageElement && messageElement.dataset
+            ? String(messageElement.dataset.backendMessageId || '').trim()
+            : '';
+        const usage = backendMessageId ? byMessage.get(backendMessageId) : null;
+        if (usage) {
+            window.setAssistantTurnTokenUsage(messageElement, usage);
+        }
+    });
+}
+
 async function loadConversation(conversationId) {
+    conversationId = String(conversationId || '').trim();
+    if (!conversationId) return;
+    // Keep the visible conversation addressable across a full page refresh.
+    // Sidebar/project entries call loadConversation directly (rather than the
+    // router helper), so without this synchronization #chat loses the active
+    // conversation and reload falls back to the welcome screen instead of
+    // reconnecting the running task event stream.
+    markChatConversationNavigation(conversationId);
+    if (typeof window.cancelScheduledChatConversationFromHash === 'function') {
+        window.cancelScheduledChatConversationFromHash();
+    }
+    syncChatConversationHash(conversationId);
     const seq = ++loadConversationRequestSeq;
+    const previousConversationId = currentConversationId;
+    cancelPendingConversationLoad();
+    detachLiveChatStreamForNavigation(conversationId);
+    // 用户单击即代表新的可见会话。必须在任何网络等待之前提交该选择，
+    // 否则每 2 秒的活跃任务刷新仍会把旧会话识别为可见，并排队重载旧补流，
+    // 反过来取消这次切换。
+    currentConversationId = conversationId;
+    try {
+        window.currentConversationId = conversationId;
+    } catch (e) { /* ignore */ }
+    loadConversationPendingId = conversationId;
+    const conversationLoadController = new AbortController();
+    loadConversationAbortController = conversationLoadController;
+    if (typeof window.selectChatProjectConversationItem === 'function') {
+        window.selectChatProjectConversationItem(conversationId);
+    }
+    if (typeof window.cancelRunningTaskEventStream === 'function') {
+        window.cancelRunningTaskEventStream(conversationId);
+    }
+    if (typeof window.clearChatHitlApprovalDock === 'function') {
+        window.clearChatHitlApprovalDock();
+    }
     try {
         const cachedConversation = getConversationLiteFromCache(conversationId);
         let conversation = null;
         let response = null;
         try {
-            response = await apiFetch(`/api/conversations/${conversationId}?include_process_details=0`);
+            response = await apiFetch(`/api/conversations/${conversationId}?include_process_details=0`, {
+                signal: conversationLoadController.signal
+            });
             conversation = await response.json();
         } catch (fetchError) {
+            if (fetchError && fetchError.name === 'AbortError') return;
             if (!cachedConversation) throw fetchError;
             console.warn('Failed to load the latest conversation; using the local cache:', fetchError);
             conversation = cachedConversation;
@@ -4902,6 +6395,14 @@ async function loadConversation(conversationId) {
             return;
         }
         if (response && !response.ok) {
+            if (seq === loadConversationRequestSeq) {
+                currentConversationId = previousConversationId;
+                try {
+                    window.currentConversationId = previousConversationId || '';
+                } catch (e) { /* ignore */ }
+                if (previousConversationId) syncChatConversationHash(previousConversationId);
+                else clearChatConversationHash();
+            }
             showChatToast('Failed to load conversation: ' + (conversation.error || 'Unknown error'), 'error');
             return;
         }
@@ -4911,42 +6412,7 @@ async function loadConversation(conversationId) {
         if (seq !== loadConversationRequestSeq) {
             return;
         }
-        
-        // 如果当前在分组详情页面，切换到对话界面
-        // 退出分组详情模式，显示所有最近对话，提供更好的用户体验
-        if (currentGroupId) {
-            const sidebar = document.querySelector('.conversation-sidebar');
-            const groupDetailPage = document.getElementById('group-detail-page');
-            const chatContainer = document.querySelector('.chat-container');
-            
-            // 确保侧边栏始终可见
-            if (sidebar) sidebar.style.display = 'flex';
-            // 隐藏分组详情页，显示对话界面
-            if (groupDetailPage) groupDetailPage.style.display = 'none';
-            if (chatContainer) chatContainer.style.display = 'flex';
-            
-            // 退出分组详情模式，这样最近对话列表会显示所有对话
-            // 用户可以在侧边栏看到所有对话，方便切换
-            const previousGroupId = currentGroupId;
-            currentGroupId = null;
-            
-            // 刷新最近对话列表，显示所有对话（包括分组中的）
-            loadConversationsWithGroups();
-        }
-        
-        // 获取当前对话所属的分组ID（用于高亮显示）
-        // 确保分组映射已加载（使用缓存避免重复请求）
-        if (Object.keys(conversationGroupMappingCache).length === 0) {
-            await loadConversationGroupMapping();
-        }
-        if (seq !== loadConversationRequestSeq) {
-            return;
-        }
-        currentConversationGroupId = conversationGroupMappingCache[conversationId] || null;
 
-        // 异步刷新分组列表高亮状态（不阻塞消息渲染）
-        loadGroups();
-        
         // 更新当前对话ID
         currentConversationId = conversationId;
         window._loadedConversationProjectId = conversation.projectId || conversation.project_id || '';
@@ -4958,8 +6424,10 @@ async function loadConversation(conversationId) {
         try {
             window.currentConversationId = conversationId;
         } catch (e) { /* ignore */ }
+        window.dispatchEvent(new CustomEvent('conversation-changed', { detail: { conversationId: conversationId } }));
+        updateChatPrimaryActionState();
         if (typeof refreshChatProjectSelector === 'function') {
-            refreshChatProjectSelector();
+            refreshChatProjectSelector({ reloadFolders: false, renderFolders: false });
         }
         refreshHitlConfigByCurrentConversation();
         const hitlSyncPromise = (typeof window.syncHitlConfigFromServer === 'function')
@@ -4969,9 +6437,14 @@ async function loadConversation(conversationId) {
                 }
             }).catch(() => {})
             : Promise.resolve();
-        void hitlSyncPromise;
+        hitlConfigSyncConversationId = conversationId;
+        hitlConfigSyncPromise = Promise.resolve(hitlSyncPromise);
+        await hitlConfigSyncPromise;
+        if (seq !== loadConversationRequestSeq || currentConversationId !== conversationId) {
+            return;
+        }
         updateActiveConversation();
-        
+
         // 如果攻击链模态框打开且显示的不是当前对话，关闭它
         const attackChainModal = document.getElementById('attack-chain-modal');
         if (attackChainModal && isAppModalOpen('attack-chain-modal')) {
@@ -4979,14 +6452,14 @@ async function loadConversation(conversationId) {
                 closeAttackChainModal();
             }
         }
-        
+
         // 清空消息区域
         const messagesDiv = document.getElementById('chat-messages');
         if (seq !== loadConversationRequestSeq) {
             return;
         }
         messagesDiv.innerHTML = '';
-        
+
         // 检查对话中是否有最近的消息，如果有，清除草稿（避免恢复已发送的消息）
         let hasRecentUserMessage = false;
         if (conversation.messages && conversation.messages.length > 0) {
@@ -5010,7 +6483,7 @@ async function loadConversation(conversationId) {
                 adjustTextareaHeight(chatInput);
             }
         }
-        
+
         // 加载消息 — 分批渲染避免长时间阻塞主线程
         if (conversation.messages && conversation.messages.length > 0) {
             const FIRST_BATCH = 20;  // 首批同步渲染（用户可见区域）
@@ -5021,15 +6494,14 @@ async function loadConversation(conversationId) {
                 if (msg.role === 'user' && isInterruptContinueInjectChatMessage(msg.content)) {
                     return;
                 }
+                const assistantContent = String(msg && msg.content != null ? msg.content : '').trim();
+                const terminalState = msg && msg.role === 'assistant'
+                    ? assistantTurnTerminalState(msg.processDetails)
+                    : null;
                 let displayContent = msg.content;
-                if (msg.role === 'assistant' && msg.content === '处理中...' && msg.processDetails && msg.processDetails.length > 0) {
-                    for (let i = msg.processDetails.length - 1; i >= 0; i--) {
-                        const detail = msg.processDetails[i];
-                        if (detail.eventType === 'error' || detail.eventType === 'cancelled') {
-                            displayContent = detail.message || msg.content;
-                            break;
-                        }
-                    }
+                if (msg.role === 'assistant' &&
+                    (assistantContent === '处理中...' || assistantContent === 'Processing...') && terminalState) {
+                    displayContent = terminalState.detail.message || msg.content;
                 }
 
                 // 消息时间口径：
@@ -5037,7 +6509,15 @@ async function loadConversation(conversationId) {
                 // - assistant: 如果后端提供 updatedAt（任务完成时写回），优先用它，避免占位消息“任务开始时间”误导
                 const msgTime = (msg && msg.role === 'assistant' && msg.updatedAt) ? msg.updatedAt : (msg ? msg.createdAt : null);
                 const mcpIds = (msg.mcpExecutionIds && Array.isArray(msg.mcpExecutionIds)) ? msg.mcpExecutionIds : [];
-                const addOpts = (msg.role === 'assistant' && mcpIds.length > 0) ? { deferMcpButtons: true } : null;
+                const isAssistantPlaceholder = msg.role === 'assistant' && (
+                    assistantContent === '处理中...' || assistantContent === 'Processing...'
+                );
+                const addOpts = (msg.role === 'assistant' && (mcpIds.length > 0 || isAssistantPlaceholder))
+                    ? {
+                        deferMcpButtons: mcpIds.length > 0,
+                        hideAssistantPlaceholder: isAssistantPlaceholder
+                    }
+                    : null;
                 const messageId = addMessage(msg.role, displayContent, mcpIds, null, msgTime, addOpts);
                 const messageEl = document.getElementById(messageId);
                 if (messageEl && msg && msg.id) {
@@ -5045,6 +6525,24 @@ async function loadConversation(conversationId) {
                     attachDeleteTurnButton(messageEl);
                 }
                 if (msg.role === 'assistant') {
+                    if (messageEl && typeof window.setAssistantTurnTiming === 'function') {
+                        const startedAt = msg && msg.createdAt ? msg.createdAt : null;
+                        const completedAt = terminalState && terminalState.completedAt
+                            ? terminalState.completedAt
+                            : (msg && msg.updatedAt ? msg.updatedAt : startedAt);
+                        const startedMs = assistantTurnTimestamp(startedAt);
+                        const completedMs = assistantTurnTimestamp(completedAt);
+                        const isRunning = isAssistantPlaceholder && !terminalState;
+                        const status = terminalState ? terminalState.status : (isRunning ? 'running' : 'completed');
+                        window.setAssistantTurnTiming(messageEl, {
+                            startedAt: startedAt,
+                            completedAt: isRunning ? null : completedAt,
+                            durationMs: (!isRunning && Number.isFinite(startedMs) && Number.isFinite(completedMs))
+                                ? Math.max(0, completedMs - startedMs)
+                                : undefined,
+                            status: status
+                        });
+                    }
                     if (messageEl && msg.reasoningContent) {
                         setMessageReasoningContent(messageEl, msg.reasoningContent);
                     }
@@ -5109,12 +6607,22 @@ async function loadConversation(conversationId) {
             if (seq !== loadConversationRequestSeq) {
                 return;
             }
+            hydrateConversationTokenUsage(conversationId, seq, conversationLoadController.signal).catch((e) => {
+                if (!e || e.name !== 'AbortError') {
+                    console.warn('hydrateConversationTokenUsage failed', e);
+                }
+            });
             if (currentConversationId === conversationId && typeof window.restoreHitlInlineForConversation === 'function') {
                 await window.restoreHitlInlineForConversation(conversationId);
             }
+            if (
+                window.CyberStrikeChatScroll &&
+                typeof window.CyberStrikeChatScroll.settleConversationRestoreToBottom === 'function'
+            ) {
+                window.CyberStrikeChatScroll.settleConversationRestoreToBottom(30);
+            }
         } else {
-            const readyMsgEmpty = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System is ready. Please enter your test requirements, and the system will automatically perform the corresponding security tests.';
-            addMessage('assistant', readyMsgEmpty, null, null, null, { systemReadyMessage: true, scroll: 'force' });
+            renderChatWelcomeEmptyState();
             if (window.CyberStrikeChatScroll) {
                 window.CyberStrikeChatScroll.forceScrollToBottom(false);
             } else {
@@ -5150,8 +6658,30 @@ async function loadConversation(conversationId) {
             });
         }
     } catch (error) {
-        console.error('delete turn failed:', error);
-        showChatToast('加载对话失败: ' + (error && error.message ? error.message : String(error)), 'error');
+        if (error && error.name === 'AbortError') return;
+        if (seq === loadConversationRequestSeq) {
+            currentConversationId = previousConversationId;
+            try {
+                window.currentConversationId = previousConversationId || '';
+            } catch (e) { /* ignore */ }
+            if (previousConversationId) syncChatConversationHash(previousConversationId);
+            else clearChatConversationHash();
+            if (typeof window.selectChatProjectConversationItem === 'function') {
+                window.selectChatProjectConversationItem(previousConversationId);
+            }
+        }
+        console.error('Failed to load conversation:', error);
+        showChatToast('Failed to load conversation: ' + (error && error.message ? error.message : String(error)), 'error');
+    } finally {
+        if (seq === loadConversationRequestSeq && typeof window.finishChatConversationRestore === 'function') {
+            window.finishChatConversationRestore(conversationId);
+        }
+        if (loadConversationAbortController === conversationLoadController) {
+            loadConversationAbortController = null;
+        }
+        if (seq === loadConversationRequestSeq && loadConversationPendingId === conversationId) {
+            loadConversationPendingId = '';
+        }
     }
 }
 
@@ -5208,9 +6738,7 @@ async function deleteConversationTurnFromUI(anchorBackendMessageId) {
         }
         invalidateConversationLiteCache(currentConversationId);
         await loadConversation(currentConversationId);
-        if (typeof loadConversationsWithGroups === 'function') {
-            loadConversationsWithGroups();
-        } else if (typeof loadConversations === 'function') {
+        if (typeof loadConversations === 'function') {
             loadConversations();
         }
     } catch (error) {
@@ -5228,17 +6756,17 @@ async function deleteConversation(conversationId, skipConfirm = false) {
             return;
         }
     }
-    
+
     try {
         const response = await apiFetch(`/api/conversations/${conversationId}`, {
             method: 'DELETE'
         });
-        
+
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.error || 'Delete failed');
         }
-        
+
         // 如果删除的是当前对话，清空对话界面
         if (conversationId === currentConversationId) {
             currentConversationId = null;
@@ -5246,26 +6774,20 @@ async function deleteConversation(conversationId, skipConfirm = false) {
                 window.currentConversationId = '';
             } catch (e) { /* ignore */ }
             document.getElementById('chat-messages').innerHTML = '';
-            const readyMsgLoad = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System is ready. Please enter your test requirements, and the system will automatically perform the corresponding security tests.';
-            addMessage('assistant', readyMsgLoad, null, null, null, { systemReadyMessage: true });
+            renderChatWelcomeEmptyState();
             addAttackChainButton(null);
         }
-        
-        // 更新缓存 - 立即删除，确保后续加载时能正确识别
-        delete conversationGroupMappingCache[conversationId];
+
         invalidateConversationLiteCache(conversationId);
-        // 同时从待保留映射中移除
-        delete pendingGroupMappings[conversationId];
-        
-        // 如果当前在分组详情页面，重新加载分组对话
-        if (currentGroupId) {
-            await loadGroupConversations(currentGroupId);
-        }
-        
-        // 刷新对话列表（使用分组接口以与其他入口一致）
-        if (typeof loadConversationsWithGroups === 'function') {
-            loadConversationsWithGroups();
-        } else if (typeof loadConversations === 'function') {
+
+        // 先同步所有侧栏的本地状态，再执行网络刷新。项目文件夹使用独立的
+        // conversation cache；如果只刷新“最近对话”，删除项会一直残留到整页刷新。
+        try {
+            document.dispatchEvent(new CustomEvent('conversation-deleted', { detail: { conversationId } }));
+        } catch (e) { /* ignore */ }
+
+        // 刷新对话列表
+        if (typeof loadConversations === 'function') {
             loadConversations();
         }
 
@@ -5276,10 +6798,6 @@ async function deleteConversation(conversationId, skipConfirm = false) {
             applyBatchConversationFilters();
         }
 
-        // 通知其他模块（如 WebShell AI 助手）同步删除，保持列表一致
-        try {
-            document.dispatchEvent(new CustomEvent('conversation-deleted', { detail: { conversationId } }));
-        } catch (e) { /* ignore */ }
     } catch (error) {
         console.error('delete turn failed:', error);
         alert('Failed to delete conversation: ' + error.message);
@@ -5376,14 +6894,14 @@ async function showAttackChain(conversationId) {
             return;
         }
     }
-    
+
     currentAttackChainConversationId = conversationId;
     const modal = document.getElementById('attack-chain-modal');
     if (!modal) {
         console.error('Attack-chain modal not found.');
         return;
     }
-    
+
     openAppModal('attack-chain-modal', { focus: false });
     updateAttackChainStats({ nodes: [], edges: [] });
 
@@ -5392,13 +6910,13 @@ async function showAttackChain(conversationId) {
     if (container) {
         container.innerHTML = '<div class="loading-spinner">' + (typeof window.t === 'function' ? window.t('chat.loading') : 'Loading...') + '</div>';
     }
-    
+
     // 隐藏详情面板
     const detailsPanel = document.getElementById('attack-chain-details');
     if (detailsPanel) {
         detailsPanel.style.display = 'none';
     }
-    
+
     // 禁用重新生成按钮
     const regenerateBtn = document.querySelector('button[onclick="regenerateAttackChain()"]');
     if (regenerateBtn) {
@@ -5406,7 +6924,7 @@ async function showAttackChain(conversationId) {
         regenerateBtn.style.opacity = '0.5';
         regenerateBtn.style.cursor = 'not-allowed';
     }
-    
+
     // 加载攻击链数据
     await loadAttackChain(conversationId);
 }
@@ -5416,12 +6934,12 @@ async function loadAttackChain(conversationId) {
     if (isAttackChainLoading(conversationId)) {
         return; // 防止重复调用
     }
-    
+
     setAttackChainLoading(conversationId, true);
-    
+
     try {
         const response = await apiFetch(`/api/attack-chain/${conversationId}`);
-        
+
         if (!response.ok) {
             // 处理 409 Conflict（正在生成中）
             if (response.status === 409) {
@@ -5460,13 +6978,13 @@ async function loadAttackChain(conversationId) {
                 }
                 return; // 提前返回，不执行 finally 块中的 setAttackChainLoading(conversationId, false)
             }
-            
+
             const error = await response.json();
             throw new Error(error.error || 'Failed to load attack chain');
         }
-        
+
         const chainData = await response.json();
-        
+
         // 检查当前显示的对话ID是否匹配，防止串台
         if (currentAttackChainConversationId !== conversationId) {
             console.log('Attack-chain data returned, but the displayed conversation changed; ignoring this render.', {
@@ -5476,16 +6994,16 @@ async function loadAttackChain(conversationId) {
             setAttackChainLoading(conversationId, false);
             return;
         }
-        
+
         // 渲染攻击链
         renderAttackChain(chainData);
-        
+
         // 更新统计信息
         updateAttackChainStats(chainData);
-        
+
         // 成功加载后，重置加载状态
         setAttackChainLoading(conversationId, false);
-        
+
     } catch (error) {
         console.error('delete turn failed:', error);
         const container = document.getElementById('attack-chain-container');
@@ -5511,21 +7029,21 @@ function renderAttackChain(chainData) {
     if (!container) {
         return;
     }
-    
+
     // 清空容器
     container.innerHTML = '';
-    
+
     if (!chainData.nodes || chainData.nodes.length === 0) {
         container.innerHTML = '<div class="empty-message">' + (typeof window.t === 'function' ? window.t('chat.noAttackChainData') : 'No attack chain data') + '</div>';
         return;
     }
-    
+
     // 计算图的复杂度（用于动态调整布局和样式）
     const nodeCount = chainData.nodes.length;
     const edgeCount = chainData.edges.length;
     const isComplexGraph = nodeCount > 15 || edgeCount > 25;
     const isDarkTheme = document.documentElement.getAttribute('data-theme') === 'dark';
-    
+
     // 优化节点标签：智能截断和换行
     chainData.nodes.forEach(node => {
         if (node.label) {
@@ -5548,10 +7066,10 @@ function renderAttackChain(chainData) {
             }
         }
     });
-    
+
     // 准备Cytoscape数据
     const elements = [];
-    
+
     // 添加节点，并预计算样式信息（与导出保持一致的主题色）
     chainData.nodes.forEach(node => {
         const riskScore = node.risk_score || 0;
@@ -5692,10 +7210,10 @@ function renderAttackChain(chainData) {
             }
         });
     });
-    
+
     // 添加边（只添加源节点和目标节点都存在的边）
     const nodeIds = new Set(chainData.nodes.map(node => node.id));
-    
+
     // 保存有效的边用于ELK布局
     const validEdges = [];
     chainData.edges.forEach(edge => {
@@ -5721,7 +7239,7 @@ function renderAttackChain(chainData) {
             });
         }
     });
-    
+
     // 初始化Cytoscape - 现代卡片式节点设计（图标 + 文字 + 徽章）
     attackChainCytoscape = cytoscape({
         container: container,
@@ -5892,7 +7410,7 @@ function renderAttackChain(chainData) {
         minZoom: 0.2,
         maxZoom: 3
     });
-    
+
     // 使用ELK布局（高质量DAG布局，减少边交叉）
     let layoutOptions = {
         name: 'breadthfirst',
@@ -5900,7 +7418,7 @@ function renderAttackChain(chainData) {
         spacingFactor: isComplexGraph ? 3.0 : 2.5,
         padding: 40
     };
-    
+
     // 使用ELK.js进行布局计算
     // elk.bundled.js会暴露ELK对象，可以直接使用new ELK()
     let elkInstance = null;
@@ -5911,10 +7429,10 @@ function renderAttackChain(chainData) {
             console.warn('ELK initialization failed:', e);
         }
     }
-    
+
     if (elkInstance) {
         try {
-            
+
             // === 布局参数（始终使用 DOWN 纵向布局）===
             const isSmallGraph = chainData.nodes.length <= 8 && validEdges.length <= 12;
             // 同层节点间距（横向分散）
@@ -5964,7 +7482,7 @@ function renderAttackChain(chainData) {
                     targets: [edge.target]
                 }))
             };
-            
+
             // 使用ELK计算布局
             elkInstance.layout(elkGraph).then(laidOutGraph => {
                 // 应用ELK计算的布局到Cytoscape节点
@@ -5978,7 +7496,7 @@ function renderAttackChain(chainData) {
                             });
                         }
                     });
-                    
+
                     // 布局完成后，居中显示图
                     setTimeout(() => {
                         centerAttackChain();
@@ -6019,7 +7537,7 @@ function renderAttackChain(chainData) {
         });
         layout.run();
     }
-    
+
     // 居中攻击链的函数：始终让所有节点完整可见
     function centerAttackChain() {
         try {
@@ -6072,7 +7590,7 @@ function renderAttackChain(chainData) {
             console.warn('Error centering the graph:', error);
         }
     }
-    
+
     // 添加点击事件
     attackChainCytoscape.on('tap', 'node', function(evt) {
         const node = evt.target;
@@ -6128,12 +7646,12 @@ function getEdgeNodes(edge) {
     try {
         const source = edge.source();
         const target = edge.target();
-        
+
         // 检查源节点和目标节点是否存在
         if (!source || !target || source.length === 0 || target.length === 0) {
             return { source: null, target: null, valid: false };
         }
-        
+
         return { source: source, target: target, valid: true };
     } catch (error) {
         console.warn('Error getting edge nodes:', error, edge.id());
@@ -6146,7 +7664,7 @@ function filterAttackChainNodes(searchText) {
     if (!attackChainCytoscape || !window.attackChainOriginalData) {
         return;
     }
-    
+
     const searchLower = searchText.toLowerCase().trim();
     if (searchLower === '') {
         // 重置所有节点可见性
@@ -6156,7 +7674,7 @@ function filterAttackChainNodes(searchText) {
         attackChainCytoscape.nodes().style('border-width', 2);
         return;
     }
-    
+
     // 过滤节点
     attackChainCytoscape.nodes().forEach(node => {
         // 使用原始标签进行搜索，不包含类型标签
@@ -6164,7 +7682,7 @@ function filterAttackChainNodes(searchText) {
         const label = originalLabel.toLowerCase();
         const type = (node.data('type') || '').toLowerCase();
         const matches = label.includes(searchLower) || type.includes(searchLower);
-        
+
         if (matches) {
             node.style('display', 'element');
             // 高亮匹配的节点
@@ -6174,7 +7692,7 @@ function filterAttackChainNodes(searchText) {
             node.style('display', 'none');
         }
     });
-    
+
     // 隐藏没有可见源节点或目标节点的边
     attackChainCytoscape.edges().forEach(edge => {
         const { source, target, valid } = getEdgeNodes(edge);
@@ -6182,7 +7700,7 @@ function filterAttackChainNodes(searchText) {
             edge.style('display', 'none');
             return;
         }
-        
+
         const sourceVisible = source.style('display') !== 'none';
         const targetVisible = target.style('display') !== 'none';
         if (sourceVisible && targetVisible) {
@@ -6191,7 +7709,7 @@ function filterAttackChainNodes(searchText) {
             edge.style('display', 'none');
         }
     });
-    
+
     // 重新调整视图
     attackChainCytoscape.fit(undefined, 60);
 }
@@ -6201,7 +7719,7 @@ function filterAttackChainByType(type) {
     if (!attackChainCytoscape || !window.attackChainOriginalData) {
         return;
     }
-    
+
     if (type === 'all') {
         attackChainCytoscape.nodes().style('display', 'element');
         attackChainCytoscape.edges().style('display', 'element');
@@ -6209,7 +7727,7 @@ function filterAttackChainByType(type) {
         attackChainCytoscape.fit(undefined, 60);
         return;
     }
-    
+
     // 过滤节点
     attackChainCytoscape.nodes().forEach(node => {
         const nodeType = node.data('type') || '';
@@ -6219,7 +7737,7 @@ function filterAttackChainByType(type) {
             node.style('display', 'none');
         }
     });
-    
+
     // 隐藏没有可见源节点或目标节点的边
     attackChainCytoscape.edges().forEach(edge => {
         const { source, target, valid } = getEdgeNodes(edge);
@@ -6227,7 +7745,7 @@ function filterAttackChainByType(type) {
             edge.style('display', 'none');
             return;
         }
-        
+
         const sourceVisible = source.style('display') !== 'none';
         const targetVisible = target.style('display') !== 'none';
         if (sourceVisible && targetVisible) {
@@ -6236,7 +7754,7 @@ function filterAttackChainByType(type) {
             edge.style('display', 'none');
         }
     });
-    
+
     // 重新调整视图
     attackChainCytoscape.fit(undefined, 60);
 }
@@ -6246,7 +7764,7 @@ function filterAttackChainByRisk(riskLevel) {
     if (!attackChainCytoscape || !window.attackChainOriginalData) {
         return;
     }
-    
+
     if (riskLevel === 'all') {
         attackChainCytoscape.nodes().style('display', 'element');
         attackChainCytoscape.edges().style('display', 'element');
@@ -6254,7 +7772,7 @@ function filterAttackChainByRisk(riskLevel) {
         attackChainCytoscape.fit(undefined, 60);
         return;
     }
-    
+
     // 定义风险范围
     const riskRanges = {
         'high': [80, 100],
@@ -6262,9 +7780,9 @@ function filterAttackChainByRisk(riskLevel) {
         'medium': [40, 59],
         'low': [0, 39]
     };
-    
+
     const [minRisk, maxRisk] = riskRanges[riskLevel] || [0, 100];
-    
+
     // 过滤节点
     attackChainCytoscape.nodes().forEach(node => {
         const riskScore = node.data('riskScore') || 0;
@@ -6274,7 +7792,7 @@ function filterAttackChainByRisk(riskLevel) {
             node.style('display', 'none');
         }
     });
-    
+
     // 隐藏没有可见源节点或目标节点的边
     attackChainCytoscape.edges().forEach(edge => {
         const { source, target, valid } = getEdgeNodes(edge);
@@ -6282,7 +7800,7 @@ function filterAttackChainByRisk(riskLevel) {
             edge.style('display', 'none');
             return;
         }
-        
+
         const sourceVisible = source.style('display') !== 'none';
         const targetVisible = target.style('display') !== 'none';
         if (sourceVisible && targetVisible) {
@@ -6291,7 +7809,7 @@ function filterAttackChainByRisk(riskLevel) {
             edge.style('display', 'none');
         }
     });
-    
+
     // 重新调整视图
     attackChainCytoscape.fit(undefined, 60);
 }
@@ -6303,19 +7821,19 @@ function resetAttackChainFilters() {
     if (searchInput) {
         searchInput.value = '';
     }
-    
+
     // 重置类型筛选
     const typeFilter = document.getElementById('attack-chain-type-filter');
     if (typeFilter) {
         typeFilter.value = 'all';
     }
-    
+
     // 重置风险筛选
     const riskFilter = document.getElementById('attack-chain-risk-filter');
     if (riskFilter) {
         riskFilter.value = 'all';
     }
-    
+
     // 重置所有节点可见性
     if (attackChainCytoscape) {
         attackChainCytoscape.nodes().forEach(node => {
@@ -6331,7 +7849,7 @@ function resetAttackChainFilters() {
 function showNodeDetails(nodeData) {
     const detailsPanel = document.getElementById('attack-chain-details');
     const detailsContent = document.getElementById('attack-chain-details-content');
-    
+
     if (!detailsPanel || !detailsContent) {
         return;
     }
@@ -6347,7 +7865,7 @@ function showNodeDetails(nodeData) {
             detailsPanel.style.opacity = '1';
         });
     });
-    
+
     let html = `
         <div class="node-detail-item">
             <strong>Node ID:</strong> <code>${nodeData.id}</code>
@@ -6362,7 +7880,7 @@ function showNodeDetails(nodeData) {
             <strong>Risk score:</strong> ${nodeData.riskScore}/100
         </div>
     `;
-    
+
     // 显示action节点信息（工具执行 + AI分析）
     if (nodeData.type === 'action' && nodeData.metadata) {
         if (nodeData.metadata.tool_name) {
@@ -6404,7 +7922,7 @@ function showNodeDetails(nodeData) {
             `;
         }
     }
-    
+
     // 显示目标信息（如果是目标节点）
     if (nodeData.type === 'target' && nodeData.metadata && nodeData.metadata.target) {
         html += `
@@ -6413,7 +7931,7 @@ function showNodeDetails(nodeData) {
             </div>
         `;
     }
-    
+
     // 显示漏洞信息（如果是漏洞节点）
     if (nodeData.type === 'vulnerability' && nodeData.metadata) {
         if (nodeData.metadata.vulnerability_type) {
@@ -6445,7 +7963,7 @@ function showNodeDetails(nodeData) {
             `;
         }
     }
-    
+
     if (nodeData.toolExecutionId) {
         html += `
             <div class="node-detail-item">
@@ -6453,7 +7971,7 @@ function showNodeDetails(nodeData) {
             </div>
         `;
     }
-    
+
     // 详情占满 sidebar 后，内容区滚动由自身处理，重置到顶部
     if (detailsContent) {
         detailsContent.scrollTop = 0;
@@ -6544,16 +8062,16 @@ function closeNodeDetails() {
 // 关闭攻击链模态框
 function closeAttackChainModal() {
     closeAppModal('attack-chain-modal');
-    
+
     // 关闭节点详情
     closeNodeDetails();
-    
+
     // 清理Cytoscape实例
     if (attackChainCytoscape) {
         attackChainCytoscape.destroy();
         attackChainCytoscape = null;
     }
-    
+
     currentAttackChainConversationId = null;
 }
 
@@ -6581,22 +8099,22 @@ async function regenerateAttackChain() {
     if (!currentAttackChainConversationId) {
         return;
     }
-    
+
     // 防止重复点击（只检查当前对话的加载状态）
     if (isAttackChainLoading(currentAttackChainConversationId)) {
         console.log('The attack chain is being generated. Please wait...');
         return;
     }
-    
+
     // 保存请求时的对话ID，防止串台
     const savedConversationId = currentAttackChainConversationId;
     setAttackChainLoading(savedConversationId, true);
-    
+
     const container = document.getElementById('attack-chain-container');
     if (container) {
         container.innerHTML = '<div class="loading-spinner">Regenerating...</div>';
     }
-    
+
     // 禁用重新生成按钮
     const regenerateBtn = document.querySelector('button[onclick="regenerateAttackChain()"]');
     if (regenerateBtn) {
@@ -6604,13 +8122,13 @@ async function regenerateAttackChain() {
         regenerateBtn.style.opacity = '0.5';
         regenerateBtn.style.cursor = 'not-allowed';
     }
-    
+
     try {
         // 调用重新生成接口
         const response = await apiFetch(`/api/attack-chain/${savedConversationId}/regenerate`, {
             method: 'POST'
         });
-        
+
         if (!response.ok) {
             // 处理 409 Conflict（正在生成中）
             if (response.status === 409) {
@@ -6632,20 +8150,20 @@ async function regenerateAttackChain() {
                 // savedConversationId 已在函数开始处定义
                 setTimeout(() => {
                     // 检查当前显示的对话ID是否匹配，且仍在加载中
-                    if (currentAttackChainConversationId === savedConversationId && 
+                    if (currentAttackChainConversationId === savedConversationId &&
                         isAttackChainLoading(savedConversationId)) {
                         refreshAttackChain();
                     }
                 }, 5000);
                 return;
             }
-            
+
             const error = await response.json();
             throw new Error(error.error || 'Failed to regenerate attack chain');
         }
-        
+
         const chainData = await response.json();
-        
+
         // 检查当前显示的对话ID是否匹配，防止串台
         if (currentAttackChainConversationId !== savedConversationId) {
             console.log('Attack-chain data returned, but the displayed conversation changed; ignoring this render.', {
@@ -6655,13 +8173,13 @@ async function regenerateAttackChain() {
             setAttackChainLoading(savedConversationId, false);
             return;
         }
-        
+
         // 渲染攻击链
         renderAttackChain(chainData);
-        
+
         // 更新统计信息
         updateAttackChainStats(chainData);
-        
+
     } catch (error) {
         console.error('delete turn failed:', error);
         if (container) {
@@ -6669,7 +8187,7 @@ async function regenerateAttackChain() {
         }
     } finally {
         setAttackChainLoading(savedConversationId, false);
-        
+
         // 恢复重新生成按钮
         if (regenerateBtn) {
             regenerateBtn.disabled = false;
@@ -7487,17 +9005,11 @@ function exportAttackChain(format) {
 }
 
 // ============================================
-// 对话分组和批量管理功能
+// 对话批量管理功能
 // ============================================
 
-// 分组数据管理（使用API）
-let currentGroupId = null; // 当前正在查看的分组详情页面
-let currentConversationGroupId = null; // 当前对话所属的分组ID（用于高亮显示）
 let contextMenuConversationId = null;
-let contextMenuGroupId = null;
-let groupsCache = [];
-let conversationGroupMappingCache = {};
-let pendingGroupMappings = {}; // 待保留的分组映射（用于处理后端API延迟的情况）
+let contextMenuConversationTitle = '';
 let conversationsListLoadSeq = 0; // 对话列表加载序号，避免并发请求导致重复渲染
 let conversationsListNavigateGen = 0; // 用户主动翻页代数，防止后台刷新覆盖翻页结果
 const CONVERSATIONS_PAGE_SIZE_KEY = 'cyberstrike.conversations_page_size';
@@ -7507,9 +9019,6 @@ const CONVERSATION_PROJECT_FILTER_NONE = '__none__';
 const CONVERSATION_PROJECT_FILTER_SELECT_ID = 'conversation-project-filter';
 const CONVERSATION_PROJECT_FILTER_CARET = '<svg class="conversation-project-filter-caret" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const BATCH_PROJECT_FILTER_SELECT_ID = 'batch-project-filter';
-const BATCH_GROUP_FILTER_SELECT_ID = 'batch-move-group-select';
-const BATCH_GROUP_HEADER_FILTER_SELECT_ID = 'batch-group-filter';
-const BATCH_GROUP_NONE = '__none__';
 const projectFilterCustomSelectRegistry = {};
 let projectFilterCustomSelectDocBound = false;
 
@@ -7801,14 +9310,6 @@ function initSimpleCustomSelect(selectId) {
     syncSimpleCustomSelect(selectId);
 }
 
-function initBatchGroupCustomSelect() {
-    initSimpleCustomSelect(BATCH_GROUP_FILTER_SELECT_ID);
-}
-
-function initBatchGroupHeaderFilterCustomSelect() {
-    initSimpleCustomSelect(BATCH_GROUP_HEADER_FILTER_SELECT_ID);
-}
-
 function initProjectFilterCustomSelect(selectId) {
     const select = document.getElementById(selectId);
     if (!select) return;
@@ -7979,17 +9480,13 @@ async function refreshConversationProjectFilter() {
 function onConversationProjectFilterChange(projectId) {
     setConversationProjectFilter(projectId || '');
     commitConversationsPage(1, { bumpNavigateGen: true });
-    loadConversationsWithGroups(conversationsSearchQuery);
+    loadConversations(conversationsSearchQuery);
 }
 
 function updateConversationSidebarFilterUI() {
-    const groupsSection = document.querySelector('.conversation-groups-section');
     const titleEl = document.querySelector('.recent-conversations-section .section-title');
     const filter = getConversationProjectFilter();
     const hasSearch = !!(conversationsSearchQuery && conversationsSearchQuery.trim());
-    if (groupsSection) {
-        groupsSection.hidden = !!filter || hasSearch;
-    }
     if (!titleEl) return;
     const tFn = typeof window.t === 'function' ? window.t.bind(window) : null;
     if (filter && filter !== CONVERSATION_PROJECT_FILTER_NONE) {
@@ -8014,7 +9511,7 @@ function updateConversationSidebarFilterUI() {
 }
 
 window.onConversationProjectBindingChanged = function onConversationProjectBindingChanged() {
-    loadConversationsWithGroups(conversationsSearchQuery);
+    loadConversations(conversationsSearchQuery);
 };
 
 function getConversationSortBy() {
@@ -8086,7 +9583,7 @@ function setConversationSortBy(sortBy) {
     updateConversationSortMenuUI();
     closeConversationSortMenu();
     commitConversationsPage(1, { bumpNavigateGen: true });
-    loadConversationsWithGroups(conversationsSearchQuery);
+    loadConversations(conversationsSearchQuery);
 }
 
 if (!window.__conversationSortMenuBound) {
@@ -8130,7 +9627,7 @@ function getConversationsTotalPages() {
 /**
  * 分页状态约定：
  * - conversationsPagination.page 仅在此处（用户操作 / reconcile 钳制 / clamp）写入
- * - loadConversationsWithGroups 只读页码，用 intentPage 或当前 page 计算 offset
+ * - loadConversations 只读页码，用 intentPage 或当前 page 计算 offset
  * - isStaleConversationListLoad 丢弃页码或 navigateGen 已变的在途请求
  */
 function commitConversationsPage(page, { bumpNavigateGen = false } = {}) {
@@ -8320,7 +9817,8 @@ function renderConversationsPagination(visibleCount) {
 
     const totalPages = getConversationsTotalPages();
     const navDisabled = totalPages <= 1;
-    el.hidden = false;
+    const recentToggle = document.getElementById('recent-conversations-toggle');
+    el.hidden = !recentToggle || recentToggle.getAttribute('aria-expanded') !== 'true';
     const start = total === 0 ? 0 : (page - 1) * pageSize + 1;
     const end = Math.min(page * pageSize, total);
     const tFn = typeof window.t === 'function' ? window.t.bind(window) : null;
@@ -8363,7 +9861,7 @@ function goConversationsPage(page) {
     const requestedPage = Math.max(1, parseInt(page, 10) || 1);
     const scrollToTop = requestedPage !== conversationsPagination.page;
     commitConversationsPage(requestedPage, { bumpNavigateGen: true });
-    loadConversationsWithGroups(conversationsSearchQuery, {
+    loadConversations(conversationsSearchQuery, {
         refreshMeta: false,
         scrollToTop,
         intentPage: requestedPage,
@@ -8381,105 +9879,14 @@ function changeConversationsPageSize() {
     } catch (e) { /* ignore */ }
     conversationsPagination.pageSize = newSize;
     commitConversationsPage(1, { bumpNavigateGen: true });
-    loadConversationsWithGroups(conversationsSearchQuery);
+    loadConversations(conversationsSearchQuery);
 }
 
 window.goConversationsPage = goConversationsPage;
 window.changeConversationsPageSize = changeConversationsPageSize;
 
-// 加载分组列表
-async function loadGroups() {
-    try {
-        const response = await apiFetch('/api/groups');
-        if (!response.ok) {
-            groupsCache = [];
-            return;
-        }
-        const data = await response.json();
-        // 确保groupsCache是有效数组
-        if (Array.isArray(data)) {
-            groupsCache = data;
-        } else {
-            // 如果返回的不是数组，使用空数组（不打印警告，因为可能后端返回了错误格式但我们要优雅处理）
-            groupsCache = [];
-        }
-
-        const groupsList = document.getElementById('conversation-groups-list');
-        if (!groupsList) return;
-
-        groupsList.innerHTML = '';
-
-        if (!Array.isArray(groupsCache) || groupsCache.length === 0) {
-            return;
-        }
-
-        // 对分组进行排序：置顶的分组在前（后端已经排序，这里只需要按顺序显示）
-        const sortedGroups = [...groupsCache];
-
-            sortedGroups.forEach(group => {
-            const groupItem = document.createElement('div');
-            groupItem.className = 'group-item';
-            // 高亮逻辑：
-            // 1. 如果当前在分组详情页面，只高亮当前分组（currentGroupId）
-            // 2. 如果不在分组详情页面，高亮当前对话所属的分组（currentConversationGroupId）
-            const shouldHighlight = currentGroupId 
-                ? (currentGroupId === group.id)
-                : (currentConversationGroupId === group.id);
-            if (shouldHighlight) {
-                groupItem.classList.add('active');
-            }
-            const isPinned = group.pinned || false;
-            if (isPinned) {
-                groupItem.classList.add('pinned');
-            }
-            groupItem.dataset.groupId = group.id;
-
-            const content = document.createElement('div');
-            content.className = 'group-item-content';
-
-            const icon = document.createElement('span');
-            icon.className = 'group-item-icon';
-            icon.textContent = group.icon || '📁';
-
-            const name = document.createElement('span');
-            name.className = 'group-item-name';
-            name.textContent = group.name;
-
-            content.appendChild(icon);
-            content.appendChild(name);
-
-            // 如果是置顶分组，添加图钉图标
-            if (isPinned) {
-                const pinIcon = document.createElement('span');
-                pinIcon.className = 'group-item-pinned';
-                pinIcon.innerHTML = '📌';
-                pinIcon.title = 'Pinned';
-                name.appendChild(pinIcon);
-            }
-            groupItem.appendChild(content);
-
-            const menuBtn = document.createElement('button');
-            menuBtn.className = 'group-item-menu';
-            menuBtn.innerHTML = '⋯';
-            menuBtn.onclick = (e) => {
-                e.stopPropagation();
-                showGroupContextMenu(e, group.id);
-            };
-            groupItem.appendChild(menuBtn);
-
-            groupItem.onclick = () => {
-                enterGroupDetail(group.id);
-            };
-
-            groupsList.appendChild(groupItem);
-        });
-    } catch (error) {
-        console.error('delete turn failed:', error);
-    }
-}
-
-// 加载对话列表（修改为支持分组和置顶）
-async function loadConversationsWithGroups(searchQuery = '', options = {}) {
+// 加载对话列表（支持置顶）
+async function loadConversations(searchQuery = '', options = {}) {
     const refreshMeta = options.refreshMeta !== false;
     const scrollToTop = options.scrollToTop === true;
     const intentPage = Number.isFinite(options.intentPage) ? options.intentPage : null;
@@ -8501,17 +9908,10 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
         }
         if (searchQuery && searchQuery.trim()) {
             convParams.set('search', searchQuery.trim());
-        } else if (!projectFilter) {
-            convParams.set('exclude_grouped', 'true');
         }
         updateConversationSidebarFilterUI();
         const url = `/api/conversations?${convParams}`;
-        const fetchTasks = [apiFetch(url)];
-        if (refreshMeta) {
-            fetchTasks.unshift(loadGroups(), loadConversationGroupMapping());
-        }
-        const results = await Promise.all(fetchTasks);
-        const response = results[results.length - 1];
+        const response = await apiFetch(url);
         if (isStaleConversationListLoad(loadSeq, intentPage, navigateGenAtStart, activePage)) return;
 
         const listContainer = document.getElementById('conversations-list');
@@ -8530,6 +9930,7 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
         if (!response.ok) {
             listContainer.innerHTML = emptyStateHtml;
             if (typeof window.applyTranslations === 'function') window.applyTranslations(listContainer);
+            updateRecentConversationsCount(0);
             renderConversationsPagination(0);
             return;
         }
@@ -8540,6 +9941,7 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
         const resolvedTotal = await resolveConversationsListTotal(convParams, parsed, pageSize, offset);
         if (isStaleConversationListLoad(loadSeq, intentPage, navigateGenAtStart, activePage)) return;
         conversationsPagination.total = resolvedTotal;
+        updateRecentConversationsCount(resolvedTotal);
 
         const pageCheck = reconcileConversationsPageAfterTotal(
             activePage, intentPage, parsed, pageSize, offset, resolvedTotal
@@ -8551,7 +9953,7 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
             if (intentPage != null) {
                 commitConversationsPage(pageCheck.clampedPage, { bumpNavigateGen: true });
             }
-            loadConversationsWithGroups(searchQuery, {
+            loadConversations(searchQuery, {
                 ...options,
                 intentPage: pageCheck.clampedPage,
                 scrollToTop: options.scrollToTop === true || activePage !== pageCheck.clampedPage,
@@ -8560,7 +9962,7 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
         }
         if (intentPage == null && clampConversationsPageToTotal()) {
             if (isStaleConversationListLoad(loadSeq, intentPage, navigateGenAtStart, activePage)) return;
-            loadConversationsWithGroups(searchQuery, options);
+            loadConversations(searchQuery, options);
             return;
         }
 
@@ -8575,11 +9977,6 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
             uniqueConversations.push(conv);
         });
 
-        const hasSearchQuery = searchQuery && searchQuery.trim();
-        const hasProjectFilter = !!getConversationProjectFilter();
-        // 与请求参数 exclude_grouped 一致：后端已排除分组内对话，勿再用 mapping 缓存二次过滤（易导致 2→1 等页被滤空）
-        const listUsesUngroupedApi = !hasSearchQuery && !hasProjectFilter;
-
         if (uniqueConversations.length === 0) {
             listContainer.innerHTML = emptyStateHtml;
             if (typeof window.applyTranslations === 'function') window.applyTranslations(listContainer);
@@ -8592,32 +9989,6 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
         const normalConvs = [];
 
         uniqueConversations.forEach(conv => {
-            // 如果有搜索关键词，显示所有匹配的对话（全局搜索，包括分组中的）
-            if (hasSearchQuery) {
-                // 搜索时显示所有匹配的对话，不管是否在分组中
-                if (conv.pinned) {
-                    pinnedConvs.push(conv);
-                } else {
-                    normalConvs.push(conv);
-                }
-                return;
-            }
-
-            // 按项目筛选时展示该项目下全部对话（含分组内）
-            if (hasProjectFilter) {
-                if (conv.pinned) {
-                    pinnedConvs.push(conv);
-                } else {
-                    normalConvs.push(conv);
-                }
-                return;
-            }
-
-            // 未走 exclude_grouped 接口时，才用 mapping 缓存过滤分组内对话
-            if (!listUsesUngroupedApi && conversationGroupMappingCache[conv.id]) {
-                return;
-            }
-
             if (conv.pinned) {
                 pinnedConvs.push(conv);
             } else {
@@ -8710,7 +10081,7 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
         listContainer.appendChild(fragment);
         updateActiveConversation();
         renderConversationsPagination(visibleCount);
-        
+
         // 翻页时回到列表顶部；后台刷新保留滚动位置
         if (sidebarContent) {
             requestAnimationFrame(() => {
@@ -8727,6 +10098,7 @@ async function loadConversationsWithGroups(searchQuery = '', options = {}) {
         if (listContainer) {
             listContainer.innerHTML = getConversationListEmptyHtml();
             if (typeof window.applyTranslations === 'function') window.applyTranslations(listContainer);
+            updateRecentConversationsCount(0);
             renderConversationsPagination(0);
         }
     }
@@ -8772,41 +10144,85 @@ function createConversationListItemWithMenu(conversation, isPinned) {
     time.textContent = conversation._timeText || formatConversationTimestamp(dateObj);
     contentWrapper.appendChild(time);
 
-    // 如果对话属于某个分组，显示分组标签
-    const groupId = conversationGroupMappingCache[conversation.id];
-    if (groupId) {
-        const group = groupsCache.find(g => g.id === groupId);
-        if (group) {
-            const groupTag = document.createElement('div');
-            groupTag.className = 'conversation-group-tag';
-            groupTag.innerHTML = `<span class="group-tag-icon">${group.icon || '📁'}</span><span class="group-tag-name">${group.name}</span>`;
-            groupTag.title = `Group: ${group.name}`;
-            contentWrapper.appendChild(groupTag);
-        }
-    }
 
     item.appendChild(contentWrapper);
 
     const menuBtn = document.createElement('button');
     menuBtn.className = 'conversation-item-menu';
     menuBtn.innerHTML = '⋯';
-    menuBtn.onclick = (e) => {
-        e.stopPropagation();
-        contextMenuConversationId = conversation.id;
-        showConversationContextMenu(e);
-    };
+    menuBtn.onclick = (e) => openConversationContextMenuForId(e, conversation.id, conversation.title || '');
     item.appendChild(menuBtn);
 
     item.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (currentGroupId) {
-            exitGroupDetail();
-        }
-        loadConversation(conversation.id);
+        const targetConversationId = String(item.dataset.conversationId || '').trim();
+        if (targetConversationId) loadConversation(targetConversationId);
     };
 
     return item;
+}
+
+function openConversationContextMenuForId(event, conversationId, conversationTitle = '') {
+    event.stopPropagation();
+    event.preventDefault();
+    contextMenuConversationId = conversationId;
+    contextMenuConversationTitle = conversationTitle;
+    return showConversationContextMenu(event);
+}
+
+let downloadMarkdownSubmenuHideTimer = null;
+
+function clearDownloadMarkdownSubmenuHideTimeout() {
+    if (!downloadMarkdownSubmenuHideTimer) return;
+    clearTimeout(downloadMarkdownSubmenuHideTimer);
+    downloadMarkdownSubmenuHideTimer = null;
+}
+
+function hideDownloadMarkdownSubmenu() {
+    clearDownloadMarkdownSubmenuHideTimeout();
+    downloadMarkdownSubmenuHideTimer = setTimeout(() => {
+        const submenu = document.getElementById('download-markdown-submenu');
+        if (submenu) submenu.style.display = 'none';
+        downloadMarkdownSubmenuHideTimer = null;
+    }, 120);
+}
+
+function handleDownloadMarkdownSubmenuEnter() {
+    clearDownloadMarkdownSubmenuHideTimeout();
+    const submenu = document.getElementById('download-markdown-submenu');
+    if (submenu) submenu.style.display = 'block';
+}
+
+function handleDownloadMarkdownSubmenuLeave(event) {
+    const submenu = document.getElementById('download-markdown-submenu');
+    if (submenu && event?.relatedTarget && submenu.contains(event.relatedTarget)) return;
+    hideDownloadMarkdownSubmenu();
+}
+
+function updateConversationContextPinText(isPinned) {
+    const pinMenuText = document.getElementById('pin-conversation-menu-text');
+    if (!pinMenuText) return;
+    if (typeof window.t === 'function') {
+        pinMenuText.textContent = isPinned ? window.t('contextMenu.unpinConversation') : window.t('contextMenu.pinConversation');
+    } else {
+        pinMenuText.textContent = isPinned ? 'Unpin conversation' : 'Pin conversation';
+    }
+}
+
+async function refreshConversationContextPinText(convId) {
+    if (!convId) {
+        updateConversationContextPinText(false);
+        return;
+    }
+    try {
+        const response = await apiFetch(`/api/conversations/${convId}`);
+        if (!response.ok) return;
+        const conv = await response.json();
+        updateConversationContextPinText(!!conv.pinned);
+    } catch (error) {
+        console.error('Failed to get conversation pin state:', error);
+    }
 }
 
 // 显示对话上下文菜单
@@ -8814,24 +10230,16 @@ async function showConversationContextMenu(event) {
     const menu = document.getElementById('conversation-context-menu');
     if (!menu) return;
 
-    // 先隐藏子菜单，确保每次打开菜单时子菜单都是关闭状态
-    const submenu = document.getElementById('move-to-group-submenu');
-    if (submenu) {
-        submenu.style.display = 'none';
-        submenuVisible = false;
-    }
     const downloadSubmenu = document.getElementById('download-markdown-submenu');
     if (downloadSubmenu) {
         downloadSubmenu.style.display = 'none';
     }
     // 清除所有定时器
-    clearSubmenuHideTimeout();
-    clearSubmenuShowTimeout();
     clearDownloadMarkdownSubmenuHideTimeout();
-    submenuLoading = false;
 
     const convId = contextMenuConversationId;
-    
+    updateConversationContextPinText(false);
+
     // 更新攻击链菜单项的启用状态
     const attackChainMenuItem = document.getElementById('attack-chain-menu-item');
     if (attackChainMenuItem) {
@@ -8857,80 +10265,27 @@ async function showConversationContextMenu(event) {
             attackChainMenuItem.title = (typeof window.t === 'function' ? window.t('chat.viewAttackChainSelectConv') : 'Please select a conversation to view attack chain');
         }
     }
-    
-    // 先获取对话的置顶状态并更新菜单文本（在显示菜单之前）
-    if (convId) {
-        try {
-            let isPinned = false;
-            // 检查对话是否真的在当前分组中
-            const conversationGroupId = conversationGroupMappingCache[convId];
-            const isInCurrentGroup = currentGroupId && conversationGroupId === currentGroupId;
-            
-            if (isInCurrentGroup) {
-                // 对话在当前分组中，获取分组内置顶状态
-                const response = await apiFetch(`/api/groups/${currentGroupId}/conversations`);
-                if (response.ok) {
-                    const groupConvs = await response.json();
-                    const conv = groupConvs.find(c => c.id === convId);
-                    if (conv) {
-                        isPinned = conv.groupPinned || false;
-                    }
-                }
-            } else {
-                // 不在分组详情页面，或者对话不在当前分组中，获取全局置顶状态
-                const response = await apiFetch(`/api/conversations/${convId}`);
-                if (response.ok) {
-                    const conv = await response.json();
-                    isPinned = conv.pinned || false;
-                }
-            }
-            
-            // 更新菜单文本
-            const pinMenuText = document.getElementById('pin-conversation-menu-text');
-            if (pinMenuText && typeof window.t === 'function') {
-                pinMenuText.textContent = isPinned ? window.t('contextMenu.unpinConversation') : window.t('contextMenu.pinConversation');
-            } else if (pinMenuText) {
-                pinMenuText.textContent = isPinned ? 'Unpin conversation' : 'Pin conversation';
-            }
-        } catch (error) {
-            console.error('Failed to get conversation pin status:', error);
-            const pinMenuText = document.getElementById('pin-conversation-menu-text');
-            if (pinMenuText && typeof window.t === 'function') {
-                pinMenuText.textContent = window.t('contextMenu.pinConversation');
-            } else if (pinMenuText) {
-                pinMenuText.textContent = 'Pin conversation';
-            }
-        }
-    } else {
-        const pinMenuText = document.getElementById('pin-conversation-menu-text');
-        if (pinMenuText && typeof window.t === 'function') {
-            pinMenuText.textContent = window.t('contextMenu.pinConversation');
-        } else if (pinMenuText) {
-            pinMenuText.textContent = 'Pin conversation';
-        }
-    }
 
-    // 在状态获取完成后再显示菜单
+
+    // 先显示菜单，置顶状态随后异步刷新，避免接口慢时点击没有任何反馈。
     menu.style.display = 'block';
     menu.style.visibility = 'visible';
     menu.style.opacity = '1';
-    
+
     // 强制重排以获取正确尺寸
     void menu.offsetHeight;
-    
+
     // 计算菜单位置，确保不超出屏幕
     const menuRect = menu.getBoundingClientRect();
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
-    
-    // 获取子菜单的宽度（如果存在，重用之前获取的submenu变量）
-    const submenuWidth = submenu ? 180 : 0; // 子菜单宽度 + 间距
-    
+
+    const submenuWidth = 0;
+
     let left = event.clientX;
     let top = event.clientY;
-    
+
     // 如果菜单会超出右边界，调整到左侧
-    // 考虑子菜单的宽度
     if (left + menuRect.width + submenuWidth > viewportWidth) {
         left = event.clientX - menuRect.width;
         // 如果调整后仍然超出，则放在按钮左侧
@@ -8938,33 +10293,27 @@ async function showConversationContextMenu(event) {
             left = Math.max(8, event.clientX - menuRect.width - submenuWidth);
         }
     }
-    
+
     // 如果菜单会超出下边界，调整到上方
     if (top + menuRect.height > viewportHeight) {
         top = Math.max(8, event.clientY - menuRect.height);
     }
-    
+
     // 确保不超出左边界
     if (left < 0) {
         left = 8;
     }
-    
+
     // 确保不超出上边界
     if (top < 0) {
         top = 8;
     }
-    
+
     menu.style.left = left + 'px';
     menu.style.top = top + 'px';
-    
+
     // 如果菜单在右侧，子菜单应该在左侧显示
     if (left < event.clientX) {
-        if (submenu) {
-            submenu.style.left = 'auto';
-            submenu.style.right = '100%';
-            submenu.style.marginLeft = '0';
-            submenu.style.marginRight = '4px';
-        }
         if (downloadSubmenu) {
             downloadSubmenu.style.left = 'auto';
             downloadSubmenu.style.right = '100%';
@@ -8972,12 +10321,6 @@ async function showConversationContextMenu(event) {
             downloadSubmenu.style.marginRight = '4px';
         }
     } else {
-        if (submenu) {
-            submenu.style.left = '100%';
-            submenu.style.right = 'auto';
-            submenu.style.marginLeft = '4px';
-            submenu.style.marginRight = '0';
-        }
         if (downloadSubmenu) {
             downloadSubmenu.style.left = '100%';
             downloadSubmenu.style.right = 'auto';
@@ -8989,14 +10332,11 @@ async function showConversationContextMenu(event) {
     // 点击外部关闭菜单
     const closeMenu = (e) => {
         // 检查点击是否在主菜单或子菜单内
-        const moveToGroupSubmenuEl = document.getElementById('move-to-group-submenu');
         const downloadMarkdownSubmenuEl = document.getElementById('download-markdown-submenu');
         const clickedInMenu = menu.contains(e.target);
-        const clickedInSubmenu = moveToGroupSubmenuEl && moveToGroupSubmenuEl.contains(e.target);
         const clickedInDownloadSubmenu = downloadMarkdownSubmenuEl && downloadMarkdownSubmenuEl.contains(e.target);
-        
-        if (!clickedInMenu && !clickedInSubmenu && !clickedInDownloadSubmenu) {
-            // 使用 closeContextMenu 确保同时关闭主菜单和子菜单
+
+        if (!clickedInMenu && !clickedInDownloadSubmenu) {
             closeContextMenu();
             document.removeEventListener('click', closeMenu);
         }
@@ -9004,110 +10344,96 @@ async function showConversationContextMenu(event) {
     setTimeout(() => {
         document.addEventListener('click', closeMenu);
     }, 0);
+
+    refreshConversationContextPinText(convId);
 }
 
-// 显示分组上下文菜单
-async function showGroupContextMenu(event, groupId) {
-    const menu = document.getElementById('group-context-menu');
-    if (!menu) return;
+let renameConversationTargetId = null;
 
-    contextMenuGroupId = groupId;
+function ensureConversationRenameModal() {
+    let modal = document.getElementById('conversation-rename-modal');
+    if (modal) return modal;
 
-    // 先获取分组的置顶状态并更新菜单文本（在显示菜单之前）
-    try {
-        // 先从缓存中查找
-        let group = groupsCache.find(g => g.id === groupId);
-        let isPinned = false;
-        
-        if (group) {
-            isPinned = group.pinned || false;
-        } else {
-            // 如果缓存中没有，从API获取
-            const response = await apiFetch(`/api/groups/${groupId}`);
-            if (response.ok) {
-                group = await response.json();
-                isPinned = group.pinned || false;
-            }
+    modal = document.createElement('div');
+    modal.id = 'conversation-rename-modal';
+    modal.className = 'modal-overlay projects-modal-overlay';
+    modal.style.display = 'none';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'conversation-rename-title');
+    modal.innerHTML = `
+        <div class="projects-modal-dialog">
+            <div class="projects-modal-header">
+                <div class="projects-modal-header-text">
+                    <div>
+                        <h3 id="conversation-rename-title" data-i18n="chat.renameConversationTitle">重命名对话</h3>
+                        <p class="projects-modal-subtitle" data-i18n="chat.renameConversationSubtitle">修改后会同步更新项目文件夹和最近对话中的名称</p>
+                    </div>
+                </div>
+                <button type="button" class="projects-modal-close" data-conversation-rename-close aria-label="关闭" data-i18n="common.close" data-i18n-attr="aria-label" data-i18n-skip-text="true">&times;</button>
+            </div>
+            <div class="projects-modal-body">
+                <div class="projects-form-field">
+                    <label for="conversation-rename-input" data-i18n="chat.conversationTitleLabel">对话名称</label>
+                    <input type="text" id="conversation-rename-input" class="form-input" maxlength="200" autocomplete="off" data-i18n="chat.conversationTitlePlaceholder" data-i18n-attr="placeholder" placeholder="请输入对话名称">
+                </div>
+            </div>
+            <div class="projects-modal-footer">
+                <button class="btn-secondary" type="button" data-conversation-rename-close data-i18n="common.cancel">取消</button>
+                <button class="btn-primary" type="button" id="conversation-rename-submit" data-i18n="contextMenu.rename">重命名</button>
+            </div>
+        </div>`;
+    modal.addEventListener('click', (event) => {
+        if (event.target === modal) closeConversationRenameModal();
+    });
+    modal.querySelectorAll('[data-conversation-rename-close]').forEach((button) => {
+        button.addEventListener('click', closeConversationRenameModal);
+    });
+    modal.querySelector('#conversation-rename-submit')?.addEventListener('click', saveConversationRename);
+    modal.querySelector('#conversation-rename-input')?.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            saveConversationRename();
+        } else if (event.key === 'Escape') {
+            closeConversationRenameModal();
         }
-        
-        // 更新菜单文本
-        const pinMenuText = document.getElementById('pin-group-menu-text');
-        if (pinMenuText && typeof window.t === 'function') {
-            pinMenuText.textContent = isPinned ? window.t('contextMenu.unpinGroup') : window.t('contextMenu.pinGroup');
-        } else if (pinMenuText) {
-            pinMenuText.textContent = isPinned ? 'Unpin group' : 'Pin group';
-        }
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        const pinMenuText = document.getElementById('pin-group-menu-text');
-        if (pinMenuText && typeof window.t === 'function') {
-            pinMenuText.textContent = window.t('contextMenu.pinGroup');
-        } else if (pinMenuText) {
-            pinMenuText.textContent = 'Pin group';
-        }
-    }
-
-    // 在状态获取完成后再显示菜单
-    menu.style.display = 'block';
-    menu.style.visibility = 'visible';
-    menu.style.opacity = '1';
-    
-    // 强制重排以获取正确尺寸
-    void menu.offsetHeight;
-    
-    // 计算菜单位置，确保不超出屏幕
-    const menuRect = menu.getBoundingClientRect();
-    const viewportWidth = window.innerWidth;
-    const viewportHeight = window.innerHeight;
-    
-    let left = event.clientX;
-    let top = event.clientY;
-    
-    // 如果菜单会超出右边界，调整到左侧
-    if (left + menuRect.width > viewportWidth) {
-        left = event.clientX - menuRect.width;
-    }
-    
-    // 如果菜单会超出下边界，调整到上方
-    if (top + menuRect.height > viewportHeight) {
-        top = event.clientY - menuRect.height;
-    }
-    
-    // 确保不超出左边界
-    if (left < 0) {
-        left = 8;
-    }
-    
-    // 确保不超出上边界
-    if (top < 0) {
-        top = 8;
-    }
-    
-    menu.style.left = left + 'px';
-    menu.style.top = top + 'px';
-
-    // 点击外部关闭菜单
-    const closeMenu = (e) => {
-        if (!menu.contains(e.target)) {
-            menu.style.display = 'none';
-            document.removeEventListener('click', closeMenu);
-        }
-    };
-    setTimeout(() => {
-        document.addEventListener('click', closeMenu);
-    }, 0);
+    });
+    document.body.appendChild(modal);
+    if (typeof window.applyTranslations === 'function') window.applyTranslations(modal);
+    return modal;
 }
 
-// 重命名对话
-async function renameConversation() {
+// 打开应用内重命名弹窗，避免内置浏览器拦截 window.prompt。
+function renameConversation() {
     const convId = contextMenuConversationId;
     if (!convId) return;
 
-    const newTitle = prompt('Enter a new title:', '');
-    if (newTitle === null || !newTitle.trim()) {
-        closeContextMenu();
+    renameConversationTargetId = convId;
+    const currentTitle = contextMenuConversationTitle || '';
+    ensureConversationRenameModal();
+    const input = document.getElementById('conversation-rename-input');
+    if (input) input.value = currentTitle;
+    closeContextMenu();
+    openAppModal('conversation-rename-modal', { focusEl: input });
+    if (input) input.select();
+}
+
+function closeConversationRenameModal() {
+    renameConversationTargetId = null;
+    closeAppModal('conversation-rename-modal');
+}
+
+async function saveConversationRename() {
+    const convId = renameConversationTargetId;
+    const input = document.getElementById('conversation-rename-input');
+    const newTitle = (input?.value || '').trim();
+    if (!convId || !newTitle) {
+        input?.focus();
         return;
     }
+
+    const submitButton = document.getElementById('conversation-rename-submit');
+    if (submitButton) submitButton.disabled = true;
 
     try {
         const response = await apiFetch(`/api/conversations/${convId}`, {
@@ -9124,22 +10450,14 @@ async function renameConversation() {
         }
 
         // 更新前端显示
-        const item = document.querySelector(`[data-conversation-id="${convId}"]`);
-        if (item) {
-            const titleEl = item.querySelector('.conversation-title');
-            if (titleEl) {
-                titleEl.textContent = newTitle.trim();
-            }
-        }
-
-        // 如果在分组详情页，也需要更新
-        const groupItem = document.querySelector(`.group-conversation-item[data-conversation-id="${convId}"]`);
-        if (groupItem) {
-            const groupTitleEl = groupItem.querySelector('.group-conversation-title');
-            if (groupTitleEl) {
-                groupTitleEl.textContent = newTitle.trim();
-            }
-        }
+        document.querySelectorAll('[data-conversation-id]').forEach((item) => {
+            if (item.dataset.conversationId !== convId) return;
+            item.querySelectorAll('.conversation-title, .project-conversation-title')
+                .forEach((titleEl) => {
+                    titleEl.textContent = newTitle.trim();
+                    titleEl.title = newTitle.trim();
+                });
+        });
 
         // 同步更新顶栏正在运行的任务名称
         if (typeof updateActiveTaskConversationTitle === 'function') {
@@ -9147,15 +10465,36 @@ async function renameConversation() {
         }
 
         // 重新加载对话列表
-        loadConversationsWithGroups();
+        await loadConversations();
+        if (typeof window.refreshChatProjectFolders === 'function') {
+            await window.refreshChatProjectFolders();
+        }
+        closeConversationRenameModal();
     } catch (error) {
-        console.error('delete turn failed:', error);
+        console.error('Failed to rename conversation:', error);
         const failedLabel = typeof window.t === 'function' ? window.t('chat.renameFailed') : 'Rename failed';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
+        const unknownErr = 'Unknown error';
         alert(failedLabel + ': ' + (error.message || unknownErr));
+    } finally {
+        if (submitButton) submitButton.disabled = false;
     }
+}
 
-    closeContextMenu();
+async function assertConversationActionResponse(response, fallbackMessage) {
+    if (response && response.ok) return response;
+    let payload = {};
+    try {
+        payload = response ? await response.json() : {};
+    } catch (e) { /* ignore */ }
+    throw new Error(payload.error || payload.message || fallbackMessage);
+}
+
+function notifyConversationPinnedChanged(conversationId, pinned) {
+    try {
+        document.dispatchEvent(new CustomEvent('conversation-pinned-changed', {
+            detail: { conversationId, pinned: !!pinned }
+        }));
+    } catch (e) { /* ignore */ }
 }
 
 // 置顶对话
@@ -9163,481 +10502,39 @@ async function pinConversation() {
     const convId = contextMenuConversationId;
     if (!convId) return;
 
+    // 点击后立即收起菜单，避免网络请求期间看起来“没有反应”。
+    closeContextMenu();
+
     try {
-        // 检查对话是否真的在当前分组中
-        // 如果对话已经从分组移出，conversationGroupMappingCache 中不会有该对话的映射
-        // 或者映射的分组ID不等于当前分组ID
-        const conversationGroupId = conversationGroupMappingCache[convId];
-        const isInCurrentGroup = currentGroupId && conversationGroupId === currentGroupId;
-        
-        // 如果当前在分组详情页面，且对话确实在当前分组中，使用分组内置顶
-        if (isInCurrentGroup) {
-            // 获取当前对话在分组中的置顶状态
-            const response = await apiFetch(`/api/groups/${currentGroupId}/conversations`);
-            const groupConvs = await response.json();
-            const conv = groupConvs.find(c => c.id === convId);
-            
-            // 如果找不到对话，说明可能有问题，使用默认值
-            const currentPinned = conv && conv.groupPinned !== undefined ? conv.groupPinned : false;
-            const newPinned = !currentPinned;
+        const response = await apiFetch(`/api/conversations/${convId}`);
+        await assertConversationActionResponse(response, 'Failed to load conversation');
+        const conv = await response.json();
+        const newPinned = !conv.pinned;
 
-            // 更新分组内置顶状态
-            await apiFetch(`/api/groups/${currentGroupId}/conversations/${convId}/pinned`, {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ pinned: newPinned }),
-            });
+        const updateResponse = await apiFetch(`/api/conversations/${convId}/pinned`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ pinned: newPinned }),
+        });
+        await assertConversationActionResponse(updateResponse, 'Failed to update pin state');
 
-            // 重新加载分组对话
-            loadGroupConversations(currentGroupId);
-        } else {
-            // 不在分组详情页面，或者对话不在当前分组中，使用全局置顶
-            const response = await apiFetch(`/api/conversations/${convId}`);
-            const conv = await response.json();
-            const newPinned = !conv.pinned;
-
-            // 更新全局置顶状态
-            await apiFetch(`/api/conversations/${convId}/pinned`, {
-                method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ pinned: newPinned }),
-            });
-
-            loadConversationsWithGroups();
-        }
+        notifyConversationPinnedChanged(convId, newPinned);
+        loadConversations();
     } catch (error) {
         console.error('delete turn failed:', error);
         alert('Failed to pin conversation: ' + (error.message || 'Unknown error'));
     }
 
-    closeContextMenu();
-}
 
-// 显示移动到分组子菜单
-async function showMoveToGroupSubmenu() {
-    const submenu = document.getElementById('move-to-group-submenu');
-    if (!submenu) return;
-
-    // 如果子菜单已经显示，不需要重复渲染
-    if (submenuVisible && submenu.style.display === 'block') {
-        return;
-    }
-
-    // 如果正在加载中，避免重复调用
-    if (submenuLoading) {
-        return;
-    }
-
-    // 清除隐藏定时器
-    clearSubmenuHideTimeout();
-    
-    // 标记为加载中
-    submenuLoading = true;
-    submenu.innerHTML = '';
-
-    // 确保分组列表已加载 - 强制重新加载以确保数据是最新的
-    try {
-        // 如果缓存为空，强制加载
-        if (!Array.isArray(groupsCache) || groupsCache.length === 0) {
-            await loadGroups();
-        } else {
-            // 即使缓存不为空，也尝试刷新一次，确保数据是最新的
-            // 但使用静默方式，不显示错误
-            try {
-                const response = await apiFetch('/api/groups');
-                if (response.ok) {
-                    const freshGroups = await response.json();
-                    if (Array.isArray(freshGroups)) {
-                        groupsCache = freshGroups;
-                    }
-                }
-            } catch (err) {
-                // 如果刷新失败，使用缓存的数据
-                console.warn('Failed to refresh the group list; using cached data:', err);
-            }
-        }
-        
-        // 再次验证缓存
-        if (!Array.isArray(groupsCache)) {
-            console.warn('groupsCache is not a valid array; resetting it to an empty array.');
-            groupsCache = [];
-            // 如果仍然无效，尝试重新加载
-            if (groupsCache.length === 0) {
-                await loadGroups();
-            }
-        }
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        // 即使加载失败，也继续显示菜单，使用现有缓存
-    }
-
-    // 如果当前在分组详情页面，显示"移出本组"选项
-    if (currentGroupId && contextMenuConversationId) {
-        // 检查对话是否在当前分组中
-        const convInGroup = conversationGroupMappingCache[contextMenuConversationId] === currentGroupId;
-        if (convInGroup) {
-            const removeItem = document.createElement('div');
-            removeItem.className = 'context-submenu-item';
-            removeItem.innerHTML = `
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    <path d="M9 12l6 6M15 12l-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                 <span>Remove from this group</span>
-            `;
-            removeItem.onclick = () => {
-                removeConversationFromGroup(contextMenuConversationId, currentGroupId);
-            };
-            submenu.appendChild(removeItem);
-            
-            // 添加分隔线
-            const divider = document.createElement('div');
-            divider.className = 'context-menu-divider';
-            submenu.appendChild(divider);
-        }
-    }
-
-    // 验证 groupsCache 是否为有效数组
-    if (!Array.isArray(groupsCache)) {
-        console.warn('groupsCache is not a valid array; resetting it to an empty array.');
-        groupsCache = [];
-    }
-
-    // 如果有分组，显示所有分组（排除对话已所在的分组）
-    if (groupsCache.length > 0) {
-        // 检查对话当前所在的分组ID
-        const conversationCurrentGroupId = contextMenuConversationId 
-            ? conversationGroupMappingCache[contextMenuConversationId] 
-            : null;
-        
-        groupsCache.forEach(group => {
-            // 验证分组对象是否有效
-            if (!group || !group.id || !group.name) {
-                console.warn('Invalid group object:', group);
-                return;
-            }
-            
-            // 如果对话已经在当前分组中，不显示该分组（因为已经在里面了）
-            if (conversationCurrentGroupId && group.id === conversationCurrentGroupId) {
-                return;
-            }
-            
-            const item = document.createElement('div');
-            item.className = 'context-submenu-item';
-            item.innerHTML = `
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <span>${group.name}</span>
-            `;
-            item.onclick = () => {
-                moveConversationToGroup(contextMenuConversationId, group.id);
-            };
-            submenu.appendChild(item);
-        });
-    } else {
-        // 如果仍然没有分组，记录日志以便调试
-        console.warn('showMoveToGroupSubmenu: groupsCache is empty; unable to display the group list.');
-    }
-
-    // 始终显示"创建分组"选项
-    const addGroupLabel = typeof window.t === 'function' ? window.t('chat.addNewGroup') : '+ New group';
-    const addItem = document.createElement('div');
-    addItem.className = 'context-submenu-item add-group-item';
-    addItem.innerHTML = `
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <span>${addGroupLabel}</span>
-    `;
-    addItem.onclick = () => {
-        showCreateGroupModal(true);
-    };
-    submenu.appendChild(addItem);
-
-    submenu.style.display = 'block';
-    submenuVisible = true;
-    submenuLoading = false;
-    
-    // 计算子菜单位置，防止溢出
-    setTimeout(() => {
-        const submenuRect = submenu.getBoundingClientRect();
-        const viewportWidth = window.innerWidth;
-        const viewportHeight = window.innerHeight;
-        
-        // 如果子菜单超出右边界，调整到左侧
-        if (submenuRect.right > viewportWidth) {
-            submenu.style.left = 'auto';
-            submenu.style.right = '100%';
-            submenu.style.marginLeft = '0';
-            submenu.style.marginRight = '4px';
-        }
-        
-        // 如果子菜单超出下边界，调整位置
-        if (submenuRect.bottom > viewportHeight) {
-            const overflow = submenuRect.bottom - viewportHeight;
-            const currentTop = parseInt(submenu.style.top) || 0;
-            submenu.style.top = (currentTop - overflow - 8) + 'px';
-        }
-    }, 0);
-}
-
-// 隐藏移动到分组子菜单的定时器
-let submenuHideTimeout = null;
-// 显示子菜单的防抖定时器
-let submenuShowTimeout = null;
-// 子菜单是否正在加载中
-let submenuLoading = false;
-// 子菜单是否已显示
-let submenuVisible = false;
-// 下载Markdown子菜单隐藏定时器
-let downloadMarkdownSubmenuHideTimeout = null;
-
-// 隐藏移动到分组子菜单
-function hideMoveToGroupSubmenu() {
-    const submenu = document.getElementById('move-to-group-submenu');
-    if (submenu) {
-        submenu.style.display = 'none';
-        submenuVisible = false;
-    }
-}
-
-// 清除隐藏子菜单的定时器
-function clearSubmenuHideTimeout() {
-    if (submenuHideTimeout) {
-        clearTimeout(submenuHideTimeout);
-        submenuHideTimeout = null;
-    }
-}
-
-// 清除显示子菜单的定时器
-function clearSubmenuShowTimeout() {
-    if (submenuShowTimeout) {
-        clearTimeout(submenuShowTimeout);
-        submenuShowTimeout = null;
-    }
-}
-
-function clearDownloadMarkdownSubmenuHideTimeout() {
-    if (downloadMarkdownSubmenuHideTimeout) {
-        clearTimeout(downloadMarkdownSubmenuHideTimeout);
-        downloadMarkdownSubmenuHideTimeout = null;
-    }
-}
-
-function showDownloadMarkdownSubmenu() {
-    const submenu = document.getElementById('download-markdown-submenu');
-    if (!submenu) return;
-    clearDownloadMarkdownSubmenuHideTimeout();
-    submenu.style.display = 'block';
-}
-
-function hideDownloadMarkdownSubmenu() {
-    const submenu = document.getElementById('download-markdown-submenu');
-    if (!submenu) return;
-    submenu.style.display = 'none';
-}
-
-function handleDownloadMarkdownSubmenuEnter() {
-    clearDownloadMarkdownSubmenuHideTimeout();
-    showDownloadMarkdownSubmenu();
-}
-
-function handleDownloadMarkdownSubmenuLeave(event) {
-    const submenu = document.getElementById('download-markdown-submenu');
-    if (!submenu) return;
-    const relatedTarget = event.relatedTarget;
-    if (relatedTarget && submenu.contains(relatedTarget)) {
-        return;
-    }
-    clearDownloadMarkdownSubmenuHideTimeout();
-    downloadMarkdownSubmenuHideTimeout = setTimeout(() => {
-        hideDownloadMarkdownSubmenu();
-        downloadMarkdownSubmenuHideTimeout = null;
-    }, 200);
-}
-
-// 处理鼠标进入"移动到分组"菜单项（带防抖）
-function handleMoveToGroupSubmenuEnter() {
-    // 清除隐藏定时器
-    clearSubmenuHideTimeout();
-    
-    // 如果子菜单已经显示，不需要重复调用
-    const submenu = document.getElementById('move-to-group-submenu');
-    if (submenu && submenuVisible && submenu.style.display === 'block') {
-        return;
-    }
-    
-    // 清除之前的显示定时器
-    clearSubmenuShowTimeout();
-    
-    // 使用防抖延迟显示，避免频繁触发
-    submenuShowTimeout = setTimeout(() => {
-        showMoveToGroupSubmenu();
-        submenuShowTimeout = null;
-    }, 100);
-}
-
-// 处理鼠标离开"移动到分组"菜单项
-function handleMoveToGroupSubmenuLeave(event) {
-    const submenu = document.getElementById('move-to-group-submenu');
-    if (!submenu) return;
-    
-    // 清除显示定时器
-    clearSubmenuShowTimeout();
-    
-    // 检查鼠标是否移动到子菜单
-    const relatedTarget = event.relatedTarget;
-    if (relatedTarget && submenu.contains(relatedTarget)) {
-        // 鼠标移动到子菜单，不清除
-        return;
-    }
-    
-    // 清除之前的隐藏定时器
-    clearSubmenuHideTimeout();
-    
-    // 延迟隐藏，给用户时间移动到子菜单
-    submenuHideTimeout = setTimeout(() => {
-        hideMoveToGroupSubmenu();
-        submenuHideTimeout = null;
-    }, 200);
-}
-
-// 移动对话到分组
-async function moveConversationToGroup(convId, groupId) {
-    try {
-        await apiFetch('/api/groups/conversations', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                conversationId: convId,
-                groupId: groupId,
-            }),
-        });
-
-        // 更新缓存
-        const oldGroupId = conversationGroupMappingCache[convId];
-        conversationGroupMappingCache[convId] = groupId;
-        
-        // 将新移动的对话添加到待保留映射中，防止后端API延迟导致映射丢失
-        pendingGroupMappings[convId] = groupId;
-        
-        // 如果移动的是当前对话，更新 currentConversationGroupId
-        if (currentConversationId === convId) {
-            currentConversationGroupId = groupId;
-        }
-        
-        // 如果当前在分组详情页面，重新加载分组对话
-        if (currentGroupId) {
-            // 如果从当前分组移出，或者移动到当前分组，都需要重新加载
-            if (currentGroupId === oldGroupId || currentGroupId === groupId) {
-                await loadGroupConversations(currentGroupId);
-            }
-        }
-        
-        // 无论是否在分组详情页面，都需要刷新最近对话列表
-        // 因为最近对话列表会根据分组映射缓存来过滤显示，需要立即更新
-        // loadConversationsWithGroups 内部会调用 loadConversationGroupMapping，
-        // loadConversationGroupMapping 会保留 pendingGroupMappings 中的映射
-        await loadConversationsWithGroups();
-        
-        // 注意：pendingGroupMappings 中的映射会在下次 loadConversationGroupMapping 
-        // 成功从后端加载时自动清理（在 loadConversationGroupMapping 中处理）
-        
-        // 刷新分组列表，更新高亮状态
-        await loadGroups();
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        alert('Failed to move conversation: ' + (error.message || 'Unknown error'));
-    }
-
-    closeContextMenu();
-}
-
-// 从分组中移除对话
-async function removeConversationFromGroup(convId, groupId) {
-    try {
-        await apiFetch(`/api/groups/${groupId}/conversations/${convId}`, {
-            method: 'DELETE',
-        });
-
-        // 更新缓存 - 立即删除，确保后续加载时能正确识别
-        delete conversationGroupMappingCache[convId];
-        // 同时从待保留映射中移除
-        delete pendingGroupMappings[convId];
-        
-        // 如果移除的是当前对话，清除 currentConversationGroupId
-        if (currentConversationId === convId) {
-            currentConversationGroupId = null;
-        }
-        
-        // 如果当前在分组详情页面，重新加载分组对话
-        if (currentGroupId === groupId) {
-            await loadGroupConversations(groupId);
-        }
-        
-        // 重新加载分组映射，确保缓存是最新的
-        await loadConversationGroupMapping();
-        
-        // 刷新分组列表，更新高亮状态
-        await loadGroups();
-        
-        // 刷新最近对话列表，让移出的对话立即显示
-        // 使用临时变量保存 currentGroupId，然后临时设置为 null，确保显示所有不在分组的对话
-        const savedGroupId = currentGroupId;
-        currentGroupId = null;
-        await loadConversationsWithGroups();
-        currentGroupId = savedGroupId;
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        alert('Failed to remove conversation: ' + (error.message || 'Unknown error'));
-    }
-
-    closeContextMenu();
-}
-
-// 加载对话分组映射
-async function loadConversationGroupMapping() {
-    try {
-        // 使用批量 API 一次性获取所有映射（消除 N+1 串行请求）
-        const response = await apiFetch('/api/groups/mappings');
-
-        // 保存待保留的映射
-        const preservedMappings = { ...pendingGroupMappings };
-
-        conversationGroupMappingCache = {};
-
-        if (response.ok) {
-            const mappings = await response.json();
-            if (Array.isArray(mappings)) {
-                mappings.forEach(m => {
-                    conversationGroupMappingCache[m.conversationId] = m.groupId;
-                    // 如果这个对话在待保留映射中，从待保留映射中移除（因为已经从后端加载了）
-                    if (preservedMappings[m.conversationId] === m.groupId) {
-                        delete pendingGroupMappings[m.conversationId];
-                    }
-                });
-            }
-        }
-
-        // 恢复待保留的映射（这些是后端API尚未同步的映射）
-        Object.assign(conversationGroupMappingCache, preservedMappings);
-    } catch (error) {
-        console.error('delete turn failed:', error);
-    }
 }
 
 // 从上下文菜单查看攻击链
 function showAttackChainFromContext() {
     const convId = contextMenuConversationId;
     if (!convId) return;
-    
+
     closeContextMenu();
     showAttackChain(convId);
 }
@@ -9816,21 +10713,14 @@ function closeContextMenu() {
     if (menu) {
         menu.style.display = 'none';
     }
-    const submenu = document.getElementById('move-to-group-submenu');
-    if (submenu) {
-        submenu.style.display = 'none';
-        submenuVisible = false;
-    }
     const downloadSubmenu = document.getElementById('download-markdown-submenu');
     if (downloadSubmenu) {
         downloadSubmenu.style.display = 'none';
     }
     // 清除所有定时器
-    clearSubmenuHideTimeout();
-    clearSubmenuShowTimeout();
     clearDownloadMarkdownSubmenuHideTimeout();
-    submenuLoading = false;
     contextMenuConversationId = null;
+    contextMenuConversationTitle = '';
 }
 
 // 显示批量管理模态框
@@ -9850,21 +10740,6 @@ function getConversationProjectLabel(conv) {
     return typeof window.t === 'function' ? window.t('batchManageModal.unknownProject') : 'Unknown project';
 }
 
-function getConversationGroupId(conv) {
-    return (conv && conversationGroupMappingCache[conv.id]) || '';
-}
-
-function getConversationGroupLabel(conv) {
-    const groupId = getConversationGroupId(conv);
-    if (!groupId) {
-        return typeof window.t === 'function' ? window.t('batchManageModal.noGroup') : 'Ungrouped';
-    }
-    const group = Array.isArray(groupsCache) ? groupsCache.find(g => g.id === groupId) : null;
-    if (group) {
-        return `${group.icon || '📁'} ${group.name}`;
-    }
-    return typeof window.t === 'function' ? window.t('batchManageModal.unknownGroup') : 'Unknown group';
-}
 
 async function prefetchProjectNamesForConversations(conversations) {
     const missing = new Set();
@@ -9895,83 +10770,10 @@ async function refreshBatchProjectFilter() {
     syncProjectFilterCustomSelect(BATCH_PROJECT_FILTER_SELECT_ID);
 }
 
-async function refreshBatchGroupSelect() {
-    const sel = document.getElementById('batch-move-group-select');
-    if (!sel) return;
-
-    if (!Array.isArray(groupsCache) || groupsCache.length === 0) {
-        await loadGroups();
-    }
-
-    const saved = sel.value || BATCH_GROUP_NONE;
-    sel.innerHTML = '';
-
-    const noneOpt = document.createElement('option');
-    noneOpt.value = BATCH_GROUP_NONE;
-    noneOpt.textContent = projectFilterT('batchManageModal.noGroupOption', 'Ungrouped');
-    sel.appendChild(noneOpt);
-
-    (groupsCache || []).forEach((group) => {
-        const opt = document.createElement('option');
-        opt.value = group.id;
-        opt.textContent = `${group.icon || '📁'} ${group.name}`;
-        sel.appendChild(opt);
-    });
-
-    if (saved === BATCH_GROUP_NONE || (groupsCache || []).some((group) => group.id === saved)) {
-        sel.value = saved;
-    } else {
-        sel.value = BATCH_GROUP_NONE;
-    }
-    syncSimpleCustomSelect(BATCH_GROUP_FILTER_SELECT_ID);
-}
-
-function appendBatchGroupHeaderFilterNativeOptions(sel) {
-    const allLabel = projectFilterT('batchManageModal.filterAllGroups', 'All groups');
-    const ungroupedLabel = projectFilterT('batchManageModal.filterUngrouped', 'Ungrouped');
-    sel.innerHTML = '';
-    const allOpt = document.createElement('option');
-    allOpt.value = '';
-    allOpt.textContent = allLabel;
-    allOpt.setAttribute('data-i18n', 'batchManageModal.filterAllGroups');
-    sel.appendChild(allOpt);
-    const ungroupedOpt = document.createElement('option');
-    ungroupedOpt.value = BATCH_GROUP_NONE;
-    ungroupedOpt.textContent = ungroupedLabel;
-    ungroupedOpt.setAttribute('data-i18n', 'batchManageModal.filterUngrouped');
-    sel.appendChild(ungroupedOpt);
-}
-
-async function refreshBatchGroupHeaderFilter() {
-    const sel = document.getElementById(BATCH_GROUP_HEADER_FILTER_SELECT_ID);
-    if (!sel) return;
-
-    if (!Array.isArray(groupsCache) || groupsCache.length === 0) {
-        await loadGroups();
-    }
-
-    const saved = sel.value || '';
-    appendBatchGroupHeaderFilterNativeOptions(sel);
-
-    (groupsCache || []).forEach((group) => {
-        const opt = document.createElement('option');
-        opt.value = group.id;
-        opt.textContent = `${group.icon || '📁'} ${group.name}`;
-        sel.appendChild(opt);
-    });
-
-    if (saved === '' || saved === BATCH_GROUP_NONE || (groupsCache || []).some((group) => group.id === saved)) {
-        sel.value = saved;
-    } else {
-        sel.value = '';
-    }
-    syncSimpleCustomSelect(BATCH_GROUP_HEADER_FILTER_SELECT_ID);
-}
 
 function getBatchFilteredConversations() {
     const query = (document.getElementById('batch-search-input')?.value || '').trim().toLowerCase();
     const projectFilter = (document.getElementById('batch-project-filter')?.value || '').trim();
-    const groupFilter = (document.getElementById(BATCH_GROUP_HEADER_FILTER_SELECT_ID)?.value || '').trim();
     return allConversationsForBatch.filter((conv) => {
         const pid = getConversationProjectId(conv);
         if (projectFilter) {
@@ -9981,19 +10783,10 @@ function getBatchFilteredConversations() {
                 return false;
             }
         }
-        const gid = getConversationGroupId(conv);
-        if (groupFilter) {
-            if (groupFilter === BATCH_GROUP_NONE) {
-                if (gid) return false;
-            } else if (gid !== groupFilter) {
-                return false;
-            }
-        }
         if (!query) return true;
         const title = (conv.title || '').toLowerCase();
         const projectName = getConversationProjectLabel(conv).toLowerCase();
-        const groupName = getConversationGroupLabel(conv).toLowerCase();
-        return title.includes(query) || projectName.includes(query) || groupName.includes(query);
+        return title.includes(query) || projectName.includes(query);
     });
 }
 
@@ -10016,16 +10809,8 @@ async function showBatchManageModal() {
     try {
         initProjectFilterCustomSelect(BATCH_PROJECT_FILTER_SELECT_ID);
         allConversationsForBatch = await fetchAllConversations('');
-        await Promise.all([
-            prefetchProjectNamesForConversations(allConversationsForBatch),
-            loadGroups(),
-            loadConversationGroupMapping(),
-        ]);
+        await prefetchProjectNamesForConversations(allConversationsForBatch);
         await refreshBatchProjectFilter();
-        initBatchGroupHeaderFilterCustomSelect();
-        await refreshBatchGroupHeaderFilter();
-        initBatchGroupCustomSelect();
-        await refreshBatchGroupSelect();
         const sidebarFilter = getConversationProjectFilter();
         const batchSel = document.getElementById('batch-project-filter');
         if (batchSel && sidebarFilter && (
@@ -10041,10 +10826,8 @@ async function showBatchManageModal() {
     } catch (error) {
         console.error('delete turn failed:', error);
         initProjectFilterCustomSelect(BATCH_PROJECT_FILTER_SELECT_ID);
-        initBatchGroupHeaderFilterCustomSelect();
-        initBatchGroupCustomSelect();
         allConversationsForBatch = [];
-        await Promise.all([refreshBatchProjectFilter(), refreshBatchGroupHeaderFilter(), refreshBatchGroupSelect()]);
+        await refreshBatchProjectFilter();
         applyBatchConversationFilters();
         openAppModal('batch-manage-modal', { focus: false });
     }
@@ -10055,36 +10838,36 @@ function safeTruncateText(text, maxLength = 50) {
     if (!text || typeof text !== 'string') {
         return text || '';
     }
-    
+
     // 使用 Array.from 将字符串转换为字符数组（正确处理 Unicode 代理对）
     const chars = Array.from(text);
-    
+
     // 如果文本长度未超过限制，直接返回
     if (chars.length <= maxLength) {
         return text;
     }
-    
+
     // 截断到最大长度（基于字符数，而不是代码单元）
     let truncatedChars = chars.slice(0, maxLength);
-    
+
     // 尝试在标点符号或空格处截断，使截断更自然
     // 在截断点往前查找合适的断点（不超过20%的长度）
     const searchRange = Math.floor(maxLength * 0.2);
     const breakChars = ['，', '。', '、', ' ', ',', '.', ';', ':', '!', '?', '！', '？', '/', '\\', '-', '_'];
     let bestBreakPos = truncatedChars.length;
-    
+
     for (let i = truncatedChars.length - 1; i >= truncatedChars.length - searchRange && i >= 0; i--) {
         if (breakChars.includes(truncatedChars[i])) {
             bestBreakPos = i + 1; // 在标点符号后断开
             break;
         }
     }
-    
+
     // 如果找到合适的断点，使用它；否则使用原截断位置
     if (bestBreakPos < truncatedChars.length) {
         truncatedChars = truncatedChars.slice(0, bestBreakPos);
     }
-    
+
     // 将字符数组转换回字符串，并添加省略号
     return truncatedChars.join('') + '...';
 }
@@ -10129,16 +10912,6 @@ function renderBatchConversations(filtered = null) {
             project.classList.add('is-unbound');
         }
 
-        const group = document.createElement('div');
-        group.className = 'batch-table-col-group';
-        const groupLabel = getConversationGroupLabel(conv);
-        const truncatedGroup = safeTruncateText(groupLabel, 24);
-        group.textContent = truncatedGroup;
-        group.title = groupLabel;
-        if (!getConversationGroupId(conv)) {
-            group.classList.add('is-unbound');
-        }
-
         const time = document.createElement('div');
         time.className = 'batch-table-col-time';
         const dateObj = conv.updatedAt ? new Date(conv.updatedAt) : new Date();
@@ -10174,7 +10947,6 @@ function renderBatchConversations(filtered = null) {
         row.appendChild(checkboxCol);
         row.appendChild(name);
         row.appendChild(project);
-        row.appendChild(group);
         row.appendChild(time);
         row.appendChild(action);
 
@@ -10222,132 +10994,6 @@ function syncSelectAllBatchCheckbox() {
     }
 }
 
-// 批量设置对话分组（选「无分组」即移出）
-async function applyBatchGroupChange() {
-    const checkboxes = document.querySelectorAll('.batch-conversation-checkbox:checked');
-    if (checkboxes.length === 0) {
-        alert(typeof window.t === 'function' ? window.t('batchManageModal.confirmGroupChangeNone') : 'Please select at least one conversation');
-        return;
-    }
-
-    const groupSelect = document.getElementById('batch-move-group-select');
-    const groupId = (groupSelect?.value || BATCH_GROUP_NONE).trim();
-
-    if (groupId === BATCH_GROUP_NONE) {
-        const items = Array.from(checkboxes).map((cb) => ({
-            id: cb.dataset.conversationId,
-            groupId: conversationGroupMappingCache[cb.dataset.conversationId] || '',
-        })).filter((item) => item.groupId);
-
-        if (items.length === 0) {
-            alert(typeof window.t === 'function' ? window.t('batchManageModal.confirmRemoveNoGroup') : 'None of the selected conversations belong to a group');
-            return;
-        }
-
-        const confirmMsg = typeof window.t === 'function'
-            ? window.t('batchManageModal.confirmRemoveN', { count: items.length })
-            : `Remove the selected ${items.length} conversation(s) from their groups?`;
-        if (!confirm(confirmMsg)) {
-            return;
-        }
-
-        try {
-            for (const item of items) {
-                await apiFetch(`/api/groups/${item.groupId}/conversations/${item.id}`, {
-                    method: 'DELETE',
-                });
-
-                delete conversationGroupMappingCache[item.id];
-                delete pendingGroupMappings[item.id];
-
-                if (currentConversationId === item.id) {
-                    currentConversationGroupId = null;
-                }
-            }
-
-            await finishBatchGroupChangeAfterRemove();
-        } catch (error) {
-        console.error('Failed to remove conversations from the group in bulk:', error);
-            await loadConversationGroupMapping();
-            applyBatchConversationFilters();
-            const failedMsg = typeof window.t === 'function' ? window.t('batchManageModal.removeFailed') : 'Remove failed';
-            const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
-            alert(failedMsg + ': ' + (error.message || unknownErr));
-        }
-        return;
-    }
-
-    const targetGroup = (groupsCache || []).find((group) => group.id === groupId);
-    const groupName = targetGroup ? targetGroup.name : groupId;
-    const confirmMsg = typeof window.t === 'function'
-        ? window.t('batchManageModal.confirmMoveN', { count: checkboxes.length, group: groupName })
-        : `${page}/${totalPages}`;
-    if (!confirm(confirmMsg)) {
-        return;
-    }
-
-    const ids = Array.from(checkboxes).map((cb) => cb.dataset.conversationId);
-
-    try {
-        for (const id of ids) {
-            await apiFetch('/api/groups/conversations', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    conversationId: id,
-                    groupId,
-                }),
-            });
-
-            conversationGroupMappingCache[id] = groupId;
-            pendingGroupMappings[id] = groupId;
-
-            if (currentConversationId === id) {
-                currentConversationGroupId = groupId;
-            }
-        }
-
-        if (currentGroupId) {
-            await loadGroupConversations(currentGroupId);
-        }
-        await loadConversationsWithGroups();
-        await loadGroups();
-        resetBatchSelectionAfterGroupChange();
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        await loadConversationGroupMapping();
-        applyBatchConversationFilters();
-        const failedMsg = typeof window.t === 'function' ? window.t('batchManageModal.moveFailed') : 'Move failed';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
-        alert(failedMsg + ': ' + (error.message || unknownErr));
-    }
-}
-
-function resetBatchSelectionAfterGroupChange() {
-    applyBatchConversationFilters();
-    const selectAll = document.getElementById('batch-select-all');
-    if (selectAll) {
-        selectAll.checked = false;
-        selectAll.indeterminate = false;
-    }
-}
-
-async function finishBatchGroupChangeAfterRemove() {
-    if (currentGroupId) {
-        await loadGroupConversations(currentGroupId);
-    }
-    await loadConversationGroupMapping();
-    await loadGroups();
-
-    const savedGroupId = currentGroupId;
-    currentGroupId = null;
-    await loadConversationsWithGroups();
-    currentGroupId = savedGroupId;
-
-    resetBatchSelectionAfterGroupChange();
-}
 
 // 删除选中的对话
 async function deleteSelectedConversations() {
@@ -10364,7 +11010,7 @@ async function deleteSelectedConversations() {
     }
 
     const ids = Array.from(checkboxes).map(cb => cb.dataset.conversationId);
-    
+
     try {
         for (const id of ids) {
             await deleteConversation(id, true); // 跳过内部确认，因为批量删除时已经确认过了
@@ -10376,9 +11022,9 @@ async function deleteSelectedConversations() {
             selectAll.indeterminate = false;
         }
     } catch (error) {
-        console.error('delete turn failed:', error);
-        const failedMsg = typeof window.t === 'function' ? window.t('batchManageModal.deleteFailed') : 'Delete failed';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
+        console.error('Delete failed:', error);
+        const failedLabel = typeof window.t === 'function' ? window.t('batchManageModal.deleteFailed') : 'Delete failed';
+        const unknownErr = 'Unknown error';
         alert(failedMsg + ': ' + (error.message || unknownErr));
     }
 }
@@ -10396,12 +11042,6 @@ function closeBatchManageModal() {
     if (searchInput) searchInput.value = '';
     const batchProj = document.getElementById('batch-project-filter');
     if (batchProj) batchProj.value = '';
-    const batchGroupFilter = document.getElementById(BATCH_GROUP_HEADER_FILTER_SELECT_ID);
-    if (batchGroupFilter) batchGroupFilter.value = '';
-    syncSimpleCustomSelect(BATCH_GROUP_HEADER_FILTER_SELECT_ID);
-    const batchGroup = document.getElementById('batch-move-group-select');
-    if (batchGroup) batchGroup.value = BATCH_GROUP_NONE;
-    syncSimpleCustomSelect(BATCH_GROUP_FILTER_SELECT_ID);
     allConversationsForBatch = [];
 }
 
@@ -10421,9 +11061,6 @@ function refreshChatPanelI18n() {
                     el.textContent = d.toLocaleTimeString(locale, timeOpts);
                 }
             } catch (e) { /* ignore */ }
-        });
-        messagesEl.querySelectorAll('.mcp-call-label').forEach(function (el) {
-            el.textContent = '\uD83D\uDCCB ' + t('chat.penetrationTestDetail');
         });
         messagesEl.querySelectorAll('.process-detail-btn').forEach(function (btn) {
             const span = btn.querySelector('span');
@@ -10445,10 +11082,16 @@ function refreshChatPanelI18n() {
             btn.setAttribute('aria-label', copyTitle);
         });
         messagesEl.querySelectorAll('.message.assistant').forEach(function (msgEl) {
+            if (typeof window.syncAssistantTurnSummary === 'function') {
+                window.syncAssistantTurnSummary(msgEl);
+            }
             if (typeof window.syncMcpToolsToggleButton === 'function') {
                 window.syncMcpToolsToggleButton(msgEl);
             }
         });
+        if (window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.refreshTurnRail === 'function') {
+            window.CyberStrikeChatScroll.refreshTurnRail();
+        }
     }
 
     if (isAppModalOpen('mcp-detail-modal')) {
@@ -10483,970 +11126,44 @@ document.addEventListener('languagechange', function () {
             }
         });
     }
-    if (typeof refreshBatchGroupSelect === 'function') {
-        refreshBatchGroupSelect().then(() => syncSimpleCustomSelect(BATCH_GROUP_FILTER_SELECT_ID));
-    }
-    if (typeof refreshBatchGroupHeaderFilter === 'function') {
-        refreshBatchGroupHeaderFilter();
-    }
     // 侧边栏最近对话等列表的时间戳会随语言变化（24h/12h 等），重新拉列表以统一格式
-    if (typeof loadConversationsWithGroups === 'function') {
-        loadConversationsWithGroups();
-    } else if (typeof loadConversations === 'function') {
+    if (typeof loadConversations === 'function') {
         loadConversations();
     }
 });
 
-// 显示创建分组模态框
-function showCreateGroupModal(andMoveConversation = false) {
-    const modal = document.getElementById('create-group-modal');
-    const input = document.getElementById('create-group-name-input');
-    const iconBtn = document.getElementById('create-group-icon-btn');
-    const iconPicker = document.getElementById('group-icon-picker');
-    const customInput = document.getElementById('custom-icon-input');
-    
-    if (input) {
-        input.value = '';
-    }
-    // 重置图标为默认值
-    if (iconBtn) {
-        iconBtn.textContent = '📁';
-    }
-    // 清空自定义图标输入框
-    if (customInput) {
-        customInput.value = '';
-    }
-    // 关闭图标选择器
-    if (iconPicker) {
-        iconPicker.style.display = 'none';
-    }
-    if (modal) {
-        openAppModal('create-group-modal', { focusEl: input });
-        modal.dataset.moveConversation = andMoveConversation ? 'true' : 'false';
-    }
-}
-
-// 关闭创建分组模态框
-function closeCreateGroupModal() {
-    closeAppModal('create-group-modal');
-    const input = document.getElementById('create-group-name-input');
-    if (input) {
-        input.value = '';
-    }
-    // 重置图标为默认值
-    const iconBtn = document.getElementById('create-group-icon-btn');
-    if (iconBtn) {
-        iconBtn.textContent = '📁';
-    }
-    // 清空自定义图标输入框
-    const customInput = document.getElementById('custom-icon-input');
-    if (customInput) {
-        customInput.value = '';
-    }
-    // 关闭图标选择器
-    const iconPicker = document.getElementById('group-icon-picker');
-    if (iconPicker) {
-        iconPicker.style.display = 'none';
-    }
-}
-
-// 选择建议标签
-function selectSuggestion(name) {
-    const input = document.getElementById('create-group-name-input');
-    if (input) {
-        input.value = name;
-        input.focus();
-    }
-}
-
-// 按 i18n key 选择建议标签（用于国际化下填充当前语言的文案）
-function selectSuggestionByKey(i18nKey) {
-    const input = document.getElementById('create-group-name-input');
-    if (input && typeof window.t === 'function') {
-        input.value = window.t(i18nKey);
-        input.focus();
-    }
-}
-
-// 切换图标选择器显示状态
-function toggleGroupIconPicker() {
-    const picker = document.getElementById('group-icon-picker');
-    if (picker) {
-        const isVisible = picker.style.display !== 'none';
-        picker.style.display = isVisible ? 'none' : 'block';
-    }
-}
-
-// 选择分组图标
-function selectGroupIcon(icon) {
-    const iconBtn = document.getElementById('create-group-icon-btn');
-    if (iconBtn) {
-        iconBtn.textContent = icon;
-    }
-    // 清空自定义输入框
-    const customInput = document.getElementById('custom-icon-input');
-    if (customInput) {
-        customInput.value = '';
-    }
-    // 关闭选择器
-    const picker = document.getElementById('group-icon-picker');
-    if (picker) {
-        picker.style.display = 'none';
-    }
-}
-
-// 应用自定义图标
-function applyCustomIcon() {
-    const customInput = document.getElementById('custom-icon-input');
-    if (!customInput) return;
-    
-    const customIcon = customInput.value.trim();
-    if (!customIcon) {
-        return;
-    }
-    
-    const iconBtn = document.getElementById('create-group-icon-btn');
-    if (iconBtn) {
-        iconBtn.textContent = customIcon;
-    }
-    
-    // 清空输入框并关闭选择器
-    customInput.value = '';
-    const picker = document.getElementById('group-icon-picker');
-    if (picker) {
-        picker.style.display = 'none';
-    }
-}
-
-// 自定义图标输入框回车键处理
-document.addEventListener('DOMContentLoaded', function() {
-    initSessionSettingsSelects();
-    initChatReasoningBarHeightSync();
-    const customInput = document.getElementById('custom-icon-input');
-    if (customInput) {
-        customInput.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                applyCustomIcon();
-            }
-        });
-    }
-    initChatAgentModeFromConfig()
-        .then(function () {
-            refreshHitlConfigByCurrentConversation();
-        })
-        .catch(function () {
-            refreshHitlConfigByCurrentConversation();
-        });
-});
-
-document.addEventListener('languagechange', function () {
-    refreshHitlConfigByCurrentConversation();
-});
-
-// 点击外部关闭图标选择器、对话模式面板、侧栏折叠卡片
-document.addEventListener('click', function(event) {
-    const picker = document.getElementById('group-icon-picker');
-    const iconBtn = document.getElementById('create-group-icon-btn');
-    if (picker && iconBtn) {
-        // 如果点击的不是图标按钮和选择器本身，则关闭选择器
-        if (!picker.contains(event.target) && !iconBtn.contains(event.target)) {
-            picker.style.display = 'none';
-        }
-    }
-
-    const agentWrap = document.getElementById('agent-mode-wrapper');
-    const agentPanel = document.getElementById('agent-mode-panel');
-    if (agentWrap && agentPanel && agentPanel.style.display === 'flex') {
-        if (!agentWrap.contains(event.target)) {
-            closeAgentModePanel();
-        }
-    }
-
-    const reasoningWrap = document.getElementById('chat-reasoning-wrapper');
-    if (reasoningWrap && reasoningWrap.style.display !== 'none' &&
-        !reasoningWrap.classList.contains('conversation-reasoning-collapsed')) {
-        if (!reasoningWrap.contains(event.target)) {
-            closeChatReasoningPanel();
-        }
-    }
-
-    const hitlCard = document.getElementById('hitl-sidebar-card');
-    if (hitlCard && !hitlCard.classList.contains('hitl-sidebar-collapsed')) {
-        if (!hitlCard.contains(event.target)) {
-            closeHitlSidebarCard();
-        }
-    }
-});
-
-// 创建分组
-async function createGroup(event) {
-    if (typeof requirePermission === 'function' && !requirePermission('group:write')) return;
-    // 阻止事件冒泡
-    if (event) {
-        event.preventDefault();
-        event.stopPropagation();
-    }
-
-    const input = document.getElementById('create-group-name-input');
-    if (!input) {
-        console.error('Input field not found.');
-        return;
-    }
-
-    const name = input.value.trim();
-    if (!name) {
-        alert(typeof window.t === 'function' ? window.t('createGroupModal.groupNamePlaceholder') : 'Enter group name');
-        return;
-    }
-
-    // 前端校验：检查名称是否已存在
-    try {
-        let groups;
-        if (Array.isArray(groupsCache) && groupsCache.length > 0) {
-            groups = groupsCache;
-        } else {
-            const response = await apiFetch('/api/groups');
-            groups = await response.json();
-        }
-        
-        // 确保groups是有效数组
-        if (!Array.isArray(groups)) {
-            groups = [];
-        }
-        
-        const nameExists = groups.some(g => g.name === name);
-        if (nameExists) {
-            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name.');
-            return;
-        }
-    } catch (error) {
-        console.error('delete turn failed:', error);
-    }
-
-    // 获取选中的图标
-    const iconBtn = document.getElementById('create-group-icon-btn');
-    const selectedIcon = iconBtn ? iconBtn.textContent.trim() : '📁';
-
-    try {
-        const response = await apiFetch('/api/groups', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                name: name,
-                icon: selectedIcon,
-            }),
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            const nameExistsMsg = typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name.';
-            if (error.error && error.error.includes('已存在')) {
-                alert(nameExistsMsg);
-                return;
-            }
-            const createFailedMsg = typeof window.t === 'function' ? window.t('createGroupModal.createFailed') : 'Create failed';
-            throw new Error(error.error || createFailedMsg);
-        }
-
-        const newGroup = await response.json();
-        
-        // 检查"移动到分组"子菜单是否打开
-        const submenu = document.getElementById('move-to-group-submenu');
-        const isSubmenuOpen = submenu && submenu.style.display !== 'none';
-
-        await loadGroups();
-
-        const modal = document.getElementById('create-group-modal');
-        const shouldMove = modal && modal.dataset.moveConversation === 'true';
-        
-        closeCreateGroupModal();
-
-        if (shouldMove && contextMenuConversationId) {
-            moveConversationToGroup(contextMenuConversationId, newGroup.id);
-        }
-
-        // 如果子菜单是打开的，刷新它，让新创建的分组立即显示
-        if (isSubmenuOpen) {
-            await showMoveToGroupSubmenu();
-        }
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        const createFailedMsg = typeof window.t === 'function' ? window.t('createGroupModal.createFailed') : 'Create failed';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
-        alert(createFailedMsg + ': ' + (error.message || unknownErr));
-    }
-}
-
-// 进入分组详情
-async function enterGroupDetail(groupId) {
-    currentGroupId = groupId;
-    // 进入分组详情页面时，清除当前对话所属的分组ID，避免高亮冲突
-    // 因为此时用户是在查看分组详情，而不是在查看分组中的某个对话
-    currentConversationGroupId = null;
-    
-    try {
-        const response = await apiFetch(`/api/groups/${groupId}`);
-        const group = await response.json();
-        
-        if (!group) {
-            currentGroupId = null;
-            return;
-        }
-
-        // 显示分组详情页，隐藏对话界面，但保持侧边栏可见
-        const sidebar = document.querySelector('.conversation-sidebar');
-        const groupDetailPage = document.getElementById('group-detail-page');
-        const chatContainer = document.querySelector('.chat-container');
-        const titleEl = document.getElementById('group-detail-title');
-
-        // 保持侧边栏可见
-        if (sidebar) sidebar.style.display = 'flex';
-        // 隐藏对话界面，显示分组详情页
-        if (chatContainer) chatContainer.style.display = 'none';
-        if (groupDetailPage) groupDetailPage.style.display = 'flex';
-        if (titleEl) titleEl.textContent = group.name;
-
-        // 刷新分组列表，确保当前分组高亮显示
-        await loadGroups();
-
-        // 加载分组对话（如果有搜索查询则使用搜索查询）
-        loadGroupConversations(groupId, currentGroupSearchQuery);
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        currentGroupId = null;
-    }
-}
-
-// 退出分组详情
-function exitGroupDetail() {
-    currentGroupId = null;
-    currentGroupSearchQuery = ''; // 清除搜索状态
-    
-    // 隐藏搜索框并清除搜索内容
-    const searchContainer = document.getElementById('group-search-container');
-    const searchInput = document.getElementById('group-search-input');
-    if (searchContainer) searchContainer.style.display = 'none';
-    if (searchInput) searchInput.value = '';
-    
-    const sidebar = document.querySelector('.conversation-sidebar');
-    const groupDetailPage = document.getElementById('group-detail-page');
-    const chatContainer = document.querySelector('.chat-container');
-
-    // 保持侧边栏可见
-    if (sidebar) sidebar.style.display = 'flex';
-    // 隐藏分组详情页，显示对话界面
-    if (groupDetailPage) groupDetailPage.style.display = 'none';
-    if (chatContainer) chatContainer.style.display = 'flex';
-
-    loadConversationsWithGroups();
-}
-
-// 加载分组中的对话
-async function loadGroupConversations(groupId, searchQuery = '') {
-    try {
-        if (!groupId) {
-            console.error('loadGroupConversations: groupId is null or undefined');
-            return;
-        }
-        
-        // 确保分组映射已加载
-        if (Object.keys(conversationGroupMappingCache).length === 0) {
-            await loadConversationGroupMapping();
-        }
-        
-        // 先清空列表，避免显示旧数据
-        const list = document.getElementById('group-conversations-list');
-        if (!list) {
-            console.error('group-conversations-list element not found');
-            return;
-        }
-        
-        // 显示加载状态
-        if (searchQuery) {
-            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.searching') : 'Searching...') + '</div>';
-        } else {
-            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.loading') : 'Loading...') + '</div>';
-        }
-
-        // 构建URL，如果有搜索关键词则添加search参数
-        let url = `/api/groups/${groupId}/conversations`;
-        if (searchQuery && searchQuery.trim()) {
-            url += '?search=' + encodeURIComponent(searchQuery.trim());
-        }
-        
-        const response = await apiFetch(url);
-        if (!response.ok) {
-            console.error(`Failed to load conversations for group ${groupId}:`, response.statusText);
-            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.loadFailedRetry') : 'Load failed, please retry') + '</div>';
-            return;
-        }
-        
-        let groupConvs = await response.json();
-        
-        // 处理 null 或 undefined 的情况，将其视为空数组
-        if (!groupConvs) {
-            groupConvs = [];
-        }
-        
-        // 验证返回的数据类型
-        if (!Array.isArray(groupConvs)) {
-            console.error(`Invalid response for group ${groupId}:`, groupConvs);
-            list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (typeof window.t === 'function' ? window.t('chat.dataFormatError') : 'Data format error') + '</div>';
-            return;
-        }
-        
-        // 更新分组映射缓存（只更新当前分组的对话）
-        // 先清理该分组之前的映射（如果有对话被移出）
-        Object.keys(conversationGroupMappingCache).forEach(convId => {
-            if (conversationGroupMappingCache[convId] === groupId) {
-                // 如果这个对话不在新的列表中，说明已被移出
-                if (!groupConvs.find(c => c.id === convId)) {
-                    delete conversationGroupMappingCache[convId];
-                }
-            }
-        });
-        
-        // 更新当前分组的对话映射
-        groupConvs.forEach(conv => {
-            conversationGroupMappingCache[conv.id] = groupId;
-        });
-
-        // 再次清空列表（清除"加载中"提示）
-        list.innerHTML = '';
-
-        if (groupConvs.length === 0) {
-            const emptyMsg = typeof window.t === 'function' ? window.t('chat.emptyGroupConversations') : 'This group has no conversations yet.';
-            const noMatchMsg = typeof window.t === 'function' ? window.t('chat.noMatchingConversationsInGroup') : 'No matching conversations found.';
-            if (searchQuery && searchQuery.trim()) {
-                list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (noMatchMsg || 'No matching conversations found.') + '</div>';
-            } else {
-                list.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">' + (emptyMsg || 'This group has no conversations yet.') + '</div>';
-            }
-            return;
-        }
-
-        // 加载每个对话的详细信息以获取消息
-        for (const conv of groupConvs) {
-            try {
-                // 验证对话ID存在
-                if (!conv.id) {
-                    console.warn('Conversation missing id:', conv);
-                    continue;
-                }
-                
-                const convResponse = await apiFetch(`/api/conversations/${conv.id}`);
-                if (!convResponse.ok) {
-                    console.error(`Failed to load conversation ${conv.id}:`, convResponse.statusText);
-                    continue;
-                }
-                
-                const fullConv = await convResponse.json();
-                
-                const item = document.createElement('div');
-                item.className = 'group-conversation-item';
-                item.dataset.conversationId = conv.id;
-                // 只有在分组详情页面且对话ID匹配时才显示active状态
-                // 如果不在分组详情页面，不应该显示active状态
-                if (currentGroupId && conv.id === currentConversationId) {
-                    item.classList.add('active');
-                } else {
-                    item.classList.remove('active');
-                }
-
-                // 创建内容包装器
-                const contentWrapper = document.createElement('div');
-                contentWrapper.className = 'group-conversation-content-wrapper';
-
-                const titleWrapper = document.createElement('div');
-                titleWrapper.style.display = 'flex';
-                titleWrapper.style.alignItems = 'center';
-                titleWrapper.style.gap = '4px';
-
-                const title = document.createElement('div');
-                title.className = 'group-conversation-title';
-        const titleText = fullConv.title || conv.title || 'Untitled conversation';
-                title.textContent = safeTruncateText(titleText, 60);
-                title.title = titleText; // 设置完整标题以便悬停查看
-                titleWrapper.appendChild(title);
-
-                // 如果对话在分组中置顶，显示置顶图标
-                if (conv.groupPinned) {
-                    const pinIcon = document.createElement('span');
-                    pinIcon.className = 'conversation-item-pinned';
-                    pinIcon.innerHTML = '📌';
-                    pinIcon.title = 'Pinned in group';
-                    titleWrapper.appendChild(pinIcon);
-                }
-
-                contentWrapper.appendChild(titleWrapper);
-
-                const timeWrapper = document.createElement('div');
-                timeWrapper.className = 'group-conversation-time';
-                const dateObj = fullConv.updatedAt ? new Date(fullConv.updatedAt) : new Date();
-                const convListLocale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
-                timeWrapper.textContent = dateObj.toLocaleString(convListLocale, {
-                    year: 'numeric',
-                    month: 'long',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit'
-                });
-
-                contentWrapper.appendChild(timeWrapper);
-
-                // 如果有第一条消息，显示内容预览
-                if (fullConv.messages && fullConv.messages.length > 0) {
-                    const firstMsg = fullConv.messages.find(m => m.role === 'user' && m.content);
-                    if (firstMsg && firstMsg.content) {
-                        const content = document.createElement('div');
-                        content.className = 'group-conversation-content';
-                        let preview = firstMsg.content.substring(0, 200);
-                        if (firstMsg.content.length > 200) {
-                            preview += '...';
-                        }
-                        content.textContent = preview;
-                        contentWrapper.appendChild(content);
-                    }
-                }
-
-                item.appendChild(contentWrapper);
-
-                // 添加三个点菜单按钮
-                const menuBtn = document.createElement('button');
-                menuBtn.className = 'conversation-item-menu';
-                menuBtn.innerHTML = '⋯';
-                menuBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    contextMenuConversationId = conv.id;
-                    showConversationContextMenu(e);
-                };
-                item.appendChild(menuBtn);
-
-                item.onclick = (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    // 切换到对话界面，但保持分组详情状态
-                    const groupDetailPage = document.getElementById('group-detail-page');
-                    const chatContainer = document.querySelector('.chat-container');
-                    if (groupDetailPage) groupDetailPage.style.display = 'none';
-                    if (chatContainer) chatContainer.style.display = 'flex';
-                    loadConversation(conv.id);
-                };
-
-                list.appendChild(item);
-            } catch (err) {
-                console.error(`Failed to load conversation ${conv.id}:`, err);
-            }
-        }
-    } catch (error) {
-        console.error('delete turn failed:', error);
-    }
-}
-
-// 编辑分组
-async function editGroup() {
-    if (!currentGroupId) return;
-
-    try {
-        const response = await apiFetch(`/api/groups/${currentGroupId}`);
-        const group = await response.json();
-        if (!group) return;
-
-        const renamePrompt = typeof window.t === 'function' ? window.t('chat.renameGroupPrompt') : 'Please enter new name:';
-        const newName = prompt(renamePrompt, group.name);
-        if (newName === null || !newName.trim()) return;
-
-        const trimmedName = newName.trim();
-        
-        // 前端校验：检查名称是否已存在（排除当前分组）
-        let groups;
-        if (Array.isArray(groupsCache) && groupsCache.length > 0) {
-            groups = groupsCache;
-        } else {
-            const response = await apiFetch('/api/groups');
-            groups = await response.json();
-        }
-        
-        // 确保groups是有效数组
-        if (!Array.isArray(groups)) {
-            groups = [];
-        }
-        
-        const nameExists = groups.some(g => g.name === trimmedName && g.id !== currentGroupId);
-        if (nameExists) {
-            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name.');
-            return;
-        }
-
-        const updateResponse = await apiFetch(`/api/groups/${currentGroupId}`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                name: trimmedName,
-                icon: group.icon || '📁',
-            }),
-        });
-
-        if (!updateResponse.ok) {
-            const error = await updateResponse.json();
-            if (error.error && error.error.includes('已存在')) {
-                alert('Group name already exists. Please use another name.');
-                return;
-            }
-            throw new Error(error.error || 'Update failed');
-        }
-
-        loadGroups();
-        
-        const titleEl = document.getElementById('group-detail-title');
-        if (titleEl) {
-            titleEl.textContent = trimmedName;
-        }
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        alert('Failed to edit group: ' + (error.message || 'Unknown error'));
-    }
-}
-
-// 删除分组
-async function deleteGroup() {
-    if (typeof requirePermission === 'function' && !requirePermission('group:delete')) return;
-    if (!currentGroupId) return;
-
-    const deleteConfirmMsg = typeof window.t === 'function' ? window.t('chat.deleteGroupConfirm') : 'Are you sure you want to delete this group? Conversations in the group will not be deleted, but will be removed from the group.';
-    if (!confirm(deleteConfirmMsg)) {
-        return;
-    }
-
-    try {
-        await apiFetch(`/api/groups/${currentGroupId}`, {
-            method: 'DELETE',
-        });
-
-        // 更新缓存
-        groupsCache = groupsCache.filter(g => g.id !== currentGroupId);
-        Object.keys(conversationGroupMappingCache).forEach(convId => {
-            if (conversationGroupMappingCache[convId] === currentGroupId) {
-                delete conversationGroupMappingCache[convId];
-            }
-        });
-
-        // 如果"移动到分组"子菜单是打开的，刷新它
-        const submenu = document.getElementById('move-to-group-submenu');
-        if (submenu && submenu.style.display !== 'none') {
-            // 子菜单是打开的，重新加载分组列表并刷新子菜单
-            await loadGroups();
-            await showMoveToGroupSubmenu();
-        } else {
-            exitGroupDetail();
-            await loadGroups();
-        }
-        
-        // 刷新对话列表，确保之前被分组的对话能立即显示
-        await loadConversationsWithGroups();
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        alert('Failed to delete group: ' + (error.message || 'Unknown error'));
-    }
-}
-
-// 从上下文菜单重命名分组
-async function renameGroupFromContext() {
-    const groupId = contextMenuGroupId;
-    if (!groupId) return;
-
-    try {
-        const response = await apiFetch(`/api/groups/${groupId}`);
-        const group = await response.json();
-        if (!group) return;
-
-        const renamePrompt = typeof window.t === 'function' ? window.t('chat.renameGroupPrompt') : 'Please enter new name:';
-        const newName = prompt(renamePrompt, group.name);
-        if (newName === null || !newName.trim()) {
-            closeGroupContextMenu();
-            return;
-        }
-
-        const trimmedName = newName.trim();
-        
-        // 前端校验：检查名称是否已存在（排除当前分组）
-        let groups;
-        if (Array.isArray(groupsCache) && groupsCache.length > 0) {
-            groups = groupsCache;
-        } else {
-            const response = await apiFetch('/api/groups');
-            groups = await response.json();
-        }
-        
-        // 确保groups是有效数组
-        if (!Array.isArray(groups)) {
-            groups = [];
-        }
-        
-        const nameExists = groups.some(g => g.name === trimmedName && g.id !== groupId);
-        if (nameExists) {
-            alert(typeof window.t === 'function' ? window.t('createGroupModal.nameExists') : 'Group name already exists, please use another name.');
-            return;
-        }
-
-        const updateResponse = await apiFetch(`/api/groups/${groupId}`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                name: trimmedName,
-                icon: group.icon || '📁',
-            }),
-        });
-
-        if (!updateResponse.ok) {
-            const error = await updateResponse.json();
-            if (error.error && error.error.includes('已存在')) {
-                alert('Group name already exists. Please use another name.');
-                return;
-            }
-            throw new Error(error.error || 'Update failed');
-        }
-
-        loadGroups();
-        
-        // 如果当前在分组详情页，更新标题
-        if (currentGroupId === groupId) {
-            const titleEl = document.getElementById('group-detail-title');
-            if (titleEl) {
-                titleEl.textContent = trimmedName;
-            }
-        }
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        const failedLabel = typeof window.t === 'function' ? window.t('chat.renameFailed') : 'Rename failed';
-        const unknownErr = typeof window.t === 'function' ? window.t('createGroupModal.unknownError') : 'Unknown error';
-        alert(failedLabel + ': ' + (error.message || unknownErr));
-    }
-
-    closeGroupContextMenu();
-}
-
-// 从上下文菜单置顶分组
-async function pinGroupFromContext() {
-    const groupId = contextMenuGroupId;
-    if (!groupId) return;
-
-    try {
-        // 获取当前分组信息
-        const response = await apiFetch(`/api/groups/${groupId}`);
-        const group = await response.json();
-        if (!group) return;
-
-        const newPinnedState = !group.pinned;
-
-        // 调用 API 更新置顶状态
-        const updateResponse = await apiFetch(`/api/groups/${groupId}/pinned`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                pinned: newPinnedState,
-            }),
-        });
-
-        if (!updateResponse.ok) {
-            const error = await updateResponse.json();
-            throw new Error(error.error || 'Update failed');
-        }
-
-        // 重新加载分组列表以更新显示顺序
-        loadGroups();
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        alert('Failed to pin group: ' + (error.message || 'Unknown error'));
-    }
-
-    closeGroupContextMenu();
-}
-
-// 从上下文菜单删除分组
-async function deleteGroupFromContext() {
-    if (typeof requirePermission === 'function' && !requirePermission('group:delete')) return;
-    const groupId = contextMenuGroupId;
-    if (!groupId) return;
-
-    const deleteConfirmMsg = typeof window.t === 'function' ? window.t('chat.deleteGroupConfirm') : 'Are you sure you want to delete this group? Conversations in the group will not be deleted, but will be removed from the group.';
-    if (!confirm(deleteConfirmMsg)) {
-        closeGroupContextMenu();
-        return;
-    }
-
-    try {
-        await apiFetch(`/api/groups/${groupId}`, {
-            method: 'DELETE',
-        });
-
-        // 更新缓存
-        groupsCache = groupsCache.filter(g => g.id !== groupId);
-        Object.keys(conversationGroupMappingCache).forEach(convId => {
-            if (conversationGroupMappingCache[convId] === groupId) {
-                delete conversationGroupMappingCache[convId];
-            }
-        });
-
-        // 如果"移动到分组"子菜单是打开的，刷新它
-        const submenu = document.getElementById('move-to-group-submenu');
-        if (submenu && submenu.style.display !== 'none') {
-            // 子菜单是打开的，重新加载分组列表并刷新子菜单
-            await loadGroups();
-            await showMoveToGroupSubmenu();
-        } else {
-            // 如果当前在分组详情页，退出详情页
-            if (currentGroupId === groupId) {
-                exitGroupDetail();
-            }
-            await loadGroups();
-        }
-        
-        // 刷新对话列表，确保之前被分组的对话能立即显示
-        await loadConversationsWithGroups();
-    } catch (error) {
-        console.error('delete turn failed:', error);
-        alert('Failed to delete group: ' + (error.message || 'Unknown error'));
-    }
-
-    closeGroupContextMenu();
-}
-
-// 关闭分组上下文菜单
-function closeGroupContextMenu() {
-    const menu = document.getElementById('group-context-menu');
-    if (menu) {
-        menu.style.display = 'none';
-    }
-    contextMenuGroupId = null;
-}
-
-
-// 分组搜索相关变量
-let groupSearchTimer = null;
-let currentGroupSearchQuery = '';
-
-// 切换分组搜索框显示/隐藏
-function toggleGroupSearch() {
-    const searchContainer = document.getElementById('group-search-container');
-    const searchInput = document.getElementById('group-search-input');
-    
-    if (!searchContainer || !searchInput) return;
-    
-    if (searchContainer.style.display === 'none') {
-        searchContainer.style.display = 'block';
-        searchInput.focus();
-    } else {
-        searchContainer.style.display = 'none';
-        clearGroupSearch();
-    }
-}
-
-// 处理分组搜索输入
-function handleGroupSearchInput(event) {
-    // 支持回车键搜索
-    if (event.key === 'Enter') {
-        event.preventDefault();
-        performGroupSearch();
-        return;
-    }
-    
-    // 支持ESC键关闭搜索
-    if (event.key === 'Escape') {
-        clearGroupSearch();
-        toggleGroupSearch();
-        return;
-    }
-    
-    const searchInput = document.getElementById('group-search-input');
-    const clearBtn = document.getElementById('group-search-clear-btn');
-    
-    if (!searchInput) return;
-    
-    const query = searchInput.value.trim();
-    
-    // 显示/隐藏清除按钮
-    if (clearBtn) {
-        clearBtn.style.display = query ? 'block' : 'none';
-    }
-    
-    // 防抖搜索
-    if (groupSearchTimer) {
-        clearTimeout(groupSearchTimer);
-    }
-    
-    groupSearchTimer = setTimeout(() => {
-        performGroupSearch();
-    }, 300); // 300ms 防抖
-}
-
-// 执行分组搜索
-async function performGroupSearch() {
-    const searchInput = document.getElementById('group-search-input');
-    if (!searchInput || !currentGroupId) return;
-    
-    const query = searchInput.value.trim();
-    currentGroupSearchQuery = query;
-    
-    // 加载搜索结果
-    await loadGroupConversations(currentGroupId, query);
-}
-
-// 清除分组搜索
-function clearGroupSearch() {
-    const searchInput = document.getElementById('group-search-input');
-    const clearBtn = document.getElementById('group-search-clear-btn');
-    
-    if (searchInput) {
-        searchInput.value = '';
-    }
-    if (clearBtn) {
-        clearBtn.style.display = 'none';
-    }
-    
-    currentGroupSearchQuery = '';
-    
-    // 重新加载分组对话（不搜索）
-    if (currentGroupId) {
-        loadGroupConversations(currentGroupId, '');
-    }
-}
-
-// 初始化时加载分组
+// 初始化时加载对话列表
 document.addEventListener('DOMContentLoaded', async () => {
+    ensureProjectSidebarStructure();
     if (window.i18nReady) await window.i18nReady;
+    if (typeof window.applyTranslations === 'function') {
+        window.applyTranslations(document.getElementById('conversation-sidebar'));
+    }
+    // 任务栏不再暴露项目筛选，清除旧选择以免隐藏部分任务。
+    setConversationProjectFilter('');
+    restoreRecentConversationsState();
     updateConversationSortMenuUI();
     initConversationProjectCustomSelect();
     initConversationsPaginationEvents();
     await refreshConversationProjectFilter();
-    await loadGroups();
-    await loadConversationsWithGroups();
-    
+    await loadConversations();
+
     // 添加页面焦点时自动刷新对话列表的功能
     // 这样当通过OpenAPI创建对话后，切换回页面时能自动看到新对话
     let lastFocusTime = Date.now();
     const CONVERSATION_REFRESH_INTERVAL = 30000; // 30秒内最多刷新一次，避免过于频繁
-    
+
     window.addEventListener('focus', () => {
         const now = Date.now();
         // 如果距离上次刷新超过30秒，才刷新对话列表
         if (now - lastFocusTime > CONVERSATION_REFRESH_INTERVAL) {
             lastFocusTime = now;
-            if (typeof loadConversationsWithGroups === 'function') {
-                loadConversationsWithGroups();
+            if (typeof loadConversations === 'function') {
+                loadConversations();
             }
         }
     });
-    
+
     // 监听页面可见性变化（当用户切换标签页回来时）
     document.addEventListener('visibilitychange', () => {
         if (!document.hidden) {
@@ -11454,8 +11171,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             const now = Date.now();
             if (now - lastFocusTime > CONVERSATION_REFRESH_INTERVAL) {
                 lastFocusTime = now;
-                if (typeof loadConversationsWithGroups === 'function') {
-                    loadConversationsWithGroups();
+                if (typeof loadConversations === 'function') {
+                    loadConversations();
                 }
             }
         }
@@ -11465,6 +11182,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.addEventListener('conversation-deleted', (e) => {
         const id = e.detail && e.detail.conversationId;
         if (!id) return;
+        // API 已确认删除后立即移除可见列表项，网络刷新只负责校准分页和计数。
+        document.querySelectorAll('.conversation-item[data-conversation-id]')
+            .forEach((item) => {
+                if (item.dataset.conversationId === id) item.remove();
+            });
         if (id === currentConversationId) {
             currentConversationId = null;
             try {
@@ -11472,13 +11194,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             } catch (e) { /* ignore */ }
             const messagesDiv = document.getElementById('chat-messages');
             if (messagesDiv) messagesDiv.innerHTML = '';
-            const readyMsg = typeof window.t === 'function' ? window.t('chat.systemReadyMessage') : 'System is ready. Please enter your test requirements, and the system will automatically perform the corresponding security tests.';
-            addMessage('assistant', readyMsg, null, null, null, { systemReadyMessage: true });
+            renderChatWelcomeEmptyState();
             addAttackChainButton(null);
         }
-        if (typeof loadConversationsWithGroups === 'function') {
-            loadConversationsWithGroups();
-        } else if (typeof loadConversations === 'function') {
+        if (typeof loadConversations === 'function') {
             loadConversations();
         }
     });
@@ -11493,6 +11212,11 @@ async function refreshAllProjectFilterSelects() {
 if (typeof window !== 'undefined') {
     window.loadConversation = loadConversation;
     window.startNewConversation = startNewConversation;
+    window.refreshChatWelcomeEmptyState = refreshSystemReadyMessageBubbles;
+    window.openConversationContextMenuForId = openConversationContextMenuForId;
+    window.renameConversation = renameConversation;
+    window.closeConversationRenameModal = closeConversationRenameModal;
+    window.saveConversationRename = saveConversationRename;
     window.refreshConversationProjectFilter = refreshConversationProjectFilter;
     window.refreshAllProjectFilterSelects = refreshAllProjectFilterSelects;
     window.onConversationProjectFilterChange = onConversationProjectFilterChange;

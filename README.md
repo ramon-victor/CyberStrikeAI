@@ -126,13 +126,14 @@ CyberStrikeAI connects planning, execution, human oversight, evidence, and repla
 ### Governance and audit
 
 - 🧑‍⚖️ **Human in the loop** provides approval modes, tool allowlists, audit-agent review, and traceable decisions.
+- 🛡️ **Call blocking** under Security adds configurable regex checks before MCP execution, reminder templates, and dry runs, with government-domain protection enabled by default. See [Tool call blocking](docs/en-US/tool-call-guard.md).
 - 🔐 **Platform RBAC** supports multiple users, system and custom roles, scoped permissions, ownership, and explicit assignments.
 - 🔒 **Security and audit** provide authenticated access, audit logs, SQLite persistence, and operational evidence retention.
 - 📄 **Result governance** stores the same capped tool result seen by the agent, protects resume paths from oversized historical output, and adds UI safeguards for large detail views. See [Tool Execution Governance](docs/en-US/tool-execution-governance.md).
 
 ### Security operations
 
-- 📁 **Conversation management** provides grouping, pinning, renaming, and batch organization.
+- 📁 **Conversation management** provides pinning, renaming, and batch organization.
 - 📂 **Projects and attack chains** connect cross-session facts, risk scoring, graph views, and step-by-step replay.
 - 🗂️ **Asset management** normalizes and deduplicates domains, IP addresses, ports, and services; supports XLSX/CSV import and export, advanced filters and saved views, ownership and business metadata, cross-page bulk maintenance, and duplicate merging; and tracks scan coverage, linked vulnerabilities, and risk state. See the [Asset Management guide](docs/en-US/asset-management.md).
 - 🛡️ **Vulnerability management** provides severity classification, lifecycle tracking, filtering, and statistics.

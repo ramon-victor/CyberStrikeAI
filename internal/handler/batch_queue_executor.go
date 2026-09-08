@@ -13,6 +13,7 @@ import (
 	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/authctx"
 	"cyberstrike-ai/internal/config"
+	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/multiagent"
 
@@ -118,8 +119,7 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 	}
 	principal := authctx.NewPrincipalWithScopes(access.User.ID, access.User.Username, access.Scope, access.Permissions, access.PermissionScopes)
 	title := safeTruncateString(task.Message, 50)
-	batchMeta := audit.ConversationCreateMeta("batch_task")
-	batchMeta.ProjectID = effectiveProjectID(h.config, queue.ProjectID)
+	batchMeta := batchSubTaskConversationMeta(h.config, queue)
 	conv, err := h.db.CreateConversation(title, batchMeta)
 	if err != nil {
 		h.logger.Error("创建对话失败", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.Error(err))
@@ -281,7 +281,12 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 	if useBatchMulti {
 		agentMode = "batch_eino_" + batchOrch
 	}
-	decision := h.finalizeAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, agentMode, resultMA, mcpIDs, reasoningContent, true)
+	decision := h.decideAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, agentMode, resultMA, mcpIDs, true)
+	autoCancelledPendingExecutionIDs := h.cleanupPendingToolExecutionsAfterIteration(taskCtx, conversationID, decision, progressCallback)
+	if len(autoCancelledPendingExecutionIDs) > 0 {
+		decision = h.decideAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, agentMode, resultMA, mcpIDs, true)
+	}
+	h.persistFinalizationDecision(conversationID, assistantMessageID, agentMode, mcpIDs, reasoningContent, decision)
 	resText := decision.FinalText
 	if !decision.Finalizable {
 		resText = finalizationBlockedMessage(decision)
@@ -289,14 +294,15 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 		sendEvent("finalization_check", resText, decision)
 	}
 	sendEvent("response", resText, finalizationResponsePayload(decision, map[string]interface{}{
-		"conversationId":   conversationID,
-		"messageId":        assistantMessageID,
-		"agentMode":        agentMode,
-		"mcpExecutionIds":  mcpIDs,
-		"batchQueueId":     queueID,
-		"batchTaskId":      task.ID,
-		"batchTaskStatus":  map[bool]string{true: string(BatchTaskStatusCompleted), false: string(BatchTaskStatusFailed)}[decision.Finalizable],
-		"candidatePreview": safeTruncateString(resultMA.Response, 500),
+		"conversationId":                   conversationID,
+		"messageId":                        assistantMessageID,
+		"agentMode":                        agentMode,
+		"mcpExecutionIds":                  mcpIDs,
+		"batchQueueId":                     queueID,
+		"batchTaskId":                      task.ID,
+		"batchTaskStatus":                  map[bool]string{true: string(BatchTaskStatusCompleted), false: string(BatchTaskStatusFailed)}[decision.Finalizable],
+		"candidatePreview":                 safeTruncateString(resultMA.Response, 500),
+		"autoCancelledPendingExecutionIds": autoCancelledPendingExecutionIDs,
 	}))
 
 	if assistantMessageID == "" {
@@ -319,6 +325,17 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 		return
 	}
 	h.batchTaskManager.UpdateTaskStatusWithConversationID(queueID, task.ID, BatchTaskStatusCompleted, resText, "", conversationID)
+}
+
+func batchSubTaskConversationMeta(cfg *config.Config, queue *BatchTaskQueue) database.ConversationCreateMeta {
+	meta := audit.ConversationCreateMeta("batch_task")
+	if queue == nil {
+		meta.ProjectID = effectiveProjectID(cfg, "")
+		return meta
+	}
+	meta.ProjectID = effectiveProjectID(cfg, queue.ProjectID)
+	meta.RoleName = strings.TrimSpace(queue.Role)
+	return meta
 }
 
 func (h *AgentHandler) handleBatchSubTaskRunError(
@@ -374,7 +391,8 @@ func (h *AgentHandler) handleBatchSubTaskRunError(
 	}
 
 	h.logger.Error("批量任务执行失败", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.String("conversationId", conversationID), zap.Error(runErr))
-	errorMsg := "execution failed: " + runErr.Error()
+	clientErr := multiagent.EinoClientRunErrorMessage(runErr)
+	errorMsg := "execution failed: " + clientErr
 	if assistantMessageID != "" {
 		if _, updateErr := h.db.Exec(
 			"UPDATE messages SET content = ?, updated_at = ? WHERE id = ?",
@@ -387,5 +405,5 @@ func (h *AgentHandler) handleBatchSubTaskRunError(
 			h.logger.Warn("保存错误详情失败", zap.String("queueId", queueID), zap.String("taskId", task.ID), zap.Error(err))
 		}
 	}
-	h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", runErr.Error())
+	h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", clientErr)
 }

@@ -17,6 +17,33 @@ function buildHashForPage(pageId) {
 }
 
 let chatConversationFromHashSeq = 0;
+
+function cancelScheduledChatConversationFromHash() {
+    chatConversationFromHashSeq++;
+    setChatConversationRestorePending('', false);
+}
+window.cancelScheduledChatConversationFromHash = cancelScheduledChatConversationFromHash;
+
+function setChatConversationRestorePending(conversationId, pending) {
+    const container = document.querySelector('.chat-container');
+    if (!container) return;
+    const id = String(conversationId || '').trim();
+    if (pending && id) {
+        container.classList.add('is-conversation-restoring');
+        container.dataset.restoringConversationId = id;
+        container.setAttribute('aria-busy', 'true');
+        return;
+    }
+    container.classList.remove('is-conversation-restoring');
+    delete container.dataset.restoringConversationId;
+    container.removeAttribute('aria-busy');
+}
+
+function finishChatConversationRestore(conversationId) {
+    setChatConversationRestorePending(conversationId, false);
+}
+window.finishChatConversationRestore = finishChatConversationRestore;
+
 function scheduleChatConversationFromHash(delayMs) {
     const hash = window.location.hash.slice(1);
     const hashParts = hash.split('?');
@@ -35,6 +62,8 @@ function scheduleChatConversationFromHash(delayMs) {
     if (!conversationId) {
         return;
     }
+    // 同一事件循环内先遮住默认新对话状态，避免网络请求返回前闪出“无项目”。
+    setChatConversationRestorePending(conversationId, true);
     const token = ++chatConversationFromHashSeq;
     setTimeout(() => {
         if (token !== chatConversationFromHashSeq) {
@@ -81,10 +110,10 @@ function initRouter() {
         const hashParts = hash.split('?');
         let pageId = hashParts[0];
         if (pageId === 'c2') pageId = 'c2-listeners';
-        if (pageId && ['dashboard', 'chat', 'hitl', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'workflows', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
+        if (pageId && ['dashboard', 'chat', 'hitl', 'tool-guard', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'workflows', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
-                scheduleChatConversationFromHash(500);
+                scheduleChatConversationFromHash(0);
             }
             return;
         }
@@ -98,6 +127,12 @@ function initRouter() {
 function switchPage(pageId) {
     const targetPage = document.getElementById(`page-${pageId}`);
     if (!targetPage) return;
+    if (pageId !== 'chat') {
+        setChatConversationRestorePending('', false);
+        if (currentPage === 'chat' && typeof window.abandonChatConversationForPageNavigation === 'function') {
+            window.abandonChatConversationForPageNavigation();
+        }
+    }
 
     // 导航点击会修改 hash，随后浏览器还会触发 hashchange。
     // 同一页面已经激活时不再重复初始化，避免接口重复请求和页面二次重绘。
@@ -151,7 +186,15 @@ function updateNavState(pageId) {
     });
     
     // 设置活动状态
-    if (pageId === 'asset-overview' || pageId === 'asset-library' || pageId === 'info-collect') {
+    if (pageId === 'hitl' || pageId === 'tool-guard') {
+        const securityItem = document.querySelector('.nav-item[data-page="security"]');
+        if (securityItem) {
+            securityItem.classList.add('active');
+            securityItem.classList.add('expanded');
+        }
+        const submenuItem = document.querySelector(`.nav-submenu-item[data-page="${pageId}"]`);
+        if (submenuItem) submenuItem.classList.add('active');
+    } else if (pageId === 'asset-overview' || pageId === 'asset-library' || pageId === 'info-collect') {
         const assetItem = document.querySelector('.nav-item[data-page="assets"]');
         if (assetItem) {
             assetItem.classList.add('active');
@@ -321,6 +364,7 @@ function showSubmenuPopup(navItem, menuId) {
     // 复制子菜单项到弹出菜单
     const submenuItems = submenu.querySelectorAll('.nav-submenu-item');
     submenuItems.forEach(item => {
+        if (item.hidden || (typeof permissionAllowedForElement === 'function' && !permissionAllowedForElement(item))) return;
         const popupItem = document.createElement('div');
         popupItem.className = 'submenu-popup-item';
         popupItem.textContent = item.textContent.trim();
@@ -386,6 +430,9 @@ async function initPage(pageId) {
             if (typeof refreshChatProjectSelector === 'function') {
                 refreshChatProjectSelector();
             }
+            break;
+        case 'tool-guard':
+            if (typeof loadToolGuardConfig === 'function') loadToolGuardConfig();
             break;
         case 'hitl':
             if (typeof refreshHitlActivePanel === 'function') {
@@ -571,6 +618,7 @@ async function initPage(pageId) {
 // 页面加载完成后初始化路由
 document.addEventListener('DOMContentLoaded', function() {
     initRouter();
+    document.documentElement.classList.remove('initial-route-pending');
     initSidebarState();
     
     // 监听hash变化
@@ -581,10 +629,10 @@ document.addEventListener('DOMContentLoaded', function() {
         let pageId = hashParts[0];
         
         if (pageId === 'c2') pageId = 'c2-listeners';
-        if (pageId && ['dashboard', 'chat', 'hitl', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'tasks', 'workflows', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
+        if (pageId && ['dashboard', 'chat', 'hitl', 'tool-guard', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'tasks', 'workflows', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
-                scheduleChatConversationFromHash(200);
+                scheduleChatConversationFromHash(0);
             }
         }
     });

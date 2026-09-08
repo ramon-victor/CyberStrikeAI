@@ -98,7 +98,9 @@ function hitlT(key, fallback, params) {
 
 const HITL_LOGS_PAGE_SIZE_KEY = 'cyberstrike_hitl_logs_page_size';
 const HITL_PENDING_PAGE_SIZE_KEY = 'cyberstrike_hitl_pending_page_size';
+const HITL_TIMEOUT_DEFAULT_MIGRATION_PREFIX = 'cyberstrike-hitl-timeout-default-v1:';
 const HITL_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+const hitlConversationConfigSaveQueues = new Map();
 
 function hitlPaginationT(key, opts, fallback) {
     if (typeof window.t === 'function') {
@@ -212,6 +214,21 @@ function normalizeHitlTimeoutSeconds(v, fallback) {
     return 0;
 }
 
+function shouldMigrateLegacyHitlTimeout(conversationId, timeoutSeconds) {
+    if (!conversationId || normalizeHitlTimeoutSeconds(timeoutSeconds, 0) > 0) return false;
+    try {
+        return localStorage.getItem(HITL_TIMEOUT_DEFAULT_MIGRATION_PREFIX + conversationId) !== '1';
+    } catch (e) {
+        return false;
+    }
+}
+
+function markLegacyHitlTimeoutMigrated(conversationId) {
+    try {
+        localStorage.setItem(HITL_TIMEOUT_DEFAULT_MIGRATION_PREFIX + conversationId, '1');
+    } catch (e) { /* ignore */ }
+}
+
 function getCurrentConversationIdForHitl() {
     if (typeof window.currentConversationId === 'string' && window.currentConversationId) {
         return window.currentConversationId;
@@ -231,57 +248,89 @@ async function fetchHitlConversationConfig(conversationId) {
     if (!data || !data.hitl) return null;
     return {
         hitl: data.hitl,
+        defaultMode: hitlModeNormalize(data.defaultMode || 'off'),
         defaultReviewer: hitlReviewerNormalize(data.defaultReviewer || 'human'),
+        defaultTimeoutSeconds: normalizeHitlTimeoutSeconds(data.defaultTimeoutSeconds, 300),
         hitlGlobalToolWhitelist: Array.isArray(data.hitlGlobalToolWhitelist) ? data.hitlGlobalToolWhitelist : []
     };
 }
 
 function applyHitlDefaultReviewerFromServer(reviewer) {
-    const v = hitlReviewerNormalize(reviewer);
+    return applyHitlDefaultConfigFromServer({ defaultReviewer: reviewer });
+}
+
+function applyHitlDefaultConfigFromServer(data) {
+    const src = data && typeof data === 'object' ? data : {};
+    const mode = hitlModeNormalize(src.defaultMode || src.mode || 'off');
+    const reviewer = hitlReviewerNormalize(src.defaultReviewer || src.reviewer || 'human');
+    const timeoutSeconds = normalizeHitlTimeoutSeconds(
+        src.defaultTimeoutSeconds != null ? src.defaultTimeoutSeconds : src.timeoutSeconds,
+        300
+    );
+    const out = {
+        mode: mode,
+        reviewer: reviewer,
+        timeoutSeconds: timeoutSeconds
+    };
     if (typeof window !== 'undefined') {
-        window.csaiHitlDefaultReviewer = v;
+        window.csaiHitlDefaultConfig = out;
+        window.csaiHitlDefaultReviewer = reviewer;
+        if (Array.isArray(src.hitlGlobalToolWhitelist)) {
+            window.csaiHitlGlobalToolWhitelist = src.hitlGlobalToolWhitelist;
+        }
     }
-    if (typeof window.saveHitlLastGlobalConfig === 'function' && typeof window.getHitlLastGlobalConfig === 'function') {
-        const gl = window.getHitlLastGlobalConfig();
-        const base = gl && typeof gl === 'object'
-            ? gl
-            : { mode: 'off', sensitiveTools: '', updatedAt: '' };
-        window.saveHitlLastGlobalConfig(Object.assign({}, base, {
-            reviewer: v,
-            updatedAt: new Date().toISOString()
-        }));
+    return out;
+}
+
+async function fetchHitlDefaultConfig() {
+    const resp = await hitlApiFetch('/api/hitl/default-config', { credentials: 'same-origin' });
+    if (!resp.ok) {
+        return applyHitlDefaultConfigFromServer({ defaultMode: 'off', defaultReviewer: 'human', defaultTimeoutSeconds: 300 });
     }
-    return v;
+    const data = await resp.json();
+    return applyHitlDefaultConfigFromServer(data);
 }
 
 async function fetchHitlDefaultReviewer() {
-    const resp = await hitlApiFetch('/api/hitl/default-reviewer', { credentials: 'same-origin' });
-    if (!resp.ok) {
-        return applyHitlDefaultReviewerFromServer('human');
-    }
-    const data = await resp.json();
-    return applyHitlDefaultReviewerFromServer(data && data.defaultReviewer);
+    const cfg = await fetchHitlDefaultConfig();
+    return hitlReviewerNormalize(cfg && cfg.reviewer);
 }
 
-async function putHitlDefaultReviewer(reviewer) {
-    const normalized = hitlReviewerNormalize(reviewer);
-    const resp = await hitlApiFetch('/api/hitl/default-reviewer', {
+async function putHitlDefaultConfig(config) {
+    const current = (typeof window !== 'undefined' && window.csaiHitlDefaultConfig && typeof window.csaiHitlDefaultConfig === 'object')
+        ? window.csaiHitlDefaultConfig
+        : { mode: 'off', reviewer: 'human', timeoutSeconds: 300 };
+    const cfg = config && typeof config === 'object' ? config : {};
+    const payload = {
+        mode: hitlModeNormalize(cfg.mode != null ? cfg.mode : current.mode),
+        reviewer: hitlReviewerNormalize(cfg.reviewer != null ? cfg.reviewer : current.reviewer),
+        timeoutSeconds: normalizeHitlTimeoutSeconds(
+            cfg.timeoutSeconds != null ? cfg.timeoutSeconds : current.timeoutSeconds,
+            300
+        )
+    };
+    const resp = await hitlApiFetch('/api/hitl/default-config', {
         method: 'PUT',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reviewer: normalized })
+        body: JSON.stringify(payload)
     });
     if (!resp.ok) {
         const msg = await readHitlApiError(resp);
         throw new Error(msg || ('HTTP ' + resp.status));
     }
     const data = await resp.json();
-    return applyHitlDefaultReviewerFromServer(data && data.defaultReviewer);
+    return applyHitlDefaultConfigFromServer(data);
+}
+
+async function putHitlDefaultReviewer(reviewer) {
+    const cfg = await putHitlDefaultConfig({ reviewer: reviewer });
+    return hitlReviewerNormalize(cfg && cfg.reviewer);
 }
 
 async function initHitlDefaultReviewerFromServer() {
     try {
-        await fetchHitlDefaultReviewer();
+        await fetchHitlDefaultConfig();
         if (!getCurrentConversationIdForHitl() && typeof window.refreshHitlConfigByCurrentConversation === 'function') {
             window.refreshHitlConfigByCurrentConversation();
         }
@@ -352,9 +401,9 @@ function showHitlPageWhitelistFeedback(text, isError) {
     el.className = 'hitl-apply-feedback' + (isError ? ' hitl-apply-feedback--error' : '');
 }
 
-function syncHitlSidebarWhitelistDisplay(toolsStr) {
-    const sidebarEl = document.getElementById('hitl-sensitive-tools');
-    if (sidebarEl) sidebarEl.value = toolsStr;
+function syncHitlSidebarWhitelistDisplay(_toolsStr) {
+    // The chat field is conversation-scoped. Updating the global allowlist page
+    // must not replace it with a merged global + conversation display value.
 }
 
 async function fetchHitlGlobalToolWhitelist() {
@@ -489,39 +538,52 @@ async function saveHitlPageWhitelist() {
 
 async function saveHitlConversationConfig(conversationId, config) {
     if (!conversationId || !config) return false;
+    const normalizedConversationId = String(conversationId).trim();
     const mode = hitlModeNormalize(config.mode || 'off');
     const enabled = typeof config.enabled === 'boolean' ? config.enabled : (mode !== 'off');
     const sensitiveTools = hitlSensitiveToolsToArray(config);
     const timeoutSeconds = normalizeHitlTimeoutSeconds(config.timeoutSeconds, 0);
     const reviewer = hitlReviewerNormalize(config.reviewer || 'human');
-    const resp = await hitlApiFetch('/api/hitl/config', {
-        method: 'PUT',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            conversationId: conversationId,
-            enabled: enabled,
-            mode: mode,
-            reviewer: reviewer,
-            sensitiveTools: sensitiveTools,
-            timeoutSeconds: timeoutSeconds
-        })
+    const previous = hitlConversationConfigSaveQueues.get(normalizedConversationId) || Promise.resolve();
+    const queued = previous.catch(function () {}).then(async function () {
+        const resp = await hitlApiFetch('/api/hitl/config', {
+            method: 'PUT',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                conversationId: normalizedConversationId,
+                enabled: enabled,
+                mode: mode,
+                reviewer: reviewer,
+                sensitiveTools: sensitiveTools,
+                timeoutSeconds: timeoutSeconds
+            })
+        });
+        if (!resp.ok) {
+            const msg = await readHitlApiError(resp);
+            throw new Error(msg || ('HTTP ' + resp.status));
+        }
+        return true;
     });
-    if (!resp.ok) {
-        const msg = await readHitlApiError(resp);
-        throw new Error(msg || ('HTTP ' + resp.status));
-    }
-    return true;
+    hitlConversationConfigSaveQueues.set(normalizedConversationId, queued);
+    return queued.finally(function () {
+        if (hitlConversationConfigSaveQueues.get(normalizedConversationId) === queued) {
+            hitlConversationConfigSaveQueues.delete(normalizedConversationId);
+        }
+    });
 }
 
 async function syncHitlConfigFromServer(conversationId) {
     const pack = await fetchHitlConversationConfig(conversationId);
     if (!pack || !pack.hitl) return;
     const cfg = pack.hitl;
-    if (pack.defaultReviewer) {
-        applyHitlDefaultReviewerFromServer(pack.defaultReviewer);
-    }
     const globalWL = pack.hitlGlobalToolWhitelist || [];
+    applyHitlDefaultConfigFromServer({
+        defaultMode: pack.defaultMode,
+        defaultReviewer: pack.defaultReviewer,
+        defaultTimeoutSeconds: pack.defaultTimeoutSeconds,
+        hitlGlobalToolWhitelist: globalWL
+    });
     if (typeof window !== 'undefined') {
         window.csaiHitlGlobalToolWhitelist = globalWL;
     }
@@ -534,44 +596,41 @@ async function syncHitlConfigFromServer(conversationId) {
         const local = readHitlLocalStorageConv(conversationId);
         const localMode = local && local.mode ? hitlModeNormalize(local.mode) : 'off';
         if (localMode !== 'off') {
+            const localReviewer = hitlReviewerNormalize(local && local.reviewer);
             let localToolsStr = typeof local.sensitiveTools === 'string' ? local.sensitiveTools : '';
             localToolsStr = strip(globalWL, localToolsStr);
             merged = {
                 enabled: true,
                 mode: localMode,
+                reviewer: localReviewer,
                 sensitiveTools: localToolsStr.split(/[,\n\r]+/).map(function (s) { return s.trim(); }).filter(Boolean),
-                timeoutSeconds: normalizeHitlTimeoutSeconds(cfg.timeoutSeconds, 0)
+                timeoutSeconds: normalizeHitlTimeoutSeconds(
+                    local && local.timeoutSeconds,
+                    normalizeHitlTimeoutSeconds(cfg.timeoutSeconds, 0)
+                )
             };
             saveHitlConversationConfig(conversationId, {
                 mode: localMode,
+                reviewer: localReviewer,
                 sensitiveTools: localToolsStr,
                 enabled: true,
                 timeoutSeconds: merged.timeoutSeconds
             }).catch(function (err) {
                 console.warn('HITL session config sync to server failed (keeping local UI only):', err);
             });
-        } else {
-            const gl = typeof window.getHitlLastGlobalConfig === 'function' ? window.getHitlLastGlobalConfig() : null;
-            const glMode = gl && gl.mode ? hitlModeNormalize(gl.mode) : 'off';
-            if (glMode !== 'off') {
-                let glToolsStr = typeof gl.sensitiveTools === 'string' ? gl.sensitiveTools : '';
-                glToolsStr = strip(globalWL, glToolsStr);
-                merged = {
-                    enabled: true,
-                    mode: glMode,
-                    sensitiveTools: glToolsStr.split(/[,\n\r]+/).map(function (s) { return s.trim(); }).filter(Boolean),
-                    timeoutSeconds: normalizeHitlTimeoutSeconds(cfg.timeoutSeconds, 0)
-                };
-                saveHitlConversationConfig(conversationId, {
-                    mode: glMode,
-                    sensitiveTools: glToolsStr,
-                    enabled: true,
-                    timeoutSeconds: merged.timeoutSeconds
-                }).catch(function (err) {
-                    console.warn('HITL session config sync to server failed (keeping local UI only):', err);
-                });
-            }
+
         }
+    }
+    if (shouldMigrateLegacyHitlTimeout(conversationId, merged.timeoutSeconds)) {
+        merged = Object.assign({}, merged, { timeoutSeconds: 300 });
+        try {
+            await saveHitlConversationConfig(conversationId, merged);
+            markLegacyHitlTimeoutMigrated(conversationId);
+        } catch (err) {
+            console.warn('HITL legacy session timeout migration failed, will retry on next load:', err);
+        }
+    } else if (normalizeHitlTimeoutSeconds(merged.timeoutSeconds, 0) > 0) {
+        markLegacyHitlTimeoutMigrated(conversationId);
     }
     const uiMode = hitlEffectiveEnabled(merged) ? hitlModeNormalize(merged.mode) : 'off';
     const rawArr = Array.isArray(merged.sensitiveTools)
@@ -590,7 +649,10 @@ async function syncHitlConfigFromServer(conversationId) {
             localStorage.setItem('chat_hitl_config_' + conversationId, JSON.stringify(normalizedCfg));
         } catch (e) {}
     }
-    if (typeof window.applyHitlConfigToUI === 'function') {
+    if (
+        getCurrentConversationIdForHitl() === conversationId &&
+        typeof window.applyHitlConfigToUI === 'function'
+    ) {
         window.applyHitlConfigToUI(normalizedCfg);
     }
     reconcileHitlUiState();
@@ -835,7 +897,11 @@ async function refreshHitlPending() {
             throw new Error('request failed');
         }
         const data = await resp.json();
-        const items = Array.isArray(data.items) ? data.items : [];
+        const rawItems = Array.isArray(data.items) ? data.items : [];
+        const items = rawItems.filter(function (item) {
+            return hitlReviewerNormalize(item && (item.reviewer || item.decidedBy || item.decided_by)) !== 'audit_agent' &&
+                String(item && item.status || '').trim().toLowerCase() !== 'audit_running';
+        });
         let workflowRuns = [];
         try {
             const wfResp = await hitlApiFetch('/api/workflows/runs/pending', { credentials: 'same-origin' });
@@ -856,7 +922,8 @@ async function refreshHitlPending() {
                 return conv.indexOf(searchQ) >= 0 || wfId.indexOf(searchQ) >= 0 || runId.indexOf(searchQ) >= 0 || label.indexOf(searchQ) >= 0;
             });
         }
-        hitlPendingTotal = (typeof data.total === 'number' ? data.total : items.length) + workflowRuns.length;
+        const hiddenAgentItems = rawItems.length - items.length;
+        hitlPendingTotal = Math.max(0, (typeof data.total === 'number' ? data.total : rawItems.length) - hiddenAgentItems) + workflowRuns.length;
         const maxPage = Math.max(1, Math.ceil(hitlPendingTotal / hitlPendingPageSize));
         if (hitlPendingPage > maxPage) {
             hitlPendingPage = maxPage;
@@ -1799,7 +1866,8 @@ document.addEventListener('DOMContentLoaded', function () {
     if (typeof window.bindHitlReviewerToggleListeners === 'function') {
         window.bindHitlReviewerToggleListeners();
     }
-    initHitlDefaultReviewerFromServer();
+    window.csaiHitlDefaultConfigReady = initHitlDefaultReviewerFromServer();
+    window.csaiHitlDefaultReviewerReady = window.csaiHitlDefaultConfigReady;
     setTimeout(reconcileHitlUiState, 0);
 });
 
@@ -1815,6 +1883,8 @@ document.addEventListener('languagechange', function () {
 window.syncHitlConfigToServerByCurrentConversation = syncHitlConfigToServerByCurrentConversation;
 window.saveHitlConversationConfig = saveHitlConversationConfig;
 window.mergeHitlGlobalToolWhitelist = mergeHitlGlobalToolWhitelist;
+window.fetchHitlDefaultConfig = fetchHitlDefaultConfig;
+window.putHitlDefaultConfig = putHitlDefaultConfig;
 
 // 由 chat.js 在 loadConversation 内 await 调用；挂到 window 供其它入口显式触发
 window.syncHitlConfigFromServer = syncHitlConfigFromServer;

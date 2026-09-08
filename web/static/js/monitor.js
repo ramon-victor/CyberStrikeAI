@@ -2,9 +2,15 @@ const progressTaskState = new Map();
 /** @type {{ progressId: string, conversationId: string } | null} */
 let userInterruptModalPending = null;
 let activeTaskInterval = null;
-const ACTIVE_TASK_REFRESH_INTERVAL = 10000; // 10秒检查一次
+const ACTIVE_TASK_REFRESH_INTERVAL = 2000; // Running and approval states need prompt self-refresh
 const TASK_FINAL_STATUSES = new Set(['failed', 'timeout', 'cancelled', 'completed']);
 const hitlInterruptToolItemMap = new Map();
+let activeTasksLoadPromise = null;
+let activeTasksVisualSignature = '';
+const CHAT_TASK_SYNC_CHANNEL_NAME = 'cyberstrike-chat-task-sync-v1';
+let chatTaskSyncChannel = null;
+let visibleConversationReplaySyncPromise = null;
+let visibleConversationReplaySyncId = '';
 
 /**
  * 主对话 POST 流仍在读取时，禁止再挂 task-events 补流，否则同一事件会画两遍（与 HITL 是否开启无关）。
@@ -17,6 +23,9 @@ function syncAgentLiveStreamConversationId(cid) {
         if (live && live.active) {
             live.conversationId = cid;
         }
+        if (typeof window.updateChatPrimaryActionState === 'function') {
+            window.updateChatPrimaryActionState();
+        }
     } catch (e) { /* ignore */ }
 }
 
@@ -24,6 +33,10 @@ function setCurrentConversationIdFromStream(cid) {
     currentConversationId = cid;
     try {
         window.currentConversationId = cid;
+        window.dispatchEvent(new CustomEvent('conversation-changed', { detail: { conversationId: cid } }));
+        if (typeof window.syncChatConversationHash === 'function') {
+            window.syncChatConversationHash(cid);
+        }
     } catch (e) { /* ignore */ }
 }
 
@@ -520,6 +533,43 @@ function shouldReuseMainResponseStream(progressId, prevStream, responseData, str
     return areMainResponseStreamIterationsCompatible(prevIterTag, streamIterTag, orch);
 }
 
+/** planning rows restored from the database after refresh are reused as the current response_stream container. */
+function findRestoredMainResponseStreamItem(timeline, responseData) {
+    if (!timeline) return null;
+    const data = responseData || {};
+    const streamId = data.streamId != null ? String(data.streamId).trim() : '';
+    const agent = data.einoAgent != null ? String(data.einoAgent).trim() : '';
+    const orchestration = data.orchestration != null ? String(data.orchestration).trim() : '';
+    const items = timeline.querySelectorAll('.timeline-item-planning, .timeline-item-thinking');
+    for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        const itemStreamId = String(item.dataset.responseStreamId || '').trim();
+        if (streamId) {
+            if (itemStreamId === streamId) return item;
+            continue;
+        }
+        const itemAgent = String(item.dataset.einoAgent || '').trim();
+        const itemOrchestration = String(item.dataset.orchestration || '').trim();
+        if (agent && itemAgent === agent && itemOrchestration === orchestration) return item;
+    }
+    return null;
+}
+
+function responseStreamStateFromRestoredItem(progressId, item, responseData) {
+    if (!item) return null;
+    const data = responseData || {};
+    const contentEl = item.querySelector('.timeline-item-content');
+    item.dataset.responseStreamPlaceholder = '1';
+    return {
+        progressId: progressId,
+        itemId: item.id,
+        buffer: contentEl ? String(contentEl.textContent || '') : '',
+        streamMeta: data,
+        streamIdentity: buildMainResponseStreamIdentity(progressId, data),
+        streamId: data.streamId != null ? String(data.streamId).trim() : ''
+    };
+}
+
 // AI 思考流式输出：progressId -> Map(streamId -> { itemId, buffer })
 const thinkingStreamStateByProgressId = new Map();
 
@@ -562,6 +612,18 @@ function escapeHtmlLocal(text) {
     const div = document.createElement('div');
     div.textContent = String(text);
     return div.innerHTML;
+}
+
+function escapeJsString(text) {
+    return JSON.stringify(String(text == null ? '' : text));
+}
+
+function escapeAttrLocal(text) {
+    return escapeHtmlLocal(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function escapeJsStringAttr(text) {
+    return escapeAttrLocal(escapeJsString(text));
 }
 
 function formatTimelinePlainTextHtml(text) {
@@ -982,11 +1044,16 @@ function updateAssistantBubbleContent(assistantMessageId, content, renderMarkdow
     const bubble = assistantElement.querySelector('.message-bubble');
     if (!bubble) return;
 
-    // 保留复制按钮：addMessage 会把按钮 append 在 message-bubble 里
+    // Remove copy buttons left inside the bubble by older versions; current buttons all live in the timestamp row.
     const copyBtn = bubble.querySelector('.message-copy-btn');
     if (copyBtn) copyBtn.remove();
 
     const newContent = content == null ? '' : String(content);
+    const normalizedContent = newContent.trim();
+    if (normalizedContent !== '处理中...' && normalizedContent !== 'Processing...') {
+        assistantElement.classList.remove('assistant-placeholder-content');
+        bubble.hidden = false;
+    }
     const html = renderMarkdown
         ? formatAssistantMarkdownContent(newContent)
         : escapeHtmlLocal(newContent).replace(/\n/g, '<br>');
@@ -999,7 +1066,9 @@ function updateAssistantBubbleContent(assistantMessageId, content, renderMarkdow
     if (typeof wrapTablesInBubble === 'function') {
         wrapTablesInBubble(bubble);
     }
-    if (copyBtn) bubble.appendChild(copyBtn);
+    if (typeof window.appendMessageCopyButton === 'function') {
+        window.appendMessageCopyButton(assistantElement);
+    }
 
     if (typeof window.csMarkdownSanitize !== 'undefined') {
         window.csMarkdownSanitize.stripSuspiciousImages(bubble);
@@ -1008,6 +1077,7 @@ function updateAssistantBubbleContent(assistantMessageId, content, renderMarkdow
 
 const conversationExecutionTracker = {
     activeConversations: new Set(),
+    ready: false,
     update(tasks = []) {
         this.activeConversations.clear();
         tasks.forEach(task => {
@@ -1019,14 +1089,190 @@ const conversationExecutionTracker = {
                 this.activeConversations.add(task.conversationId);
             }
         });
+        this.ready = true;
     },
     isRunning(conversationId) {
         return !!conversationId && this.activeConversations.has(conversationId);
+    },
+    markRunning(conversationId) {
+        const id = String(conversationId || '').trim();
+        if (!id) return false;
+        this.activeConversations.add(id);
+        this.ready = true;
+        return true;
+    }
+};
+
+function notifyConversationTaskStarted(conversationId) {
+    const id = String(conversationId || '').trim();
+    if (!id) return false;
+    conversationExecutionTracker.markRunning(id);
+    window.dispatchEvent(new CustomEvent('conversation-task-state-changed', {
+        detail: { conversationId: id, running: true }
+    }));
+    if (typeof window.updateChatPrimaryActionState === 'function') {
+        window.updateChatPrimaryActionState();
+    }
+    if (chatTaskSyncChannel) {
+        chatTaskSyncChannel.postMessage({ type: 'task-started', conversationId: id, at: Date.now() });
+    }
+    return true;
+}
+
+function initChatTaskSyncChannel() {
+    if (chatTaskSyncChannel || typeof BroadcastChannel !== 'function') return;
+    chatTaskSyncChannel = new BroadcastChannel(CHAT_TASK_SYNC_CHANNEL_NAME);
+    chatTaskSyncChannel.addEventListener('message', function (event) {
+        const payload = event && event.data;
+        if (!payload || payload.type !== 'task-started') return;
+        const id = String(payload.conversationId || '').trim();
+        if (!id) return;
+        conversationExecutionTracker.markRunning(id);
+        if (typeof window.updateChatPrimaryActionState === 'function') {
+            window.updateChatPrimaryActionState();
+        }
+        // Server-side task registration may lag the cross-tab notification by a moment; the authoritative task list confirms and attaches the supplement stream later.
+        setTimeout(function () {
+            if (typeof loadActiveTasks === 'function') loadActiveTasks();
+        }, 180);
+    });
+}
+
+initChatTaskSyncChannel();
+window.notifyConversationTaskStarted = notifyConversationTaskStarted;
+
+const hitlPendingInterruptTracker = {
+    pendingById: new Map(),
+    ready: false,
+    update(items = []) {
+        this.pendingById.clear();
+        items.forEach(item => this.add(item));
+        this.ready = true;
+    },
+    replaceConversation(conversationId, items = []) {
+        const id = String(conversationId || '').trim();
+        if (id) {
+            this.pendingById.forEach((item, interruptId) => {
+                if (String(item && item.conversationId || '').trim() === id) {
+                    this.pendingById.delete(interruptId);
+                }
+            });
+        }
+        items.forEach(item => this.add(item));
+        this.ready = true;
+    },
+    add(item) {
+        const interruptId = String(item && (item.interruptId || item.id) || '').trim();
+        if (!interruptId) return;
+        this.pendingById.set(interruptId, item);
+    },
+    remove(interruptId) {
+        this.pendingById.delete(String(interruptId || '').trim());
+    },
+    has(interruptId) {
+        return !!interruptId && this.pendingById.has(String(interruptId));
     }
 };
 
 function isConversationTaskRunning(conversationId) {
     return conversationExecutionTracker.isRunning(conversationId);
+}
+window.isConversationTaskRunning = isConversationTaskRunning;
+
+function setHitlApprovalInterruptedVisualState(panel, interrupted) {
+    if (!panel || panel.classList.contains('hitl-inline-done')) return;
+    const eyebrow = panel.querySelector('.hitl-approval-eyebrow');
+    const countdown = panel.querySelector('.hitl-approval-countdown');
+    if (interrupted) {
+        stopHitlApprovalCountdown(panel);
+        panel.classList.add('hitl-approval-interrupted');
+        if (eyebrow && !Object.prototype.hasOwnProperty.call(eyebrow.dataset, 'taskAvailableText')) {
+            eyebrow.dataset.taskAvailableText = eyebrow.textContent || '';
+            eyebrow.textContent = hitlApprovalTranslate('hitl.taskInterrupted', 'Task interrupted');
+        }
+        if (countdown && !Object.prototype.hasOwnProperty.call(countdown.dataset, 'taskAvailableHtml')) {
+            countdown.dataset.taskAvailableHtml = countdown.innerHTML;
+            countdown.dataset.taskAvailableClass = countdown.className;
+            countdown.dataset.taskAvailableExpiresAt = countdown.dataset.hitlExpiresAt || '';
+            countdown.dataset.taskAvailableTimeout = countdown.dataset.hitlTimeout || '';
+            countdown.removeAttribute('data-hitl-expires-at');
+            countdown.removeAttribute('data-hitl-timeout');
+            countdown.className = 'hitl-approval-countdown hitl-approval-countdown--interrupted';
+            countdown.innerHTML = '<div class="hitl-codex-state hitl-codex-state--interrupted">' +
+                '<span class="hitl-codex-state-icon" aria-hidden="true">×</span>' +
+                '<strong>' + escapeHtml(hitlApprovalTranslate('hitl.interruptedApprovalCancelled', 'Task interrupted; approval cancelled')) + '</strong>' +
+                '</div>';
+        }
+        return;
+    }
+    if (!panel.classList.contains('hitl-approval-interrupted')) return;
+    panel.classList.remove('hitl-approval-interrupted');
+    if (eyebrow && Object.prototype.hasOwnProperty.call(eyebrow.dataset, 'taskAvailableText')) {
+        eyebrow.textContent = eyebrow.dataset.taskAvailableText;
+        delete eyebrow.dataset.taskAvailableText;
+    }
+    if (countdown && Object.prototype.hasOwnProperty.call(countdown.dataset, 'taskAvailableHtml')) {
+        countdown.className = countdown.dataset.taskAvailableClass || 'hitl-approval-countdown';
+        countdown.innerHTML = countdown.dataset.taskAvailableHtml;
+        if (countdown.dataset.taskAvailableExpiresAt) {
+            countdown.dataset.hitlExpiresAt = countdown.dataset.taskAvailableExpiresAt;
+        }
+        if (countdown.dataset.taskAvailableTimeout) {
+            countdown.dataset.hitlTimeout = countdown.dataset.taskAvailableTimeout;
+        }
+        delete countdown.dataset.taskAvailableClass;
+        delete countdown.dataset.taskAvailableHtml;
+        delete countdown.dataset.taskAvailableExpiresAt;
+        delete countdown.dataset.taskAvailableTimeout;
+        if (panel.__hitlApprovalCountdownData) {
+            bindHitlApprovalCountdown(panel, panel.__hitlApprovalCountdownData);
+        }
+    }
+}
+
+function setHitlApprovalTaskAvailability(panel, conversationId) {
+    if (!panel) return;
+    const id = String(conversationId || panel.dataset.conversationId || '').trim();
+    if (id) panel.dataset.conversationId = id;
+    const interruptId = String(panel.dataset.hitlInterruptId || '').trim();
+    const taskClosed = !!id && conversationExecutionTracker.ready && !conversationExecutionTracker.isRunning(id);
+    // The same conversation may have started a new task after a service restart; do not re-activate old approvals because of it.
+    // When a specific approval ID is no longer in the pending list, the countdown and buttons must stay disabled.
+    const interruptClosed = !!interruptId && hitlPendingInterruptTracker.ready &&
+        !hitlPendingInterruptTracker.has(interruptId);
+    const approvalClosed = taskClosed || interruptClosed;
+    const buttons = panel.querySelectorAll(
+        '.hitl-inline-approve, .hitl-inline-reject, .workflow-hitl-inline-approve, .workflow-hitl-inline-reject'
+    );
+    const status = panel.querySelector('.hitl-inline-status, .workflow-hitl-inline-status');
+    panel.classList.toggle('hitl-approval-task-closed', approvalClosed);
+    setHitlApprovalInterruptedVisualState(panel, approvalClosed);
+    buttons.forEach(function (button) {
+        if (approvalClosed) {
+            if (!button.disabled) button.dataset.disabledByClosedTask = '1';
+            button.disabled = true;
+        } else if (button.dataset.disabledByClosedTask === '1') {
+            button.disabled = false;
+            delete button.dataset.disabledByClosedTask;
+        }
+    });
+    if (!status) return;
+    if (approvalClosed) {
+        if (!Object.prototype.hasOwnProperty.call(status.dataset, 'taskAvailableText')) {
+            status.dataset.taskAvailableText = status.textContent || '';
+        }
+        status.textContent = hitlApprovalTranslate('hitl.taskClosedApprovalUnavailable', 'Task ended; approval is unavailable');
+    } else if (Object.prototype.hasOwnProperty.call(status.dataset, 'taskAvailableText')) {
+        status.textContent = status.dataset.taskAvailableText;
+        delete status.dataset.taskAvailableText;
+    }
+}
+
+function syncHitlApprovalTaskAvailability() {
+    document.querySelectorAll('.hitl-inline-approval[data-conversation-id], .chat-hitl-approval-dock[data-conversation-id]')
+        .forEach(function (panel) {
+            setHitlApprovalTaskAvailability(panel, panel.dataset.conversationId);
+        });
 }
 
 /** 顶栏「停止任务」与进度条按钮对齐时，用会话 ID 反查当前页的 progress 块 ID（无则弹窗内仍可按会话取消） */
@@ -1075,6 +1321,7 @@ function markProgressCancelling(progressId) {
 }
 
 function finalizeProgressTask(progressId, finalLabel) {
+    stopLiveProgressLatestFollow(progressId);
     const stopBtn = document.getElementById(`${progressId}-stop-btn`);
     if (stopBtn) {
         stopBtn.disabled = true;
@@ -1188,7 +1435,7 @@ async function submitUserInterruptHardCancel() {
     const { progressId, conversationId } = userInterruptModalPending;
     closeUserInterruptModal();
     if (progressId) {
-        await performHardCancelProgressTask(progressId);
+        await performHardCancelProgressTask(progressId, conversationId);
         return;
     }
     if (!conversationId) {
@@ -1204,11 +1451,12 @@ async function submitUserInterruptHardCancel() {
 }
 
 /** 彻底停止任务（原「停止任务」行为） */
-async function performHardCancelProgressTask(progressId) {
+async function performHardCancelProgressTask(progressId, conversationId = '') {
     const state = progressTaskState.get(progressId);
     const stopBtn = document.getElementById(`${progressId}-stop-btn`);
+    const targetConversationId = String(conversationId || (state && state.conversationId) || '').trim();
 
-    if (!state || !state.conversationId) {
+    if (!targetConversationId) {
         if (stopBtn) {
             stopBtn.disabled = true;
             setTimeout(() => {
@@ -1219,7 +1467,7 @@ async function performHardCancelProgressTask(progressId) {
         return;
     }
 
-    if (state.cancelling) {
+    if (state && state.cancelling) {
         return;
     }
 
@@ -1230,7 +1478,7 @@ async function performHardCancelProgressTask(progressId) {
     }
 
     try {
-        await requestCancel(state.conversationId);
+        await requestCancel(targetConversationId);
         loadActiveTasks();
     } catch (error) {
         console.error('取消任务失败:', error);
@@ -1246,14 +1494,61 @@ async function performHardCancelProgressTask(progressId) {
     }
 }
 
+const progressElapsedTimerById = new Map();
+
+function progressElapsedText(progressId) {
+    const el = document.getElementById(progressId);
+    const startedAt = el && el.dataset ? Number(el.dataset.turnStartedAtMs) : NaN;
+    const duration = typeof window.formatAssistantTurnDuration === 'function'
+        ? window.formatAssistantTurnDuration(Number.isFinite(startedAt) ? Date.now() - startedAt : 0)
+        : Math.max(0, Math.floor((Date.now() - (Number.isFinite(startedAt) ? startedAt : Date.now())) / 1000)) + 's';
+    return typeof window.t === 'function'
+        ? window.t('chat.turnElapsedRunning', { duration: duration })
+        : 'Processed for ' + duration;
+}
+
+function syncProgressElapsedSummary(progressId) {
+    const el = document.getElementById(progressId);
+    if (!el) return;
+    const title = el.querySelector('.progress-title');
+    if (title) title.textContent = progressElapsedText(progressId);
+    const timeline = document.getElementById(progressId + '-timeline');
+    const summary = el.querySelector('.progress-summary-toggle');
+    if (summary) {
+        const expanded = !!(timeline && timeline.classList.contains('expanded'));
+        summary.classList.toggle('is-expanded', expanded);
+        summary.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    }
+}
+
+function stopProgressElapsedClock(progressId) {
+    const timer = progressElapsedTimerById.get(progressId);
+    if (timer) clearInterval(timer);
+    progressElapsedTimerById.delete(progressId);
+}
+
+function startProgressElapsedClock(progressId) {
+    stopProgressElapsedClock(progressId);
+    syncProgressElapsedSummary(progressId);
+    progressElapsedTimerById.set(progressId, setInterval(function () {
+        if (!document.getElementById(progressId)) {
+            stopProgressElapsedClock(progressId);
+            return;
+        }
+        syncProgressElapsedSummary(progressId);
+    }, 1000));
+}
+
 function addProgressMessage() {
     const messagesDiv = document.getElementById('chat-messages');
     const messageDiv = document.createElement('div');
     messageCounter++;
     const id = 'progress-' + Date.now() + '-' + messageCounter;
     messageDiv.id = id;
-    messageDiv.className = 'message system progress-message';
-    
+    messageDiv.className = 'message assistant progress-message';
+
+    messagesDiv.querySelector('.chat-welcome-empty-state')?.remove();
+
     const contentWrapper = document.createElement('div');
     contentWrapper.className = 'message-content';
     
@@ -1264,12 +1559,19 @@ function addProgressMessage() {
     const collapseDetailText = typeof window.t === 'function' ? window.t('tasks.collapseDetail') : 'Collapse details';
     bubble.innerHTML = `
         <div class="progress-header">
-            <span class="progress-title">🔍 ${progressTitleText}</span>
+            <button type="button" class="turn-process-summary progress-summary-toggle is-expanded" aria-expanded="true" onclick="toggleProgressDetails('${id}')">
+                <span class="turn-process-leading">
+                    <span class="turn-process-status-dot is-running" aria-hidden="true"></span>
+                    <span class="progress-title"></span>
+                </span>
+                <svg class="turn-process-chevron" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M7.5 5.5L12 10l-4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
             <div class="progress-actions">
                 <button class="progress-stop" id="${id}-stop-btn" onclick="cancelProgressTask('${id}')">${stopTaskText}</button>
                 <button class="progress-toggle" onclick="toggleProgressDetails('${id}')">${collapseDetailText}</button>
             </div>
         </div>
+        <div class="progress-stage" aria-live="polite">${progressTitleText}</div>
         <div class="progress-timeline expanded" id="${id}-timeline"></div>
         <div class="progress-footer">
             <button type="button" class="progress-toggle progress-toggle-bottom" onclick="toggleProgressDetails('${id}')">${collapseDetailText}</button>
@@ -1279,6 +1581,8 @@ function addProgressMessage() {
     contentWrapper.appendChild(bubble);
     messageDiv.appendChild(contentWrapper);
     messageDiv.dataset.conversationId = currentConversationId || '';
+    messageDiv.dataset.turnStartedAtMs = String(Date.now());
+    messageDiv.dataset.turnStartedAt = new Date().toISOString();
     messagesDiv.appendChild(messageDiv);
     bubble.classList.add('is-streaming');
     const progressWasPinned = typeof window.captureScrollPinState === 'function'
@@ -1290,6 +1594,8 @@ function addProgressMessage() {
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
 
+    startProgressElapsedClock(id);
+    startLiveProgressLatestFollow(id);
     return id;
 }
 
@@ -1309,11 +1615,16 @@ function toggleProgressDetails(progressId) {
         timeline.classList.add('expanded');
         toggleBtns.forEach((btn) => { btn.textContent = collapseT; });
     }
+    if (typeof updateProcessDetailsReturnLatestControl === 'function') {
+        updateProcessDetailsReturnLatestControl(timeline);
+    }
+    syncProgressElapsedSummary(progressId);
 }
 
 // 编排器开始输出最终回复时隐藏整条进度消息（过程已迁入助手气泡的「展开详情」，避免与进度卡重复）
 function hideProgressMessageForFinalReply(progressId) {
     if (!progressId) return;
+    stopLiveProgressLatestFollow(progressId);
     const el = document.getElementById(progressId);
     if (el) {
         el.style.display = 'none';
@@ -1321,12 +1632,16 @@ function hideProgressMessageForFinalReply(progressId) {
 }
 
 // 折叠所有进度详情
-function collapseAllProgressDetails(assistantMessageId, progressId) {
+function collapseAllProgressDetails(assistantMessageId, progressId, options) {
+    const forceCollapse = !!(options && options.force);
     // 折叠集成到MCP区域的详情
     if (assistantMessageId) {
         const detailsId = 'process-details-' + assistantMessageId;
         const detailsContainer = document.getElementById(detailsId);
-        if (detailsContainer && detailsContainer.dataset.userExpanded !== '1') {
+        if (detailsContainer && (forceCollapse || detailsContainer.dataset.userExpanded !== '1')) {
+            if (forceCollapse) {
+                delete detailsContainer.dataset.userExpanded;
+            }
             const timeline = detailsContainer.querySelector('.progress-timeline');
             if (timeline) {
                 timeline.classList.remove('expanded');
@@ -1334,6 +1649,9 @@ function collapseAllProgressDetails(assistantMessageId, progressId) {
                     btn.innerHTML = '<span>' + (typeof window.t === 'function' ? window.t('chat.expandDetail') : 'Expand details') + '</span>';
                 });
             }
+        }
+        if (typeof window.syncAssistantTurnSummary === 'function') {
+            window.syncAssistantTurnSummary(document.getElementById(assistantMessageId));
         }
     }
     
@@ -1372,9 +1690,28 @@ function getAssistantId() {
     return null;
 }
 
-// 将进度详情集成到工具调用区域（流式阶段助手消息不挂 mcp 条，结束时在此创建，避免图二整行 MCP 芯片样式）
-function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecutionIds) {
+function applyAssistantTurnTimingFromProgress(progressId, assistantElement, terminalStatus) {
     const progressElement = document.getElementById(progressId);
+    const progressStartedAt = progressElement && progressElement.dataset
+        ? (progressElement.dataset.turnStartedAt || new Date(Number(progressElement.dataset.turnStartedAtMs) || Date.now()).toISOString())
+        : new Date().toISOString();
+    const progressStartedAtMs = progressElement && progressElement.dataset
+        ? Number(progressElement.dataset.turnStartedAtMs)
+        : Date.now();
+    const completedAt = new Date();
+    stopProgressElapsedClock(progressId);
+    if (!assistantElement || typeof window.setAssistantTurnTiming !== 'function') return;
+    window.setAssistantTurnTiming(assistantElement, {
+        startedAt: progressStartedAt,
+        completedAt: completedAt.toISOString(),
+        durationMs: Math.max(0, completedAt.getTime() - (Number.isFinite(progressStartedAtMs) ? progressStartedAtMs : completedAt.getTime())),
+        status: terminalStatus || 'completed'
+    });
+}
+
+// 将进度详情集成到工具调用区域（流式阶段助手消息不挂 mcp 条，结束时在此创建，避免图二整行 MCP 芯片样式）
+function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecutionIds, terminalStatus) {
+    stopProgressElapsedClock(progressId);
 
     // 只 flush 终态标题/正文；完成后的详情回看统一走后端分页，不再复制实时 DOM 快照。
     flushAllPendingStreamPlainUpdates();
@@ -1401,6 +1738,7 @@ function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecut
     if (typeof window.ensureMcpCallSectionChrome === 'function') {
         window.ensureMcpCallSectionChrome(assistantElement, assistantMessageId);
     }
+    applyAssistantTurnTimingFromProgress(progressId, assistantElement, terminalStatus || 'completed');
     const mcpSection = assistantElement.querySelector('.mcp-call-section');
     if (!mcpSection) {
         removeMessage(progressId);
@@ -1469,6 +1807,169 @@ function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecut
 
 const PROCESS_DETAILS_PAGE_SIZE = 50;
 const processDetailsAutoLoadObservers = new WeakMap();
+const processDetailsReturnLatestControls = new WeakMap();
+const processDetailsLatestFollowStates = new Map();
+const PROCESS_DETAILS_RESTORE_FOLLOW_MS = 6000;
+const PROCESS_DETAILS_FOLLOW_SCROLLBAR_GUTTER_PX = 18;
+// Only resume auto-follow when the user genuinely scrolls to the bottom; keep 2px for sub-pixel scrolling.
+const PROCESS_DETAILS_FOLLOW_RESUME_THRESHOLD_PX = 2;
+
+function processDetailsReturnLatestLabel() {
+    if (typeof window.t !== 'function') return 'Jump to latest iteration';
+    const value = window.t('chat.returnToLatestProcessDetail');
+    return value && value !== 'chat.returnToLatestProcessDetail' ? value : 'Jump to latest iteration';
+}
+
+function processDetailsDistanceFromLatest(timeline) {
+    if (!timeline) return 0;
+    return Math.max(0, timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop);
+}
+
+function isProcessDetailsTimelineStreaming(container) {
+    if (!container) return false;
+    if (container.classList && container.classList.contains('is-streaming')) return true;
+    return !!(container.closest && container.closest('.progress-container.is-streaming, .process-details-container.is-streaming'));
+}
+
+function getProcessDetailsLatestFollowStateForTimeline(timeline) {
+    let matched = null;
+    processDetailsLatestFollowStates.forEach(function (state) {
+        if (!matched && state && state.timeline === timeline && !state.stopped) {
+            matched = state;
+        }
+    });
+    return matched;
+}
+
+function updateProcessDetailsReturnLatestControl(timeline) {
+    const state = processDetailsReturnLatestControls.get(timeline);
+    if (!state || !state.button) return false;
+    const scrollable = timeline.scrollHeight > timeline.clientHeight + 2;
+    const awayFromLatest = processDetailsDistanceFromLatest(timeline) > PROCESS_DETAILS_FOLLOW_RESUME_THRESHOLD_PX;
+    const expanded = timeline.classList && timeline.classList.contains('expanded');
+    const followState = getProcessDetailsLatestFollowStateForTimeline(timeline);
+    // While running, stick-to-bottom briefly leaves the bottom between the MutationObserver and the next-frame scroll;
+    // as long as the user has not explicitly scrolled up into detached, do not flash the "Jump to latest iteration" button.
+    const followingLatest = !!(followState && !followState.detached);
+    const shouldShow = !followingLatest && expanded && scrollable && awayFromLatest;
+    const label = processDetailsReturnLatestLabel();
+    state.button.hidden = !shouldShow;
+    state.button.title = label;
+    state.button.setAttribute('aria-label', label);
+    state.button.classList.toggle('has-pending-new', shouldShow && state.hasPendingNewBelow);
+    state.button.classList.toggle('is-streaming', shouldShow && isProcessDetailsTimelineStreaming(state.container));
+    return shouldShow;
+}
+
+function syncProcessDetailsLatestFollowAfterManualReturn(timeline) {
+    processDetailsLatestFollowStates.forEach(function (state) {
+        if (!state || state.timeline !== timeline) return;
+        state.detached = false;
+        state.hasPendingNewBelow = false;
+        state.lastScrollTop = timeline.scrollTop;
+        if (!state.stopped && typeof state.scheduleFollowLatest === 'function') {
+            state.scheduleFollowLatest();
+        }
+    });
+}
+
+function markProcessDetailsReturnLatestPending(timeline) {
+    const state = processDetailsReturnLatestControls.get(timeline);
+    if (!state) return false;
+    if (processDetailsDistanceFromLatest(timeline) > PROCESS_DETAILS_FOLLOW_RESUME_THRESHOLD_PX) {
+        state.hasPendingNewBelow = true;
+    }
+    updateProcessDetailsReturnLatestControl(timeline);
+    return true;
+}
+
+function ensureProcessDetailsReturnLatestControl(timeline) {
+    if (!timeline || timeline.nodeType !== 1) return false;
+    let state = processDetailsReturnLatestControls.get(timeline);
+    if (state) {
+        updateProcessDetailsReturnLatestControl(timeline);
+        return true;
+    }
+
+    const container = timeline.closest
+        ? timeline.closest('.progress-container, .process-details-container')
+        : null;
+    const host = (container && container.querySelector && container.querySelector('.process-details-content')) || container || timeline.parentElement;
+    if (!host) return false;
+    host.classList.add('process-details-return-latest-host');
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'process-details-return-latest';
+    button.hidden = true;
+    button.innerHTML = '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5.5 7.5 10 12l4.5-4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    host.appendChild(button);
+
+    state = {
+        container: container || host,
+        host: host,
+        button: button,
+        hasPendingNewBelow: false,
+        resizeObserver: null,
+        mutationObserver: null
+    };
+    processDetailsReturnLatestControls.set(timeline, state);
+
+    const clearPointer = function (event) {
+        if (event) event.stopPropagation();
+    };
+    const scrollToLatest = function (event) {
+        if (event) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+        const targetTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+        if (typeof timeline.scrollTo === 'function') {
+            timeline.scrollTo({ top: targetTop, behavior: 'smooth' });
+        } else {
+            timeline.scrollTop = targetTop;
+        }
+        state.hasPendingNewBelow = false;
+        syncProcessDetailsLatestFollowAfterManualReturn(timeline);
+        updateProcessDetailsReturnLatestControl(timeline);
+        setTimeout(function () {
+            if (timeline.isConnected) {
+                updateProcessDetailsReturnLatestControl(timeline);
+            }
+        }, 360);
+        button.blur();
+    };
+    const onScroll = function () {
+        if (processDetailsDistanceFromLatest(timeline) <= PROCESS_DETAILS_FOLLOW_RESUME_THRESHOLD_PX) {
+            state.hasPendingNewBelow = false;
+        }
+        updateProcessDetailsReturnLatestControl(timeline);
+    };
+
+    button.addEventListener('pointerdown', clearPointer);
+    button.addEventListener('mousedown', clearPointer);
+    button.addEventListener('touchstart', clearPointer, { passive: true });
+    button.addEventListener('click', scrollToLatest);
+    timeline.addEventListener('scroll', onScroll, { passive: true });
+    if (typeof ResizeObserver === 'function') {
+        state.resizeObserver = new ResizeObserver(function () {
+            updateProcessDetailsReturnLatestControl(timeline);
+        });
+        state.resizeObserver.observe(timeline);
+    }
+    if (typeof MutationObserver === 'function') {
+        state.mutationObserver = new MutationObserver(function () {
+            updateProcessDetailsReturnLatestControl(timeline);
+        });
+        state.mutationObserver.observe(timeline, { childList: true, subtree: true, characterData: true });
+    }
+    updateProcessDetailsReturnLatestControl(timeline);
+    return true;
+}
+
+window.ensureProcessDetailsReturnLatestControl = ensureProcessDetailsReturnLatestControl;
+window.updateProcessDetailsReturnLatestControl = updateProcessDetailsReturnLatestControl;
+window.markProcessDetailsReturnLatestPending = markProcessDetailsReturnLatestPending;
 
 function processDetailsContinuousLabel(kind) {
     if (kind === 'older') {
@@ -1497,32 +1998,6 @@ function disconnectProcessDetailsAutoLoader(detailsContainer) {
         old.disconnect();
         processDetailsAutoLoadObservers.delete(detailsContainer);
     }
-}
-
-function scrollProcessDetailsToLatest(assistantMessageId, smooth) {
-    const detailsContainer = document.getElementById('process-details-' + assistantMessageId);
-    if (!detailsContainer) return;
-    const timeline = detailsContainer.querySelector('.progress-timeline');
-    if (!timeline) return;
-    const behavior = smooth === false ? 'auto' : 'smooth';
-    if (timeline.scrollHeight > timeline.clientHeight + 2) {
-        timeline.scrollTo({ top: timeline.scrollHeight, behavior: behavior });
-        return;
-    }
-    const items = timeline.querySelectorAll('.timeline-item');
-    if (!items.length) return;
-    const lastItem = items[items.length - 1];
-    lastItem.scrollIntoView({ behavior: behavior, block: 'nearest' });
-}
-
-function updateProcessDetailsJumpLatestVisibility(detailsContainer) {
-    if (!detailsContainer) return;
-    const btn = detailsContainer.querySelector('.process-details-jump-latest');
-    const timeline = detailsContainer.querySelector('.progress-timeline');
-    if (!btn || !timeline) return;
-    const hasUnloadedNewer = detailsContainer.dataset.hasNext === '1';
-    const awayFromTimelineBottom = timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop > 120;
-    btn.classList.toggle('visible', hasUnloadedNewer || awayFromTimelineBottom);
 }
 
 async function requestProcessDetailsAutoPage(assistantMessageId, backendMessageId, direction, sentinel) {
@@ -1591,33 +2066,6 @@ function updateProcessDetailsPaginationButtons(assistantMessageId, backendMessag
         timeline.appendChild(bottomSentinel);
     }
 
-    let jumpBtn = detailsContainer.querySelector('.process-details-jump-latest');
-    if (!jumpBtn) {
-        jumpBtn = document.createElement('button');
-        jumpBtn.type = 'button';
-        jumpBtn.className = 'process-details-jump-latest';
-        jumpBtn.textContent = typeof window.t === 'function' ? window.t('chat.backToLatestProgress') : '↓ Back to latest';
-        detailsContainer.appendChild(jumpBtn);
-    }
-    jumpBtn.onclick = async function () {
-        if (detailsContainer.dataset.hasNext === '1') {
-            await loadProcessDetailsPaginated(assistantMessageId, backendMessageId, {
-                autoLoadAll: false,
-                initialLatest: true
-            });
-        }
-        requestAnimationFrame(function () {
-            scrollProcessDetailsToLatest(assistantMessageId, true);
-            updateProcessDetailsJumpLatestVisibility(detailsContainer);
-        });
-    };
-
-    if (timeline.dataset.continuousScrollBound !== '1') {
-        timeline.dataset.continuousScrollBound = '1';
-        timeline.addEventListener('scroll', function () {
-            updateProcessDetailsJumpLatestVisibility(detailsContainer);
-        }, { passive: true });
-    }
 
     if (typeof IntersectionObserver === 'function' && (topSentinel || bottomSentinel)) {
         const root = document.getElementById('chat-messages') || null;
@@ -1649,8 +2097,254 @@ function updateProcessDetailsPaginationButtons(assistantMessageId, backendMessag
             };
         }
     }
-    updateProcessDetailsJumpLatestVisibility(detailsContainer);
 }
+
+function scrollProcessDetailsToLatest(assistantMessageId, smooth = true) {
+    const container = document.getElementById('process-details-' + assistantMessageId);
+    const timeline = container && container.querySelector('.progress-timeline');
+    if (!timeline) return false;
+    const targetTop = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+    if (smooth && typeof timeline.scrollTo === 'function') {
+        timeline.scrollTo({ top: targetTop, behavior: 'smooth' });
+    } else {
+        timeline.scrollTop = targetTop;
+    }
+    const state = processDetailsReturnLatestControls.get(timeline);
+    if (state) {
+        state.hasPendingNewBelow = false;
+        updateProcessDetailsReturnLatestControl(timeline);
+    }
+    return true;
+}
+
+window.scrollProcessDetailsToLatest = scrollProcessDetailsToLatest;
+
+function stopProcessDetailsLatestFollow(assistantMessageId) {
+    const key = String(assistantMessageId || '');
+    const state = processDetailsLatestFollowStates.get(key);
+    if (!state) return false;
+    state.stopped = true;
+    if (state.rafId) cancelAnimationFrame(state.rafId);
+    if (state.timeoutId) clearTimeout(state.timeoutId);
+    if (state.observer) state.observer.disconnect();
+    if (state.resizeObserver) state.resizeObserver.disconnect();
+    state.cleanup.forEach(function (cleanup) {
+        try { cleanup(); } catch (e) { /* ignore */ }
+    });
+    processDetailsLatestFollowStates.delete(key);
+    return true;
+}
+
+function stopAllProcessDetailsLatestFollow() {
+    Array.from(processDetailsLatestFollowStates.keys()).forEach(stopProcessDetailsLatestFollow);
+}
+
+/**
+ * When restoring a running conversation after refresh, the iteration-thinking area has its own scroll container.
+ * The first screen of history details, later frame-by-frame rendering, and SSE character deltas all keep growing it,
+ * so we cannot pin only the outer #chat-messages, nor scroll just once when the first screen completes.
+ */
+function startProcessDetailsLatestFollow(assistantMessageId, options) {
+    const opts = options || {};
+    const key = String(opts.stateKey || assistantMessageId || '');
+    if (!key) return false;
+    const explicitTimeline = opts.timeline && opts.timeline.nodeType === 1 ? opts.timeline : null;
+    const container = explicitTimeline
+        ? explicitTimeline.closest('.progress-container, .process-details-container')
+        : document.getElementById('process-details-' + key);
+    const timeline = explicitTimeline || (container && container.querySelector('.progress-timeline'));
+    if (!container || !timeline) return false;
+
+    stopProcessDetailsLatestFollow(key);
+    ensureProcessDetailsReturnLatestControl(timeline);
+    const persistent = !!opts.persistent;
+    const durationMs = Number.isFinite(Number(opts.durationMs))
+        ? Math.max(250, Number(opts.durationMs))
+        : PROCESS_DETAILS_RESTORE_FOLLOW_MS;
+    const state = {
+        stopped: false,
+        detached: false,
+        persistent: persistent,
+        timeline: timeline,
+        hasPendingNewBelow: false,
+        lastScrollTop: timeline.scrollTop,
+        userScrollIntentUntil: 0,
+        touchLastY: null,
+        rafId: 0,
+        timeoutId: 0,
+        observer: null,
+        resizeObserver: null,
+        cleanup: []
+    };
+    processDetailsLatestFollowStates.set(key, state);
+
+    const detachForUserNavigation = function () {
+        state.detached = true;
+        if (state.rafId) {
+            cancelAnimationFrame(state.rafId);
+            state.rafId = 0;
+        }
+        updateProcessDetailsReturnLatestControl(timeline);
+    };
+    const onWheel = function (event) {
+        if (!event) return;
+        if (Math.abs(event.deltaY) > 1) {
+            state.userScrollIntentUntil = Date.now() + 1200;
+        }
+        if (event.deltaY < -1) detachForUserNavigation();
+    };
+    const onPointerDown = function (event) {
+        if (!event) return;
+        const rect = timeline.getBoundingClientRect();
+        if (event.clientX >= rect.right - PROCESS_DETAILS_FOLLOW_SCROLLBAR_GUTTER_PX) {
+            state.userScrollIntentUntil = Date.now() + 1800;
+        }
+    };
+    const onKeyDown = function (event) {
+        if (!event) return;
+        if (['ArrowUp', 'PageUp', 'Home', 'ArrowDown', 'PageDown', 'End', ' '].includes(event.key)) {
+            state.userScrollIntentUntil = Date.now() + 1200;
+        }
+        if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home') {
+            detachForUserNavigation();
+        }
+    };
+    const onTouchStart = function (event) {
+        if (!event || !event.touches || event.touches.length !== 1) return;
+        state.touchLastY = event.touches[0].clientY;
+        state.userScrollIntentUntil = Date.now() + 1200;
+    };
+    const onTouchMove = function (event) {
+        if (!event || !event.touches || event.touches.length !== 1) return;
+        const nextY = event.touches[0].clientY;
+        state.userScrollIntentUntil = Date.now() + 1200;
+        if (state.touchLastY != null && nextY > state.touchLastY + 4) {
+            detachForUserNavigation();
+        }
+        state.touchLastY = nextY;
+    };
+    const onTouchEnd = function () {
+        state.touchLastY = null;
+    };
+    const onScroll = function () {
+        if (state.stopped) return;
+        const currentTop = timeline.scrollTop;
+        const scrolledUp = currentTop < state.lastScrollTop - 1;
+        const scrolledDown = currentTop > state.lastScrollTop + 1;
+        const distance = Math.max(0, timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop);
+
+        // A first small upward scroll may still be within the "32px from bottom" threshold; within the same scroll
+        // event we must not detach and instantly resume, or continuous output keeps yanking the viewport back to the bottom.
+        // Rebuilding history iterations after refresh triggers scroll-anchoring changes with no user input; such layout scrolling
+        // must not stop inner latest-content following; only explicit user intent or an already-detached state stays detached.
+        if (scrolledUp && (state.detached || Date.now() <= state.userScrollIntentUntil)) {
+            detachForUserNavigation();
+        } else if (
+            state.detached &&
+            scrolledDown &&
+            Date.now() <= state.userScrollIntentUntil &&
+            distance <= PROCESS_DETAILS_FOLLOW_RESUME_THRESHOLD_PX
+        ) {
+            state.detached = false;
+            state.hasPendingNewBelow = false;
+            scheduleFollowLatest();
+        }
+        if (distance <= PROCESS_DETAILS_FOLLOW_RESUME_THRESHOLD_PX) {
+            state.hasPendingNewBelow = false;
+        }
+        state.lastScrollTop = currentTop;
+        updateProcessDetailsReturnLatestControl(timeline);
+    };
+    timeline.addEventListener('wheel', onWheel, { passive: true });
+    timeline.addEventListener('pointerdown', onPointerDown, { passive: true });
+    timeline.addEventListener('keydown', onKeyDown);
+    timeline.addEventListener('touchstart', onTouchStart, { passive: true });
+    timeline.addEventListener('touchmove', onTouchMove, { passive: true });
+    timeline.addEventListener('touchend', onTouchEnd, { passive: true });
+    timeline.addEventListener('scroll', onScroll, { passive: true });
+    state.cleanup.push(function () { timeline.removeEventListener('wheel', onWheel); });
+    state.cleanup.push(function () { timeline.removeEventListener('pointerdown', onPointerDown); });
+    state.cleanup.push(function () { timeline.removeEventListener('keydown', onKeyDown); });
+    state.cleanup.push(function () { timeline.removeEventListener('touchstart', onTouchStart); });
+    state.cleanup.push(function () { timeline.removeEventListener('touchmove', onTouchMove); });
+    state.cleanup.push(function () { timeline.removeEventListener('touchend', onTouchEnd); });
+    state.cleanup.push(function () { timeline.removeEventListener('scroll', onScroll); });
+
+    const followLatest = function () {
+        state.rafId = 0;
+        if (state.stopped || !timeline.isConnected) {
+            stopProcessDetailsLatestFollow(key);
+            return;
+        }
+        if (state.detached) return;
+        if (typeof opts.scrollToLatest === 'function') {
+            opts.scrollToLatest(timeline);
+        } else {
+            scrollProcessDetailsToLatest(String(assistantMessageId || ''), false);
+        }
+        state.hasPendingNewBelow = false;
+        state.lastScrollTop = timeline.scrollTop;
+        updateProcessDetailsReturnLatestControl(timeline);
+        // The inner iteration area and the outer conversation area pin separately; after the user scrolls up the inner area, this state pauses auto-follow for both.
+        if (window.CyberStrikeChatScroll &&
+            typeof window.CyberStrikeChatScroll.scrollIfPinned === 'function') {
+            window.CyberStrikeChatScroll.scrollIfPinned(true);
+        }
+    };
+    const scheduleFollowLatest = function () {
+        if (state.stopped || state.rafId) return;
+        if (state.detached) {
+            state.hasPendingNewBelow = true;
+            markProcessDetailsReturnLatestPending(timeline);
+            return;
+        }
+        state.rafId = requestAnimationFrame(followLatest);
+    };
+    state.scheduleFollowLatest = scheduleFollowLatest;
+
+    state.observer = new MutationObserver(scheduleFollowLatest);
+    state.observer.observe(timeline, { childList: true, subtree: true, characterData: true });
+    if (typeof ResizeObserver === 'function') {
+        state.resizeObserver = new ResizeObserver(scheduleFollowLatest);
+        state.resizeObserver.observe(timeline);
+    }
+    scheduleFollowLatest();
+
+    if (!persistent) {
+        state.timeoutId = setTimeout(function () {
+            stopProcessDetailsLatestFollow(key);
+        }, durationMs);
+    }
+    return true;
+}
+
+function liveProgressLatestFollowKey(progressId) {
+    return 'live-progress:' + String(progressId || '');
+}
+
+function startLiveProgressLatestFollow(progressId) {
+    const id = String(progressId || '');
+    const timeline = id ? document.getElementById(id + '-timeline') : null;
+    if (!timeline) return false;
+    return startProcessDetailsLatestFollow(id, {
+        stateKey: liveProgressLatestFollowKey(id),
+        timeline: timeline,
+        persistent: true,
+        scrollToLatest: function (target) {
+            target.scrollTop = Math.max(0, target.scrollHeight - target.clientHeight);
+        }
+    });
+}
+
+function stopLiveProgressLatestFollow(progressId) {
+    return stopProcessDetailsLatestFollow(liveProgressLatestFollowKey(progressId));
+}
+
+window.startProcessDetailsLatestFollow = startProcessDetailsLatestFollow;
+window.stopProcessDetailsLatestFollow = stopProcessDetailsLatestFollow;
+window.stopAllProcessDetailsLatestFollow = stopAllProcessDetailsLatestFollow;
+window.startLiveProgressLatestFollow = startLiveProgressLatestFollow;
+window.stopLiveProgressLatestFollow = stopLiveProgressLatestFollow;
 
 /**
  * 分页加载过程详情并增量渲染。默认全量加载供恢复流程使用；
@@ -1661,6 +2355,8 @@ async function loadProcessDetailsPaginated(assistantMessageId, backendMessageId,
         return;
     }
     const opts = options || {};
+    const signal = opts.signal;
+    if (signal && signal.aborted) return;
     const autoLoadAll = opts.autoLoadAll !== false;
     const detailsContainer = document.getElementById('process-details-' + assistantMessageId);
     const PAGE = PROCESS_DETAILS_PAGE_SIZE;
@@ -1680,7 +2376,8 @@ async function loadProcessDetailsPaginated(assistantMessageId, backendMessageId,
             detailsContainer.dataset.autoLoadSuspended = '1';
         }
         const summaryRes = await apiFetch(
-            '/api/messages/' + encodeURIComponent(String(backendMessageId)) + '/process-details?summary=1'
+            '/api/messages/' + encodeURIComponent(String(backendMessageId)) + '/process-details?summary=1',
+            signal ? { signal: signal } : undefined
         );
         const summaryJSON = await summaryRes.json().catch(() => ({}));
         if (!summaryRes.ok) {
@@ -1691,6 +2388,7 @@ async function loadProcessDetailsPaginated(assistantMessageId, backendMessageId,
     }
     let isFirst = !opts.append;
     while (true) {
+        if (signal && signal.aborted) return;
         const params = new URLSearchParams();
         params.set('limit', String(PAGE));
         if (anchorId && !opts.append && !prepend) {
@@ -1700,12 +2398,14 @@ async function loadProcessDetailsPaginated(assistantMessageId, backendMessageId,
         }
         const res = await apiFetch(
             '/api/messages/' + encodeURIComponent(String(backendMessageId)) +
-            '/process-details?' + params.toString()
+            '/process-details?' + params.toString(),
+            signal ? { signal: signal } : undefined
         );
         const j = await res.json().catch(() => ({}));
         if (!res.ok) {
             throw new Error((j && j.error) ? j.error : String(res.status));
         }
+        if (signal && signal.aborted) return;
         const details = (j && Array.isArray(j.processDetails)) ? j.processDetails : [];
         const toolExecutions = (j && Array.isArray(j.toolExecutions)) ? j.toolExecutions : [];
         const hasMore = !!(j && j.hasMore);
@@ -1743,6 +2443,11 @@ async function loadProcessDetailsPaginated(assistantMessageId, backendMessageId,
         await new Promise((resolve) => requestAnimationFrame(resolve));
     }
     if (opts.initialLatest) {
+        // renderProcessDetails may keep appending across frames, and SSE after restore keeps growing the same thinking text;
+        // establish a short-lived stick-to-bottom for the iteration details instead of only scrolling the outer conversation container.
+        startProcessDetailsLatestFollow(assistantMessageId, {
+            durationMs: PROCESS_DETAILS_RESTORE_FOLLOW_MS
+        });
         requestAnimationFrame(function () {
             scrollProcessDetailsToLatest(assistantMessageId, false);
             if (detailsContainer) {
@@ -1898,6 +2603,12 @@ function toggleProcessDetails(progressId, assistantMessageId) {
         setExpanded(!timeline.classList.contains('expanded'));
     } else if (timeline) {
         setExpanded(!timeline.classList.contains('expanded'));
+    }
+    if (timeline && typeof updateProcessDetailsReturnLatestControl === 'function') {
+        updateProcessDetailsReturnLatestControl(timeline);
+    }
+    if (typeof window.syncAssistantTurnSummary === 'function') {
+        window.syncAssistantTurnSummary(document.getElementById(assistantMessageId));
     }
     
     // 滚动到展开的详情位置（流式且用户上滑阅读时不抢主列表滚动）
@@ -2076,6 +2787,120 @@ function formatEinoRunRetryTitle(data) {
     return base;
 }
 
+function formatEinoModelRetryTitle(data) {
+    const d = data && typeof data === 'object' ? data : {};
+    const base = typeof window.t === 'function'
+        ? window.t('chat.einoModelRetryTitle')
+        : '🔁 Model call retry';
+    const attempt = Number(d.attempt || 0);
+    if (Number.isFinite(attempt) && attempt > 0) {
+        return base + '（' + attempt + '）';
+    }
+    return base;
+}
+
+function formatEinoModelRetryMessage(message, data) {
+    const d = data && typeof data === 'object' ? data : {};
+    const lines = [];
+    const base = String(message || '').trim();
+    if (base) lines.push(base);
+    if (d.reason != null && String(d.reason).trim() !== '') {
+        lines.push('Reason: ' + String(d.reason).trim());
+    }
+    if (d.error != null && String(d.error).trim() !== '') {
+        lines.push('Error details: ' + String(d.error).trim());
+    }
+    return lines.join('\n');
+}
+
+function formatEinoModelFailoverTitle(data) {
+    const d = data && typeof data === 'object' ? data : {};
+    const base = typeof window.t === 'function'
+        ? window.t('chat.einoModelFailoverTitle')
+        : '🔀 Switching fallback model';
+    const attempt = Number(d.attempt || 0);
+    if (Number.isFinite(attempt) && attempt > 0) {
+        return base + '（' + attempt + '）';
+    }
+    return base;
+}
+
+function formatEinoModelFailoverMessage(message, data) {
+    const d = data && typeof data === 'object' ? data : {};
+    const lines = [];
+    const base = String(message || '').trim();
+    if (base) lines.push(base);
+    if (d.channel != null && String(d.channel).trim() !== '') {
+        lines.push('Channel: ' + String(d.channel).trim());
+    }
+    if (d.model != null && String(d.model).trim() !== '') {
+        lines.push('Model: ' + String(d.model).trim());
+    }
+    return lines.join('\n');
+}
+
+function formatCompactInteger(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n)) return '0';
+    try {
+        return Math.max(0, Math.trunc(n)).toLocaleString(getCurrentTimeLocale());
+    } catch (e) {
+        return String(Math.max(0, Math.trunc(n)));
+    }
+}
+
+function formatEinoUsageSummaryTitle(data) {
+    const d = data && typeof data === 'object' ? data : {};
+    const base = typeof window.t === 'function'
+        ? window.t('chat.einoUsageSummaryTitle')
+        : 'Token usage summary';
+    const total = Number(d.totalTokens || 0);
+    if (Number.isFinite(total) && total > 0) {
+        return base + ' · ' + formatCompactInteger(total);
+    }
+    return base;
+}
+
+function formatEinoUsageSummaryMessage(data) {
+    const d = data && typeof data === 'object' ? data : {};
+    const label = function (key, fallback) {
+        if (typeof window.t !== 'function') return fallback;
+        const translated = window.t(key);
+        return translated && translated !== key ? translated : fallback;
+    };
+    const rows = [
+        [label('chat.einoUsageModelCalls', 'Model calls'), d.modelCalls],
+        [label('chat.einoUsagePromptTokens', 'Prompt tokens'), d.promptTokens],
+        [label('chat.einoUsageCompletionTokens', 'Completion tokens'), d.completionTokens],
+        [label('chat.einoUsageTotalTokens', 'Total tokens'), d.totalTokens]
+    ];
+    if (Number(d.cachedTokens || 0) > 0) {
+        rows.push([label('chat.einoUsageCachedTokens', 'Cached tokens'), d.cachedTokens]);
+    }
+    if (Number(d.reasoningTokens || 0) > 0) {
+        rows.push([label('chat.einoUsageReasoningTokens', 'Reasoning tokens'), d.reasoningTokens]);
+    }
+    return rows.map(function (row) {
+        return row[0] + ': ' + formatCompactInteger(row[1]);
+    }).join('\n');
+}
+
+function dispatchAgentPlanTaskEvent(event, fallbackConversationId) {
+    if (!event || (event.type !== 'tool_call' && event.type !== 'tool_result')) return;
+    const data = event.data && typeof event.data === 'object' ? event.data : {};
+    const toolName = String(data.toolName || '').trim().toLowerCase();
+    if (!['taskcreate', 'taskupdate', 'tasklist', 'taskget'].includes(toolName)) return;
+    const conversationId = String(data.conversationId || fallbackConversationId || window.currentConversationId || '').trim();
+    if (!conversationId) return;
+    window.dispatchEvent(new CustomEvent('agent-plan-task-event', {
+        detail: {
+            eventType: event.type,
+            conversationId: conversationId,
+            data: data
+        }
+    }));
+}
+
 // 处理流式事件
 function handleStreamEvent(event, progressElement, progressId, 
                           getAssistantId, setAssistantId, getMcpIds, setMcpIds, options) {
@@ -2104,6 +2929,7 @@ function handleStreamEvent(event, progressElement, progressId,
             return;
         }
     }
+    dispatchAgentPlanTaskEvent(event, expectedConversationId || eventConversationId);
     const streamScrollWasPinned = typeof window.captureScrollPinState === 'function'
         ? window.captureScrollPinState()
         : (typeof window.isChatMessagesPinnedToBottom === 'function' ? window.isChatMessagesPinnedToBottom() : true);
@@ -2174,12 +3000,13 @@ function handleStreamEvent(event, progressElement, progressId,
                 loadActiveTasks();
                 // 延迟刷新对话列表，确保用户消息已保存，updated_at已更新
                 // 这样新对话才能正确显示在最近对话列表的顶部
-                // 使用loadConversationsWithGroups确保分组映射缓存正确加载，无论是否有分组都能立即显示
+                // Refresh the recent-conversations list
                 setTimeout(() => {
-                    if (typeof loadConversationsWithGroups === 'function') {
-                        loadConversationsWithGroups();
-                    } else if (typeof loadConversations === 'function') {
+                    if (typeof loadConversations === 'function') {
                         loadConversations();
+                    }
+                    if (typeof window.refreshChatProjectFolders === 'function') {
+                        window.refreshChatProjectFolders();
                     }
                 }, 200);
             }
@@ -2546,7 +3373,57 @@ function handleStreamEvent(event, progressElement, progressId,
             });
             break;
 
-        case 'hitl_interrupt':
+        case 'finalization_pending_tools_cancelled': {
+            const d = event.data || {};
+            markToolExecutionItemsCancelled(timeline, autoCancelledExecutionIdsFromData(d));
+            addTimelineItem(timeline, 'progress', {
+                title: 'Tool execution finished',
+                message: event.message,
+                data: d,
+                expanded: false
+            });
+            break;
+        }
+
+        case 'hitl_audit_agent_started': {
+            const auditData = Object.assign({}, event.data || {}, {
+                reviewer: 'audit_agent',
+                status: 'audit_running'
+            });
+            const auditTargetItem = findToolCallItemForHitl(timeline, auditData);
+            if (auditTargetItem && auditTargetItem.id) {
+                renderInlineHitlApproval(auditTargetItem.id, auditData);
+            } else {
+                const auditItemId = addTimelineItem(timeline, 'hitl_audit_agent_started', {
+                    title: 'Audit Agent reviewing',
+                    message: event.message,
+                    data: auditData
+                });
+                renderInlineHitlApproval(auditItemId, auditData);
+            }
+            break;
+        }
+        case 'hitl_audit_agent': {
+            const auditDecisionData = Object.assign({}, event.data || {}, {
+                reviewer: 'audit_agent',
+                decidedBy: 'audit_agent',
+                status: 'decided'
+            });
+            const auditDecision = auditDecisionData.decision === 'reject' ? 'reject' : 'approve';
+            if (!resolveInlineHitlDecision(timeline, auditDecisionData, auditDecision, event.message)) {
+                const auditTargetItem = findToolCallItemForHitl(timeline, auditDecisionData);
+                if (auditTargetItem && auditTargetItem.id) {
+                    renderInlineHitlApproval(auditTargetItem.id, Object.assign({}, auditDecisionData, {
+                        resolved: true,
+                        decision: auditDecision
+                    }));
+                }
+            }
+            break;
+        }
+        case 'hitl_interrupt': {
+            hitlPendingInterruptTracker.add(event.data || {});
+            hitlPendingInterruptTracker.ready = true;
             const hitlTargetItem = findToolCallItemForHitl(timeline, event.data || {});
             if (hitlTargetItem && hitlTargetItem.id) {
                 renderInlineHitlApproval(hitlTargetItem.id, event.data || {});
@@ -2558,11 +3435,16 @@ function handleStreamEvent(event, progressElement, progressId,
                 });
                 renderInlineHitlApproval(hitlItemId, event.data || {});
             }
+            renderChatHitlApprovalDock(event.data || {});
+            updateHitlApprovalSidebar(event.data || {}, true);
             try {
                 window.dispatchEvent(new CustomEvent('hitl-interrupt', { detail: event.data || {} }));
             } catch (e) {}
             break;
-        case 'hitl_resumed':
+        }
+        case 'hitl_resumed': {
+            hitlPendingInterruptTracker.remove(event.data && event.data.interruptId);
+            hitlPendingInterruptTracker.ready = true;
             if (!resolveInlineHitlDecision(timeline, event.data || {}, 'approve', event.message)) {
                 addTimelineItem(timeline, 'progress', {
                     title: '✅ HITL',
@@ -2570,8 +3452,16 @@ function handleStreamEvent(event, progressElement, progressId,
                     data: event.data
                 });
             }
+            clearChatHitlApprovalDock(event.data && event.data.interruptId);
+            updateHitlApprovalSidebar(event.data || {}, false);
+            try {
+                window.dispatchEvent(new CustomEvent('hitl-resolved', { detail: event.data || {} }));
+            } catch (e) {}
             break;
-        case 'hitl_rejected':
+        }
+        case 'hitl_rejected': {
+            hitlPendingInterruptTracker.remove(event.data && event.data.interruptId);
+            hitlPendingInterruptTracker.ready = true;
             if (!resolveInlineHitlDecision(timeline, event.data || {}, 'reject', event.message)) {
                 addTimelineItem(timeline, 'error', {
                     title: '⛔ HITL',
@@ -2579,7 +3469,13 @@ function handleStreamEvent(event, progressElement, progressId,
                     data: event.data
                 });
             }
+            clearChatHitlApprovalDock(event.data && event.data.interruptId);
+            updateHitlApprovalSidebar(event.data || {}, false);
+            try {
+                window.dispatchEvent(new CustomEvent('hitl-resolved', { detail: event.data || {} }));
+            } catch (e) {}
             break;
+        }
 
         case 'user_interrupt_continue': {
             const d = event.data || {};
@@ -2633,6 +3529,37 @@ function handleStreamEvent(event, progressElement, progressId,
                 title: formatEinoRunRetryTitle(d),
                 message: msg,
                 data: d
+            });
+            break;
+        }
+
+        case 'eino_model_retry': {
+            const d = event.data || {};
+            addTimelineItem(timeline, 'warning', {
+                title: formatEinoModelRetryTitle(d),
+                message: formatEinoModelRetryMessage(event.message, d),
+                data: d
+            });
+            break;
+        }
+
+        case 'eino_model_failover': {
+            const d = event.data || {};
+            addTimelineItem(timeline, 'warning', {
+                title: formatEinoModelFailoverTitle(d),
+                message: formatEinoModelFailoverMessage(event.message, d),
+                data: d
+            });
+            break;
+        }
+
+        case 'eino_usage_summary': {
+            const d = event.data || {};
+            addTimelineItem(timeline, 'eino_usage_summary', {
+                title: formatEinoUsageSummaryTitle(d),
+                message: formatEinoUsageSummaryMessage(d),
+                data: d,
+                expanded: false
             });
             break;
         }
@@ -2714,13 +3641,15 @@ function handleStreamEvent(event, progressElement, progressId,
         case 'tool_result':
             const resultInfo = event.data || {};
             const resultToolName = resultInfo.toolName || (typeof window.t === 'function' ? window.t('chat.unknownTool') : 'Unknown tool');
-            const success = resultInfo.success !== false;
+            const success = getToolResultDisplayState(resultInfo).success;
             const resultDisplayState = getToolResultDisplayState(resultInfo, { rawText: event.message || '' });
             const backgroundRunning = resultDisplayState.kind === 'background_running';
-            const statusIcon = backgroundRunning ? '⏳' : (success ? '✅' : '❌');
+            const statusIcon = resultDisplayState.kind === 'blocked' ? '🛡' : (backgroundRunning ? '⏳' : (success ? '✅' : '❌'));
             const resultToolCallId = resultInfo.toolCallId || null;
-            const resultStatusForCall = backgroundRunning ? 'background_running' : (success ? 'completed' : 'failed');
-            const resultExecText = backgroundRunning
+            const resultStatusForCall = toolDisplayStatusFromState(resultDisplayState);
+            const resultExecText = resultDisplayState.kind === 'blocked'
+                ? (typeof window.t === 'function' ? window.t('chat.toolExecBlocked', { name: escapeHtml(resultToolName) }) : 'Tool ' + escapeHtml(resultToolName) + ' blocked')
+                : backgroundRunning
                 ? (getBackgroundRunningToolLabel() + ': ' + escapeHtml(resultToolName))
                 : (success ? (typeof window.t === 'function' ? window.t('chat.toolExecComplete', { name: escapeHtml(resultToolName) }) : '工具 ' + escapeHtml(resultToolName) + ' 执行完成') : (typeof window.t === 'function' ? window.t('chat.toolExecFailed', { name: escapeHtml(resultToolName) }) : '工具 ' + escapeHtml(resultToolName) + ' 执行失败'));
 
@@ -2869,7 +3798,7 @@ function handleStreamEvent(event, progressElement, progressId,
         }
             
         case 'progress':
-            const progressTitle = document.querySelector(`#${progressId} .progress-title`);
+            const progressTitle = document.querySelector(`#${progressId} .progress-stage`);
             if (progressTitle) {
                 // 保存原文，语言切换时可用 translateProgressMessage 重新套当前语言
                 const progressEl = document.getElementById(progressId);
@@ -2882,11 +3811,12 @@ function handleStreamEvent(event, progressElement, progressId,
                     }
                 }
                 const progressMsg = translateProgressMessage(event.message, event.data);
-                progressTitle.textContent = '🔍 ' + progressMsg;
+                progressTitle.textContent = progressMsg;
             }
             break;
         
         case 'cancelled':
+            stopProgressElapsedClock(progressId);
             const taskCancelledText = typeof window.t === 'function' ? window.t('chat.taskCancelled') : 'Task cancelled';
             if (timeline) {
                 addTimelineItem(timeline, 'cancelled', {
@@ -2895,7 +3825,7 @@ function handleStreamEvent(event, progressElement, progressId,
                     data: event.data
                 });
             }
-            const cancelTitle = document.querySelector(`#${progressId} .progress-title`);
+            const cancelTitle = document.querySelector(`#${progressId} .progress-stage`);
             if (cancelTitle) {
                 cancelTitle.textContent = '⛔ ' + taskCancelledText;
             }
@@ -2917,8 +3847,9 @@ function handleStreamEvent(event, progressElement, progressId,
                 if (assistantElement) {
                     const detailsId = 'process-details-' + assistantId;
                     if (!document.getElementById(detailsId)) {
-                        integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : []);
+                        integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], 'cancelled');
                     } else if (preferredMessageId) {
+                        applyAssistantTurnTimingFromProgress(progressId, assistantElement, 'cancelled');
                         maybeReloadLazyProcessDetails(assistantId);
                     }
                     setTimeout(() => {
@@ -2972,6 +3903,14 @@ function handleStreamEvent(event, progressElement, progressId,
                 responseStreamStateByProgressId.set(progressId, prevStream);
                 break;
             }
+            const restoredItem = findRestoredMainResponseStreamItem(timeline, responseData);
+            if (restoredItem) {
+                responseStreamStateByProgressId.set(
+                    progressId,
+                    responseStreamStateFromRestoredItem(progressId, restoredItem, responseData)
+                );
+                break;
+            }
             const title = einoMainStreamPlanningTitle(responseData);
             const itemId = addTimelineItem(timeline, 'thinking', {
                 title: title,
@@ -3006,7 +3945,23 @@ function handleStreamEvent(event, progressElement, progressId,
             let state = responseStreamStateByProgressId.get(progressId);
             const incomingStreamId = responseData.streamId != null ? String(responseData.streamId).trim() : '';
             if (!state) {
-                state = { progressId: progressId, itemId: null, buffer: '', streamMeta: responseData, streamId: incomingStreamId };
+                const restoredItem = findRestoredMainResponseStreamItem(timeline, responseData);
+                state = responseStreamStateFromRestoredItem(progressId, restoredItem, responseData);
+                if (!state) {
+                    const itemId = addTimelineItem(timeline, 'thinking', {
+                        title: einoMainStreamPlanningTitle(responseData),
+                        message: ' ',
+                        data: Object.assign({}, responseData, { responseStreamPlaceholder: true })
+                    });
+                    state = {
+                        progressId: progressId,
+                        itemId: itemId,
+                        buffer: '',
+                        streamMeta: responseData,
+                        streamIdentity: buildMainResponseStreamIdentity(progressId, responseData),
+                        streamId: incomingStreamId
+                    };
+                }
                 responseStreamStateByProgressId.set(progressId, state);
             } else if (!state.streamMeta && responseData && (responseData.einoAgent || responseData.orchestration)) {
                 state.streamMeta = responseData;
@@ -3044,6 +3999,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const responseData = event.data || {};
             const mcpIds = mergeMcpExecutionIDLists(typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], responseData.mcpExecutionIds || []);
             setMcpIds(mcpIds);
+            markToolExecutionItemsCancelled(timeline, autoCancelledExecutionIdsFromData(responseData));
 
             // 更新对话ID
             if (responseData.conversationId) {
@@ -3139,6 +4095,7 @@ function handleStreamEvent(event, progressElement, progressId,
             break;
             
         case 'error':
+            stopProgressElapsedClock(progressId);
             // 显示错误
             if (timeline) {
                 addTimelineItem(timeline, 'error', {
@@ -3149,7 +4106,7 @@ function handleStreamEvent(event, progressElement, progressId,
             }
             
             // 更新进度标题为错误状态
-            const errorTitle = document.querySelector(`#${progressId} .progress-title`);
+            const errorTitle = document.querySelector(`#${progressId} .progress-stage`);
             if (errorTitle) {
                 errorTitle.textContent = '❌ ' + (typeof window.t === 'function' ? window.t('chat.executionFailed') : 'Execution failed');
             }
@@ -3175,8 +4132,11 @@ function handleStreamEvent(event, progressElement, progressId,
                 if (assistantElement) {
                     const detailsId = 'process-details-' + assistantId;
                     if (!document.getElementById(detailsId)) {
-                        integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : []);
+                        const terminalStatus = event.data && event.data.errorType === 'timeout' ? 'timeout' : 'failed';
+                        integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], terminalStatus);
                     } else if (preferredMessageId) {
+                        const terminalStatus = event.data && event.data.errorType === 'timeout' ? 'timeout' : 'failed';
+                        applyAssistantTurnTimingFromProgress(progressId, assistantElement, terminalStatus);
                         maybeReloadLazyProcessDetails(assistantId);
                     }
                     setTimeout(() => {
@@ -3194,7 +4154,7 @@ function handleStreamEvent(event, progressElement, progressId,
             
         case 'done':
             if (event.data && event.data.workflowStatus === 'awaiting_hitl') {
-                const waitingTitle = document.querySelector(`#${progressId} .progress-title`);
+                const waitingTitle = document.querySelector(`#${progressId} .progress-stage`);
                 if (waitingTitle) {
                     waitingTitle.textContent = '⏸️ ' + (typeof window.t === 'function' ? window.t('chat.workflowAwaitingApproval') : '工作流等待审批');
                 }
@@ -3203,6 +4163,7 @@ function handleStreamEvent(event, progressElement, progressId,
                 }
                 break;
             }
+            stopProgressElapsedClock(progressId);
             // 清理流式输出状态
             responseStreamStateByProgressId.delete(progressId);
             mainIterationStateByProgressId.delete(String(progressId));
@@ -3219,7 +4180,7 @@ function handleStreamEvent(event, progressElement, progressId,
                 clearCsTaskReplay();
             }
             // 完成，更新进度标题（如果进度消息还存在）
-            const doneTitle = document.querySelector(`#${progressId} .progress-title`);
+            const doneTitle = document.querySelector(`#${progressId} .progress-stage`);
             if (doneTitle) {
                 doneTitle.textContent = '✅ ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestComplete') : 'Penetration test complete');
             }
@@ -3273,6 +4234,220 @@ function handleStreamEvent(event, progressElement, progressId,
     scrollChatMessagesToBottomIfPinned(streamScrollWasPinned);
 }
 
+function hitlApprovalTranslate(key, fallback, vars) {
+    if (typeof window.t !== 'function') return fallback;
+    const value = window.t(key, vars || {});
+    return value && value !== key ? value : fallback;
+}
+
+function hitlApprovalTemplate(key, fallback, vars) {
+    let template = hitlApprovalTranslate(key, fallback);
+    Object.keys(vars || {}).forEach(function (name) {
+        template = template.replaceAll('{{' + name + '}}', String(vars[name]));
+    });
+    return template;
+}
+
+function hitlApprovalPayload(data) {
+    return data && data.payload && typeof data.payload === 'object' ? data.payload : {};
+}
+
+function hitlApprovalArguments(data) {
+    const payload = hitlApprovalPayload(data);
+    if (payload.argumentsObj && typeof payload.argumentsObj === 'object') return payload.argumentsObj;
+    if (payload.arguments && typeof payload.arguments === 'object') return payload.arguments;
+    if (typeof payload.arguments === 'string') {
+        try {
+            const parsed = JSON.parse(payload.arguments);
+            if (parsed && typeof parsed === 'object') return parsed;
+        } catch (e) { /* keep the raw request below */ }
+    }
+    return {};
+}
+
+function findHitlArgumentValue(args, keys) {
+    if (!args || typeof args !== 'object') return '';
+    for (let i = 0; i < keys.length; i++) {
+        const value = args[keys[i]];
+        if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    const nestedKeys = ['input', 'params', 'options', 'request'];
+    for (let i = 0; i < nestedKeys.length; i++) {
+        const nested = args[nestedKeys[i]];
+        if (nested && typeof nested === 'object') {
+            const found = findHitlArgumentValue(nested, keys);
+            if (found) return found;
+        }
+    }
+    return '';
+}
+
+function describeHitlApprovalRequest(data) {
+    const payload = hitlApprovalPayload(data);
+    const args = hitlApprovalArguments(data);
+    const rawToolName = String(data.toolName || payload.toolName || 'tool').trim() || 'tool';
+    const toolName = rawToolName.toLowerCase();
+    const url = findHitlArgumentValue(args, ['url', 'uri', 'href', 'targetUrl', 'target_url']);
+    const command = findHitlArgumentValue(args, ['command', 'cmd', 'script', 'shell_command']);
+    const path = findHitlArgumentValue(args, ['path', 'filePath', 'file_path', 'filename']);
+    const isBrowser = !!url || /browser|chrome|navigate|open_url|web/.test(toolName);
+    const isCommand = !!command || /(^|::|_)exec$|shell|terminal|command|run_command/.test(toolName);
+    const isFile = !!path || /write_file|edit_file|apply_patch|delete_file|move_file/.test(toolName);
+    let displayTool = rawToolName;
+    let question = hitlApprovalTemplate('hitl.requestGeneric', 'Allow CyberStrikeAI to call {{tool}}?', { tool: rawToolName });
+    let primary = '';
+    let kind = 'generic';
+    if (isBrowser) {
+        kind = 'browser';
+        question = url
+            ? (url.length > 160
+                ? hitlApprovalTranslate('hitl.requestVisitLongUrl', 'Allow CyberStrikeAI to visit this address?')
+                : hitlApprovalTemplate('hitl.requestVisitUrl', 'Allow CyberStrikeAI to visit {{url}}?', { url: url }))
+            : hitlApprovalTranslate('hitl.requestBrowser', 'Allow CyberStrikeAI to use the browser?');
+        primary = url;
+    } else if (isCommand) {
+        kind = 'command';
+        question = hitlApprovalTranslate('hitl.requestCommand', 'Allow CyberStrikeAI to run this command?');
+        primary = command;
+    } else if (isFile) {
+        kind = 'file';
+        question = path
+            ? (path.length > 160
+                ? hitlApprovalTranslate('hitl.requestModifyLongPath', 'Allow CyberStrikeAI to modify this file?')
+                : hitlApprovalTemplate('hitl.requestFile', 'Allow CyberStrikeAI to modify {{path}}?', { path: path }))
+            : hitlApprovalTranslate('hitl.requestFiles', 'Allow CyberStrikeAI to modify files?');
+        primary = path;
+    }
+    return {
+        rawToolName: rawToolName,
+        displayTool: displayTool,
+        question: question,
+        primary: primary,
+        kind: kind,
+        args: args,
+        argsJSON: JSON.stringify(args, null, 2)
+    };
+}
+
+function isAgentReviewedHitl(data) {
+    if (!data) return false;
+    const reviewer = String(data.reviewer || data.decidedBy || data.decided_by || '').trim().toLowerCase();
+    const status = String(data.status || '').trim().toLowerCase();
+    return reviewer === 'audit_agent' || reviewer === 'agent' || reviewer === 'ai' || status === 'audit_running';
+}
+
+function getHitlApprovalTiming(data) {
+    const payload = hitlApprovalPayload(data);
+    const approval = payload.hitlApproval && typeof payload.hitlApproval === 'object' ? payload.hitlApproval : {};
+    const timeoutSeconds = Number(data.timeoutSeconds != null ? data.timeoutSeconds : approval.timeoutSeconds);
+    const createdRaw = data.createdAt || approval.createdAt || '';
+    const expiresRaw = data.expiresAt || approval.expiresAt || '';
+    const createdAt = Date.parse(createdRaw);
+    let expiresAt = Date.parse(expiresRaw);
+    const safeTimeout = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? Math.floor(timeoutSeconds) : 0;
+    if (!Number.isFinite(expiresAt) && safeTimeout > 0 && Number.isFinite(createdAt)) {
+        expiresAt = createdAt + safeTimeout * 1000;
+    }
+    return {
+        timeoutSeconds: safeTimeout,
+        createdAt: Number.isFinite(createdAt) ? createdAt : 0,
+        expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0
+    };
+}
+
+function formatHitlRemaining(milliseconds) {
+    const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
+}
+
+function buildHitlCountdownHtml(data) {
+    const timing = getHitlApprovalTiming(data);
+    if (!timing.timeoutSeconds || !timing.expiresAt) {
+        return '<div class="hitl-approval-countdown hitl-approval-countdown--unlimited">' +
+            '<span>' + escapeHtml(hitlApprovalTranslate('hitl.timeoutUnlimited', 'No time limit')) + '</span></div>';
+    }
+    const remaining = Math.max(0, timing.expiresAt - Date.now());
+    const percent = Math.max(0, Math.min(100, remaining / (timing.timeoutSeconds * 1000) * 100));
+    return '<div class="hitl-approval-countdown" data-hitl-expires-at="' + timing.expiresAt + '" data-hitl-timeout="' + timing.timeoutSeconds + '">' +
+        '<div class="hitl-approval-countdown-copy"><span>' + escapeHtml(hitlApprovalTranslate('hitl.timeoutAutoReject', 'Automatically rejects at expiry')) + '</span>' +
+        '<strong class="hitl-approval-countdown-value">' + formatHitlRemaining(remaining) + '</strong></div>' +
+        '<div class="hitl-approval-progress" aria-hidden="true"><span class="hitl-approval-progress-value" style="width:' + percent.toFixed(2) + '%"></span></div>' +
+        '</div>';
+}
+
+function stopHitlApprovalCountdown(panel) {
+    if (panel && panel.__hitlCountdownTimer) {
+        window.clearInterval(panel.__hitlCountdownTimer);
+        panel.__hitlCountdownTimer = 0;
+    }
+}
+
+function bindHitlApprovalCountdown(panel, data) {
+    if (!panel) return;
+    stopHitlApprovalCountdown(panel);
+    panel.__hitlApprovalCountdownData = data;
+    if (panel.classList.contains('hitl-approval-task-closed')) return;
+    const timing = getHitlApprovalTiming(data);
+    const countdown = panel.querySelector('.hitl-approval-countdown[data-hitl-expires-at]');
+    if (!countdown || !timing.expiresAt || !timing.timeoutSeconds) return;
+    const value = countdown.querySelector('.hitl-approval-countdown-value');
+    const progress = countdown.querySelector('.hitl-approval-progress-value');
+    const update = function () {
+        const remaining = Math.max(0, timing.expiresAt - Date.now());
+        const percent = Math.max(0, Math.min(100, remaining / (timing.timeoutSeconds * 1000) * 100));
+        if (value) value.textContent = formatHitlRemaining(remaining);
+        if (progress) progress.style.width = percent.toFixed(2) + '%';
+        if (remaining <= 0) {
+            stopHitlApprovalCountdown(panel);
+            panel.classList.add('hitl-approval-expired');
+            panel.querySelectorAll('.hitl-inline-approve, .hitl-inline-reject').forEach(function (button) {
+                button.disabled = true;
+            });
+            const status = panel.querySelector('.hitl-inline-status');
+            if (status) status.textContent = hitlApprovalTranslate('hitl.expiredAutoRejected', 'Approval timed out; rejecting automatically…');
+        }
+    };
+    update();
+    panel.__hitlCountdownTimer = window.setInterval(update, 250);
+}
+
+function renderToolCallApprovalSummary(item, data) {
+    if (!item || !data || !data.interruptId) return;
+    let panel = item.querySelector(':scope > .hitl-inline-approval.hitl-tool-approval-summary');
+    if (!panel) {
+        panel = document.createElement('div');
+        panel.className = 'hitl-inline-approval hitl-tool-approval-summary';
+        const header = item.querySelector(':scope > .timeline-item-header');
+        if (header && header.nextSibling) {
+            item.insertBefore(panel, header.nextSibling);
+        } else {
+            item.appendChild(panel);
+        }
+    }
+    const payload = data.payload && typeof data.payload === 'object' ? data.payload : {};
+    const mode = String(data.mode || 'approval').trim().toLowerCase();
+    const allowEdit = mode === 'review_edit';
+    const argsObj = payload.argumentsObj && typeof payload.argumentsObj === 'object'
+        ? payload.argumentsObj
+        : {};
+    panel.innerHTML = buildInlineHitlApprovalHtml(data, {
+        toolName: '',
+        mode: mode,
+        allowEdit: allowEdit,
+        argsJSON: JSON.stringify(argsObj, null, 2)
+    });
+    panel.dataset.hitlInterruptId = String(data.interruptId);
+    panel.dataset.conversationId = String(data.conversationId || window.currentConversationId || '').trim();
+    panel.classList.toggle('hitl-inline-done', !!data.resolved || String(data.status || '') === 'decided');
+    if (!data.resolved && !isAgentReviewedHitl(data)) {
+        bindInlineHitlApproval(panel, data, { allowEdit: allowEdit });
+        bindHitlApprovalCountdown(panel, data);
+        setHitlApprovalTaskAvailability(panel, panel.dataset.conversationId);
+    }
+}
+
 function renderInlineHitlApproval(itemId, data) {
     const item = document.getElementById(itemId);
     if (!item || !data || !data.interruptId) return;
@@ -3289,7 +4464,8 @@ function renderInlineHitlApproval(itemId, data) {
             existingContent.remove();
             item.classList.remove('tool-call-detail-expanded');
         }
-        renderToolCallDetailContent(item);
+        renderToolCallApprovalSummary(item, data);
+        updateToolDetailToggleLabel(item);
         return;
     }
     let contentEl = item.querySelector('.timeline-item-content');
@@ -3317,6 +4493,8 @@ function renderInlineHitlApproval(itemId, data) {
 
     const panel = document.createElement('div');
     panel.className = 'hitl-inline-approval';
+    panel.dataset.hitlInterruptId = String(data.interruptId);
+    panel.dataset.conversationId = String(data.conversationId || window.currentConversationId || '').trim();
     panel.innerHTML = buildInlineHitlApprovalHtml(data, {
         toolName: toolName,
         mode: mode,
@@ -3325,7 +4503,11 @@ function renderInlineHitlApproval(itemId, data) {
         argsJSON: argsJSON
     });
     contentEl.appendChild(panel);
-    bindInlineHitlApproval(panel, data, { allowEdit: allowEdit });
+    if (!isAgentReviewedHitl(data)) {
+        bindInlineHitlApproval(panel, data, { allowEdit: allowEdit });
+        bindHitlApprovalCountdown(panel, data);
+        setHitlApprovalTaskAvailability(panel, panel.dataset.conversationId);
+    }
 }
 
 function resolveInlineHitlDecision(timeline, data, decision, message) {
@@ -3346,6 +4528,9 @@ function resolveInlineHitlDecision(timeline, data, decision, message) {
             resolved: true,
             decision: decision,
             decisionMessage: message || '',
+            reviewer: data.reviewer || data.decidedBy || (state.hitlData && (state.hitlData.reviewer || state.hitlData.decidedBy)) || 'human',
+            decidedBy: data.decidedBy || (state.hitlData && state.hitlData.decidedBy) || '',
+            status: 'decided',
             comment: data.comment || (state.hitlData && state.hitlData.comment) || '',
             editedArgs: data.editedArgs || data.editedArguments || (state.hitlData && (state.hitlData.editedArgs || state.hitlData.editedArguments)) || null
         });
@@ -3361,13 +4546,21 @@ function resolveInlineHitlDecision(timeline, data, decision, message) {
             content.remove();
             item.classList.remove('tool-call-detail-expanded');
         }
-        renderToolCallDetailContent(item);
+        renderToolCallApprovalSummary(item, state.hitlData);
+        updateToolDetailToggleLabel(item);
         return true;
     }
 
     const panel = item.querySelector('.hitl-inline-approval');
     if (panel) {
-        markInlineHitlDecision(panel, decision, message || '');
+        stopHitlApprovalCountdown(panel);
+        panel.classList.add('hitl-inline-done');
+        panel.innerHTML = buildInlineHitlApprovalHtml(Object.assign({}, data, {
+            resolved: true,
+            decision: decision,
+            decisionMessage: message || '',
+            status: 'decided'
+        }), { toolName: data.toolName || '' });
         return true;
     }
     return false;
@@ -3399,54 +4592,115 @@ function buildInlineHitlApprovalHtml(data, opts) {
     const hasToolNameOverride = opts && Object.prototype.hasOwnProperty.call(opts, 'toolName');
     const toolName = hasToolNameOverride ? String(opts.toolName || '') : (data.toolName || '-');
     const mode = opts && opts.mode ? opts.mode : String(data.mode || 'approval').trim().toLowerCase();
-    const modeLabel = opts && opts.modeLabel ? opts.modeLabel : (mode === 'review_edit' ? '审查编辑' : '审批模式');
     const allowEdit = opts && opts.allowEdit === true;
-    const argsJSON = opts && opts.argsJSON ? opts.argsJSON : '';
-    const toolBadge = toolName
-        ? '<span class="hitl-tool-badge">' + escapeHtml(toolName) + '</span>'
+    const request = describeHitlApprovalRequest(Object.assign({}, data, toolName ? { toolName: toolName } : {}));
+    const argsJSON = opts && opts.argsJSON ? opts.argsJSON : request.argsJSON;
+    const reviewer = String(data.reviewer || data.decidedBy || '').trim().toLowerCase();
+    const audit = reviewer === 'audit_agent' || String(data.status || '') === 'audit_running';
+    const status = String(data.status || '').trim().toLowerCase();
+    const timedOut = status === 'timeout' || String(data.decidedBy || '').trim().toLowerCase() === 'system' && /timeout|超时/i.test(String(data.comment || data.decisionMessage || ''));
+    const cancelled = status === 'cancelled';
+    const resolved = !!data.resolved || status === 'decided' || status === 'timeout' || cancelled || data.decision === 'approve' || data.decision === 'reject';
+    const editedArgs = data.editedArgs || data.editedArguments;
+    const hasEditedArgs = editedArgs && typeof editedArgs === 'object' && Object.keys(editedArgs).length > 0;
+    const tr = hitlApprovalTranslate;
+    const shield = '<svg class="hitl-codex-shield" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 2.2l6 2.5v4.5c0 3.8-2.35 6.55-6 8.6-3.65-2.05-6-4.8-6-8.6V4.7l6-2.5z" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"/><path d="M7.5 10l1.55 1.55L12.8 7.8" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    const toolHeading = toolName || request.displayTool
+        ? '<div class="hitl-codex-tool-row">' + shield + '<span>' + escapeHtml(request.displayTool || toolName) + '</span></div>'
         : '';
-    if (data && data.resolved) {
-        const ok = data.decision === 'approve';
-        const text = data.decisionMessage || (ok ? '已通过，继续执行' : '已拒绝');
-        const comment = data.comment ? '<span class="hitl-inline-decision-comment">' + escapeHtml(data.comment) + '</span>' : '';
-        return `
-            <div class="hitl-inline-decision hitl-inline-decision--${ok ? 'approve' : 'reject'}">
-                <span class="hitl-inline-decision-dot" aria-hidden="true"></span>
-                <strong>${escapeHtml(ok ? '审批通过' : '审批拒绝')}</strong>
-                <span>${escapeHtml(text)}</span>
+    if (resolved) {
+        if (cancelled) {
+            const statusText = tr('hitl.interruptedApprovalCancelled', 'Task interrupted; approval cancelled');
+            const comment = data.comment && data.comment !== 'process restarted' && data.comment !== 'task cancelled'
+                ? '<p class="hitl-codex-explainer">' + escapeHtml(data.comment) + '</p>'
+                : '';
+            return toolHeading + `
+                <div class="hitl-codex-state hitl-codex-state--interrupted">
+                    <span class="hitl-codex-state-icon" aria-hidden="true">×</span>
+                    <strong>${escapeHtml(statusText)}</strong>
+                </div>
                 ${comment}
+            `;
+        }
+        const ok = !timedOut && data.decision !== 'reject';
+        let statusText;
+        if (timedOut) {
+            statusText = tr('hitl.expiredRejected', 'Approval timed out and was rejected');
+        } else if (audit) {
+            statusText = ok
+                ? (hasEditedArgs ? tr('hitl.auditEditedApproved', 'Audit Agent edited parameters and approved') : tr('hitl.auditApproved', 'Audit Agent approved'))
+                : tr('hitl.auditRejected', 'Audit Agent rejected');
+        } else {
+            statusText = ok
+                ? (hasEditedArgs ? tr('hitl.humanEditedApproved', 'Edited parameters and allowed') : tr('hitl.humanApproved', 'Allowed once'))
+                : tr('hitl.humanRejected', 'Human approval rejected');
+        }
+        const comment = data.comment
+            ? '<p class="hitl-codex-explainer">' + escapeHtml(data.comment) + '</p>'
+            : '';
+        const diff = hasEditedArgs
+            ? '<details class="hitl-codex-diff"><summary>' + escapeHtml(tr('hitl.viewEditedArgs', 'View edited parameters')) + '</summary><pre>' + escapeHtml(JSON.stringify(editedArgs, null, 2)) + '</pre></details>'
+            : '';
+        return toolHeading + `
+            <div class="hitl-codex-state hitl-codex-state--${ok ? 'approved' : 'rejected'}">
+                <span class="hitl-codex-state-icon" aria-hidden="true">${ok ? '✓' : '×'}</span>
+                <strong>${escapeHtml(statusText)}</strong>
             </div>
+            ${comment}
+            ${diff}
         `;
     }
+    if (audit) {
+        const auditStatus = mode === 'review_edit'
+            ? tr('hitl.auditReviewEditing', 'Automatically reviewing and correcting')
+            : tr('hitl.auditReviewing', 'Automatic review in progress');
+        const explanation = tr('hitl.auditReviewExplanation', 'A carefully prompted review agent is reviewing this request. It will run only after approval.');
+        return toolHeading + `
+            <div class="hitl-codex-state hitl-codex-state--running">
+                <span class="hitl-codex-spinner" aria-hidden="true"></span>
+                <strong>${escapeHtml(auditStatus)}</strong>
+            </div>
+            <p class="hitl-codex-explainer">${escapeHtml(explanation)}</p>
+        `;
+    }
+    const pendingStatus = allowEdit
+        ? tr('hitl.waitingHumanReview', 'Waiting for human review')
+        : tr('hitl.waitingHumanApproval', 'Waiting for human approval');
+    const rejectLabel = tr('hitl.reject', 'Reject');
+    const approveLabel = allowEdit
+        ? tr('hitl.saveEditedAndAllow', 'Save edits and allow')
+        : tr('hitl.allowOnce', 'Allow once');
+    const hasArgs = request.args && Object.keys(request.args).length > 0;
+    const primary = request.primary
+        ? '<div class="hitl-approval-primary hitl-approval-primary--' + request.kind + '"><code>' + escapeHtml(request.primary) + '</code></div>'
+        : '';
+    const requestDetails = hasArgs
+        ? '<details class="hitl-approval-details"' + (allowEdit ? ' open' : '') + '><summary>' + escapeHtml(allowEdit
+            ? tr('hitl.editRequestDetails', 'View or edit request parameters')
+            : tr('hitl.viewRequestDetails', 'View request details')) + '</summary>' +
+            (allowEdit
+                ? '<textarea class="hitl-edit-args hitl-inline-edit" spellcheck="false">' + escapeHtml(argsJSON === '{}' ? '' : argsJSON) + '</textarea>'
+                : '<pre>' + escapeHtml(argsJSON) + '</pre>') + '</details>'
+        : '';
     return `
-        <div class="hitl-inline-header">
-            <div class="hitl-inline-title">
-                <span class="hitl-inline-icon" aria-hidden="true">!</span>
-                <span>待审批</span>
-            </div>
-            <div class="hitl-inline-badges">
-                ${toolBadge}
-                <span class="hitl-mode-tag hitl-mode-tag--${escapeHtml(mode || 'approval')}">${escapeHtml(modeLabel)}</span>
-            </div>
+        ${toolHeading}
+        <div class="hitl-approval-heading">
+            <span class="hitl-approval-eyebrow">${escapeHtml(pendingStatus)}</span>
+            <h3>${escapeHtml(request.question)}</h3>
         </div>
+        ${primary}
+        ${buildHitlCountdownHtml(data)}
         <div class="hitl-inline-body">
-            <div class="hitl-input-help hitl-inline-summary">确认上方参数后决定是否继续执行。</div>
-            ${allowEdit
-                ? `<label class="hitl-inline-field">
-                       <span class="hitl-context-label">参数覆盖（JSON，可选）</span>
-                       <textarea class="hitl-edit-args hitl-inline-edit" placeholder='{"command":"ls -la"}'>${escapeHtml(argsJSON === '{}' ? '' : argsJSON)}</textarea>
-                   </label>`
-                : ''
-            }
-            <label class="hitl-inline-field">
-                <span class="hitl-context-label">备注（可选）</span>
-                <input class="hitl-config-input hitl-inline-comment" type="text" placeholder="例如：允许只读命令">
-            </label>
+            ${requestDetails}
+            <details class="hitl-approval-details hitl-approval-comment-details">
+                <summary>${escapeHtml(tr('hitl.addApprovalComment', 'Add approval comment (optional)'))}</summary>
+                <input class="hitl-config-input hitl-inline-comment" type="text" placeholder="${escapeHtml(tr('hitl.commentPlaceholder', 'e.g. allow read-only command'))}">
+            </details>
         </div>
         <div class="hitl-pending-actions hitl-inline-actions">
             <div class="hitl-input-help hitl-inline-status" aria-live="polite"></div>
-            <button class="btn-secondary hitl-inline-reject">拒绝</button>
-            <button class="btn-primary hitl-inline-approve">通过</button>
+            <button type="button" class="btn-secondary hitl-inline-reject">${escapeHtml(rejectLabel)} <kbd>Esc</kbd></button>
+            <button type="button" class="btn-primary hitl-inline-approve">${escapeHtml(approveLabel)} <kbd>↵</kbd></button>
         </div>
     `;
 }
@@ -3464,7 +4718,7 @@ function bindInlineHitlApproval(panel, data, opts) {
     const editInput = panel.querySelector('.hitl-inline-edit');
     const statusEl = panel.querySelector('.hitl-inline-status');
     const allowEdit = opts && opts.allowEdit === true;
-    if (!approveBtn || !rejectBtn || !commentInput || !statusEl) return;
+    if (!approveBtn || !rejectBtn || !statusEl) return;
 
     if (editInput) {
         autoResizeHitlTextarea(editInput);
@@ -3481,7 +4735,7 @@ function bindInlineHitlApproval(panel, data, opts) {
     const submit = async function (decision) {
         setBusy(true);
         let editedArgs = null;
-        if (allowEdit && editInput) {
+        if (decision === 'approve' && allowEdit && editInput) {
             const raw = String(editInput.value || '').trim();
             if (raw) {
                 try {
@@ -3492,8 +4746,12 @@ function bindInlineHitlApproval(panel, data, opts) {
                     return;
                 }
             }
+            const originalArgs = hitlApprovalArguments(data);
+            if (editedArgs && JSON.stringify(editedArgs) === JSON.stringify(originalArgs)) {
+                editedArgs = null;
+            }
         }
-        const comment = String(commentInput.value || '').trim();
+        const comment = commentInput ? String(commentInput.value || '').trim() : '';
         try {
             if (typeof window.submitHitlDecisionWithPayload === 'function') {
                 const convFollow = data.conversationId || (typeof window.currentConversationId === 'string' ? window.currentConversationId : '');
@@ -3516,6 +4774,8 @@ function bindInlineHitlApproval(panel, data, opts) {
                     resolved: true,
                     decision: decision,
                     decisionMessage: msg,
+                    reviewer: 'human',
+                    status: 'decided',
                     comment: comment,
                     editedArgs: editedArgs
                 });
@@ -3526,30 +4786,283 @@ function bindInlineHitlApproval(panel, data, opts) {
                 }
                 state.pending = decision === 'approve';
                 setToolCallDetailState(toolItem, state);
+                renderToolCallApprovalSummary(toolItem, state.hitlData);
+            } else {
+                markInlineHitlDecision(panel, decision, msg);
             }
-            statusEl.textContent = msg;
-            markInlineHitlDecision(panel, decision, msg);
             panel.classList.add('hitl-inline-done');
+            stopHitlApprovalCountdown(panel);
+            clearChatHitlApprovalDock(data.interruptId);
+            if (typeof window.setProjectConversationApprovalStatus === 'function') {
+                window.setProjectConversationApprovalStatus(data.conversationId || window.currentConversationId || '', false);
+            }
         } catch (e) {
             statusEl.textContent = '提交失败：' + (e && e.message ? e.message : 'unknown error');
             setBusy(false);
         }
     };
 
-    approveBtn.onclick = function () { submit('approve'); };
-    rejectBtn.onclick = function () { submit('reject'); };
+    const bindExplicitHitlAction = function (button, decision) {
+        let pointerArmed = false;
+        button.addEventListener('pointerdown', function (event) {
+            pointerArmed = event.isPrimary !== false && (event.button == null || event.button === 0);
+        });
+        button.addEventListener('pointercancel', function () {
+            pointerArmed = false;
+        });
+        button.onclick = function (event) {
+            const pointerClick = !!event && Number(event.detail || 0) > 0;
+            const explicitlyPressed = pointerArmed;
+            pointerArmed = false;
+            // Mouse/touch clicks must originate from the approval button itself; keyboard Enter/Escape has detail 0 and keeps working.
+            // This blocks synthetic clicks the browser redirects to the bottom approval button after scroll-positioning buttons hide.
+            if (pointerClick && !explicitlyPressed) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+            submit(decision);
+        };
+    };
+
+    bindExplicitHitlAction(approveBtn, 'approve');
+    bindExplicitHitlAction(rejectBtn, 'reject');
+    if (panel.classList.contains('chat-hitl-approval-dock')) {
+        panel.onkeydown = function (event) {
+            const tag = event.target && event.target.tagName ? event.target.tagName.toLowerCase() : '';
+            const editing = tag === 'input' || tag === 'textarea' || tag === 'summary';
+            if (event.key === 'Escape' && !editing) {
+                event.preventDefault();
+                rejectBtn.click();
+            } else if (event.key === 'Enter' && !editing) {
+                event.preventDefault();
+                approveBtn.click();
+            }
+        };
+    }
 }
+
+function clearChatHitlApprovalDock(interruptId) {
+    const dock = document.getElementById('chat-hitl-approval-dock');
+    if (!dock) return;
+    if (interruptId && dock.dataset.hitlInterruptId && dock.dataset.hitlInterruptId !== String(interruptId)) return;
+    stopHitlApprovalCountdown(dock);
+    dock.hidden = true;
+    dock.innerHTML = '';
+    dock.removeAttribute('data-hitl-interrupt-id');
+    dock.removeAttribute('data-conversation-id');
+    dock.removeAttribute('tabindex');
+    dock.onkeydown = null;
+    const container = dock.closest('.chat-input-container');
+    if (container) container.classList.remove('has-hitl-approval');
+}
+
+function wrapChatHitlApprovalScrollRegion(dock) {
+    if (!dock) return;
+    const actions = Array.prototype.find.call(dock.children, function (child) {
+        return child.classList && child.classList.contains('hitl-inline-actions');
+    });
+    if (!actions) return;
+    const scrollRegion = document.createElement('div');
+    scrollRegion.className = 'chat-hitl-approval-scroll-region';
+    while (dock.firstChild && dock.firstChild !== actions) {
+        scrollRegion.appendChild(dock.firstChild);
+    }
+    dock.insertBefore(scrollRegion, actions);
+}
+
+function renderChatHitlApprovalDock(data) {
+    const dock = document.getElementById('chat-hitl-approval-dock');
+    if (!dock || !data || !data.interruptId) return false;
+    const conversationId = String(data.conversationId || '').trim();
+    const currentId = String(window.currentConversationId || '').trim();
+    // While a new task has no conversation ID yet, late approvals from other running conversations must not overwrite the input box.
+    // Approval panels with an explicit conversation ID may only render within that same current conversation.
+    if (conversationId && conversationId !== currentId) return false;
+    if (isAgentReviewedHitl(data)) return false;
+    let mode = String(data.mode || 'approval').trim().toLowerCase();
+    if (mode === 'feedback' || mode === 'followup') mode = 'approval';
+    const allowEdit = mode === 'review_edit';
+    dock.dataset.hitlInterruptId = String(data.interruptId);
+    dock.dataset.conversationId = conversationId || currentId;
+    dock.setAttribute('tabindex', '-1');
+    dock.innerHTML = buildInlineHitlApprovalHtml(data, {
+        mode: mode,
+        allowEdit: allowEdit,
+        argsJSON: JSON.stringify(hitlApprovalArguments(data), null, 2)
+    });
+    wrapChatHitlApprovalScrollRegion(dock);
+    dock.hidden = false;
+    const container = dock.closest('.chat-input-container');
+    if (container) container.classList.add('has-hitl-approval');
+    bindInlineHitlApproval(dock, data, { allowEdit: allowEdit });
+    bindHitlApprovalCountdown(dock, data);
+    setHitlApprovalTaskAvailability(dock, dock.dataset.conversationId);
+    return true;
+}
+
+const hitlSidebarApprovalState = new Map();
+let hitlSidebarApprovalSyncTimer = 0;
+
+function renderDirectHitlSidebarApproval(conversationId, data) {
+    const id = String(conversationId || '').trim();
+    if (!id) return false;
+    const button = document.querySelector('.project-conversation-item[data-conversation-id="' + hitlEscapeAttrSelector(id) + '"]');
+    if (!button) return false;
+    const label = button.querySelector('.project-conversation-label');
+    if (!label) return false;
+    let group = label.querySelector('.project-task-status-group');
+    if (!group) {
+        group = document.createElement('span');
+        group.className = 'project-task-status-group';
+        label.appendChild(group);
+    }
+    let status = group.querySelector('.project-task-status--approval');
+    if (!status) {
+        status = document.createElement('span');
+        status.className = 'project-task-status project-task-status--approval';
+        status.innerHTML = '<span class="project-approval-label"></span><span class="project-approval-time"></span>' +
+            '<span class="project-approval-progress"><span class="project-approval-progress-value"></span></span>';
+        group.insertBefore(status, group.firstChild);
+    }
+    const text = hitlApprovalTranslate('hitl.waitingApprovalShort', 'Waiting for approval');
+    const labelEl = status.querySelector('.project-approval-label');
+    if (labelEl) labelEl.textContent = text;
+    status.setAttribute('aria-label', text);
+    status.title = text;
+    const timing = getHitlApprovalTiming(data || {});
+    const timeEl = status.querySelector('.project-approval-time');
+    const progressEl = status.querySelector('.project-approval-progress');
+    const valueEl = status.querySelector('.project-approval-progress-value');
+    if (!timing.timeoutSeconds || !timing.expiresAt) {
+        if (timeEl) timeEl.textContent = '';
+        if (progressEl) progressEl.hidden = true;
+        return true;
+    }
+    if (progressEl) progressEl.hidden = false;
+    const remaining = Math.max(0, timing.expiresAt - Date.now());
+    const percent = Math.max(0, Math.min(100, remaining / (timing.timeoutSeconds * 1000) * 100));
+    if (timeEl) timeEl.textContent = formatHitlRemaining(remaining).replace(/^0/, '');
+    if (valueEl) valueEl.style.width = percent.toFixed(2) + '%';
+    status.setAttribute('role', 'progressbar');
+    status.setAttribute('aria-valuemin', '0');
+    status.setAttribute('aria-valuemax', '100');
+    status.setAttribute('aria-valuenow', String(Math.round(percent)));
+    status.classList.toggle('is-expired', remaining <= 0);
+    return true;
+}
+
+function removeDirectHitlSidebarApproval(conversationId) {
+    const id = String(conversationId || '').trim();
+    if (!id) return;
+    const button = document.querySelector('.project-conversation-item[data-conversation-id="' + hitlEscapeAttrSelector(id) + '"]');
+    const status = button && button.querySelector('.project-task-status--approval');
+    const group = status && status.closest('.project-task-status-group');
+    if (status) status.remove();
+    if (group && !group.children.length) group.remove();
+}
+
+function syncDirectHitlSidebarApprovals() {
+    hitlSidebarApprovalState.forEach(function (data, conversationId) {
+        renderDirectHitlSidebarApproval(conversationId, data);
+    });
+    if (!hitlSidebarApprovalState.size && hitlSidebarApprovalSyncTimer) {
+        window.clearInterval(hitlSidebarApprovalSyncTimer);
+        hitlSidebarApprovalSyncTimer = 0;
+    }
+}
+
+function updateHitlApprovalSidebar(data, pending) {
+    const conversationId = String((data && data.conversationId) || window.currentConversationId || '').trim();
+    if (!conversationId) return;
+    if (pending && isAgentReviewedHitl(data)) return;
+    if (pending) {
+        hitlSidebarApprovalState.set(conversationId, data || { conversationId: conversationId });
+        renderDirectHitlSidebarApproval(conversationId, data || {});
+        if (!hitlSidebarApprovalSyncTimer) {
+            hitlSidebarApprovalSyncTimer = window.setInterval(syncDirectHitlSidebarApprovals, 500);
+        }
+    } else {
+        hitlSidebarApprovalState.delete(conversationId);
+        removeDirectHitlSidebarApproval(conversationId);
+        syncDirectHitlSidebarApprovals();
+    }
+    if (typeof window.setProjectConversationApprovalStatus === 'function') {
+        window.setProjectConversationApprovalStatus(conversationId, pending, pending ? data : null);
+    }
+}
+
+function syncHitlApprovalSidebarState(items) {
+    const nextByConversation = new Map();
+    (Array.isArray(items) ? items : []).forEach(function (item) {
+        if (isAgentReviewedHitl(item)) return;
+        const conversationId = String(item && item.conversationId || '').trim();
+        if (conversationId && !nextByConversation.has(conversationId)) {
+            nextByConversation.set(conversationId, item);
+        }
+    });
+    hitlSidebarApprovalState.forEach(function (_item, conversationId) {
+        if (!nextByConversation.has(conversationId)) {
+            hitlSidebarApprovalState.delete(conversationId);
+            removeDirectHitlSidebarApproval(conversationId);
+        }
+    });
+    nextByConversation.forEach(function (item, conversationId) {
+        hitlSidebarApprovalState.set(conversationId, item);
+    });
+    syncDirectHitlSidebarApprovals();
+    if (hitlSidebarApprovalState.size && !hitlSidebarApprovalSyncTimer) {
+        hitlSidebarApprovalSyncTimer = window.setInterval(syncDirectHitlSidebarApprovals, 500);
+    }
+}
+
+function reconcilePendingHitlState(rawItems) {
+    const activeItems = (Array.isArray(rawItems) ? rawItems : [])
+        .map(function (item) { return hitlPendingItemToData(item); })
+        .filter(function (item) {
+            return item && !isAgentReviewedHitl(item) && conversationExecutionTracker.isRunning(item.conversationId);
+        });
+    hitlPendingInterruptTracker.update(activeItems);
+    syncHitlApprovalTaskAvailability();
+    syncHitlApprovalSidebarState(activeItems);
+    if (typeof window.syncProjectConversationApprovalStatuses === 'function') {
+        window.syncProjectConversationApprovalStatuses(activeItems);
+    }
+
+    const currentId = String(window.currentConversationId || '').trim();
+    const currentPending = activeItems.find(function (item) {
+        return item.conversationId === currentId;
+    });
+    const dock = document.getElementById('chat-hitl-approval-dock');
+    const dockInterruptId = dock && String(dock.dataset.hitlInterruptId || '').trim();
+    if (!currentPending) {
+        if (dockInterruptId) clearChatHitlApprovalDock();
+        return;
+    }
+
+    if (!dockInterruptId || dockInterruptId !== currentPending.interruptId || dock.hidden) {
+        renderChatHitlApprovalDock(currentPending);
+    }
+    const inlineSelector = '.hitl-inline-approval[data-hitl-interrupt-id="' +
+        hitlEscapeAttrSelector(currentPending.interruptId) + '"]';
+    if (!document.querySelector(inlineSelector)) {
+        restoreHitlInlineForConversation(currentId);
+    }
+}
+
+window.renderChatHitlApprovalDock = renderChatHitlApprovalDock;
+window.clearChatHitlApprovalDock = clearChatHitlApprovalDock;
 
 function markInlineHitlDecision(panel, decision, message) {
     if (!panel) return;
     const ok = decision === 'approve';
     panel.classList.add('hitl-inline-done');
     panel.innerHTML = `
-        <div class="hitl-inline-decision hitl-inline-decision--${ok ? 'approve' : 'reject'}">
-            <span class="hitl-inline-decision-dot" aria-hidden="true"></span>
-            <strong>${escapeHtml(ok ? '审批通过' : '审批拒绝')}</strong>
-            <span>${escapeHtml(message || (ok ? '已通过，继续执行' : '已拒绝'))}</span>
+        <div class="hitl-codex-state hitl-codex-state--${ok ? 'approved' : 'rejected'}">
+            <span class="hitl-codex-state-icon" aria-hidden="true">${ok ? '✓' : '×'}</span>
+            <strong>${escapeHtml(ok ? 'Allowed once' : 'Human approval rejected')}</strong>
         </div>
+        ${message ? '<p class="hitl-codex-explainer">' + escapeHtml(message) + '</p>' : ''}
     `;
 }
 
@@ -3571,6 +5084,7 @@ function renderInlineWorkflowHitlApproval(itemId, data) {
     const prompt = data.prompt || '';
     const panel = document.createElement('div');
     panel.className = 'workflow-hitl-inline-approval hitl-inline-approval';
+    panel.dataset.conversationId = String(data.conversationId || window.currentConversationId || '').trim();
     panel.innerHTML = `
         <div class="hitl-inline-header">
             <div class="hitl-inline-title">
@@ -3638,6 +5152,7 @@ function renderInlineWorkflowHitlApproval(itemId, data) {
 
     approveBtn.onclick = function () { submit(true); };
     rejectBtn.onclick = function () { submit(false); };
+    setHitlApprovalTaskAvailability(panel, panel.dataset.conversationId);
 }
 
 function parseWorkflowHitlPendingJSON(raw) {
@@ -3794,6 +5309,9 @@ function expandProcessDetailsTimeline(assistantMessageId) {
             btn.innerHTML = '<span>' + collapseT + '</span>';
         });
     }
+    if (typeof window.syncAssistantTurnSummary === 'function') {
+        window.syncAssistantTurnSummary(document.getElementById(assistantMessageId));
+    }
     setTimeout(function () {
         if (window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.scrollIntoViewIfFollowing === 'function') {
             window.CyberStrikeChatScroll.scrollIntoViewIfFollowing(detailsContainer, { behavior: 'smooth', block: 'nearest' });
@@ -3812,19 +5330,72 @@ function findLastAssistantMessageElInChat() {
     return null;
 }
 
+function hitlPendingItemToData(item, fallbackConversationId) {
+    if (!item) return null;
+    let payloadObj = item.payload && typeof item.payload === 'object' ? item.payload : {};
+    if (typeof item.payload === 'string') {
+        try {
+            payloadObj = JSON.parse(item.payload || '{}');
+        } catch (e) {
+            payloadObj = {};
+        }
+    }
+    const timing = payloadObj.hitlApproval && typeof payloadObj.hitlApproval === 'object'
+        ? payloadObj.hitlApproval
+        : {};
+    return {
+        interruptId: String(item.interruptId || item.id || '').trim(),
+        mode: item.mode,
+        toolName: item.toolName,
+        toolCallId: item.toolCallId,
+        payload: payloadObj,
+        conversationId: String(item.conversationId || fallbackConversationId || '').trim(),
+        createdAt: timing.createdAt || item.createdAt,
+        timeoutSeconds: timing.timeoutSeconds,
+        expiresAt: timing.expiresAt,
+        reviewer: item.reviewer || item.decidedBy || 'human',
+        status: item.status || 'pending'
+    };
+}
+
+const hitlInlineRestoreInFlight = new Set();
+
 /**
  * 刷新或切换会话后：根据待审批记录恢复时间线里的内联审批入口，并展开详情区。
  */
 async function restoreHitlInlineForConversation(conversationId) {
     if (!conversationId || typeof apiFetch !== 'function') return;
+    if (hitlInlineRestoreInFlight.has(conversationId)) return;
     if (typeof window.currentConversationId === 'string' && window.currentConversationId !== conversationId) {
         return;
     }
+    hitlInlineRestoreInFlight.add(conversationId);
     try {
         const resp = await apiFetch('/api/hitl/pending?conversationId=' + encodeURIComponent(conversationId) + '&status=pending&pageSize=50');
         if (!resp.ok) return;
         const data = await resp.json().catch(function () { return {}; });
-        const items = Array.isArray(data.items) ? data.items : [];
+        const rawItems = (Array.isArray(data.items) ? data.items : []).filter(function (item) {
+            return !isAgentReviewedHitl(item);
+        });
+        // The task list is the authoritative running state for the current process. After a service restart or task cancellation,
+        // even if the approval query briefly reads stale pending records, the approval entry and countdown must not be re-attached.
+        const items = conversationExecutionTracker.ready && !conversationExecutionTracker.isRunning(conversationId)
+            ? []
+            : rawItems;
+        if (typeof window.currentConversationId === 'string' && window.currentConversationId !== conversationId) return;
+        clearChatHitlApprovalDock();
+        const normalizedItems = items.map(function (item) {
+            return hitlPendingItemToData(item, conversationId);
+        }).filter(Boolean);
+        hitlPendingInterruptTracker.replaceConversation(conversationId, normalizedItems);
+        syncHitlApprovalTaskAvailability();
+        if (items.length > 0) {
+            const newestPending = normalizedItems[0];
+            renderChatHitlApprovalDock(newestPending);
+            updateHitlApprovalSidebar(newestPending, true);
+        } else {
+            updateHitlApprovalSidebar({ conversationId: conversationId }, false);
+        }
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
             let backendMsgId = item.messageId != null ? String(item.messageId).trim() : '';
@@ -3863,20 +5434,7 @@ async function restoreHitlInlineForConversation(conversationId) {
                 }
             }
             expandProcessDetailsTimeline(clientMsgId);
-            let payloadObj = {};
-            try {
-                payloadObj = JSON.parse(String(item.payload || '{}'));
-            } catch (e) {
-                payloadObj = {};
-            }
-            const hitlData = {
-                interruptId: item.id,
-                mode: item.mode,
-                toolName: item.toolName,
-                toolCallId: item.toolCallId,
-                payload: payloadObj,
-                conversationId: item.conversationId || conversationId
-            };
+            const hitlData = hitlPendingItemToData(item);
             let hitlItemEl = null;
             if (item.toolCallId) {
                 hitlItemEl = detailsContainer.querySelector('[data-tool-call-id="' + hitlEscapeAttrSelector(String(item.toolCallId)) + '"]');
@@ -3906,6 +5464,8 @@ async function restoreHitlInlineForConversation(conversationId) {
         }
     } catch (e) {
         console.error('restoreHitlInlineForConversation failed', e);
+    } finally {
+        hitlInlineRestoreInFlight.delete(conversationId);
     }
 }
 
@@ -3956,8 +5516,85 @@ window.refreshLastAssistantProcessDetails = refreshLastAssistantProcessDetails;
 
 const taskEventReplayAttachState = {
     conversationId: null,
-    inFlightPromise: null
+    inFlightPromise: null,
+    abortController: null
 };
+
+function assistantMessageNeedsTaskReplayReconcile(assistantEl) {
+    if (!assistantEl) return false;
+    if (assistantEl.classList.contains('assistant-placeholder-content')) return true;
+    const bubble = assistantEl.querySelector('.message-bubble');
+    const text = bubble ? String(bubble.textContent || '').trim() : '';
+    return !!(bubble && bubble.hidden) || text === '处理中...' || text === 'Processing...';
+}
+
+/**
+ * The task-events subscription has an unavoidable race: the task list still shows running, but by the time the SSE request
+ * is truly established the task may already be finished. Then do not just stop the clock; reconcile the final assistant text from the database.
+ */
+async function reconcileConversationAfterTaskReplay(conversationId, keepFollowing) {
+    if (!conversationId || typeof apiFetch !== 'function') return false;
+    if (String(window.currentConversationId || '') !== String(conversationId)) return false;
+
+    const response = await apiFetch(
+        '/api/conversations/' + encodeURIComponent(String(conversationId)) + '?include_process_details=0'
+    );
+    if (!response.ok) return false;
+    const conversation = await response.json().catch(function () { return {}; });
+    const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
+    let finalMessage = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i] && messages[i].role === 'assistant') {
+            finalMessage = messages[i];
+            break;
+        }
+    }
+    const assistantEl = findLastAssistantMessageElInChat();
+    if (!finalMessage || !assistantEl || !assistantEl.id) return false;
+
+    updateAssistantBubbleContent(assistantEl.id, finalMessage.content || '', true);
+    if (finalMessage.id) {
+        applyBackendMessageIdToAssistantDom(assistantEl.id, finalMessage.id);
+    }
+    if (typeof window.setAssistantTurnTiming === 'function') {
+        const startedAt = finalMessage.createdAt || null;
+        const completedAt = finalMessage.updatedAt || startedAt;
+        window.setAssistantTurnTiming(assistantEl, {
+            startedAt: startedAt,
+            completedAt: completedAt,
+            status: 'completed'
+        });
+    }
+    if (finalMessage.id && typeof loadProcessDetailsPaginated === 'function') {
+        await loadProcessDetailsPaginated(assistantEl.id, finalMessage.id, {
+            initialLatest: true,
+            autoLoadAll: false
+        });
+    } else {
+        await refreshLastAssistantProcessDetails(conversationId);
+    }
+    collapseAllProgressDetails(assistantEl.id, null, { force: true });
+    if (keepFollowing && window.CyberStrikeChatScroll) {
+        if (typeof window.CyberStrikeChatScroll.settleToBottomIfFollowing === 'function') {
+            window.CyberStrikeChatScroll.settleToBottomIfFollowing(24);
+        } else if (typeof window.CyberStrikeChatScroll.forceScrollToBottom === 'function') {
+            window.CyberStrikeChatScroll.forceScrollToBottom(false);
+        }
+    }
+    if (typeof loadConversations === 'function') loadConversations();
+    return true;
+}
+
+function cancelRunningTaskEventStream(nextConversationId) {
+    const nextId = String(nextConversationId || '').trim();
+    const activeId = String(taskEventReplayAttachState.conversationId || '').trim();
+    if (!activeId || activeId === nextId) return false;
+    stopAllProcessDetailsLatestFollow();
+    if (taskEventReplayAttachState.abortController) {
+        taskEventReplayAttachState.abortController.abort();
+    }
+    return true;
+}
 
 /**
  * 订阅运行中任务的 SSE 镜像（GET /api/agent-loop/task-events），用于 HITL 通过后主连接已断开时接续 UI。
@@ -3973,24 +5610,49 @@ async function attachRunningTaskEventStream(conversationId) {
     if (shouldSkipTaskEventReplayAttach(conversationId)) {
         return false;
     }
+    cancelRunningTaskEventStream(conversationId);
+    const abortController = new AbortController();
 
     const attachPromise = (async function () {
         try {
-            const check = await apiFetch('/api/agent-loop/tasks');
+            const check = await apiFetch('/api/agent-loop/tasks', { signal: abortController.signal });
             if (!check.ok) return false;
             const j = await check.json().catch(function () { return {}; });
             const active = (j.tasks || []).some(function (t) {
                 return t && t.conversationId === conversationId && (t.status === 'running' || t.status === 'cancelling');
             });
-            if (!active) return false;
+            if (!active) {
+                const staleAssistant = findLastAssistantMessageElInChat();
+                if (assistantMessageNeedsTaskReplayReconcile(staleAssistant)) {
+                    await reconcileConversationAfterTaskReplay(conversationId, true);
+                }
+                return false;
+            }
 
             const asEl = findLastAssistantMessageElInChat();
             if (!asEl || !asEl.id) return false;
+            // Start the SSE request before loading long process details, so increments produced during detail pagination are not missed entirely.
+            const url = '/api/agent-loop/task-events?conversationId=' + encodeURIComponent(conversationId);
+            const eventStreamResponsePromise = apiFetch(url, {
+                method: 'GET',
+                headers: { Accept: 'text/event-stream' },
+                signal: abortController.signal
+            }).then(function (response) {
+                return { response: response, error: null };
+            }, function (error) {
+                // Detail pagination may take a while; catch network errors first so no unhandledrejection
+                // occurs before the later await, and let the current attach flow clean up uniformly.
+                return { response: null, error: error };
+            });
             const backendId = asEl.dataset && asEl.dataset.backendMessageId;
             if (backendId && typeof renderProcessDetails === 'function') {
-                // 运行中会话可能远超默认 50 条；完整补齐数据库历史后再接实时事件。
+                // A running conversation may far exceed the default 50 messages; when switching, restore only the latest page and let scroll pagination fill in older records.
                 if (typeof loadProcessDetailsPaginated === 'function') {
-                    await loadProcessDetailsPaginated(asEl.id, String(backendId));
+                    await loadProcessDetailsPaginated(asEl.id, String(backendId), {
+                        initialLatest: true,
+                        autoLoadAll: false,
+                        signal: abortController.signal
+                    });
                 } else {
                     const res = await apiFetch(
                         '/api/messages/' + encodeURIComponent(String(backendId)) + '/process-details?full=1'
@@ -4000,6 +5662,7 @@ async function attachRunningTaskEventStream(conversationId) {
                         renderProcessDetails(asEl.id, jd.processDetails);
                     }
                 }
+                if (abortController.signal.aborted) return false;
                 // 历史重绘会重建时间线节点，需重新挂载 HITL 审批入口。
                 if (typeof window.restoreHitlInlineForConversation === 'function') {
                     await window.restoreHitlInlineForConversation(conversationId);
@@ -4013,13 +5676,30 @@ async function attachRunningTaskEventStream(conversationId) {
             if (window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.onTaskEventStreamBegin === 'function') {
                 window.CyberStrikeChatScroll.onTaskEventStreamBegin(conversationId, asEl.id, progressId);
             }
+            // Keep following the iteration-thinking area during the task-events supplement; detach as soon as the user scrolls the details up.
+            startProcessDetailsLatestFollow(asEl.id, { persistent: true });
 
-            const url = '/api/agent-loop/task-events?conversationId=' + encodeURIComponent(conversationId);
-            const response = await apiFetch(url, {
-                method: 'GET',
-                headers: { Accept: 'text/event-stream' }
-            });
+            // The initial message render after refresh already scrolled to the bottom, but restoring the latest details page grows the DOM again.
+            // If the user has not scrolled up meanwhile, re-pin precisely after the page completes; never steal the scroll while browsing history.
+            if (
+                window.CyberStrikeChatScroll &&
+                typeof window.CyberStrikeChatScroll.settleToBottomIfFollowing === 'function' &&
+                (typeof window.captureScrollPinState !== 'function' || window.captureScrollPinState())
+            ) {
+                window.CyberStrikeChatScroll.settleToBottomIfFollowing(12);
+            } else if (
+                window.CyberStrikeChatScroll &&
+                typeof window.CyberStrikeChatScroll.forceScrollToBottom === 'function' &&
+                (typeof window.captureScrollPinState !== 'function' || window.captureScrollPinState())
+            ) {
+                window.CyberStrikeChatScroll.forceScrollToBottom(false);
+            }
+
+            const eventStreamResult = await eventStreamResponsePromise;
+            if (eventStreamResult.error) throw eventStreamResult.error;
+            const response = eventStreamResult.response;
             if (!response.ok) {
+                stopProcessDetailsLatestFollow(asEl.id);
                 clearCsTaskReplay();
                 if (progressTaskState.has(progressId)) {
                     progressTaskState.delete(progressId);
@@ -4027,6 +5707,7 @@ async function attachRunningTaskEventStream(conversationId) {
                 if (window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.onTaskEventStreamEnd === 'function') {
                     window.CyberStrikeChatScroll.onTaskEventStreamEnd();
                 }
+                await reconcileConversationAfterTaskReplay(conversationId, true);
                 return false;
             }
 
@@ -4077,43 +5758,84 @@ async function attachRunningTaskEventStream(conversationId) {
             if (window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.onTaskEventStreamEnd === 'function') {
                 window.CyberStrikeChatScroll.onTaskEventStreamEnd();
             }
+            stopProcessDetailsLatestFollow(asEl.id);
             if (typeof loadActiveTasks === 'function') loadActiveTasks();
+            if (!replaySawDone) {
+                // Task completion closes the event bus; if the final frame is lost to connection races or congestion, still reconcile the text from the DB.
+                const keepFollowingOnClose = typeof window.captureScrollPinState === 'function'
+                    ? window.captureScrollPinState()
+                    : true;
+                await reconcileConversationAfterTaskReplay(conversationId, keepFollowingOnClose);
+            }
             if (replaySawDone && typeof window.loadConversation === 'function' && window.currentConversationId === conversationId) {
                 const replayTimeline = document.getElementById('process-details-' + asEl.id + '-timeline');
-                const keepExpanded = !!(replayTimeline && replayTimeline.classList.contains('expanded'));
+                const keepFollowingFinalRender = typeof window.captureScrollPinState === 'function'
+                    ? window.captureScrollPinState()
+                    : true;
                 await window.loadConversation(conversationId);
                 // loadConversation 使用轻量消息接口，会把详情重新置为懒加载状态；
                 // 任务终态再从 DB 全量对账一次，补回订阅建立期间可能错过的事件。
                 await refreshLastAssistantProcessDetails(conversationId);
-                if (keepExpanded) {
-                    const finalAssistant = findLastAssistantMessageElInChat();
-                    if (finalAssistant && finalAssistant.id) {
-                        expandProcessDetailsTimeline(finalAssistant.id);
-                    }
+                // Once the supplement stream completes, return to the final-state summary; details auto-expanded during refresh to show live iterations
+                // should not stay expanded. Users can still view them manually via "Expand details".
+                const finalAssistant = findLastAssistantMessageElInChat();
+                if (finalAssistant && finalAssistant.id) {
+                    collapseAllProgressDetails(finalAssistant.id, progressId, { force: true });
+                }
+                // Final message and detail repaints both grow the DOM; re-pin only if the user was still following.
+                if (
+                    keepFollowingFinalRender &&
+                    window.CyberStrikeChatScroll &&
+                    typeof window.CyberStrikeChatScroll.settleToBottomIfFollowing === 'function'
+                ) {
+                    window.CyberStrikeChatScroll.settleToBottomIfFollowing(18);
+                } else if (
+                    keepFollowingFinalRender &&
+                    window.CyberStrikeChatScroll &&
+                    typeof window.CyberStrikeChatScroll.forceScrollToBottom === 'function'
+                ) {
+                    window.CyberStrikeChatScroll.forceScrollToBottom(false);
                 }
             }
             return true;
         } catch (e) {
-            console.warn('attachRunningTaskEventStream', e);
-            clearCsTaskReplay();
-            if (window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.onTaskEventStreamEnd === 'function') {
+            if (!(e && e.name === 'AbortError')) {
+                console.warn('attachRunningTaskEventStream', e);
+            }
+            const ownsCurrentAttach = taskEventReplayAttachState.inFlightPromise === attachPromise;
+            if (ownsCurrentAttach && window.csTaskReplay && window.csTaskReplay.conversationId === conversationId) {
+                clearCsTaskReplay();
+            }
+            if (ownsCurrentAttach && window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.onTaskEventStreamEnd === 'function') {
                 window.CyberStrikeChatScroll.onTaskEventStreamEnd();
+            }
+            if (ownsCurrentAttach) {
+                const currentAssistant = findLastAssistantMessageElInChat();
+                if (currentAssistant && currentAssistant.id) {
+                    stopProcessDetailsLatestFollow(currentAssistant.id);
+                }
+            }
+            if (ownsCurrentAttach && !abortController.signal.aborted) {
+                abortController.abort();
             }
             return false;
         } finally {
             if (taskEventReplayAttachState.inFlightPromise === attachPromise) {
                 taskEventReplayAttachState.inFlightPromise = null;
                 taskEventReplayAttachState.conversationId = null;
+                taskEventReplayAttachState.abortController = null;
             }
         }
     })();
 
     taskEventReplayAttachState.conversationId = conversationId;
     taskEventReplayAttachState.inFlightPromise = attachPromise;
+    taskEventReplayAttachState.abortController = abortController;
     return attachPromise;
 }
 
 window.attachRunningTaskEventStream = attachRunningTaskEventStream;
+window.cancelRunningTaskEventStream = cancelRunningTaskEventStream;
 window.taskReplayProgressId = taskReplayProgressId;
 window.expandProcessDetailsTimeline = expandProcessDetailsTimeline;
 
@@ -4132,6 +5854,13 @@ function parseToolCallArgsFromData(data) {
         return {};
     }
     return args;
+}
+
+function toolCallArgsEmpty(args) {
+    if (args == null) return true;
+    if (typeof args !== 'object') return false;
+    if (Array.isArray(args)) return args.length === 0;
+    return Object.keys(args).length === 0;
 }
 
 function formatToolCallTimelineTitle(toolName, index, total) {
@@ -4161,9 +5890,41 @@ function collectToolResultTextParts(value, parts, depth) {
     if (value.content != null) collectToolResultTextParts(value.content, parts, depth + 1);
 }
 
+// Older records did not have a structured marker. Only recognize the exact
+// guard prefix at the start of a result, never a quoted mention in ordinary output.
+function isToolGuardBlockedResult(value, depth, allowLegacy) {
+    depth = depth || 0;
+    allowLegacy = allowLegacy !== false;
+    if (value == null || depth > 5) return false;
+    if (typeof value === 'string') {
+        const text = value.trimStart();
+        if (allowLegacy && /^Tool call blocked by security rule(?:[：:\r\n]|$)/.test(text)) return true;
+        if (text.startsWith('{')) {
+            try { return isToolGuardBlockedResult(JSON.parse(text), depth + 1, allowLegacy); } catch (e) { /* plain text */ }
+        }
+        return false;
+    }
+    if (typeof value !== 'object') return false;
+    if (Array.isArray(value)) return value.some(function (part) { return isToolGuardBlockedResult(part, depth + 1, allowLegacy); });
+    if (value.blocked === true || value.status === 'blocked' || value.displayStatus === 'blocked') return true;
+    if (value._meta && value._meta['cyberstrike.ai/blocked'] === true) return true;
+    if (value.success === true || value.isError === false || value.status === 'completed') allowLegacy = false;
+    return ['result', 'error', 'content', 'text', 'resultPreview'].some(function (key) {
+        return isToolGuardBlockedResult(value[key], depth + 1, allowLegacy);
+    });
+}
+
+function getToolExecutionDisplayStatus(execution) {
+    return isToolGuardBlockedResult(execution) ? 'blocked' : String(execution && execution.status || 'unknown').toLowerCase();
+}
+
 function getToolResultDisplayState(data, opts) {
     opts = opts || {};
     data = data || {};
+    const allowLegacyBlock = data.success !== true && data.isError !== false && data.status !== 'completed';
+    if (isToolGuardBlockedResult(data) || isToolGuardBlockedResult(opts.rawText, 0, allowLegacyBlock)) {
+        return { kind: 'blocked', isError: true, success: false };
+    }
     const toolName = String(data.toolName || data.name || '').trim().toLowerCase();
     const isObservationTool = toolName === 'wait_tool_execution' || toolName === 'get_tool_execution';
     const explicitStatus = String(data.displayStatus || data.status || '').toLowerCase();
@@ -4172,6 +5933,9 @@ function getToolResultDisplayState(data, opts) {
             return { kind: 'success', isError: false, success: true };
         }
         return { kind: 'background_running', isError: false, success: false };
+    }
+    if (explicitStatus === 'cancelled' || explicitStatus === 'canceled') {
+        return { kind: 'cancelled', isError: true, success: false };
     }
     const parts = [];
     if (opts.rawText != null) parts.push(String(opts.rawText));
@@ -4204,6 +5968,14 @@ function getBackgroundRunningToolLabel() {
     return 'is-danger';
 }
 
+function toolDisplayStatusFromState(displayState) {
+    if (!displayState) return 'completed';
+    if (displayState.kind === 'background_running') return 'background_running';
+    if (displayState.kind === 'cancelled') return 'cancelled';
+    if (displayState.kind === 'blocked') return 'blocked';
+    return displayState.isError ? 'failed' : 'completed';
+}
+
 function buildToolResultSectionHtml(data, opts) {
     opts = opts || {};
     const _t = function (k, o) {
@@ -4225,7 +5997,7 @@ function buildToolResultSectionHtml(data, opts) {
     const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
     const rawText = opts.rawText != null ? String(opts.rawText) : resultStr;
     const displayState = getToolResultDisplayState(data, { rawText: rawText });
-    const sectionClass = displayState.kind === 'background_running' ? 'pending' : (displayState.isError ? 'error' : 'success');
+    const sectionClass = displayState.kind === 'blocked' ? 'blocked' : (displayState.kind === 'background_running' ? 'pending' : (displayState.isError ? 'error' : 'success'));
     return (
         '<div class="tool-result-section ' + sectionClass + '">' +
         '<strong data-i18n="timeline.executionResult">' + escapeHtml(execResultLabel) + '</strong>' +
@@ -4373,33 +6145,10 @@ async function renderToolCallDetailContent(item) {
         hitlEditedArgsLabel +
         '<pre class="tool-args">' + escapeHtml(JSON.stringify(args, null, 2)) + '</pre>' +
         '</div>';
-    let hitlBlock = '';
-    if (state.hitlData && state.hitlData.interruptId) {
-        const hitlPayload = state.hitlData.payload && typeof state.hitlData.payload === 'object' ? state.hitlData.payload : {};
-        let hitlMode = String(state.hitlData.mode || '').trim().toLowerCase();
-        if (hitlMode === 'feedback' || hitlMode === 'followup') hitlMode = 'approval';
-        const hitlAllowEdit = hitlMode === 'review_edit';
-        const hitlArgsObj = hitlPayload.argumentsObj && typeof hitlPayload.argumentsObj === 'object' ? hitlPayload.argumentsObj : args;
-        hitlBlock = '<div class="hitl-inline-approval hitl-inline-approval--merged">' +
-            buildInlineHitlApprovalHtml(state.hitlData, {
-                toolName: '',
-                mode: hitlMode,
-                modeLabel: hitlMode === 'review_edit' ? '审查编辑' : '审批模式',
-                allowEdit: hitlAllowEdit,
-                argsJSON: JSON.stringify(hitlArgsObj || {}, null, 2)
-            }) +
-            '</div>';
-    }
-    content.innerHTML = '<div class="tool-details">' + argsBlock + resultBlock + hitlBlock + '</div>';
+    content.innerHTML = '<div class="tool-details">' + argsBlock + resultBlock + '</div>';
     item.appendChild(content);
     item.classList.add('tool-call-detail-expanded');
     updateToolDetailToggleLabel(item);
-    const hitlPanel = content.querySelector('.hitl-inline-approval');
-    if (hitlPanel && state.hitlData) {
-        let bindMode = String(state.hitlData.mode || '').trim().toLowerCase();
-        if (bindMode === 'feedback' || bindMode === 'followup') bindMode = 'approval';
-        bindInlineHitlApproval(hitlPanel, state.hitlData, { allowEdit: bindMode === 'review_edit' });
-    }
 }
 
 if (typeof document !== 'undefined' && !document.__cyberStrikeToolCallDetailToggleBound) {
@@ -4448,6 +6197,10 @@ function mergeToolResultIntoCallItem(item, data, options) {
 
     if (item.classList.contains('tool-call-collapsible')) {
         const state = toolCallDetailStateByItemId.get(item.id) || {};
+        const resultArgs = parseToolCallArgsFromData(data);
+        if (toolCallArgsEmpty(state.args) && !toolCallArgsEmpty(resultArgs)) {
+            state.args = resultArgs;
+        }
         state.resultData = data;
         state.rawText = text;
         state.resultDetailId = data.processDetailId || state.resultDetailId || '';
@@ -4464,9 +6217,13 @@ function mergeToolResultIntoCallItem(item, data, options) {
         }
         item.dataset.toolResultMerged = '1';
         item.dataset.toolSuccess = (!displayState.isError && !backgroundRunning) ? '1' : '0';
-        item.dataset.toolDisplayStatus = backgroundRunning ? 'background_running' : (displayState.isError ? 'failed' : 'completed');
-        item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed');
-        item.classList.add(backgroundRunning ? 'tool-call-running' : (displayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
+        item.dataset.toolDisplayStatus = toolDisplayStatusFromState(displayState);
+        if (data.executionId != null && String(data.executionId).trim() !== '') {
+            item.dataset.toolExecutionId = String(data.executionId).trim();
+        }
+        item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed', 'tool-call-blocked');
+        item.classList.add(getToolCallStatusPresentation(toolDisplayStatusFromState(displayState)).itemClass);
+        applyToolCallStatus(item, item.dataset.toolDisplayStatus);
         return true;
     }
 
@@ -4478,7 +6235,7 @@ function mergeToolResultIntoCallItem(item, data, options) {
     if (!section) return false;
 
     section.classList.remove('pending');
-    section.className = 'tool-result-section ' + (backgroundRunning ? 'pending' : (displayState.isError ? 'error' : 'success'));
+    section.className = 'tool-result-section ' + (displayState.kind === 'blocked' ? 'blocked' : (backgroundRunning ? 'pending' : (displayState.isError ? 'error' : 'success')));
     const pre = section.querySelector('pre.tool-result');
     if (pre) {
         pre.classList.remove('tool-result-pending');
@@ -4503,9 +6260,13 @@ function mergeToolResultIntoCallItem(item, data, options) {
 
     item.dataset.toolResultMerged = '1';
     item.dataset.toolSuccess = (!displayState.isError && !backgroundRunning) ? '1' : '0';
-    item.dataset.toolDisplayStatus = backgroundRunning ? 'background_running' : (displayState.isError ? 'failed' : 'completed');
-    item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed');
-    item.classList.add(backgroundRunning ? 'tool-call-running' : (displayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
+    item.dataset.toolDisplayStatus = toolDisplayStatusFromState(displayState);
+    if (data.executionId != null && String(data.executionId).trim() !== '') {
+        item.dataset.toolExecutionId = String(data.executionId).trim();
+    }
+    item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed', 'tool-call-blocked');
+    item.classList.add(getToolCallStatusPresentation(toolDisplayStatusFromState(displayState)).itemClass);
+    applyToolCallStatus(item, item.dataset.toolDisplayStatus);
     return true;
 }
 
@@ -4550,6 +6311,13 @@ function coalesceProcessDetailsToolPairs(details) {
     function absorbResult(targetDetail, resultDetail) {
         const rd = resultDetail.data || {};
         targetDetail.data = targetDetail.data || {};
+        if (toolCallArgsEmpty(parseToolCallArgsFromData(targetDetail.data))) {
+            const resultArgs = parseToolCallArgsFromData(rd);
+            if (!toolCallArgsEmpty(resultArgs)) {
+                targetDetail.data.argumentsObj = resultArgs;
+                targetDetail.data.arguments = JSON.stringify(resultArgs);
+            }
+        }
         targetDetail.data._mergedResult = Object.assign({}, rd);
         if (resultDetail.id) {
             targetDetail.data._mergedResultDetailId = resultDetail.id;
@@ -4573,20 +6341,43 @@ function coalesceProcessDetailsToolPairs(details) {
                 createdAt: detail.createdAt,
                 data: Object.assign({}, data)
             };
-            if (id) callsById.set(id, copy);
+            if (id) {
+                let list = callsById.get(id);
+                if (!list) {
+                    list = [];
+                    callsById.set(id, list);
+                }
+                list.push(copy);
+            }
             fifoCalls.push(copy);
             out.push(copy);
-        } else         if (et === 'tool_result') {
+        } else if (et === 'tool_result') {
             let target = null;
             if (id && callsById.has(id)) {
-                target = callsById.get(id);
-            } else {
+                const list = callsById.get(id);
+                while (list.length) {
+                    const candidate = list.shift();
+                    if (candidate && candidate.data && !candidate.data._mergedResult) {
+                        target = candidate;
+                        break;
+                    }
+                }
+            }
+            if (!target) {
+                const resultName = String(data.toolName || '').trim().toLowerCase();
+                let anyUnmatched = null;
                 for (let j = 0; j < fifoCalls.length; j++) {
                     const c = fifoCalls[j];
-                    if (c && c.data && !c.data._mergedResult) {
+                    if (!c || !c.data || c.data._mergedResult) continue;
+                    if (!anyUnmatched) anyUnmatched = c;
+                    const callName = String(c.data.toolName || '').trim().toLowerCase();
+                    if (!resultName || !callName || callName === resultName) {
                         target = c;
                         break;
                     }
+                }
+                if (!target && id) {
+                    target = anyUnmatched;
                 }
             }
             if (target) {
@@ -4613,8 +6404,63 @@ window.mergeToolResultIntoCallItem = mergeToolResultIntoCallItem;
 window.formatToolCallTimelineTitle = formatToolCallTimelineTitle;
 window.parseToolCallArgsFromData = parseToolCallArgsFromData;
 window.getToolResultDisplayState = getToolResultDisplayState;
+window.getToolExecutionDisplayStatus = getToolExecutionDisplayStatus;
 window.getBackgroundRunningToolLabel = getBackgroundRunningToolLabel;
 window.buildToolResultSectionHtml = buildToolResultSectionHtml;
+
+function getToolCallStatusPresentation(status) {
+    const normalized = String(status || '').toLowerCase();
+    const translate = function (key, fallback) {
+        if (typeof window.t !== 'function') return fallback;
+        const value = window.t(key);
+        return value && value !== key ? value : fallback;
+    };
+    if (normalized === 'running') {
+        return { status: normalized, itemClass: 'tool-call-running', badgeClass: 'tool-status-running', label: translate('timeline.running', 'Running...'), icon: '' };
+    }
+    if (normalized === 'background_running') {
+        return { status: normalized, itemClass: 'tool-call-running', badgeClass: 'tool-status-running', label: getBackgroundRunningToolLabel(), icon: '' };
+    }
+    if (normalized === 'completed') {
+        return { status: normalized, itemClass: 'tool-call-completed', badgeClass: 'tool-status-completed', label: translate('timeline.completed', 'Completed'), icon: '✅ ' };
+    }
+    if (normalized === 'failed') {
+        return { status: normalized, itemClass: 'tool-call-failed', badgeClass: 'tool-status-failed', label: translate('timeline.execFailed', 'Execution failed'), icon: '❌ ' };
+    }
+    if (normalized === 'blocked') {
+        return { status: normalized, itemClass: 'tool-call-blocked', badgeClass: 'tool-status-blocked', label: translate('timeline.blocked', 'Blocked'), icon: '🛡 ' };
+    }
+    if (normalized === 'cancelled' || normalized === 'canceled') {
+        return { status: 'cancelled', itemClass: 'tool-call-failed', badgeClass: 'tool-status-failed', label: translate('tasks.statusCancelled', 'Cancelled'), icon: '⛔ ' };
+    }
+    if (normalized === 'result_missing') {
+        return { status: normalized, itemClass: 'tool-call-incomplete', badgeClass: 'tool-status-incomplete', label: translate('timeline.resultMissing', 'Result record missing'), icon: '⚠️ ' };
+    }
+    return null;
+}
+
+// Real-time events, refreshed history, and language switches all reuse the same tool-status presentation.
+function applyToolCallStatus(item, status) {
+    if (!item) return;
+    const presentation = getToolCallStatusPresentation(status);
+    const titleElement = item.querySelector('.timeline-item-title');
+    if (!titleElement) return;
+
+    item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed', 'tool-call-blocked', 'tool-call-incomplete');
+    const previousBadge = titleElement.querySelector('.tool-status-badge');
+    if (previousBadge) previousBadge.remove();
+    if (!presentation) {
+        delete item.dataset.toolDisplayStatus;
+        return;
+    }
+
+    item.dataset.toolDisplayStatus = presentation.status;
+    item.classList.add(presentation.itemClass);
+    const badge = document.createElement('span');
+    badge.className = 'tool-status-badge ' + presentation.badgeClass;
+    badge.textContent = presentation.icon + presentation.label;
+    titleElement.appendChild(badge);
+}
 
 // 更新工具调用状态
 function updateToolCallStatus(progressId, toolCallId, status) {
@@ -4624,35 +6470,53 @@ function updateToolCallStatus(progressId, toolCallId, status) {
     const item = document.getElementById(mapping.itemId);
     if (!item) return;
     
-    const titleElement = item.querySelector('.timeline-item-title');
-    if (!titleElement) return;
-    
-    // 移除之前的状态类
-    item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed');
-    
-    const runningLabel = typeof window.t === 'function' ? window.t('timeline.running') : 'Running...';
-    const completedLabel = typeof window.t === 'function' ? window.t('timeline.completed') : 'Completed';
-    const failedLabel = typeof window.t === 'function' ? window.t('timeline.execFailed') : 'Execution failed';
-    const backgroundRunningLabel = getBackgroundRunningToolLabel();
-    let statusText = '';
-    if (status === 'running' || status === 'background_running') {
-        item.classList.add('tool-call-running');
-        statusText = ' <span class="tool-status-badge tool-status-running">' +
-            escapeHtml(status === 'background_running' ? backgroundRunningLabel : runningLabel) +
-            '</span>';
-    } else if (status === 'completed') {
-        item.classList.add('tool-call-completed');
-        statusText = ' <span class="tool-status-badge tool-status-completed">✅ ' + escapeHtml(completedLabel) + '</span>';
-    } else if (status === 'failed') {
+    applyToolCallStatus(item, status);
+}
+
+function normalizeExecutionIdList(value) {
+    const input = Array.isArray(value) ? value : (value == null ? [] : [value]);
+    const seen = new Set();
+    const out = [];
+    input.forEach(function (v) {
+        const s = String(v == null ? '' : v).trim();
+        if (!s || seen.has(s)) return;
+        seen.add(s);
+        out.push(s);
+    });
+    return out;
+}
+
+function autoCancelledExecutionIdsFromData(data) {
+    data = data || {};
+    return normalizeExecutionIdList(data.autoCancelledPendingExecutionIds || data.autoCancelledExecutionIds || []);
+}
+
+function markToolExecutionItemsCancelled(root, executionIds) {
+    const ids = normalizeExecutionIdList(executionIds);
+    if (!root || ids.length === 0) return 0;
+    const idSet = new Set(ids);
+    let count = 0;
+    root.querySelectorAll('.timeline-item[data-tool-execution-id]').forEach(function (item) {
+        const execId = String(item.dataset.toolExecutionId || '').trim();
+        if (!execId || !idSet.has(execId)) return;
+        item.dataset.toolSuccess = '0';
+        item.dataset.toolDisplayStatus = 'cancelled';
+        item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-incomplete');
         item.classList.add('tool-call-failed');
-        statusText = ' <span class="tool-status-badge tool-status-failed">❌ ' + escapeHtml(failedLabel) + '</span>';
-    }
-    
-    // 更新标题（保留原有文本，追加状态）
-    const originalText = titleElement.innerHTML;
-    // 移除之前可能存在的状态标记
-    const cleanText = originalText.replace(/\s*<span class="tool-status-badge[^>]*>.*?<\/span>/g, '');
-    titleElement.innerHTML = cleanText + statusText;
+        const state = toolCallDetailStateByItemId.get(item.id);
+        if (state && state.resultData && typeof state.resultData === 'object') {
+            state.resultData = Object.assign({}, state.resultData, {
+                status: 'cancelled',
+                success: false,
+                isError: true
+            });
+            state.pending = false;
+            setToolCallDetailState(item, state);
+        }
+        applyToolCallStatus(item, 'cancelled');
+        count++;
+    });
+    return count;
 }
 
 // 添加时间线项目
@@ -4801,23 +6665,34 @@ function addTimelineItem(timeline, type, options) {
         const mergedDisplayState = merged ? getToolResultDisplayState(merged) : null;
         const mergedBackgroundRunning = mergedDisplayState && mergedDisplayState.kind === 'background_running';
         const terminalStatus = String(options.toolStatus || '').toLowerCase();
+        const forcedStatus = mergedDisplayState && mergedDisplayState.kind === 'blocked' ? 'blocked' : (terminalStatus === 'completed' || terminalStatus === 'blocked' || terminalStatus === 'failed' || terminalStatus === 'cancelled' || terminalStatus === 'canceled')
+            ? (terminalStatus === 'canceled' ? 'cancelled' : terminalStatus)
+            : '';
         if (merged) {
             item.dataset.toolResultMerged = '1';
-            item.dataset.toolSuccess = (!mergedDisplayState.isError && !mergedBackgroundRunning) ? '1' : '0';
-            item.dataset.toolDisplayStatus = mergedBackgroundRunning ? 'background_running' : (mergedDisplayState.isError ? 'failed' : 'completed');
-            item.classList.add(mergedBackgroundRunning ? 'tool-call-running' : (mergedDisplayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
+            item.dataset.toolSuccess = forcedStatus ? (forcedStatus === 'completed' ? '1' : '0') : ((!mergedDisplayState.isError && !mergedBackgroundRunning) ? '1' : '0');
+            item.dataset.toolDisplayStatus = forcedStatus || toolDisplayStatusFromState(mergedDisplayState);
+            if (merged.executionId != null && String(merged.executionId).trim() !== '') {
+                item.dataset.toolExecutionId = String(merged.executionId).trim();
+            }
+            item.classList.add(getToolCallStatusPresentation(item.dataset.toolDisplayStatus).itemClass);
             if (d._mergedResultDetailId) {
                 item.dataset.toolResultDetailId = String(d._mergedResultDetailId);
             }
-        } else if (terminalStatus === 'completed' || terminalStatus === 'failed') {
+        } else if (terminalStatus === 'completed' || terminalStatus === 'blocked' || terminalStatus === 'failed' || terminalStatus === 'cancelled' || terminalStatus === 'canceled') {
             item.dataset.toolSuccess = terminalStatus === 'completed' ? '1' : '0';
-            item.classList.add(terminalStatus === 'completed' ? 'tool-call-completed' : 'tool-call-failed');
+            item.dataset.toolDisplayStatus = terminalStatus === 'canceled' ? 'cancelled' : terminalStatus;
+            item.classList.add(getToolCallStatusPresentation(terminalStatus).itemClass);
         } else if (terminalStatus === 'result_missing') {
+            item.dataset.toolDisplayStatus = 'result_missing';
             item.classList.add('tool-call-incomplete');
             item.title = typeof window.t === 'function' ? window.t('timeline.resultMissing') : 'Result record missing';
+        } else if (terminalStatus === 'running' || terminalStatus === 'background_running') {
+            item.dataset.toolDisplayStatus = terminalStatus;
+            item.classList.add('tool-call-running');
         }
     }
-    if (type === 'hitl_interrupt' && options.data && options.data.interruptId != null && String(options.data.interruptId).trim() !== '') {
+    if ((type === 'hitl_interrupt' || type === 'hitl_audit_agent_started' || type === 'hitl_audit_agent' || type === 'hitl_resumed' || type === 'hitl_rejected') && options.data && options.data.interruptId != null && String(options.data.interruptId).trim() !== '') {
         item.dataset.hitlInterruptId = String(options.data.interruptId).trim();
     }
     if (type === 'workflow_hitl_waiting' && options.data) {
@@ -4837,13 +6712,27 @@ function addTimelineItem(timeline, type, options) {
         }
         item.dataset.toolName = (d.toolName != null && d.toolName !== '') ? String(d.toolName) : '';
         item.dataset.toolSuccess = (!displayState.isError && displayState.kind !== 'background_running') ? '1' : '0';
-        item.dataset.toolDisplayStatus = displayState.kind === 'background_running' ? 'background_running' : (displayState.isError ? 'failed' : 'completed');
+        item.dataset.toolDisplayStatus = toolDisplayStatusFromState(displayState);
+        if (d.executionId != null && String(d.executionId).trim() !== '') {
+            item.dataset.toolExecutionId = String(d.executionId).trim();
+        }
+    }
+    if (type === 'eino_usage_summary' && options.data) {
+        const d = options.data;
+        ['modelCalls', 'promptTokens', 'completionTokens', 'totalTokens', 'cachedTokens', 'reasoningTokens'].forEach(function (key) {
+            if (d[key] != null) {
+                item.dataset[key] = String(d[key]);
+            }
+        });
     }
     if (options.data && options.data.einoAgent != null && String(options.data.einoAgent).trim() !== '') {
         item.dataset.einoAgent = String(options.data.einoAgent).trim();
     }
     if (options.data && options.data.orchestration != null && String(options.data.orchestration).trim() !== '') {
         item.dataset.orchestration = String(options.data.orchestration).trim();
+    }
+    if (options.data && options.data.streamId != null && String(options.data.streamId).trim() !== '') {
+        item.dataset.responseStreamId = String(options.data.streamId).trim();
     }
     if (options.data && options.data.responseStreamPlaceholder === true) {
         item.dataset.responseStreamPlaceholder = '1';
@@ -4896,12 +6785,16 @@ function addTimelineItem(timeline, type, options) {
         const mergedDisplayState = merged ? getToolResultDisplayState(merged) : null;
         const mergedBackgroundRunning = mergedDisplayState && mergedDisplayState.kind === 'background_running';
         const terminalStatus = String(options.toolStatus || '').toLowerCase();
-        const hasTerminalStatus = terminalStatus === 'completed' || terminalStatus === 'failed';
+        const forcedStatus = mergedDisplayState && mergedDisplayState.kind === 'blocked' ? 'blocked' : (terminalStatus === 'completed' || terminalStatus === 'blocked' || terminalStatus === 'failed' || terminalStatus === 'cancelled' || terminalStatus === 'canceled')
+            ? (terminalStatus === 'canceled' ? 'cancelled' : terminalStatus)
+            : '';
+        const hasTerminalStatus = terminalStatus === 'completed' || terminalStatus === 'blocked' || terminalStatus === 'failed' || terminalStatus === 'cancelled' || terminalStatus === 'canceled';
         const hasHistoricalStatus = hasTerminalStatus || terminalStatus === 'result_missing';
         if (merged) {
-            item.classList.add(mergedBackgroundRunning ? 'tool-call-running' : (mergedDisplayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
+            const statusForClass = forcedStatus || toolDisplayStatusFromState(mergedDisplayState);
+            item.classList.add(getToolCallStatusPresentation(statusForClass).itemClass);
         } else if (hasTerminalStatus) {
-            item.classList.add(terminalStatus === 'completed' ? 'tool-call-completed' : 'tool-call-failed');
+            item.classList.add(getToolCallStatusPresentation(terminalStatus).itemClass);
         } else if (terminalStatus === 'result_missing') {
             item.classList.add('tool-call-incomplete');
         } else if (!options.skipPendingResult) {
@@ -4909,10 +6802,10 @@ function addTimelineItem(timeline, type, options) {
         }
         setToolCallDetailState(item, {
             args: args,
-            resultData: merged || null,
+            resultData: (merged && forcedStatus) ? Object.assign({}, merged, { status: forcedStatus, success: forcedStatus === 'completed', isError: forcedStatus !== 'completed' }) : (merged || null),
             pending: !merged && !hasHistoricalStatus && !options.skipPendingResult,
             processDetailId: options.processDetailId || '',
-            resultDetailId: data._mergedResultDetailId || '',
+            resultDetailId: data._mergedResultDetailId || (merged && merged.processDetailId) || '',
             payloadDeferred: data._payloadDeferred === true || (merged && merged._payloadDeferred === true),
             payloadLoaded: !(data._payloadDeferred === true || (merged && merged._payloadDeferred === true))
         });
@@ -4961,8 +6854,11 @@ function addTimelineItem(timeline, type, options) {
             payloadDeferred: data._payloadDeferred === true,
             payloadLoaded: data._payloadDeferred !== true
         });
-        item.dataset.toolDisplayStatus = displayState.kind === 'background_running' ? 'background_running' : (displayState.isError ? 'failed' : 'completed');
-        item.classList.add(displayState.kind === 'background_running' ? 'tool-call-running' : (displayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
+        item.dataset.toolDisplayStatus = toolDisplayStatusFromState(displayState);
+        if (data.executionId != null && String(data.executionId).trim() !== '') {
+            item.dataset.toolExecutionId = String(data.executionId).trim();
+        }
+        item.classList.add(getToolCallStatusPresentation(toolDisplayStatusFromState(displayState)).itemClass);
     } else if (type === 'cancelled') {
         const taskCancelledLabel = typeof window.t === 'function' ? window.t('chat.taskCancelled') : 'Task cancelled';
         content += `
@@ -4975,6 +6871,8 @@ function addTimelineItem(timeline, type, options) {
             ? formatTimelineStreamBody(options.message, options.data)
             : options.message;
         content += `<div class="timeline-item-content timeline-stream-plain">${formatTimelinePlainTextHtml(streamBody)}</div>`;
+    } else if (type === 'eino_usage_summary' && options.message) {
+        content += `<div class="timeline-item-content timeline-stream-plain timeline-usage-summary">${formatTimelinePlainTextHtml(options.message)}</div>`;
     } else if (type === 'progress' && options.message) {
         content += `<div class="timeline-item-content timeline-eino-trace"><pre class="tool-result">${escapeHtml(options.message)}</pre></div>`;
     } else if (type === 'user_interrupt_continue' && options.message) {
@@ -4985,6 +6883,27 @@ function addTimelineItem(timeline, type, options) {
     }
 
     item.innerHTML = content;
+    if (type === 'tool_call') {
+        let initialToolStatus = item.dataset.toolDisplayStatus || '';
+        if (!initialToolStatus && item.classList.contains('tool-call-running')) {
+            initialToolStatus = 'running';
+        }
+        if (initialToolStatus) {
+            applyToolCallStatus(item, initialToolStatus);
+        }
+    }
+    if (type === 'iteration') {
+        const scope = options.data && options.data.einoScope != null
+            ? String(options.data.einoScope).trim()
+            : '';
+        // A turn forms only when the main agent re-enters the model; sub-agent steps keep the plain timeline style,
+        // avoiding expert calls within the same turn being misrendered as new main-iteration groups.
+        if (scope !== 'sub') {
+            item.classList.add('timeline-iteration-divider');
+            item.setAttribute('role', 'separator');
+            item.setAttribute('aria-label', String(options.title || ''));
+        }
+    }
     if (item.classList.contains('tool-detail-collapsible')) {
         updateToolDetailToggleLabel(item);
     }
@@ -5005,25 +6924,110 @@ function addTimelineItem(timeline, type, options) {
 }
 
 // 加载活跃任务列表
-async function loadActiveTasks(showErrors = false) {
+function loadActiveTasks(showErrors = false) {
+    if (activeTasksLoadPromise) return activeTasksLoadPromise;
     const bar = document.getElementById('active-tasks-bar');
-    try {
-        const response = await apiFetch('/api/agent-loop/tasks');
-        const result = await response.json().catch(() => ({}));
+    activeTasksLoadPromise = (async function () {
+        try {
+            const [response, pendingResponse] = await Promise.all([
+                apiFetch('/api/agent-loop/tasks'),
+                apiFetch('/api/hitl/pending?page=1&pageSize=200').catch(function () { return null; })
+            ]);
+            const result = await response.json().catch(() => ({}));
 
-        if (!response.ok) {
-            throw new Error(result.error || (typeof window.t === 'function' ? window.t('tasks.loadActiveTasksFailed') : 'Failed to load active tasks'));
-        }
+            if (!response.ok) {
+                throw new Error(result.error || (typeof window.t === 'function' ? window.t('tasks.loadActiveTasksFailed') : 'Failed to load active tasks'));
+            }
 
-        renderActiveTasks(result.tasks || []);
-    } catch (error) {
-        console.error('获取活跃任务失败:', error);
-        if (showErrors && bar) {
-            bar.style.display = 'block';
-            const cannotGetStatus = typeof window.t === 'function' ? window.t('tasks.cannotGetTaskStatus') : 'Cannot get task status';
-            bar.innerHTML = `<div class="active-task-error">${escapeHtml(cannotGetStatus)}${escapeHtml(error.message)}</div>`;
+            renderActiveTasks(result.tasks || []);
+            if (pendingResponse && pendingResponse.ok) {
+                const pendingResult = await pendingResponse.json().catch(function () { return {}; });
+                reconcilePendingHitlState(pendingResult.items || []);
+            }
+        } catch (error) {
+            // When the service stops, restarts, or the login expires, tasks from the old process can no longer be approved.
+            // Clear the local running/approval caches immediately so countdowns and buttons do not stay usable.
+            renderActiveTasks([]);
+            hitlPendingInterruptTracker.update([]);
+            syncHitlApprovalTaskAvailability();
+            syncHitlApprovalSidebarState([]);
+            if (typeof window.syncProjectConversationApprovalStatuses === 'function') {
+                window.syncProjectConversationApprovalStatuses([]);
+            }
+            console.error('Failed to load active tasks:', error);
+            if (showErrors && bar) {
+                bar.style.display = 'block';
+                const cannotGetStatus = typeof window.t === 'function' ? window.t('tasks.cannotGetTaskStatus') : 'Cannot get task status';
+                bar.innerHTML = `<div class="active-task-error">${escapeHtml(cannotGetStatus)}${escapeHtml(error.message)}</div>`;
+            }
         }
+    })().finally(function () {
+        activeTasksLoadPromise = null;
+    });
+    return activeTasksLoadPromise;
+}
+
+function syncVisibleConversationTaskReplay(tasks) {
+    const conversationId = String(window.currentConversationId ||
+        (typeof currentConversationId === 'string' ? currentConversationId : '') || '').trim();
+    if (!conversationId) return false;
+    const active = (Array.isArray(tasks) ? tasks : []).some(function (task) {
+        return task && String(task.conversationId || '').trim() === conversationId &&
+            !TASK_FINAL_STATUSES.has(String(task.status || '').toLowerCase());
+    });
+    if (!active) {
+        if (visibleConversationReplaySyncId === conversationId && !visibleConversationReplaySyncPromise) {
+            visibleConversationReplaySyncId = '';
+        }
+        return false;
     }
+    if (shouldSkipTaskEventReplayAttach(conversationId)) return false;
+    if (
+        taskEventReplayAttachState.conversationId === conversationId &&
+        taskEventReplayAttachState.inFlightPromise
+    ) {
+        return true;
+    }
+    if (visibleConversationReplaySyncPromise && visibleConversationReplaySyncId === conversationId) {
+        return true;
+    }
+    visibleConversationReplaySyncId = conversationId;
+    visibleConversationReplaySyncPromise = Promise.resolve()
+        .then(async function () {
+            // The user may have switched conversations after the task refresh was queued but before this microtask ran.
+            // The old conversation's supplement stream must not cancel or override the target conversation load the user just started.
+            if (String(window.currentConversationId || '') !== conversationId) {
+                return false;
+            }
+            if (
+                typeof window.isChatConversationLoadPending === 'function' &&
+                window.isChatConversationLoadPending(conversationId)
+            ) {
+                return false;
+            }
+            // Another tab already added a user message and a running assistant turn; reload light history first so the supplement stream does not attach to a stale assistant message.
+            if (typeof window.loadConversation === 'function') {
+                await window.loadConversation(conversationId);
+            }
+            if (
+                String(window.currentConversationId || '') === conversationId &&
+                typeof attachRunningTaskEventStream === 'function' &&
+                !shouldSkipTaskEventReplayAttach(conversationId)
+            ) {
+                return attachRunningTaskEventStream(conversationId);
+            }
+            return false;
+        })
+        .catch(function (error) {
+            console.warn('Failed to sync running conversation from another tab:', error);
+            return false;
+        })
+        .finally(function () {
+            if (visibleConversationReplaySyncId === conversationId) {
+                visibleConversationReplaySyncPromise = null;
+            }
+        });
+    return true;
 }
 
 function getActiveTaskDisplayName(task) {
@@ -5034,6 +7038,33 @@ function getActiveTaskDisplayName(task) {
     if (title) return title;
     const message = (task.message || '').trim();
     return message || unnamedTaskText;
+}
+
+function stableActiveTasksForDisplay(tasks) {
+    return (Array.isArray(tasks) ? tasks : []).slice().sort(function (a, b) {
+        const aStartedAt = Date.parse(a && a.startedAt ? a.startedAt : '');
+        const bStartedAt = Date.parse(b && b.startedAt ? b.startedAt : '');
+        const aTime = Number.isFinite(aStartedAt) ? aStartedAt : Number.MAX_SAFE_INTEGER;
+        const bTime = Number.isFinite(bStartedAt) ? bStartedAt : Number.MAX_SAFE_INTEGER;
+        if (aTime !== bTime) return aTime - bTime;
+        return String(a && a.conversationId || '').localeCompare(String(b && b.conversationId || ''));
+    });
+}
+
+function activeTasksRenderSignature(tasks) {
+    const language = typeof i18next !== 'undefined' && i18next.language ? i18next.language : getCurrentTimeLocale();
+    return JSON.stringify({
+        language: language,
+        tasks: (Array.isArray(tasks) ? tasks : []).map(function (task) {
+            return {
+                conversationId: task && task.conversationId || '',
+                title: task && task.title || '',
+                message: task && task.message || '',
+                startedAt: task && task.startedAt || '',
+                status: task && task.status || ''
+            };
+        })
+    });
 }
 
 function updateActiveTaskConversationTitle(conversationId, newTitle) {
@@ -5052,19 +7083,41 @@ function renderActiveTasks(tasks) {
     const bar = document.getElementById('active-tasks-bar');
     if (!bar) return;
 
-    const normalizedTasks = Array.isArray(tasks) ? tasks : [];
+    const normalizedTasks = stableActiveTasksForDisplay(tasks);
     conversationExecutionTracker.update(normalizedTasks);
+    window.dispatchEvent(new CustomEvent('conversation-task-state-changed', {
+        detail: { tasks: normalizedTasks }
+    }));
+    syncHitlApprovalTaskAvailability();
+    reconcileHitlApprovalStateWithActiveTasks(normalizedTasks);
+    if (typeof window.updateChatPrimaryActionState === 'function') {
+        window.updateChatPrimaryActionState();
+    }
+    if (typeof window.updateProjectFolderTaskStatuses === 'function') {
+        window.updateProjectFolderTaskStatuses(normalizedTasks);
+    }
     if (typeof updateAttackChainAvailability === 'function') {
         updateAttackChainAvailability();
     }
+    syncVisibleConversationTaskReplay(normalizedTasks);
 
     if (normalizedTasks.length === 0) {
         bar.style.display = 'none';
         bar.innerHTML = '';
+        activeTasksVisualSignature = '';
         return;
     }
 
     bar.style.display = 'flex';
+    const nextVisualSignature = activeTasksRenderSignature(normalizedTasks);
+    if (
+        nextVisualSignature === activeTasksVisualSignature &&
+        bar.querySelectorAll('.active-task-item').length === normalizedTasks.length
+    ) {
+        return;
+    }
+    const previousScrollLeft = bar.scrollLeft;
+    activeTasksVisualSignature = nextVisualSignature;
     bar.innerHTML = '';
 
     function openActiveTaskConversation(conversationId) {
@@ -5143,6 +7196,28 @@ function renderActiveTasks(tasks) {
 
         bar.appendChild(item);
     });
+    bar.scrollLeft = previousScrollLeft;
+}
+
+function reconcileHitlApprovalStateWithActiveTasks(tasks) {
+    const activeIds = new Set(
+        (Array.isArray(tasks) ? tasks : [])
+            .filter((task) => task && task.conversationId && !TASK_FINAL_STATUSES.has(String(task.status || '').toLowerCase()))
+            .map((task) => String(task.conversationId))
+    );
+    hitlSidebarApprovalState.forEach(function (_data, conversationId) {
+        if (activeIds.has(String(conversationId))) return;
+        hitlSidebarApprovalState.delete(conversationId);
+        removeDirectHitlSidebarApproval(conversationId);
+        if (typeof window.setProjectConversationApprovalStatus === 'function') {
+            window.setProjectConversationApprovalStatus(conversationId, false);
+        }
+    });
+    const dock = document.getElementById('chat-hitl-approval-dock');
+    const dockConversationId = dock && String(dock.dataset.conversationId || '').trim();
+    if (dockConversationId && !activeIds.has(dockConversationId)) {
+        clearChatHitlApprovalDock();
+    }
 }
 
 function cancelActiveTask(conversationId) {
@@ -5699,11 +7774,13 @@ function buildMonitorTotals(summary) {
     const total = s.totalCalls || 0;
     const success = s.successCalls || 0;
     const failed = s.failedCalls || 0;
+    const blocked = s.blockedCalls || 0;
     return {
         total,
         success,
         failed,
-        neutral: Math.max(0, total - success - failed),
+        blocked,
+        neutral: Math.max(0, total - success - failed - blocked),
         lastCallTime: s.lastCallTime ? new Date(s.lastCallTime) : null,
     };
 }
@@ -5732,6 +7809,7 @@ function buildMcpTimelineSvg(points, rangeKey) {
     const plotH = H - padT - padB;
     const maxVal = Math.max(1, ...points.map((p) => p.total || 0));
     const hasFailed = points.some((p) => (p.failed || 0) > 0);
+    const hasBlocked = points.some((p) => (p.blocked || 0) > 0);
     const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
     const barGap = points.length > 48 ? 1 : 2;
     const barW = Math.max(1.6, Math.min(8, (plotW / Math.max(1, points.length)) - barGap));
@@ -5753,6 +7831,11 @@ function buildMcpTimelineSvg(points, rangeKey) {
             return `${i === 0 ? 'M' : 'L'} ${c.x.toFixed(2)} ${fy.toFixed(2)}`;
         }).join(' ');
     }
+
+    const blockedPath = hasBlocked ? coords.map((c, i) => {
+        const y = padT + plotH - ((c.p.blocked || 0) / maxVal) * plotH;
+        return `${i === 0 ? 'M' : 'L'} ${c.x.toFixed(2)} ${y.toFixed(2)}`;
+    }).join(' ') : '';
 
     let peakIdx = 0;
     points.forEach((p, i) => {
@@ -5786,23 +7869,28 @@ function buildMcpTimelineSvg(points, rangeKey) {
         const isPeak = c.i === peakIdx && (c.p.total || 0) > 0;
         const dotClass = 'mcp-stats-timeline-dot' + (isPeak ? ' mcp-stats-timeline-dot--peak' : '');
         return `<circle class="${dotClass}" cx="${c.x.toFixed(2)}" cy="${c.y.toFixed(2)}" r="${isPeak ? 2 : 1.5}"
-            data-time="${escapeHtml(tipTime)}"
+            data-time="${escapeAttrLocal(tipTime)}"
             data-total="${c.p.total || 0}"
-            data-failed="${c.p.failed || 0}" />`;
+            data-failed="${c.p.failed || 0}"
+            data-blocked="${c.p.blocked || 0}" />`;
     }).join('');
 
     const bars = coords.map((c) => {
         const total = c.p.total || 0;
         const failed = c.p.failed || 0;
+        const blocked = c.p.blocked || 0;
         const h = total > 0 ? Math.max(3, (total / maxVal) * plotH) : 1;
         const y = baseY - h;
-        const failedH = failed > 0 ? Math.max(2, (failed / maxVal) * plotH) : 0;
+        const failedH = total > 0 ? h * (failed / total) : 0;
+        const blockedH = total > 0 ? h * (blocked / total) : 0;
         const tipTime = formatMcpTimelineLabel(c.p.t, rangeKey, locale);
         return `<g class="mcp-stats-timeline-bar-group">
             <rect class="mcp-stats-timeline-bar${total > 0 ? ' is-active' : ''}" x="${(c.x - barW / 2).toFixed(2)}" y="${y.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}" rx="1.6"
-                data-time="${escapeHtml(tipTime)}" data-total="${total}" data-failed="${failed}" />
+                data-time="${escapeAttrLocal(tipTime)}" data-total="${total}" data-failed="${failed}" data-blocked="${blocked}" />
             ${failedH > 0 ? `<rect class="mcp-stats-timeline-bar-fail" x="${(c.x - barW / 2).toFixed(2)}" y="${(baseY - failedH).toFixed(2)}" width="${barW.toFixed(2)}" height="${failedH.toFixed(2)}" rx="1.6"
-                data-time="${escapeHtml(tipTime)}" data-total="${total}" data-failed="${failed}" />` : ''}
+                data-time="${escapeAttrLocal(tipTime)}" data-total="${total}" data-failed="${failed}" data-blocked="${blocked}" />` : ''}
+            ${blockedH > 0 ? `<rect class="mcp-stats-timeline-bar-blocked" x="${(c.x - barW / 2).toFixed(2)}" y="${(baseY - failedH - blockedH).toFixed(2)}" width="${barW.toFixed(2)}" height="${blockedH.toFixed(2)}" rx="1.6"
+                data-time="${escapeAttrLocal(tipTime)}" data-total="${total}" data-failed="${failed}" data-blocked="${blocked}" />` : ''}
         </g>`;
     }).join('');
 
@@ -5830,6 +7918,7 @@ function buildMcpTimelineSvg(points, rangeKey) {
         ${peakMarker}
         <path class="mcp-stats-timeline-line" d="${linePath}" stroke="url(#mcpTimelineLineStroke)" />
         ${hasFailed ? `<path class="mcp-stats-timeline-line mcp-stats-timeline-line--fail" d="${failPath}" />` : ''}
+        ${hasBlocked ? `<path class="mcp-stats-timeline-line mcp-stats-timeline-line--blocked" d="${blockedPath}" />` : ''}
         ${dots}
         ${xLabels}
     </svg>`;
@@ -5858,22 +7947,23 @@ function bindMcpStatsTimelineEvents() {
     }
 
     root.addEventListener('mousemove', function (e) {
-        const dot = e.target.closest('.mcp-stats-timeline-dot, .mcp-stats-timeline-bar, .mcp-stats-timeline-bar-fail');
+        const dot = e.target.closest('.mcp-stats-timeline-dot, .mcp-stats-timeline-bar, .mcp-stats-timeline-bar-fail, .mcp-stats-timeline-bar-blocked');
         if (!dot || !mcpTimelineTooltipEl) {
             root.querySelectorAll('.mcp-stats-timeline-dot.is-active').forEach((d) => d.classList.remove('is-active'));
-            root.querySelectorAll('.mcp-stats-timeline-bar.is-hover, .mcp-stats-timeline-bar-fail.is-hover').forEach((d) => d.classList.remove('is-hover'));
+            root.querySelectorAll('.mcp-stats-timeline-bar.is-hover, .mcp-stats-timeline-bar-fail.is-hover, .mcp-stats-timeline-bar-blocked.is-hover').forEach((d) => d.classList.remove('is-hover'));
             mcpTimelineTooltipEl.style.display = 'none';
             return;
         }
         root.querySelectorAll('.mcp-stats-timeline-dot.is-active').forEach((d) => d.classList.remove('is-active'));
-        root.querySelectorAll('.mcp-stats-timeline-bar.is-hover, .mcp-stats-timeline-bar-fail.is-hover').forEach((d) => d.classList.remove('is-hover'));
+        root.querySelectorAll('.mcp-stats-timeline-bar.is-hover, .mcp-stats-timeline-bar-fail.is-hover, .mcp-stats-timeline-bar-blocked.is-hover').forEach((d) => d.classList.remove('is-hover'));
         dot.classList.add('is-active');
         dot.classList.add('is-hover');
         const time = dot.getAttribute('data-time') || '';
         const total = dot.getAttribute('data-total') || '0';
         const failed = dot.getAttribute('data-failed') || '0';
-        const tip = mcpMonitorT('timelineTooltip', { time, total, failed })
-            || `${time}：${total} 次（失败 ${failed}）`;
+        const blocked = dot.getAttribute('data-blocked') || '0';
+        const tip = mcpMonitorT('timelineTooltip', { time, total, failed, blocked })
+            || monitorFallback(`${time}：${total} 次（失败 ${failed}，安全拦截 ${blocked}）`, `${time}: ${total} calls (${failed} failed, ${blocked} blocked)`);
         mcpTimelineTooltipEl.textContent = tip;
         mcpTimelineTooltipEl.style.display = 'block';
         mcpTimelineTooltipEl.style.left = `${e.clientX}px`;
@@ -5884,7 +7974,7 @@ function bindMcpStatsTimelineEvents() {
         if (!e.target.closest || !e.target.closest('.mcp-stats-combined__timeline, .mcp-stats-timeline')) return;
         if (e.relatedTarget && root.contains(e.relatedTarget)) return;
         root.querySelectorAll('.mcp-stats-timeline-dot.is-active').forEach((d) => d.classList.remove('is-active'));
-        root.querySelectorAll('.mcp-stats-timeline-bar.is-hover, .mcp-stats-timeline-bar-fail.is-hover').forEach((d) => d.classList.remove('is-hover'));
+        root.querySelectorAll('.mcp-stats-timeline-bar.is-hover, .mcp-stats-timeline-bar-fail.is-hover, .mcp-stats-timeline-bar-blocked.is-hover').forEach((d) => d.classList.remove('is-hover'));
         if (mcpTimelineTooltipEl) mcpTimelineTooltipEl.style.display = 'none';
     });
 
@@ -5962,10 +8052,13 @@ function renderMcpTimelineActiveMoments(points, rangeKey) {
         const time = formatMcpTimelineLabel(p.t, rangeKey, locale);
         const failed = p.failed || 0;
         const failedLabel = mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`;
+        const blocked = p.blocked || 0;
+        const blockedLabel = mcpMonitorT('blockedCount', { n: blocked }) || monitorFallback(`安全拦截 ${blocked}`, `Blocked ${blocked}`);
         return `<span class="mcp-stats-timeline-moment" title="${escapeHtml(time)}">
             <span class="mcp-stats-timeline-moment__time">${escapeHtml(time)}</span>
             <span class="mcp-stats-timeline-moment__count">${p.total || 0}</span>
             ${failed > 0 ? `<span class="mcp-stats-timeline-moment__fail">${escapeHtml(failedLabel)}</span>` : ''}
+            ${blocked > 0 ? `<span class="mcp-stats-timeline-moment__blocked">${escapeHtml(blockedLabel)}</span>` : ''}
         </span>`;
     }).join('');
     const moreChip = hiddenCount > 0
@@ -6045,7 +8138,9 @@ function renderMcpStatsTimelineBody(timeline, timelineError, compactEmpty, loadi
     const chartSvg = buildMcpTimelineSvg(points, rangeKey);
     const totalLegend = mcpMonitorT('timelineTotalLegend') || '总调用';
     const failLegend = mcpMonitorT('timelineFailedLegend') || '失败';
+    const blockedLegend = mcpMonitorT('timelineBlockedLegend') || monitorFallback('安全拦截', 'Blocked');
     const hasFailed = points.some((p) => (p.failed || 0) > 0);
+    const hasBlocked = points.some((p) => (p.blocked || 0) > 0);
     const sparseHint = buildTimelineSparseHint(points, timeline);
     const momentsHtml = renderMcpTimelineActiveMoments(points, rangeKey);
     const sparseHtml = sparseHint
@@ -6060,6 +8155,7 @@ function renderMcpStatsTimelineBody(timeline, timelineError, compactEmpty, loadi
         <div class="mcp-stats-timeline__legend">
             <span class="mcp-stats-timeline__legend-item">${escapeHtml(totalLegend)}</span>
             ${hasFailed ? `<span class="mcp-stats-timeline__legend-item mcp-stats-timeline__legend-item--fail">${escapeHtml(failLegend)}</span>` : ''}
+            ${hasBlocked ? `<span class="mcp-stats-timeline__legend-item mcp-stats-timeline__legend-item--blocked">${escapeHtml(blockedLegend)}</span>` : ''}
         </div>`;
 }
 
@@ -6421,11 +8517,11 @@ function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '', opt
             || `${s.name}，${s.calls} 次调用，占 ${s.pct}%`;
         return `<li class="mcp-stats-dist-legend-item-wrap">
             <button type="button" class="mcp-stats-dist-legend-item${isActive ? ' is-active' : ''}"
-                data-tool-name="${escapeHtml(s.name)}"
+                data-tool-name="${escapeAttrLocal(s.name)}"
                 data-pct="${s.pct}"
                 data-calls="${s.calls}"
                 data-is-others="0"
-                aria-label="${escapeHtml(rowAria)}"
+                aria-label="${escapeAttrLocal(rowAria)}"
                 aria-pressed="${isActive ? 'true' : 'false'}">${inner}</button>
         </li>`;
     }).join('');
@@ -6452,8 +8548,8 @@ function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '', opt
             </div>`;
 
     return `
-        <div class="mcp-stats-dist-panel${embedded ? ' mcp-stats-dist-panel--embedded' : ''}" aria-label="${escapeHtml(distTitle)}"
-            data-center-label="${escapeHtml(centerLabel)}"
+        <div class="mcp-stats-dist-panel${embedded ? ' mcp-stats-dist-panel--embedded' : ''}" aria-label="${escapeAttrLocal(distTitle)}"
+            data-center-label="${escapeAttrLocal(centerLabel)}"
             data-center-value="${top6SharePct}"
             data-center-suffix="%">
             ${headerHtml}
@@ -6600,8 +8696,13 @@ function renderMcpStatsMetricsBar(totals, successRate, rateTone, rateSubText, la
     const lastCallLabel = mcpMonitorT('lastCall') || monitorFallback('最近一次调用', 'Last call');
     const successPill = mcpMonitorT('successCount', { n: totals.success }) || monitorFallback(`成功 ${totals.success}`, `Success ${totals.success}`);
     const failedPill = mcpMonitorT('failedCount', { n: totals.failed }) || monitorFallback(`失败 ${totals.failed}`, `Failed ${totals.failed}`);
+    const blockedPill = mcpMonitorT('blockedCount', { n: totals.blocked }) || monitorFallback(`安全拦截 ${totals.blocked}`, `Blocked ${totals.blocked}`);
     const neutralPill = mcpMonitorT('neutralCount', { n: totals.neutral }) || monitorFallback(`终止 ${totals.neutral}`, `Stopped ${totals.neutral}`);
+    const rateHint = mcpMonitorT('rateExcludesBlocked') || monitorFallback('成功率仅统计成功和失败的调用，不包含安全拦截和终止', 'Success rate includes only successful and failed calls; blocked and stopped calls are excluded');
     const rateValue = hasCalls ? `${successRate}%` : successRate;
+    const blockedChip = totals.blocked > 0
+        ? `<span class="mcp-stats-kpi__chip is-blocked">${escapeHtml(blockedPill)}</span>`
+        : '';
     const neutralChip = totals.neutral > 0
         ? `<span class="mcp-stats-kpi__chip is-neutral">${escapeHtml(neutralPill)}</span>`
         : '';
@@ -6616,6 +8717,7 @@ function renderMcpStatsMetricsBar(totals, successRate, rateTone, rateSubText, la
                     <div class="mcp-stats-kpi__meta">
                         <span class="mcp-stats-kpi__chip is-ok">${escapeHtml(successPill)}</span>
                         <span class="mcp-stats-kpi__chip is-fail">${escapeHtml(failedPill)}</span>
+                        ${blockedChip}
                         ${neutralChip}
                     </div>
                 </div>
@@ -6623,7 +8725,7 @@ function renderMcpStatsMetricsBar(totals, successRate, rateTone, rateSubText, la
             <article class="mcp-stats-kpi__item mcp-stats-kpi__item--rate">
                 <span class="mcp-stats-kpi__accent" aria-hidden="true"></span>
                 <div class="mcp-stats-kpi__content">
-                    <span class="mcp-stats-kpi__label">${escapeHtml(successRateLabel)}</span>
+                    <span class="mcp-stats-kpi__label" title="${escapeAttrLocal(rateHint)}">${escapeHtml(successRateLabel)}</span>
                     <span class="mcp-stats-kpi__value mcp-stats-kpi__value--rate ${rateTone}">${rateValue}</span>
                     <span class="mcp-stats-kpi__status ${rateTone}">${escapeHtml(rateSubText)}</span>
                 </div>
@@ -6652,33 +8754,39 @@ function renderMcpStatsToolTable(topTools, totals, activeToolFilter = '') {
         const total = tool.totalCalls || 0;
         const success = tool.successCalls || 0;
         const failed = tool.failedCalls || 0;
+        const blocked = tool.blockedCalls || 0;
         const effectiveTotal = success + failed;
         const toolRateNum = effectiveTotal > 0 ? (success / effectiveTotal) * 100 : 0;
         const toolRate = toolRateNum.toFixed(1);
+        const rateText = effectiveTotal > 0 ? `${toolRate}%` : '-';
         const sharePct = totals.total > 0 ? ((total / totals.total) * 100).toFixed(1) : '0.0';
         const dotColor = MCP_STATS_DIST_COLORS[index % MCP_STATS_DIST_COLORS.length];
         const isActive = activeToolFilter && monitorToolNamesEqual(activeToolFilter, rawName);
-        const rateClass = getMcpToolRateClass(toolRateNum);
+        const rateClass = effectiveTotal > 0 ? getMcpToolRateClass(toolRateNum) : 'is-muted';
         const rankClass = index === 0 ? ' rank-1' : index === 1 ? ' rank-2' : index === 2 ? ' rank-3' : '';
-        const rowAria = mcpMonitorT('toolRowAriaLabel', { name, total, rate: toolRate })
-            || `${name}，${total} 次调用，成功率 ${toolRate}%`;
+        const blockedLabel = mcpMonitorT('blockedCount', { n: blocked }) || monitorFallback(`安全拦截 ${blocked}`, `Blocked ${blocked}`);
+        const rowAria = (effectiveTotal > 0
+            ? (mcpMonitorT('toolRowAriaLabel', { name, total, rate: toolRate }) || `${name}, ${total} calls, success rate ${toolRate}%`)
+            : (mcpMonitorT('toolRowNoCompletedAriaLabel', { name, total }) || monitorFallback(`${name}，${total} 次调用，暂无完成结果，点击查看执行记录`, `${name}, ${total} calls, no completed outcomes, click to view records`)))
+            + (blocked > 0 ? ` · ${blockedLabel}` : '');
         rowsHtml += `
             <tr class="mcp-stats-tool-row${isActive ? ' is-active' : ''}"
-                data-tool-name="${escapeHtml(rawName)}"
+                data-tool-name="${escapeAttrLocal(rawName)}"
                 tabindex="0"
                 role="button"
-                aria-label="${escapeHtml(rowAria)}"
+                aria-label="${escapeAttrLocal(rowAria)}"
                 aria-pressed="${isActive ? 'true' : 'false'}">
                 <td class="col-rank"><span class="mcp-stats-rank${rankClass}">${index + 1}</span></td>
-                <td class="col-tool" title="${escapeHtml(name)}">
+                <td class="col-tool" title="${escapeAttrLocal(name)}">
                     <span class="mcp-stats-tool-dot" style="background:${dotColor}" aria-hidden="true"></span>
                     <span class="mcp-stats-tool-label">${escapeHtml(name)}</span>
                 </td>
                 <td class="col-num">${total}</td>
                 <td class="col-share">${sharePct}%</td>
                 <td class="col-rate">
-                    <span class="mcp-stats-rate ${rateClass}">${toolRate}%</span>
+                    <span class="mcp-stats-rate ${rateClass}">${rateText}</span>
                     ${failed > 0 ? `<span class="mcp-stats-fail-note">${escapeHtml(mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`)}</span>` : ''}
+                    ${blocked > 0 ? `<span class="mcp-stats-blocked-note">${escapeHtml(blockedLabel)}</span>` : ''}
                 </td>
             </tr>`;
     });
@@ -6719,8 +8827,8 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
         const segAria = mcpMonitorT('distSegmentAria', { name: displayName, pct: s.pct, calls: s.calls })
             || `${displayName}，占 ${s.pct}%，${s.calls} 次`;
         return `<span class="mcp-stats-proportion-seg${isActive ? ' is-active' : ''}"
-            data-tool-name="${escapeHtml(s.name)}" data-pct="${s.pct}" data-calls="${s.calls}" data-is-others="0"
-            role="button" tabindex="0" aria-label="${escapeHtml(segAria)}"
+            data-tool-name="${escapeAttrLocal(s.name)}" data-pct="${s.pct}" data-calls="${s.calls}" data-is-others="0"
+            role="button" tabindex="0" aria-label="${escapeAttrLocal(segAria)}"
             style="flex:${s.pctNum} 1 0;background:${s.color}" title="${escapeHtml(title)}"></span>`;
     }).join('');
 
@@ -6731,29 +8839,34 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
         const total = tool.totalCalls || 0;
         const success = tool.successCalls || 0;
         const failed = tool.failedCalls || 0;
+        const blocked = tool.blockedCalls || 0;
         const effectiveTotal = success + failed;
         const toolRateNum = effectiveTotal > 0 ? (success / effectiveTotal) * 100 : 0;
         const toolRate = toolRateNum.toFixed(1);
+        const rateText = effectiveTotal > 0 ? `${toolRate}%` : '-';
         const sharePct = totals.total > 0 ? ((total / totals.total) * 100).toFixed(1) : '0.0';
         const color = MCP_STATS_DIST_COLORS[index % MCP_STATS_DIST_COLORS.length];
         const barPct = maxCalls > 0 ? ((total / maxCalls) * 100).toFixed(1) : '0';
         const isActive = activeToolFilter && monitorToolNamesEqual(activeToolFilter, rawName);
-        const rateClass = getMcpToolRateClass(toolRateNum);
+        const rateClass = effectiveTotal > 0 ? getMcpToolRateClass(toolRateNum) : 'is-muted';
         const rankClass = index === 0 ? ' rank-1' : index === 1 ? ' rank-2' : index === 2 ? ' rank-3' : '';
-        const rowAria = mcpMonitorT('toolRowAriaLabel', { name, total, rate: toolRate })
-            || `${name}，${total} 次，成功率 ${toolRate}%`;
+        const blockedLabel = mcpMonitorT('blockedCount', { n: blocked }) || monitorFallback(`安全拦截 ${blocked}`, `Blocked ${blocked}`);
+        const rowAria = (effectiveTotal > 0
+            ? (mcpMonitorT('toolRowAriaLabel', { name, total, rate: toolRate }) || `${name}, ${total} calls, success rate ${toolRate}%`)
+            : (mcpMonitorT('toolRowNoCompletedAriaLabel', { name, total }) || monitorFallback(`${name}，${total} 次调用，暂无完成结果，点击查看执行记录`, `${name}, ${total} calls, no completed outcomes, click to view records`)))
+            + (blocked > 0 ? ` · ${blockedLabel}` : '');
         const failNote = failed > 0
             ? `<span class="mcp-stats-tool-item__fail">${escapeHtml(mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`)}</span>`
             : '';
         const successLabel = mcpMonitorT('successCount', { n: success }) || `成功 ${success}`;
         const failedLabel = mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`;
         return `<li class="mcp-stats-tool-item${isActive ? ' is-active' : ''}"
-            data-tool-name="${escapeHtml(rawName)}" tabindex="0" role="button"
-            aria-label="${escapeHtml(rowAria)}" aria-pressed="${isActive ? 'true' : 'false'}">
+            data-tool-name="${escapeAttrLocal(rawName)}" tabindex="0" role="button"
+            aria-label="${escapeAttrLocal(rowAria)}" aria-pressed="${isActive ? 'true' : 'false'}">
             <div class="mcp-stats-tool-item__top">
                 <span class="mcp-stats-tool-item__rank mcp-stats-rank${rankClass}">${index + 1}</span>
                 <span class="mcp-stats-tool-item__dot" style="background:${color}" aria-hidden="true"></span>
-                <span class="mcp-stats-tool-item__name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                <span class="mcp-stats-tool-item__name" title="${escapeAttrLocal(name)}">${escapeHtml(name)}</span>
                 <span class="mcp-stats-tool-item__share">${sharePct}%</span>
             </div>
             <div class="mcp-stats-tool-item__middle">
@@ -6766,13 +8879,14 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
             <div class="mcp-stats-tool-item__bottom">
                 <span class="mcp-stats-tool-item__pill is-success">${escapeHtml(successLabel)}</span>
                 <span class="mcp-stats-tool-item__pill${failed > 0 ? ' is-danger' : ''}">${escapeHtml(failedLabel)}</span>
-                <span class="mcp-stats-tool-item__rate ${rateClass}">${toolRate}%${failNote}</span>
+                ${blocked > 0 ? `<span class="mcp-stats-tool-item__pill is-blocked">${escapeHtml(blockedLabel)}</span>` : ''}
+                <span class="mcp-stats-tool-item__rate ${rateClass}">${rateText}${failNote}</span>
             </div>
         </li>`;
     }).join('');
 
     return `
-        <div class="mcp-stats-tools-panel" role="region" aria-label="${escapeHtml(totalCallsLabel)}">
+            <div class="mcp-stats-tools-panel" role="region" aria-label="${escapeHtml(mcpMonitorT('toolStatsTitle') || monitorFallback('工具统计', 'Tool statistics'))}">
             <div class="mcp-stats-tools-panel__hero">
                 <div class="mcp-stats-proportion-bar" role="img" aria-label="${escapeHtml(distAria)}">${stackedHtml}</div>
                 <p class="mcp-stats-tools-panel__caption">
@@ -6813,8 +8927,8 @@ function renderMcpStatsChartAside(topTools, totals, activeToolFilter = '') {
 
     return `
         <div class="mcp-stats-dist-panel mcp-stats-dist-panel--compact"
-            aria-label="${escapeHtml(distTitle)}"
-            data-center-label="${escapeHtml(centerLabel)}"
+            aria-label="${escapeAttrLocal(distTitle)}"
+            data-center-label="${escapeAttrLocal(centerLabel)}"
             data-center-value="${top6SharePct}"
             data-center-suffix="%">
             <p class="mcp-stats-panel__aside-title">${escapeHtml(distTitle)}</p>
@@ -6960,6 +9074,7 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
         running: 'statusRunning',
         completed: 'statusCompleted',
         failed: 'statusFailed',
+        blocked: 'statusBlocked',
         cancelled: 'statusCancelled',
         hard_timeout: 'statusHardTimeout',
         orphaned: 'statusOrphaned'
@@ -6967,7 +9082,7 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
     const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : undefined;
     const rowEntries = executions
         .map(exec => {
-            const status = (exec.status || 'unknown').toLowerCase();
+            const status = getToolExecutionDisplayStatus(exec);
             const statusClass = `monitor-status-chip ${status}`;
             const statusKey = statusKeyMap[status];
             const statusLabel = (typeof window.t === 'function' && statusKey) ? window.t('mcpMonitor.' + statusKey) : getStatusText(status);
@@ -6975,11 +9090,11 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
             const duration = formatExecutionDuration(exec.startTime, exec.endTime);
             const toolName = escapeHtml(formatMonitorToolName(exec.toolName) || unknownToolLabel);
             const rawExecId = exec.id || '';
-            const executionId = escapeHtml(rawExecId);
+            const executionId = escapeAttrLocal(rawExecId);
+            const jsExecId = escapeJsStringAttr(rawExecId);
             const terminateBtn = status === 'running'
-                ? `<button type="button" class="btn-secondary btn-monitor-abort" data-require-permission="monitor:write" onclick="cancelMCPToolExecution('${rawExecId.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')">${escapeHtml(terminateLabel)}</button>`
+                ? `<button type="button" class="btn-secondary btn-monitor-abort" data-require-permission="monitor:write" onclick="cancelMCPToolExecution(${jsExecId})">${escapeHtml(terminateLabel)}</button>`
                 : '';
-            const jsExecId = rawExecId.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
             const isSelected = monitorState.selectedExecutions.has(rawExecId);
             const rowKey = monitorRenderKey([exec, isSelected, locale || 'en-US']);
             return {
@@ -6988,7 +9103,7 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
                 html: `
                 <tr data-execution-id="${executionId}">
                     <td>
-                        <input type="checkbox" class="monitor-execution-checkbox theme-checkbox" value="${executionId}" ${isSelected ? 'checked' : ''} onchange="toggleExecutionSelection('${jsExecId}', this.checked)" />
+                        <input type="checkbox" class="monitor-execution-checkbox theme-checkbox" value="${executionId}" ${isSelected ? 'checked' : ''} onchange="toggleExecutionSelection(${jsExecId}, this.checked)" />
                     </td>
                     <td>${toolName}</td>
                     <td><span class="${statusClass}">${escapeHtml(statusLabel)}</span></td>
@@ -6996,9 +9111,9 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
                     <td class="monitor-execution-duration">${escapeHtml(duration)}</td>
                     <td>
                         <div class="monitor-execution-actions">
-                            <button class="btn-secondary" onclick="showMCPDetail('${executionId}')">${escapeHtml(viewDetailLabel)}</button>
+                            <button class="btn-secondary" onclick="showMCPDetail(${jsExecId})">${escapeHtml(viewDetailLabel)}</button>
                             ${terminateBtn}
-                            <button class="btn-secondary btn-delete" data-require-permission="monitor:delete" onclick="deleteExecution('${executionId}')" title="${escapeHtml(deleteExecTitle)}">${escapeHtml(deleteLabel)}</button>
+                            <button class="btn-secondary btn-delete" data-require-permission="monitor:delete" onclick="deleteExecution(${jsExecId})" title="${escapeHtml(deleteExecTitle)}">${escapeHtml(deleteLabel)}</button>
                         </div>
                     </td>
                 </tr>
@@ -7426,8 +9541,8 @@ function refreshProgressAndTimelineI18n() {
     });
     document.querySelectorAll('.progress-message').forEach(function (msgEl) {
         const raw = msgEl.dataset.progressRawMessage;
-        const titleEl = msgEl.querySelector('.progress-title');
-        if (titleEl && raw) {
+        const stageEl = msgEl.querySelector('.progress-stage');
+        if (stageEl && raw) {
             let pdata = null;
             if (msgEl.dataset.progressRawData) {
                 try {
@@ -7436,13 +9551,9 @@ function refreshProgressAndTimelineI18n() {
                     pdata = null;
                 }
             }
-            titleEl.textContent = '\uD83D\uDD0D ' + translateProgressMessage(raw, pdata);
+            stageEl.textContent = translateProgressMessage(raw, pdata);
         }
-    });
-    // 转换后的详情区顶栏「任务执行详情」：仅刷新不在 .progress-message 内的 progress 标题
-    document.querySelectorAll('.progress-container .progress-header .progress-title').forEach(function (titleEl) {
-        if (titleEl.closest('.progress-message')) return;
-        titleEl.textContent = '\uD83D\uDCCB ' + _t('chat.penetrationTestDetail');
+        if (msgEl.id) syncProgressElapsedSummary(msgEl.id);
     });
 
     // 时间线项：按类型重算标题，并重绘时间戳
@@ -7503,15 +9614,32 @@ function refreshProgressAndTimelineI18n() {
                 ? formatToolCallTimelineTitle(name, index, total)
                 : _t('chat.callTool', { name: name, index: index, total: total });
             titleSpan.textContent = ap + '\uD83D\uDD27 ' + callTitle;
+            if (item.dataset.toolDisplayStatus) {
+                applyToolCallStatus(item, item.dataset.toolDisplayStatus);
+            }
         } else if (type === 'tool_result' && (item.dataset.toolName !== undefined || item.dataset.toolSuccess !== undefined)) {
             const name = (item.dataset.toolName != null && item.dataset.toolName !== '') ? item.dataset.toolName : _t('chat.unknownTool');
             const displayStatus = item.dataset.toolDisplayStatus || '';
             const backgroundRunning = displayStatus === 'background_running';
             const success = item.dataset.toolSuccess === '1';
-            const icon = backgroundRunning ? '\u23F3 ' : (success ? '\u2705 ' : '\u274C ');
-            titleSpan.textContent = ap + icon + (backgroundRunning ? (getBackgroundRunningToolLabel() + ': ' + name) : (success ? _t('chat.toolExecComplete', { name: name }) : _t('chat.toolExecFailed', { name: name })));
+            const icon = displayStatus === 'blocked' ? '🛡 ' : (backgroundRunning ? '\u23F3 ' : (success ? '\u2705 ' : '\u274C '));
+            titleSpan.textContent = ap + icon + (displayStatus === 'blocked' ? _t('chat.toolExecBlocked', { name: name }) : backgroundRunning ? (getBackgroundRunningToolLabel() + ': ' + name) : (success ? _t('chat.toolExecComplete', { name: name }) : _t('chat.toolExecFailed', { name: name })));
         } else if (type === 'eino_agent_reply') {
             titleSpan.textContent = ap + '\uD83D\uDCAC ' + _t('chat.einoAgentReplyTitle');
+        } else if (type === 'eino_usage_summary') {
+            const usageData = {
+                modelCalls: item.dataset.modelCalls,
+                promptTokens: item.dataset.promptTokens,
+                completionTokens: item.dataset.completionTokens,
+                totalTokens: item.dataset.totalTokens,
+                cachedTokens: item.dataset.cachedTokens,
+                reasoningTokens: item.dataset.reasoningTokens
+            };
+            titleSpan.textContent = formatEinoUsageSummaryTitle(usageData);
+            const contentEl = item.querySelector('.timeline-usage-summary');
+            if (contentEl) {
+                setTimelineItemContentStreamPlain(contentEl, formatEinoUsageSummaryMessage(usageData));
+            }
         } else if (type === 'cancelled') {
             titleSpan.textContent = '\u26D4 ' + _t('chat.taskCancelled');
         } else if (type === 'user_interrupt_continue') {
@@ -7546,6 +9674,9 @@ function refreshProgressAndTimelineI18n() {
     });
 
     document.querySelectorAll('#chat-messages .message.assistant').forEach(function (msgEl) {
+        if (typeof window.syncAssistantTurnSummary === 'function') {
+            window.syncAssistantTurnSummary(msgEl);
+        }
         if (typeof window.syncMcpToolsToggleButton === 'function') {
             window.syncMcpToolsToggleButton(msgEl);
         }

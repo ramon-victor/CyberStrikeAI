@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,16 @@ type AgentTask struct {
 
 	// hitlCognition 本轮运行中供 HITL/审计 Agent 读取的上下文（用户原话 + 思考，不含会话历史）
 	hitlCognition *hitlCognitionState
+
+	// agentRuntimeCancel wraps the current Eino ADK native AgentCancelFunc; task
+	// cancellation triggers it first and falls back to the host context.
+	agentRuntimeCancel        func(error) bool
+	agentRuntimeCancelVersion uint64
+
+	// agentTurnLoopInterrupt is the current Eino TurnLoop user-follow-up push hook;
+	// on interrupt-and-continue the follow-up is enqueued as a new turn item first.
+	agentTurnLoopInterrupt        func(string) bool
+	agentTurnLoopInterruptVersion uint64
 
 	cancel func(error)
 }
@@ -216,6 +227,58 @@ func (m *AgentTaskManager) BindTaskCancel(conversationID string, cancel context.
 	if t, ok := m.tasks[conversationID]; ok && t != nil {
 		t.cancel = func(err error) {
 			cancel(err)
+		}
+	}
+}
+
+// BindAgentRuntimeCancel registers the Eino native cancel hook for the current run segment.
+func (m *AgentTaskManager) BindAgentRuntimeCancel(conversationID string, cancel func(error) bool) func() {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" || cancel == nil {
+		return func() {}
+	}
+	m.mu.Lock()
+	t, ok := m.tasks[conversationID]
+	if !ok || t == nil {
+		m.mu.Unlock()
+		return func() {}
+	}
+	t.agentRuntimeCancelVersion++
+	version := t.agentRuntimeCancelVersion
+	t.agentRuntimeCancel = cancel
+	m.mu.Unlock()
+
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if cur, exists := m.tasks[conversationID]; exists && cur != nil && cur.agentRuntimeCancelVersion == version {
+			cur.agentRuntimeCancel = nil
+		}
+	}
+}
+
+// BindAgentTurnLoopInterrupt registers the Eino TurnLoop user-follow-up enqueue hook for the running task.
+func (m *AgentTaskManager) BindAgentTurnLoopInterrupt(conversationID string, push func(string) bool) func() {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" || push == nil {
+		return func() {}
+	}
+	m.mu.Lock()
+	t, ok := m.tasks[conversationID]
+	if !ok || t == nil {
+		m.mu.Unlock()
+		return func() {}
+	}
+	t.agentTurnLoopInterruptVersion++
+	version := t.agentTurnLoopInterruptVersion
+	t.agentTurnLoopInterrupt = push
+	m.mu.Unlock()
+
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if cur, exists := m.tasks[conversationID]; exists && cur != nil && cur.agentTurnLoopInterruptVersion == version {
+			cur.agentTurnLoopInterrupt = nil
 		}
 	}
 }
@@ -402,13 +465,34 @@ func (m *AgentTaskManager) CancelTask(conversationID string, cause error) (bool,
 	if cause == nil {
 		cause = ErrTaskCancelled
 	}
+	interruptPush := task.agentTurnLoopInterrupt
+	interruptNote := task.InterruptContinueNote
+	runtimeCancel := task.agentRuntimeCancel
 	var toolCanceler func(string)
 	if errors.Is(cause, ErrTaskCancelled) {
 		toolCanceler = m.toolCanceler
 	}
 	m.mu.Unlock()
 
-	if cancel != nil {
+	if errors.Is(cause, multiagent.ErrInterruptContinue) && interruptPush != nil && interruptPush(interruptNote) {
+		m.mu.Lock()
+		if cur, exists := m.tasks[conversationID]; exists && cur != nil {
+			cur.InterruptContinueNote = ""
+		}
+		m.mu.Unlock()
+		return true, nil
+	}
+
+	runtimeHandled := false
+	if runtimeCancel != nil {
+		runtimeHandled = runtimeCancel(cause)
+	}
+	// A "hard stop" must also cancel the host context: the native Agent Cancel may
+	// be accepted yet only return at the next safe point or report a timeout, so
+	// the whole task cannot be kept alive on that basis alone.
+	// Interrupt-and-continue keeps its original semantics: when the native cancel
+	// already handled the request, the runtime is responsible for resuming.
+	if cancel != nil && (!runtimeHandled || errors.Is(cause, ErrTaskCancelled)) {
 		cancel(cause)
 	}
 	if toolCanceler != nil {
@@ -515,6 +599,12 @@ func (m *AgentTaskManager) GetActiveTasks() []*AgentTask {
 			Status:         task.Status,
 		})
 	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].StartedAt.Equal(result[j].StartedAt) {
+			return result[i].ConversationID < result[j].ConversationID
+		}
+		return result[i].StartedAt.Before(result[j].StartedAt)
+	})
 	return result
 }
 

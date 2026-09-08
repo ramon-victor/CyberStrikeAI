@@ -8,19 +8,27 @@ import (
 
 const toolSearchToolName = "tool_search"
 
-// HitlExemptMetaTools 为编排/元工具：不直接执行攻击动作，但会阻塞 agent 控制流。
-// tool_search 必须免审批，否则其 HITL 拒绝结果与 Eino toolsearch 中间件不兼容（会硬崩 ChatModel）。
+// HitlExemptMetaTools are the HITL built-in approval-exempt tools: the
+// orchestration/meta tools plus write_file, which the model output repair chain
+// depends on. tool_search must stay approval-exempt, otherwise its HITL
+// rejection result is incompatible with the Eino toolsearch middleware (it hard
+// crashes the ChatModel); write_file must stay approval-exempt, otherwise long
+// scripts or request bodies cannot be safely persisted to disk first and the
+// model output repair chain would be blocked again.
 var HitlExemptMetaTools = []string{
 	toolSearchToolName,
 	"skill",
 	"task",
 	"write_todos",
+	"write_file",
 	"transfer_to_agent",
 	"exit",
 	"TaskCreate",
 	"TaskGet",
 	"TaskUpdate",
 	"TaskList",
+	"upsert_project_fact",
+	"get_project_fact",
 }
 
 // IsToolSearchTool reports whether name is the Eino dynamictool tool_search meta-tool.

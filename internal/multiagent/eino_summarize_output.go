@@ -19,6 +19,8 @@ var (
 const (
 	userIntentLedgerStartMarker = "<original_user_intent_ledger>"
 	userIntentLedgerEndMarker   = "</original_user_intent_ledger>"
+
+	summarizationTranscriptPathInstruction = "If you need to compress earlier specifics (such as exact code snippets, error messages, or content you generated), the full conversation transcript is at: %s"
 )
 
 // stripAnalysisFromSummarizationMessage removes the <analysis> block from a post-processed
@@ -60,6 +62,45 @@ func stripAnalysisFromSummarizationText(text string) string {
 		return text
 	}
 	return stripped
+}
+
+func appendTranscriptPathToSummarizationMessage(msg adk.Message, transcriptPath string) adk.Message {
+	transcriptPath = strings.TrimSpace(transcriptPath)
+	if msg == nil || transcriptPath == "" {
+		return msg
+	}
+	section := fmt.Sprintf(summarizationTranscriptPathInstruction, transcriptPath)
+	cloned := *msg
+	if cloned.Content != "" && !strings.Contains(cloned.Content, transcriptPath) {
+		cloned.Content = appendSummarizationSection(cloned.Content, section)
+	}
+	if len(cloned.UserInputMultiContent) > 0 {
+		parts := make([]schema.MessageInputPart, len(cloned.UserInputMultiContent))
+		copy(parts, cloned.UserInputMultiContent)
+		for i := range parts {
+			if parts[i].Type != schema.ChatMessagePartTypeText {
+				continue
+			}
+			if parts[i].Text != "" && !strings.Contains(parts[i].Text, transcriptPath) {
+				parts[i].Text = appendSummarizationSection(parts[i].Text, section)
+			}
+			break
+		}
+		cloned.UserInputMultiContent = parts
+	}
+	return &cloned
+}
+
+func appendSummarizationSection(text, section string) string {
+	text = strings.TrimSpace(text)
+	section = strings.TrimSpace(section)
+	if text == "" {
+		return section
+	}
+	if section == "" {
+		return text
+	}
+	return text + "\n\n" + section
 }
 
 // extractSummarizationSummaryBody returns the inner text of the last <summary> block when present.

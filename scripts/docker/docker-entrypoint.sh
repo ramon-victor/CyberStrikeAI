@@ -5,7 +5,7 @@ set -Eeuo pipefail
 template_config="${CYBERSTRIKE_TEMPLATE_CONFIG:-/app/config.example.yaml}"
 runtime_config_dir="${CYBERSTRIKE_RUNTIME_CONFIG_DIR:-/app/runtime-config}"
 runtime_config_path="${CYBERSTRIKE_RUNTIME_CONFIG_PATH:-${runtime_config_dir}/config.yaml}"
-app_version="${CYBERSTRIKE_APP_VERSION:-v1.7.11}"
+app_version="${CYBERSTRIKE_APP_VERSION:-v1.7.18}"
 
 if [[ ! "${app_version}" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
     printf '[docker-entrypoint] invalid CYBERSTRIKE_APP_VERSION: %s\n' "${app_version}" >&2

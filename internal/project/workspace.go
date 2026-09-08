@@ -62,7 +62,8 @@ func BuildWorkspaceBlock(absPath string) string {
 **You must use this directory** for files downloaded with curl/wget, temporary HTML/JS, and the search scope for read_file/glob/grep:
 `+"`%s`"+`
 
-- **Do not** use the system `+"`/tmp`"+` directory or any other global temporary directory; files can leak across projects or sessions.
+- **Do not** use the system `+"`/tmp`"+` or other global temporary directories (files leak across projects/sessions).
 - Download example: `+"`curl -o '%s/page.html' 'https://target/'`"+`; when using exec, set `+"`workdir`"+` to this directory.
-- Before reading, use glob/grep/read_file with searches **restricted to this directory**; do not search `+"`/tmp`"+` indiscriminately.`, absPath, absPath)
+- Before reading downloaded artifacts or temp analysis files, restrict glob/grep/read_file searches **to this directory**; do not search `+"`/tmp`"+` indiscriminately.
+- When the user asks about "current directory", "project root", or the application's own files, interpret them relative to the server process working directory; do not mistake the empty session workspace for the project root.`, absPath, absPath)
 }

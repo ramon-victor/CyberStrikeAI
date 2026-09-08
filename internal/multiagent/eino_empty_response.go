@@ -22,7 +22,7 @@ func isEinoEmptyResponseText(s string) bool {
 	if s == "" {
 		return false
 	}
-	return 		strings.Contains(s, "no assistant text was captured") ||
+	return strings.Contains(s, "no assistant text was captured") ||
 		strings.Contains(s, "no assistant text output captured")
 }
 

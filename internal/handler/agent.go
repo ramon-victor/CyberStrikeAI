@@ -75,8 +75,11 @@ found:
 
 // responsePlanAgg buffers main-assistant response_stream chunks for one "planning" process_detail row.
 type responsePlanAgg struct {
-	meta map[string]interface{}
-	b    strings.Builder
+	meta            map[string]interface{}
+	b               strings.Builder
+	detailID        string
+	lastPersistAt   time.Time
+	lastPersistSize int
 }
 
 // thinkingBuf aggregates thinking_stream_* / reasoning_chain_stream_* before flush to process_details.
@@ -145,30 +148,36 @@ func responseStreamIterationFromMeta(m map[string]interface{}) int {
 	}
 }
 
-func discardPlanningIfEchoesToolResult(respPlan *responsePlanAgg, toolData interface{}) {
+func discardPlanningIfEchoesToolResult(respPlan *responsePlanAgg, toolData interface{}) string {
 	if respPlan == nil {
-		return
+		return ""
 	}
 	plan := normalizeProcessDetailText(respPlan.b.String())
 	if plan == "" {
-		return
+		return ""
 	}
 	dataMap, ok := toolData.(map[string]interface{})
 	if !ok {
-		return
+		return ""
 	}
 	res, ok := dataMap["result"].(string)
 	if !ok {
-		return
+		return ""
 	}
 	r := normalizeProcessDetailText(res)
 	if r == "" {
-		return
+		return ""
 	}
 	if plan == r || strings.HasSuffix(plan, r) {
+		detailID := respPlan.detailID
 		respPlan.meta = nil
 		respPlan.b.Reset()
+		respPlan.detailID = ""
+		respPlan.lastPersistAt = time.Time{}
+		respPlan.lastPersistSize = 0
+		return detailID
 	}
+	return ""
 }
 
 // AgentHandler Agent处理器
@@ -219,6 +228,20 @@ func (h *AgentHandler) CancelRunningTaskForConversation(conversationID string) {
 	} else if err != nil {
 		h.logger.Warn("取消会话运行中任务失败", zap.String("conversationId", conversationID), zap.Error(err))
 	}
+}
+
+// ConversationTaskRuntimeState exposes the authoritative live state and start
+// time used to scope persisted TaskCreate files to the current run. A task
+// already entering cancellation must stop driving progress UI immediately.
+func (h *AgentHandler) ConversationTaskRuntimeState(conversationID string) (bool, time.Time) {
+	if h == nil || h.tasks == nil || strings.TrimSpace(conversationID) == "" {
+		return false, time.Time{}
+	}
+	task := h.tasks.GetTaskSnapshot(strings.TrimSpace(conversationID))
+	if task == nil || !strings.EqualFold(strings.TrimSpace(task.Status), "running") {
+		return false, time.Time{}
+	}
+	return true, task.StartedAt
 }
 
 func (h *AgentHandler) cancelRunningMCPToolsForConversation(conversationID string) {
@@ -292,12 +315,13 @@ func (h *AgentHandler) SetHitlToolWhitelistSaver(s HitlToolWhitelistSaver) {
 	h.hitlWhitelistSaver = s
 }
 
-// HitlDefaultReviewerSaver 持久化全局默认审批方到 config.yaml。
+// HitlDefaultReviewerSaver persists the global default HITL config to config.yaml.
 type HitlDefaultReviewerSaver interface {
+	UpdateHitlDefaultConfig(mode, reviewer string, timeoutSeconds int) error
 	UpdateHitlDefaultReviewer(reviewer string) error
 }
 
-// SetHitlDefaultReviewerSaver 设置 HITL 默认审批方落盘。
+// SetHitlDefaultReviewerSaver sets the HITL default config persistence implementation.
 func (h *AgentHandler) SetHitlDefaultReviewerSaver(s HitlDefaultReviewerSaver) {
 	h.hitlDefaultReviewerSaver = s
 }
@@ -307,6 +331,35 @@ func (h *AgentHandler) hitlEffectiveDefaultReviewer() string {
 		return normalizeHitlReviewer(h.config.Hitl.EffectiveDefaultReviewer())
 	}
 	return "human"
+}
+
+func (h *AgentHandler) hitlEffectiveDefaultMode() string {
+	if h != nil && h.config != nil {
+		return normalizeHitlDefaultMode(h.config.Hitl.EffectiveDefaultMode())
+	}
+	return "off"
+}
+
+func (h *AgentHandler) hitlEffectiveDefaultTimeoutSeconds() int {
+	if h != nil && h.config != nil {
+		timeout := h.config.Hitl.EffectiveDefaultTimeoutSeconds()
+		if timeout < 0 {
+			return 0
+		}
+		return timeout
+	}
+	return 300
+}
+
+func (h *AgentHandler) hitlEffectiveDefaultRequest() *HITLRequest {
+	mode := h.hitlEffectiveDefaultMode()
+	return &HITLRequest{
+		Enabled:        mode != "off",
+		Mode:           mode,
+		Reviewer:       h.hitlEffectiveDefaultReviewer(),
+		SensitiveTools: []string{},
+		TimeoutSeconds: h.hitlEffectiveDefaultTimeoutSeconds(),
+	}
 }
 
 // HITLNeedsToolApproval 供 C2 危险任务门控：与会话侧人机协同及免审批白名单判定一致。
@@ -675,25 +728,26 @@ func (h *AgentHandler) mergeAssistantMessagePartialOnCancel(messageID, partial s
 
 // ChatResponse 聊天响应
 type ChatResponse struct {
-	Response            string    `json:"response"`
-	MCPExecutionIDs     []string  `json:"mcpExecutionIds,omitempty"` // 本次对话中执行的MCP调用ID列表
-	ConversationID      string    `json:"conversationId"`            // 对话ID
-	Time                time.Time `json:"time"`
-	Finalizable         bool      `json:"finalizable"`
-	Finalized           bool      `json:"finalized"`
-	Status              string    `json:"status,omitempty"`
-	CompletionReason    string    `json:"completionReason,omitempty"`
-	EvidenceVerified    bool      `json:"evidenceVerified"`
-	EvidenceRefs        []string  `json:"evidenceRefs,omitempty"`
-	PendingExecutionIDs []string  `json:"pendingExecutionIds,omitempty"`
-	MissingChecks       []string  `json:"missingChecks,omitempty"`
+	Response                         string    `json:"response"`
+	MCPExecutionIDs                  []string  `json:"mcpExecutionIds,omitempty"` // MCP call IDs executed in this conversation
+	ConversationID                   string    `json:"conversationId"`            // Conversation ID
+	Time                             time.Time `json:"time"`
+	Finalizable                      bool      `json:"finalizable"`
+	Finalized                        bool      `json:"finalized"`
+	Status                           string    `json:"status,omitempty"`
+	CompletionReason                 string    `json:"completionReason,omitempty"`
+	EvidenceVerified                 bool      `json:"evidenceVerified"`
+	EvidenceRefs                     []string  `json:"evidenceRefs,omitempty"`
+	PendingExecutionIDs              []string  `json:"pendingExecutionIds,omitempty"`
+	MissingChecks                    []string  `json:"missingChecks,omitempty"`
+	AutoCancelledPendingExecutionIDs []string  `json:"autoCancelledPendingExecutionIds,omitempty"`
 }
 
 func (h *AgentHandler) finalizeRobotAgentError(ctx context.Context, assistantMessageID, conversationID string, resultMA *multiagent.RunResult, errMA error) (string, string, error) {
 	if shouldPersistEinoAgentTraceAfterRunError(ctx) {
 		h.persistEinoAgentTraceForResume(conversationID, resultMA)
 	}
-	errMsg := "Execution failed: " + errMA.Error()
+	errMsg := "Execution failed: " + multiagent.EinoClientRunErrorMessage(errMA)
 	if assistantMessageID != "" {
 		_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
 		_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errMsg, nil)
@@ -701,8 +755,13 @@ func (h *AgentHandler) finalizeRobotAgentError(ctx context.Context, assistantMes
 	return "", conversationID, errMA
 }
 
-func (h *AgentHandler) finalizeRobotAgentSuccess(assistantMessageID, conversationID string, resultMA *multiagent.RunResult) (string, string, error) {
-	decision := h.finalizeAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, "robot", resultMA, resultMA.MCPExecutionIDs, multiagent.AggregatedReasoningFromTraceJSON(resultMA.LastAgentTraceInput), true)
+func (h *AgentHandler) finalizeRobotAgentSuccess(taskCtx context.Context, assistantMessageID, conversationID string, resultMA *multiagent.RunResult) (string, string, error) {
+	reasoningContent := multiagent.AggregatedReasoningFromTraceJSON(resultMA.LastAgentTraceInput)
+	decision := h.decideAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, "robot", resultMA, resultMA.MCPExecutionIDs, true)
+	if cancelled := h.cleanupPendingToolExecutionsAfterIteration(taskCtx, conversationID, decision, nil); len(cancelled) > 0 {
+		decision = h.decideAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, "robot", resultMA, resultMA.MCPExecutionIDs, true)
+	}
+	h.persistFinalizationDecision(conversationID, assistantMessageID, "robot", resultMA.MCPExecutionIDs, reasoningContent, decision)
 	responseText := decision.FinalText
 	if !decision.Finalizable {
 		responseText = finalizationBlockedMessage(decision)
@@ -735,7 +794,7 @@ func (h *AgentHandler) runRobotEinoSingleWithRetry(
 		*taskStatus = "failed"
 		return h.finalizeRobotAgentError(taskCtx, assistantMessageID, conversationID, resultMA, errMA)
 	}
-	return h.finalizeRobotAgentSuccess(assistantMessageID, conversationID, resultMA)
+	return h.finalizeRobotAgentSuccess(taskCtx, assistantMessageID, conversationID, resultMA)
 }
 
 func (h *AgentHandler) runRobotMultiAgentWithRetry(
@@ -756,7 +815,7 @@ func (h *AgentHandler) runRobotMultiAgentWithRetry(
 		*taskStatus = "failed"
 		return h.finalizeRobotAgentError(taskCtx, assistantMessageID, conversationID, resultMA, errMA)
 	}
-	return h.finalizeRobotAgentSuccess(assistantMessageID, conversationID, resultMA)
+	return h.finalizeRobotAgentSuccess(taskCtx, assistantMessageID, conversationID, resultMA)
 }
 
 // ProcessMessageForRobot 供机器人（企业微信/钉钉/飞书）调用：Eino 单/多代理执行路径（含 progressCallback、过程详情），仅不发送 SSE，最后返回完整回复
@@ -888,6 +947,32 @@ func (h *AgentHandler) publishProgressToTaskEventBus(conversationID, eventType, 
 	h.taskEventBus.Publish(conversationID, sseLine)
 }
 
+func isInternalEinoDiagnosticProgress(eventType, message string, data interface{}) bool {
+	switch eventType {
+	case "model_output_rejected":
+		return true
+	case "progress":
+		msg := strings.TrimSpace(message)
+		if msg == "Eino TurnLoop persistent multi-turn runtime has taken over this conversation." ||
+			msg == "Eino TurnLoop switched to the next turn with the user supplement at a safe point." ||
+			msg == "Pushed the user supplement into the Eino TurnLoop; waiting for a safe point to switch…" {
+			return true
+		}
+		m, ok := data.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		switch strings.TrimSpace(fmt.Sprint(m["kind"])) {
+		case "turn_loop_takeover", "turn_loop_preempted":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
 // enrichProgressEventData 为 SSE / taskEventBus 事件补齐 conversationId、messageId，便于前端懒加载过程详情。
 func enrichProgressEventData(data interface{}, conversationID, assistantMessageID string) interface{} {
 	if strings.TrimSpace(conversationID) == "" && strings.TrimSpace(assistantMessageID) == "" {
@@ -976,14 +1061,15 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 	syncHitlCognition := func() {
 		h.syncHitlCognitionFromProgress(conversationID, assistantMessageID, thinkingStreams, &respPlan)
 	}
-	flushResponsePlan := func() {
+	persistResponsePlan := func(reset bool) {
 		if assistantMessageID == "" {
 			return
 		}
 		content := strings.TrimSpace(respPlan.b.String())
 		if content == "" {
-			respPlan.meta = nil
-			respPlan.b.Reset()
+			if reset {
+				respPlan = responsePlanAgg{}
+			}
 			return
 		}
 		data := map[string]interface{}{
@@ -992,13 +1078,26 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 		for k, v := range respPlan.meta {
 			data[k] = v
 		}
-		if err := h.db.AddProcessDetail(assistantMessageID, conversationID, "planning", content, data); err != nil {
+		var err error
+		if respPlan.detailID == "" {
+			respPlan.detailID, err = h.db.AddProcessDetailWithID(
+				assistantMessageID, conversationID, "planning", content, data,
+			)
+		} else {
+			err = h.db.UpdateProcessDetailContent(respPlan.detailID, content, data)
+		}
+		if err != nil {
 			h.logger.Warn("保存过程详情失败", zap.Error(err), zap.String("eventType", "planning"))
+		} else {
+			respPlan.lastPersistAt = time.Now()
+			respPlan.lastPersistSize = respPlan.b.Len()
 		}
 		syncHitlCognition()
-		respPlan.meta = nil
-		respPlan.b.Reset()
+		if reset {
+			respPlan = responsePlanAgg{}
+		}
 	}
+	flushResponsePlan := func() { persistResponsePlan(true) }
 
 	flushThinkingStreams := func() {
 		if assistantMessageID == "" {
@@ -1039,6 +1138,10 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 		progressMu.Lock()
 		defer progressMu.Unlock()
 
+		if isInternalEinoDiagnosticProgress(eventType, message, data) {
+			return
+		}
+
 		// 上游在重试/补偿时可能重复回调相同 tool_call/tool_result。
 		// 这里做幂等过滤，保证前端展示和 process_details 都以唯一事件为准。
 		if (eventType == "tool_call" || eventType == "tool_result") && data != nil {
@@ -1068,15 +1171,18 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 		}
 
 		deferToolProgressSend := eventType == "tool_call" || eventType == "tool_result"
-		// 流式：写 HTTP SSE；非流式（机器人等）：镜像到 taskEventBus 供 Web 订阅。
-		// 工具事件需先落库拿 processDetailId，再向前端发送摘要，避免大 payload 默认进入浏览器。
+		// The main HTTP SSE stream and the taskEventBus must both be written: a page
+		// refresh cuts the original connection, and the refreshed GET task-events
+		// subscription relies on the eventBus to keep receiving later iterations.
+		// Sources without their own SSE (e.g. bots) also only write to the eventBus.
+		// Tool events must be persisted first to obtain the processDetailId, then the
+		// summary is sent.
 		if !deferToolProgressSend {
 			clientData := enrichProgressEventData(data, conversationID, assistantMessageID)
 			if sendEventFunc != nil {
 				sendEventFunc(eventType, message, clientData)
-			} else {
-				h.publishProgressToTaskEventBus(conversationID, eventType, message, clientData)
 			}
+			h.publishProgressToTaskEventBus(conversationID, eventType, message, clientData)
 		}
 
 		// 保存tool_call事件中的参数
@@ -1329,6 +1435,15 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 					respPlan.meta[k] = v
 				}
 			}
+			// The in-progress main reply cannot live only in memory: a refresh destroys
+			// the old page and new task-events subscribers only receive future deltas.
+			// Throttle updates to the same planning record by time or delta size so a
+			// refresh can restore from the database everything shown before it.
+			if respPlan.lastPersistAt.IsZero() ||
+				time.Since(respPlan.lastPersistAt) >= 300*time.Millisecond ||
+				respPlan.b.Len()-respPlan.lastPersistSize >= 1024 {
+				persistResponsePlan(false)
+			}
 			syncHitlCognition()
 			return
 		}
@@ -1439,7 +1554,11 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 			eventType != "eino_agent_reply_stream_delta" &&
 			eventType != "eino_agent_reply_stream_end" {
 			if eventType == "tool_result" {
-				discardPlanningIfEchoesToolResult(&respPlan, data)
+				if detailID := discardPlanningIfEchoesToolResult(&respPlan, data); detailID != "" {
+					if err := h.db.DeleteProcessDetail(detailID); err != nil {
+						h.logger.Warn("failed to delete tool-result planning echo", zap.Error(err), zap.String("processDetailId", detailID))
+					}
+				}
 			}
 			// 在关键过程事件落库前，先把「规划中」与聚合中的 thinking / reasoning_chain 流落库
 			flushResponsePlan()
@@ -1455,17 +1574,15 @@ func (h *AgentHandler) createProgressCallback(runCtx context.Context, cancelRun 
 				}
 				if sendEventFunc != nil {
 					sendEventFunc(eventType, message, clientData)
-				} else {
-					h.publishProgressToTaskEventBus(conversationID, eventType, message, clientData)
 				}
+				h.publishProgressToTaskEventBus(conversationID, eventType, message, clientData)
 			}
 		} else if deferToolProgressSend {
 			clientData := enrichProgressEventData(summarizeProcessDetailData(eventType, data), conversationID, assistantMessageID)
 			if sendEventFunc != nil {
 				sendEventFunc(eventType, message, clientData)
-			} else {
-				h.publishProgressToTaskEventBus(conversationID, eventType, message, clientData)
 			}
+			h.publishProgressToTaskEventBus(conversationID, eventType, message, clientData)
 		}
 	}
 }

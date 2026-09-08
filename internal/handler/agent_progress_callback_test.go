@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
@@ -15,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// TestCreateProgressCallback_ConcurrentToolEvents 回归 issue #142：并行 tool 回调不得 concurrent map panic。
+// TestCreateProgressCallback_ConcurrentToolEvents regression for issue #142: parallel tool callbacks must not cause a concurrent map panic.
 func TestCreateProgressCallback_ConcurrentToolEvents(t *testing.T) {
 	logger := zap.NewNop()
 	h := &AgentHandler{
@@ -51,7 +53,125 @@ func TestCreateProgressCallback_ConcurrentToolEvents(t *testing.T) {
 	wg.Wait()
 }
 
-// TestCreateProgressCallback_FlushesReasoningOnDone 流式推理聚合须在 done/response 时落库，刷新后可回放。
+// TestCreateProgressCallback_MirrorsWebStreamEvents after a page refresh the task-events subscription must
+// keep receiving later events of the original Web SSE task instead of only waiting for the final DB result.
+func TestCreateProgressCallback_MirrorsWebStreamEvents(t *testing.T) {
+	bus := NewTaskEventBus()
+	h := &AgentHandler{logger: zap.NewNop(), config: &config.Config{}, taskEventBus: bus}
+	_, events := bus.Subscribe("conv-refresh-stream")
+	primaryCalls := 0
+	cb := h.createProgressCallback(
+		context.Background(), nil, "conv-refresh-stream", "",
+		func(eventType, message string, data interface{}) { primaryCalls++ },
+	)
+
+	cb("progress", "Round 3", map[string]interface{}{"iteration": 3})
+	if primaryCalls != 1 {
+		t.Fatalf("expected primary SSE callback once, got %d", primaryCalls)
+	}
+	select {
+	case payload := <-events:
+		body := string(payload)
+		if !strings.Contains(body, `"type":"progress"`) || !strings.Contains(body, `"conversationId":"conv-refresh-stream"`) {
+			t.Fatalf("unexpected mirrored event: %s", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected progress event mirrored to task event bus")
+	}
+}
+
+func TestCreateProgressCallback_HidesInternalEinoDiagnostics(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := database.NewDB(filepath.Join(tmp, "test.sqlite"), zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	conv, err := db.CreateConversation("diag-hidden", database.ConversationCreateMeta{})
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	asst, err := db.AddMessage(conv.ID, "assistant", "处理中...", nil)
+	if err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+	bus := NewTaskEventBus()
+	h := &AgentHandler{logger: zap.NewNop(), db: db, taskEventBus: bus}
+	_, events := bus.Subscribe(conv.ID)
+	primaryCalls := 0
+	cb := h.createProgressCallback(
+		context.Background(), nil, conv.ID, asst.ID,
+		func(string, string, interface{}) { primaryCalls++ },
+	)
+
+	cb("model_output_rejected", "Model tool call incomplete or arguments unsafe; execution blocked and a rewrite requested.", map[string]interface{}{
+		"reason": "invalid_tool_arguments_json",
+	})
+	cb("progress", "Eino TurnLoop persistent multi-turn runtime has taken over this conversation.", map[string]interface{}{
+		"kind": "turn_loop_takeover",
+	})
+
+	if primaryCalls != 0 {
+		t.Fatalf("primary SSE calls = %d, want hidden diagnostics", primaryCalls)
+	}
+	select {
+	case payload := <-events:
+		t.Fatalf("unexpected mirrored diagnostic event: %s", string(payload))
+	default:
+	}
+	details, err := db.GetProcessDetails(asst.ID)
+	if err != nil {
+		t.Fatalf("GetProcessDetails: %v", err)
+	}
+	if len(details) != 0 {
+		t.Fatalf("process details = %+v, want no diagnostics persisted", details)
+	}
+}
+
+func TestCreateProgressCallback_PersistsRunningResponseBeforeDone(t *testing.T) {
+	tmp := t.TempDir()
+	db, err := database.NewDB(filepath.Join(tmp, "test.sqlite"), zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	conv, err := db.CreateConversation("refresh-running", database.ConversationCreateMeta{})
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	asst, err := db.AddMessage(conv.ID, "assistant", "处理中...", nil)
+	if err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+
+	h := &AgentHandler{logger: zap.NewNop(), db: db}
+	cb := h.createProgressCallback(context.Background(), nil, conv.ID, asst.ID, nil)
+	meta := map[string]interface{}{
+		"streamId":      "response-refresh-1",
+		"einoAgent":     "cyberstrike-eino-single",
+		"orchestration": "eino_single",
+	}
+	cb("response_start", "", meta)
+	cb("response_delta", "first part generated before the refresh", openai.WithSSEAccumulated(meta, "first part generated before the refresh"))
+
+	details, err := db.GetProcessDetails(asst.ID)
+	if err != nil {
+		t.Fatalf("GetProcessDetails: %v", err)
+	}
+	if len(details) != 1 || details[0].EventType != "planning" || details[0].Message != "first part generated before the refresh" {
+		t.Fatalf("expected one running planning snapshot, got %+v", details)
+	}
+
+	longer := "first part generated before the refresh" + strings.Repeat("continue iterating", 300)
+	cb("response_delta", "continue iterating", openai.WithSSEAccumulated(meta, longer))
+	details, err = db.GetProcessDetails(asst.ID)
+	if err != nil {
+		t.Fatalf("GetProcessDetails after update: %v", err)
+	}
+	if len(details) != 1 || details[0].Message != longer {
+		t.Fatalf("running snapshot should update in-place, rows=%d len=%d", len(details), len(details[0].Message))
+	}
+}
+
+// TestCreateProgressCallback_FlushesReasoningOnDone reasoning stream aggregation must be persisted on done/response so it can be replayed after a refresh.
 func TestCreateProgressCallback_FlushesReasoningOnDone(t *testing.T) {
 	tmp := t.TempDir()
 	db, err := database.NewDB(filepath.Join(tmp, "test.sqlite"), zap.NewNop())

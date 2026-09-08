@@ -205,6 +205,7 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 	}
 	agentMode := "eino_" + effectiveOrch
 	var decision agentfinalizer.Decision
+	var autoCancelledPendingExecutionIDs []string
 
 	for {
 		segmentMainIterationMax := 0
@@ -240,6 +241,12 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 		taskCtxLoop := mcp.WithMCPConversationID(taskCtx, conversationID)
 		taskCtxLoop = mcp.WithToolRunRegistry(taskCtxLoop, h.tasks)
 		taskCtxLoop = mcp.WithEinoExecuteRunRegistry(taskCtxLoop, h.tasks)
+		taskCtxLoop = multiagent.WithAgentRuntimeCancelRegistrar(taskCtxLoop, func(cancel func(error) bool) func() {
+			return h.tasks.BindAgentRuntimeCancel(conversationID, cancel)
+		})
+		taskCtxLoop = multiagent.WithAgentTurnLoopInterruptRegistrar(taskCtxLoop, func(push func(string) bool) func() {
+			return h.tasks.BindAgentTurnLoopInterrupt(conversationID, push)
+		})
 		taskCtxLoop = multiagent.WithHITLToolInterceptor(taskCtxLoop, func(ctx context.Context, toolName, arguments string) (string, error) {
 			return h.interceptHITLForEinoTool(ctx, cancelWithCause, conversationID, assistantMessageID, sendEvent, toolName, arguments)
 		})
@@ -276,6 +283,10 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 				continue
 			}
 			decision = h.decideAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, agentMode, result, cumulativeMCPExecutionIDs, requestRequiresExecutionEvidence(&req))
+			if cancelled := h.cleanupPendingToolExecutionsAfterIteration(taskCtx, conversationID, decision, progressCallback); len(cancelled) > 0 {
+				autoCancelledPendingExecutionIDs = mergeMCPExecutionIDLists(autoCancelledPendingExecutionIDs, cancelled)
+				decision = h.decideAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, agentMode, result, cumulativeMCPExecutionIDs, requestRequiresExecutionEvidence(&req))
+			}
 			if h.tryAutoContinueAfterFinalization(taskCtx, conversationID, result, decision, &finalizationAutoContinueAttempt, &curHistory, &curFinalMessage, progressCallback) {
 				mainIterationOffset += segmentMainIterationMax
 				timeoutCancel()
@@ -287,6 +298,14 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 		}
 
 		cause := context.Cause(baseCtx)
+		if cause == nil {
+			switch {
+			case errors.Is(runErr, multiagent.ErrInterruptContinue):
+				cause = multiagent.ErrInterruptContinue
+			case errors.Is(runErr, ErrTaskCancelled):
+				cause = ErrTaskCancelled
+			}
+		}
 		if errors.Is(cause, multiagent.ErrInterruptContinue) {
 			if shouldPersistEinoAgentTraceAfterRunError(baseCtx) {
 				h.persistEinoAgentTraceForResume(conversationID, result)
@@ -366,15 +385,17 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 		h.logger.Error("Eino DeepAgent 执行失败", zap.Error(runErr))
 		taskStatus = "failed"
 		h.tasks.UpdateTaskStatus(conversationID, taskStatus)
-		errMsg := "执行失败: " + runErr.Error()
+		clientErr := multiagent.EinoClientRunErrorMessage(runErr)
+		errMsg := "Execution failed: " + clientErr
 		if assistantMessageID != "" {
 			_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
 			_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errMsg, nil)
 		}
-		sendEvent("error", errMsg, map[string]interface{}{
-			"conversationId": conversationID,
-			"messageId":      assistantMessageID,
-		})
+		errData := multiagent.EinoClientRunErrorFields(runErr)
+		errData["conversationId"] = conversationID
+		errData["messageId"] = assistantMessageID
+		errData["error"] = errMsg
+		sendEvent("error", errMsg, errData)
 		sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
 		timeoutCancel()
 		return
@@ -384,6 +405,10 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 
 	if decision.CompletionReason == "" {
 		decision = h.decideAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, agentMode, result, cumulativeMCPExecutionIDs, requestRequiresExecutionEvidence(&req))
+		if cancelled := h.cleanupPendingToolExecutionsAfterIteration(taskCtx, conversationID, decision, nil); len(cancelled) > 0 {
+			autoCancelledPendingExecutionIDs = mergeMCPExecutionIDLists(autoCancelledPendingExecutionIDs, cancelled)
+			decision = h.decideAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, agentMode, result, cumulativeMCPExecutionIDs, requestRequiresExecutionEvidence(&req))
+		}
 	}
 	h.persistFinalizationDecision(conversationID, assistantMessageID, agentMode, cumulativeMCPExecutionIDs, multiagent.AggregatedReasoningFromTraceJSON(result.LastAgentTraceInput), decision)
 
@@ -401,10 +426,11 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 		h.tasks.UpdateTaskStatus(conversationID, taskStatus)
 	}
 	sendEvent("response", responseText, finalizationResponsePayload(decision, map[string]interface{}{
-		"mcpExecutionIds": cumulativeMCPExecutionIDs,
-		"conversationId":  conversationID,
-		"messageId":       assistantMessageID,
-		"agentMode":       agentMode,
+		"mcpExecutionIds":                  cumulativeMCPExecutionIDs,
+		"conversationId":                   conversationID,
+		"messageId":                        assistantMessageID,
+		"agentMode":                        agentMode,
+		"autoCancelledPendingExecutionIds": autoCancelledPendingExecutionIDs,
 	}))
 	sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
 }
@@ -464,6 +490,7 @@ func (h *AgentHandler) MultiAgentLoop(c *gin.Context) {
 	}
 	agentMode := "eino_" + effectiveOrch
 	var decision agentfinalizer.Decision
+	var autoCancelledPendingExecutionIDs []string
 	for {
 		result, runErr = multiagent.RunDeepAgent(
 			taskCtx,
@@ -488,11 +515,14 @@ func (h *AgentHandler) MultiAgentLoop(c *gin.Context) {
 				h.persistEinoAgentTraceForResume(prep.ConversationID, result)
 			}
 			h.logger.Error("Eino DeepAgent 执行失败", zap.Error(runErr))
-			errMsg := "执行失败: " + runErr.Error()
+			clientErr := multiagent.EinoClientRunErrorMessage(runErr)
+			errMsg := "Execution failed: " + clientErr
 			if prep.AssistantMessageID != "" {
 				_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), prep.AssistantMessageID)
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
+			errData := multiagent.EinoClientRunErrorFields(runErr)
+			errData["error"] = errMsg
+			c.JSON(http.StatusInternalServerError, errData)
 			return
 		}
 		mw := &h.config.MultiAgent.EinoMiddleware
@@ -500,6 +530,10 @@ func (h *AgentHandler) MultiAgentLoop(c *gin.Context) {
 			continue
 		}
 		decision = h.decideAgentRunForDeliveryWithPolicy(prep.ConversationID, prep.AssistantMessageID, agentMode, result, result.MCPExecutionIDs, requestRequiresExecutionEvidence(&req))
+		if cancelled := h.cleanupPendingToolExecutionsAfterIteration(taskCtx, prep.ConversationID, decision, progressCallback); len(cancelled) > 0 {
+			autoCancelledPendingExecutionIDs = mergeMCPExecutionIDLists(autoCancelledPendingExecutionIDs, cancelled)
+			decision = h.decideAgentRunForDeliveryWithPolicy(prep.ConversationID, prep.AssistantMessageID, agentMode, result, result.MCPExecutionIDs, requestRequiresExecutionEvidence(&req))
+		}
 		if h.tryAutoContinueAfterFinalization(taskCtx, prep.ConversationID, result, decision, &finalizationAutoContinueAttempt, &curHist, &curMsg, progressCallback) {
 			continue
 		}
@@ -519,18 +553,19 @@ func (h *AgentHandler) MultiAgentLoop(c *gin.Context) {
 		responseText = finalizationBlockedMessage(decision)
 	}
 	c.JSON(http.StatusOK, ChatResponse{
-		Response:            responseText,
-		MCPExecutionIDs:     result.MCPExecutionIDs,
-		ConversationID:      prep.ConversationID,
-		Time:                time.Now(),
-		Finalizable:         decision.Finalizable,
-		Finalized:           decision.Finalized,
-		Status:              decision.Status,
-		CompletionReason:    decision.CompletionReason,
-		EvidenceVerified:    decision.EvidenceVerified,
-		EvidenceRefs:        decision.EvidenceRefs,
-		PendingExecutionIDs: decision.PendingExecutionIDs,
-		MissingChecks:       decision.MissingChecks,
+		Response:                         responseText,
+		MCPExecutionIDs:                  result.MCPExecutionIDs,
+		ConversationID:                   prep.ConversationID,
+		Time:                             time.Now(),
+		Finalizable:                      decision.Finalizable,
+		Finalized:                        decision.Finalized,
+		Status:                           decision.Status,
+		CompletionReason:                 decision.CompletionReason,
+		EvidenceVerified:                 decision.EvidenceVerified,
+		EvidenceRefs:                     decision.EvidenceRefs,
+		PendingExecutionIDs:              decision.PendingExecutionIDs,
+		MissingChecks:                    decision.MissingChecks,
+		AutoCancelledPendingExecutionIDs: autoCancelledPendingExecutionIDs,
 	})
 }
 

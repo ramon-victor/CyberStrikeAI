@@ -665,81 +665,6 @@ func scanConversationRows(rows *sql.Rows) ([]*Conversation, error) {
 	return conversations, rows.Err()
 }
 
-const ungroupedConversationsSQL = `
-	FROM conversations c
-	WHERE NOT EXISTS (
-		SELECT 1 FROM conversation_group_mappings cgm WHERE cgm.conversation_id = c.id
-	)`
-
-// CountUngroupedConversations 统计不在任何分组中的对话数量。
-func (db *DB) CountUngroupedConversations(projectID string) (int, error) {
-	where := ungroupedConversationsSQL
-	args := []interface{}{}
-	where, args = appendConversationProjectFilter(where, args, projectID, "c")
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) `+where, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("统计未分组对话失败: %w", err)
-	}
-	return count, nil
-}
-
-func (db *DB) CountUngroupedConversationsForAccess(projectID, userID, scope string) (int, error) {
-	where := ungroupedConversationsSQL
-	args := []interface{}{}
-	where, args = appendConversationProjectFilter(where, args, projectID, "c")
-	where, args = appendConversationAccessFilter(where, args, userID, scope, "c")
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) `+where, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("统计未分组对话失败: %w", err)
-	}
-	return count, nil
-}
-
-// ListUngroupedConversations 列出不在任何分组中的对话（最近对话侧栏）。
-func (db *DB) ListUngroupedConversations(limit, offset int, sortBy, projectID string) ([]*Conversation, error) {
-	orderClause := conversationOrderClause(sortBy, "c")
-	where := ungroupedConversationsSQL
-	args := []interface{}{}
-	where, args = appendConversationProjectFilter(where, args, projectID, "c")
-	args = append(args, limit, offset)
-	rows, err := db.Query(
-		`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode `+
-			where+`
-		 `+orderClause+`
-		 LIMIT ? OFFSET ?`,
-		args...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("查询未分组对话失败: %w", err)
-	}
-	defer rows.Close()
-	return scanConversationRows(rows)
-}
-
-func (db *DB) ListUngroupedConversationsForAccess(limit, offset int, sortBy, projectID, userID, scope string) ([]*Conversation, error) {
-	if scope == RBACScopeAll || strings.TrimSpace(userID) == "" {
-		return db.ListUngroupedConversations(limit, offset, sortBy, projectID)
-	}
-	orderClause := conversationOrderClause(sortBy, "c")
-	where := ungroupedConversationsSQL
-	args := []interface{}{}
-	where, args = appendConversationProjectFilter(where, args, projectID, "c")
-	where, args = appendConversationAccessFilter(where, args, userID, scope, "c")
-	args = append(args, limit, offset)
-	rows, err := db.Query(
-		`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode `+
-			where+`
-		 `+orderClause+`
-		 LIMIT ? OFFSET ?`,
-		args...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("查询未分组对话失败: %w", err)
-	}
-	defer rows.Close()
-	return scanConversationRows(rows)
-}
-
 // GetConversationTitle 获取对话标题（轻量查询，不加载消息）
 func (db *DB) GetConversationTitle(id string) (string, error) {
 	var title string
@@ -766,6 +691,22 @@ func (db *DB) UpdateConversationTitle(id, title string) error {
 	return nil
 }
 
+// UpdateConversationPinned updates a conversation's pinned state
+func (db *DB) UpdateConversationPinned(id string, pinned bool) error {
+	pinnedValue := 0
+	if pinned {
+		pinnedValue = 1
+	}
+	_, err := db.Exec(
+		"UPDATE conversations SET pinned = ?, updated_at = ? WHERE id = ?",
+		pinnedValue, time.Now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update conversation pinned state: %w", err)
+	}
+	return nil
+}
+
 // UpdateConversationTime 更新对话时间
 func (db *DB) UpdateConversationTime(id string) error {
 	_, err := db.Exec(
@@ -784,7 +725,6 @@ func (db *DB) UpdateConversationTime(id string) error {
 // - process_details（过程详情）
 // - attack_chain_nodes（攻击链节点）
 // - attack_chain_edges（攻击链边）
-// - conversation_group_mappings（分组映射）
 // 漏洞记录会保留：vulnerabilities.conversation_id 使用 ON DELETE SET NULL，仅解除与会话的关联。
 // 注意：knowledge_retrieval_logs 在删除前会被显式清理。
 func (db *DB) DeleteConversation(id string) error {
@@ -1350,7 +1290,43 @@ func (db *DB) AddProcessDetailWithID(messageID, conversationID, eventType, messa
 		return "", fmt.Errorf("添加过程详情失败: %w", err)
 	}
 
+	db.maybeRecordModelTokenUsage(messageID, conversationID, id, eventType, data)
+
 	return id, nil
+}
+
+// UpdateProcessDetailContent updates the body and metadata of a streaming aggregated
+// detail. A fixed record ID avoids adding a row per token and lets a page refresh
+// read planning output that has not finished yet.
+func (db *DB) UpdateProcessDetailContent(id, message string, data interface{}) error {
+	var dataJSON string
+	if data != nil {
+		jsonData, err := json.Marshal(data)
+		if err != nil {
+			return fmt.Errorf("failed to serialize process detail data: %w", err)
+		}
+		dataJSON = string(jsonData)
+	}
+	result, err := db.Exec(
+		"UPDATE process_details SET message = ?, data = ? WHERE id = ?",
+		message, dataJSON, strings.TrimSpace(id),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update process detail: %w", err)
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr == nil && affected == 0 {
+		return fmt.Errorf("process detail not found: %s", id)
+	}
+	return nil
+}
+
+// DeleteProcessDetail deletes a temporary planning record identified as a tool-result echo.
+func (db *DB) DeleteProcessDetail(id string) error {
+	_, err := db.Exec("DELETE FROM process_details WHERE id = ?", strings.TrimSpace(id))
+	if err != nil {
+		return fmt.Errorf("failed to delete process detail: %w", err)
+	}
+	return nil
 }
 
 // GetProcessDetails 获取消息的过程详情
@@ -1420,6 +1396,10 @@ type ProcessDetailsSummary struct {
 	ToolCount       int                           `json:"toolCount"`
 	ToolExecutions  []ProcessDetailsToolExecution `json:"toolExecutions,omitempty"`
 	MCPExecutionIDs []string                      `json:"mcpExecutionIds,omitempty"`
+	StartedAt       *time.Time                    `json:"startedAt,omitempty"`
+	CompletedAt     *time.Time                    `json:"completedAt,omitempty"`
+	DurationMs      int64                         `json:"durationMs"`
+	Status          string                        `json:"status,omitempty"`
 }
 
 type ProcessDetailsToolExecution struct {
@@ -1442,6 +1422,54 @@ func (db *DB) GetProcessDetailsSummary(messageID string) (*ProcessDetailsSummary
 	}
 
 	summary := &ProcessDetailsSummary{Total: total}
+	var messageCreatedAt, messageUpdatedAt sql.NullString
+	var messageContent string
+	if err := db.QueryRow(
+		"SELECT created_at, updated_at, content FROM messages WHERE id = ?",
+		messageID,
+	).Scan(&messageCreatedAt, &messageUpdatedAt, &messageContent); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("failed to query process detail durations: %w", err)
+	}
+	if messageCreatedAt.Valid {
+		if startedAt := parseDBTime(messageCreatedAt.String); !startedAt.IsZero() {
+			summary.StartedAt = &startedAt
+		}
+	}
+	var terminalEvent, terminalCreatedAt string
+	terminalErr := db.QueryRow(`
+SELECT event_type, created_at
+FROM process_details
+WHERE message_id = ? AND event_type IN ('cancelled', 'timeout', 'error')
+ORDER BY created_at DESC, rowid DESC
+LIMIT 1`, messageID).Scan(&terminalEvent, &terminalCreatedAt)
+	if terminalErr != nil && !errors.Is(terminalErr, sql.ErrNoRows) {
+		return nil, fmt.Errorf("failed to query process detail terminal state: %w", terminalErr)
+	}
+	if terminalEvent != "" {
+		switch terminalEvent {
+		case "cancelled":
+			summary.Status = "cancelled"
+		case "timeout":
+			summary.Status = "timeout"
+		default:
+			summary.Status = "failed"
+		}
+		if completedAt := parseDBTime(terminalCreatedAt); !completedAt.IsZero() {
+			summary.CompletedAt = &completedAt
+		}
+	} else if strings.TrimSpace(messageContent) == "处理中..." || strings.TrimSpace(messageContent) == "Processing..." {
+		summary.Status = "running"
+	} else {
+		summary.Status = "completed"
+		if messageUpdatedAt.Valid {
+			if completedAt := parseDBTime(messageUpdatedAt.String); !completedAt.IsZero() {
+				summary.CompletedAt = &completedAt
+			}
+		}
+	}
+	if summary.StartedAt != nil && summary.CompletedAt != nil && !summary.CompletedAt.Before(*summary.StartedAt) {
+		summary.DurationMs = summary.CompletedAt.Sub(*summary.StartedAt).Milliseconds()
+	}
 	if total == 0 {
 		return summary, nil
 	}
@@ -1451,6 +1479,11 @@ func (db *DB) GetProcessDetailsSummary(messageID string) (*ProcessDetailsSummary
 		messageID,
 	).Scan(&summary.ToolCount); err != nil {
 		return nil, fmt.Errorf("统计工具调用详情失败: %w", err)
+	}
+
+	pendingToolStatus := "result_missing"
+	if summary.Status == "running" {
+		pendingToolStatus = "running"
 	}
 
 	execRows, err := db.Query(
@@ -1463,12 +1496,12 @@ func (db *DB) GetProcessDetailsSummary(messageID string) (*ProcessDetailsSummary
 	seenExecIDs := make(map[string]bool)
 	// A provider may reuse a fallback toolCallId across streaming rounds. Keep a
 	// FIFO per ID instead of a single index so every persisted call gets at most
-	// one result. Results without a stable ID are kept separate instead of being
-	// guessed by order; showing no link is safer than linking to the wrong tool.
+	// one result. ID-less results still attach to an unmatched call with the same
+	// tool name (parallel nmap 1/2, 2/2 often lose one ID); different tools stay
+	// unlinked so a leftover preview cannot steal another call's slot.
 	toolIndexesByCallID := make(map[string][]int)
 	lastMatchedToolIndexByCallID := make(map[string]int)
 	matchedToolIndexes := make([]bool, 0)
-	nextUnmatchedToolIdx := 0
 	for execRows.Next() {
 		var detailID string
 		var eventType string
@@ -1484,33 +1517,19 @@ func (db *DB) GetProcessDetailsSummary(messageID string) (*ProcessDetailsSummary
 		if err := json.Unmarshal([]byte(dataJSON), &payload); err != nil {
 			continue
 		}
-		toolName, _ := payload["toolName"].(string)
-		toolName = strings.TrimSpace(toolName)
-		toolCallID, _ := payload["toolCallId"].(string)
-		toolCallID = strings.TrimSpace(toolCallID)
-		execID, _ := payload["executionId"].(string)
-		execID = strings.TrimSpace(execID)
-		status := ""
-		if eventType == "tool_result" {
-			if success, ok := payload["success"].(bool); ok {
-				if success {
-					status = "completed"
-				} else {
-					status = "failed"
-				}
-			} else if isErr, ok := payload["isError"].(bool); ok && isErr {
-				status = "failed"
-			}
-		}
+		toolName := processDetailString(payload, "toolName")
+		toolCallID := processDetailString(payload, "toolCallId")
+		execID := processDetailString(payload, "executionId")
+		status := toolResultStatusFromPayload(payload, eventType)
 		if eventType == "tool_call" {
 			summary.ToolExecutions = append(summary.ToolExecutions, ProcessDetailsToolExecution{
 				ProcessDetailID: strings.TrimSpace(detailID),
 				ToolName:        toolName,
 				ToolCallID:      toolCallID,
-				// This summary is reconstructed from persisted history, not live
-				// execution state. Until a matching result is found the honest state
-				// is "result_missing", never "running".
-				Status: "result_missing",
+				// This summary is reconstructed from persisted history. For an
+				// active assistant turn, a missing result means the call is still
+				// pending; after the turn is terminal it is genuinely incomplete.
+				Status: pendingToolStatus,
 			})
 			matchedToolIndexes = append(matchedToolIndexes, false)
 			if toolCallID != "" {
@@ -1518,36 +1537,14 @@ func (db *DB) GetProcessDetailsSummary(messageID string) (*ProcessDetailsSummary
 			}
 		}
 		if eventType == "tool_result" {
-			idx := -1
-			if toolCallID != "" {
-				queue := toolIndexesByCallID[toolCallID]
-				for len(queue) > 0 {
-					candidate := queue[0]
-					queue = queue[1:]
-					if candidate >= 0 && candidate < len(matchedToolIndexes) && !matchedToolIndexes[candidate] {
-						idx = candidate
-						break
-					}
-				}
-				toolIndexesByCallID[toolCallID] = queue
-				if idx < 0 {
-					// Multiple persisted result events for one call (for example an
-					// agent-facing reduced result replacing an earlier preview) update
-					// that call instead of consuming an unrelated FIFO entry.
-					if previous, ok := lastMatchedToolIndexByCallID[toolCallID]; ok {
-						idx = previous
-					}
-				}
-			}
-			if idx < 0 && toolCallID != "" {
-				for nextUnmatchedToolIdx < len(matchedToolIndexes) && matchedToolIndexes[nextUnmatchedToolIdx] {
-					nextUnmatchedToolIdx++
-				}
-				if nextUnmatchedToolIdx < len(matchedToolIndexes) {
-					idx = nextUnmatchedToolIdx
-					nextUnmatchedToolIdx++
-				}
-			}
+			idx := matchToolExecutionIndex(
+				summary.ToolExecutions,
+				matchedToolIndexes,
+				toolCallID,
+				toolName,
+				toolIndexesByCallID,
+				lastMatchedToolIndexByCallID,
+			)
 			if idx >= 0 && idx < len(summary.ToolExecutions) {
 				matchedToolIndexes[idx] = true
 				if toolCallID != "" {
@@ -1563,6 +1560,8 @@ func (db *DB) GetProcessDetailsSummary(messageID string) (*ProcessDetailsSummary
 				summary.ToolExecutions[idx].ExecutionID = execID
 				if status != "" {
 					summary.ToolExecutions[idx].Status = status
+				} else {
+					summary.ToolExecutions[idx].Status = "completed"
 				}
 			} else {
 				summary.ToolExecutions = append(summary.ToolExecutions, ProcessDetailsToolExecution{
@@ -1585,6 +1584,7 @@ func (db *DB) GetProcessDetailsSummary(messageID string) (*ProcessDetailsSummary
 		return nil, fmt.Errorf("遍历工具执行摘要失败: %w", err)
 	}
 	execRows.Close()
+	db.applyPersistedToolExecutionStatuses(summary.ToolExecutions)
 
 	rows, err := db.Query(
 		"SELECT data FROM process_details WHERE message_id = ? AND event_type = 'iteration' ORDER BY created_at ASC, rowid ASC",
@@ -1617,6 +1617,103 @@ func (db *DB) GetProcessDetailsSummary(messageID string) (*ProcessDetailsSummary
 	summary.IterationCount = iterCount
 	summary.MaxIteration = maxIter
 	return summary, nil
+}
+
+func processDetailString(payload map[string]interface{}, key string) string {
+	if payload == nil {
+		return ""
+	}
+	v, ok := payload[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "" || s == "<nil>" {
+		return ""
+	}
+	return s
+}
+
+func toolResultStatusFromPayload(payload map[string]interface{}, eventType string) string {
+	if eventType != "tool_result" {
+		return ""
+	}
+	if blocked, _ := payload["blocked"].(bool); blocked || strings.EqualFold(processDetailString(payload, "status"), "blocked") {
+		return "blocked"
+	}
+	if status := processDetailString(payload, "status"); strings.EqualFold(status, "background_running") {
+		return "background_running"
+	}
+	if success, ok := payload["success"].(bool); ok {
+		if success {
+			return "completed"
+		}
+		return "failed"
+	}
+	if isErr, ok := payload["isError"].(bool); ok && isErr {
+		return "failed"
+	}
+	return "completed"
+}
+
+func (db *DB) applyPersistedToolExecutionStatuses(executions []ProcessDetailsToolExecution) {
+	for i := range executions {
+		execID := strings.TrimSpace(executions[i].ExecutionID)
+		if execID == "" {
+			continue
+		}
+		var status string
+		if err := db.QueryRow(`SELECT status FROM tool_executions WHERE id = ?`, execID).Scan(&status); err != nil {
+			continue
+		}
+		status = strings.ToLower(strings.TrimSpace(status))
+		if status == "" {
+			continue
+		}
+		executions[i].Status = status
+	}
+}
+
+func matchToolExecutionIndex(
+	executions []ProcessDetailsToolExecution,
+	matched []bool,
+	toolCallID, toolName string,
+	toolIndexesByCallID map[string][]int,
+	lastMatchedToolIndexByCallID map[string]int,
+) int {
+	if toolCallID != "" {
+		queue := toolIndexesByCallID[toolCallID]
+		for len(queue) > 0 {
+			candidate := queue[0]
+			queue = queue[1:]
+			if candidate >= 0 && candidate < len(matched) && !matched[candidate] {
+				toolIndexesByCallID[toolCallID] = queue
+				return candidate
+			}
+		}
+		toolIndexesByCallID[toolCallID] = queue
+		if previous, ok := lastMatchedToolIndexByCallID[toolCallID]; ok {
+			return previous
+		}
+	}
+	if toolName != "" {
+		for i := range matched {
+			if matched[i] {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(executions[i].ToolName), toolName) {
+				return i
+			}
+		}
+	}
+	if toolCallID != "" {
+		for i := range matched {
+			if !matched[i] {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // GetProcessDetailsPage 分页获取消息的过程详情（按时间升序）。

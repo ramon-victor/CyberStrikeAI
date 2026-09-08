@@ -61,6 +61,18 @@ func TestBatchQueueExecutionShouldStop(t *testing.T) {
 	}
 }
 
+func TestBatchSubTaskConversationMetaKeepsQueueRole(t *testing.T) {
+	t.Parallel()
+
+	meta := batchSubTaskConversationMeta(nil, &BatchTaskQueue{Role: " Penetration testing "})
+	if meta.Source != "batch_task" {
+		t.Fatalf("expected batch_task source, got %q", meta.Source)
+	}
+	if meta.RoleName != "Penetration testing" {
+		t.Fatalf("expected queue role to be stored on child conversation, got %q", meta.RoleName)
+	}
+}
+
 func TestDeleteQueueBlockedWhileExecutorActive(t *testing.T) {
 	t.Parallel()
 	m := NewBatchTaskManager(zap.NewNop())

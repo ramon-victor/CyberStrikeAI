@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"cyberstrike-ai/internal/termout"
+	"cyberstrike-ai/internal/toolguard"
 
 	"gopkg.in/yaml.v3"
 )
@@ -29,6 +31,7 @@ type Config struct {
 	Shodan      SpaceSearchConfig     `yaml:"shodan,omitempty" json:"shodan,omitempty"`
 	Agent       AgentConfig           `yaml:"agent"`
 	Hitl        HitlConfig            `yaml:"hitl,omitempty" json:"hitl,omitempty"`
+	ToolGuard   *toolguard.Config     `yaml:"tool_guard,omitempty" json:"tool_guard,omitempty"`
 	Security    SecurityConfig        `yaml:"security"`
 	Database    DatabaseConfig        `yaml:"database"`
 	Auth        AuthConfig            `yaml:"auth"`
@@ -54,9 +57,6 @@ type EnsureLocalConfigResult struct {
 
 const (
 	DefaultMaxCompletionTokens                        = 16384
-	DefaultMaxToolArgumentsBytes                      = 65536
-	DefaultMaxShellCommandBytes                       = 65536
-	DefaultModelOutputRepairMaxAttempts               = 1
 	DefaultSummarizationUserIntentLedgerMaxRunes      = 96000
 	DefaultSummarizationUserIntentLedgerEntryMaxRunes = 16000
 	DefaultLatestUserMessageMaxRunes                  = 48000
@@ -256,12 +256,6 @@ func (c MultiAgentEinoCallbacksConfig) EinoCallbacksMaxOutputSummaryRunes() int 
 
 // MultiAgentEinoMiddlewareConfig optional Eino ADK middleware and Deep / supervisor tuning.
 type MultiAgentEinoMiddlewareConfig struct {
-	// MaxToolArgumentsBytes hard-rejects oversized model-generated tool arguments before execution.
-	MaxToolArgumentsBytes int `yaml:"max_tool_arguments_bytes,omitempty" json:"max_tool_arguments_bytes,omitempty"`
-	// MaxShellCommandBytes applies a stricter limit to exec/execute command strings.
-	MaxShellCommandBytes int `yaml:"max_shell_command_bytes,omitempty" json:"max_shell_command_bytes,omitempty"`
-	// ModelOutputRepairMaxAttempts limits consecutive model-output repair attempts.
-	ModelOutputRepairMaxAttempts int `yaml:"model_output_repair_max_attempts,omitempty" json:"model_output_repair_max_attempts,omitempty"`
 	// PatchToolCalls inserts placeholder tool results for dangling assistant tool_calls (nil = enabled).
 	PatchToolCalls *bool `yaml:"patch_tool_calls,omitempty" json:"patch_tool_calls,omitempty"`
 	// ToolSearch enables dynamictool/toolsearch: hide tail tools until model calls tool_search (reduces prompt tools).
@@ -297,7 +291,7 @@ type MultiAgentEinoMiddlewareConfig struct {
 	LatestUserMessageHeadRunes int `yaml:"latest_user_message_head_runes,omitempty" json:"latest_user_message_head_runes,omitempty"`
 	// LatestUserMessageTailRunes keeps the tail preview for an oversized current user turn.
 	LatestUserMessageTailRunes int `yaml:"latest_user_message_tail_runes,omitempty" json:"latest_user_message_tail_runes,omitempty"`
-	// SummarizationRetryMaxAttempts 已废弃：summarization 与 run loop 共用 run_retry_max_attempts 及 isEinoTransientRunError。
+	// SummarizationRetryMaxAttempts is deprecated: summarization and Eino native ModelRetry share model_retry_max_retries and isEinoTransientRunError.
 	SummarizationRetryMaxAttempts int `yaml:"summarization_retry_max_attempts,omitempty" json:"summarization_retry_max_attempts,omitempty"`
 	// PlanExecuteUserInputBudgetRatio caps planner/replanner/executor userInput prompt budget ratio (default 0.35).
 	PlanExecuteUserInputBudgetRatio float64 `yaml:"plan_execute_user_input_budget_ratio,omitempty" json:"plan_execute_user_input_budget_ratio,omitempty"`
@@ -307,41 +301,29 @@ type MultiAgentEinoMiddlewareConfig struct {
 	PlanExecuteMaxStepResultRunes int `yaml:"plan_execute_max_step_result_runes,omitempty" json:"plan_execute_max_step_result_runes,omitempty"`
 	// PlanExecuteKeepLastSteps keeps only the tail steps in prompt view (default 8).
 	PlanExecuteKeepLastSteps int `yaml:"plan_execute_keep_last_steps,omitempty" json:"plan_execute_keep_last_steps,omitempty"`
-	// CheckpointDir when non-empty enables adk.Runner CheckPointStore (file-backed) for interrupt/resume persistence.
+	// CheckpointDir is retained for config compatibility. Chat agent runs do
+	// not consume it; cross-turn recovery is centralized in conversations.last_react_*.
 	CheckpointDir string `yaml:"checkpoint_dir,omitempty" json:"checkpoint_dir,omitempty"`
 	// DeepOutputKey passed to deep.Config OutputKey (session final text); empty = off.
 	DeepOutputKey string `yaml:"deep_output_key,omitempty" json:"deep_output_key,omitempty"`
-	// DeepModelRetryMaxRetries 已废弃：临时错误统一由 run loop 内 isEinoTransientRunError + run_retry_max_attempts 处理。
+	// DeepModelRetryMaxRetries is deprecated: use model_retry_max_retries; the field is kept only for backward config compatibility.
 	DeepModelRetryMaxRetries int `yaml:"deep_model_retry_max_retries,omitempty" json:"deep_model_retry_max_retries,omitempty"`
-	// RunRetryMaxAttempts > 0：408/409/425/429/5xx/网络抖动时可退避重试次数（run loop 与 summarization 共用）；0=默认 4。
+	// ModelRetryMaxRetries configures Eino ADK native ChatModel retry attempts; 0=default 4.
+	ModelRetryMaxRetries int `yaml:"model_retry_max_retries,omitempty" json:"model_retry_max_retries,omitempty"`
+	// ModelRetryMaxBackoffSec caps native model retry backoff seconds; 0=default 30.
+	ModelRetryMaxBackoffSec int `yaml:"model_retry_max_backoff_sec,omitempty" json:"model_retry_max_backoff_sec,omitempty"`
+	// ModelFailoverChannels lists ai.channels IDs to try after native model retry is exhausted.
+	ModelFailoverChannels []string `yaml:"model_failover_channels,omitempty" json:"model_failover_channels,omitempty"`
+	// ModelFailoverMaxRetries caps distinct failover channel attempts; 0=all configured failover channels.
+	ModelFailoverMaxRetries int `yaml:"model_failover_max_retries,omitempty" json:"model_failover_max_retries,omitempty"`
+	// RunRetryMaxAttempts is deprecated: transient model errors are handled by Eino native ModelRetry; kept only for the non-model run-loop fallback and the legacy summarization field.
 	RunRetryMaxAttempts int `yaml:"run_retry_max_attempts,omitempty" json:"run_retry_max_attempts,omitempty"`
-	// RunRetryMaxBackoffSec 单次退避上限秒数；0=默认 30。
+	// RunRetryMaxBackoffSec is deprecated: use model_retry_max_backoff_sec; kept only for the non-model run-loop fallback and the legacy summarization field.
 	RunRetryMaxBackoffSec int `yaml:"run_retry_max_backoff_sec,omitempty" json:"run_retry_max_backoff_sec,omitempty"`
 	// EmptyResponseContinueMaxAttempts Run 成功但未捕获助手正文时 Handler 层退避续跑次数；0=默认 5。
 	EmptyResponseContinueMaxAttempts int `yaml:"empty_response_continue_max_attempts,omitempty" json:"empty_response_continue_max_attempts,omitempty"`
 	// TaskToolDescriptionPrefix when non-empty sets deep.Config TaskToolDescriptionGenerator (sub-agent names appended).
 	TaskToolDescriptionPrefix string `yaml:"task_tool_description_prefix,omitempty" json:"task_tool_description_prefix,omitempty"`
-}
-
-func (c MultiAgentEinoMiddlewareConfig) MaxToolArgumentsBytesEffective() int {
-	if c.MaxToolArgumentsBytes > 0 {
-		return c.MaxToolArgumentsBytes
-	}
-	return DefaultMaxToolArgumentsBytes
-}
-
-func (c MultiAgentEinoMiddlewareConfig) MaxShellCommandBytesEffective() int {
-	if c.MaxShellCommandBytes > 0 {
-		return c.MaxShellCommandBytes
-	}
-	return DefaultMaxShellCommandBytes
-}
-
-func (c MultiAgentEinoMiddlewareConfig) ModelOutputRepairMaxAttemptsEffective() int {
-	if c.ModelOutputRepairMaxAttempts > 0 {
-		return c.ModelOutputRepairMaxAttempts
-	}
-	return DefaultModelOutputRepairMaxAttempts
 }
 
 func (c MultiAgentEinoMiddlewareConfig) SummarizationTriggerRatioEffective() float64 {
@@ -514,6 +496,10 @@ type MultiAgentPublic struct {
 	LatestUserMessageMaxRunes                  int      `json:"latest_user_message_max_runes"`
 	LatestUserMessageHeadRunes                 int      `json:"latest_user_message_head_runes"`
 	LatestUserMessageTailRunes                 int      `json:"latest_user_message_tail_runes"`
+	ModelRetryMaxRetries                       int      `json:"model_retry_max_retries"`
+	ModelRetryMaxBackoffSec                    int      `json:"model_retry_max_backoff_sec"`
+	ModelFailoverChannels                      []string `json:"model_failover_channels,omitempty"`
+	ModelFailoverMaxRetries                    int      `json:"model_failover_max_retries"`
 	ToolSearchAlwaysVisibleTools               []string `json:"tool_search_always_visible_tools,omitempty"`
 	ToolSearchAlwaysVisibleEffectiveTools      []string `json:"tool_search_always_visible_effective_tools,omitempty"`
 }
@@ -555,15 +541,19 @@ func NormalizeMultiAgentOrchestration(s string) string {
 
 // MultiAgentAPIUpdate 设置页/API 仅更新多代理标量字段；写入 YAML 时不覆盖 sub_agents 等块。
 type MultiAgentAPIUpdate struct {
-	Enabled                                    bool   `json:"enabled"`
-	RobotDefaultAgentMode                      string `json:"robot_default_agent_mode,omitempty"`
-	BatchUseMultiAgent                         bool   `json:"batch_use_multi_agent"`
-	PlanExecuteLoopMaxIterations               *int   `json:"plan_execute_loop_max_iterations,omitempty"`
-	SummarizationUserIntentLedgerMaxRunes      *int   `json:"summarization_user_intent_ledger_max_runes,omitempty"`
-	SummarizationUserIntentLedgerEntryMaxRunes *int   `json:"summarization_user_intent_ledger_entry_max_runes,omitempty"`
-	LatestUserMessageMaxRunes                  *int   `json:"latest_user_message_max_runes,omitempty"`
-	LatestUserMessageHeadRunes                 *int   `json:"latest_user_message_head_runes,omitempty"`
-	LatestUserMessageTailRunes                 *int   `json:"latest_user_message_tail_runes,omitempty"`
+	Enabled                                    bool      `json:"enabled"`
+	RobotDefaultAgentMode                      string    `json:"robot_default_agent_mode,omitempty"`
+	BatchUseMultiAgent                         bool      `json:"batch_use_multi_agent"`
+	PlanExecuteLoopMaxIterations               *int      `json:"plan_execute_loop_max_iterations,omitempty"`
+	SummarizationUserIntentLedgerMaxRunes      *int      `json:"summarization_user_intent_ledger_max_runes,omitempty"`
+	SummarizationUserIntentLedgerEntryMaxRunes *int      `json:"summarization_user_intent_ledger_entry_max_runes,omitempty"`
+	LatestUserMessageMaxRunes                  *int      `json:"latest_user_message_max_runes,omitempty"`
+	LatestUserMessageHeadRunes                 *int      `json:"latest_user_message_head_runes,omitempty"`
+	LatestUserMessageTailRunes                 *int      `json:"latest_user_message_tail_runes,omitempty"`
+	ModelRetryMaxRetries                       *int      `json:"model_retry_max_retries,omitempty"`
+	ModelRetryMaxBackoffSec                    *int      `json:"model_retry_max_backoff_sec,omitempty"`
+	ModelFailoverChannels                      *[]string `json:"model_failover_channels,omitempty"`
+	ModelFailoverMaxRetries                    *int      `json:"model_failover_max_retries,omitempty"`
 	// 指针区分「JSON 未传该字段」与「传空数组要清空」；省略时不应覆盖 YAML 中的常驻工具白名单。
 	ToolSearchAlwaysVisibleTools *[]string `json:"tool_search_always_visible_tools,omitempty"`
 }
@@ -817,8 +807,11 @@ type ServerConfig struct {
 }
 
 type LogConfig struct {
-	Level  string `yaml:"level"`
-	Output string `yaml:"output"`
+	Level                   string `yaml:"level"`
+	Output                  string `yaml:"output"`
+	DiagnosticDir           string `yaml:"diagnostic_dir"`
+	DiagnosticDisabled      bool   `yaml:"diagnostic_disabled"`
+	DiagnosticRetentionDays int    `yaml:"diagnostic_retention_days"`
 }
 
 type MCPConfig struct {
@@ -831,7 +824,7 @@ type MCPConfig struct {
 }
 
 type OpenAIConfig struct {
-	Provider            string `yaml:"provider,omitempty" json:"provider,omitempty"` // API 提供商: "openai"(默认) 或 "claude"，claude 时自动桥接为 Anthropic Messages API
+	Provider            string `yaml:"provider,omitempty" json:"provider,omitempty"` // API provider: "openai" (default) or "claude"; claude uses the Eino native Anthropic Messages API
 	APIKey              string `yaml:"api_key" json:"api_key"`
 	BaseURL             string `yaml:"base_url" json:"base_url"`
 	Model               string `yaml:"model" json:"model"`
@@ -959,10 +952,12 @@ func (c *Config) ApplyDefaultAIChannel() {
 	if c == nil {
 		return
 	}
+	c.NormalizeAIProviderProfiles()
 	c.AI.EnsureDefaultFromOpenAI(c.OpenAI)
 	if oa, _, ok := c.AI.ResolveChannel(c.AI.DefaultChannel); ok {
 		c.OpenAI = oa
 	}
+	c.NormalizeAIProviderProfiles()
 }
 
 func (c OpenAIConfig) MaxCompletionTokensEffective() int {
@@ -970,6 +965,59 @@ func (c OpenAIConfig) MaxCompletionTokensEffective() int {
 		return c.MaxCompletionTokens
 	}
 	return DefaultMaxCompletionTokens
+}
+
+// IsDeepSeekEndpointOrModel reports whether the channel targets DeepSeek's
+// official-compatible API endpoint. The historical name is kept for compatibility;
+// model names alone are not enough to infer DeepSeek wire behavior behind
+// OpenAI-compatible gateways.
+func (c OpenAIConfig) IsDeepSeekEndpointOrModel() bool {
+	baseURL := strings.ToLower(strings.TrimSpace(c.BaseURL))
+	return strings.Contains(baseURL, "deepseek")
+}
+
+func (c OpenAIConfig) IsDeepSeekOfficialEndpoint() bool {
+	host := normalizedURLHost(c.BaseURL)
+	return host == "api.deepseek.com"
+}
+
+func normalizedURLHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		parsed, err = url.Parse("https://" + strings.TrimLeft(raw, "/"))
+		if err != nil {
+			return ""
+		}
+	}
+	return strings.ToLower(strings.TrimPrefix(parsed.Hostname(), "www."))
+}
+
+func NormalizeOpenAIProviderProfile(oa *OpenAIConfig) {
+	if oa == nil {
+		return
+	}
+	if oa.IsDeepSeekOfficialEndpoint() {
+		oa.Reasoning.Profile = "deepseek"
+	}
+}
+
+func (c *Config) NormalizeAIProviderProfiles() {
+	if c == nil {
+		return
+	}
+	NormalizeOpenAIProviderProfile(&c.OpenAI)
+	if c.AI.Channels != nil {
+		for id, ch := range c.AI.Channels {
+			oa := ch.ToOpenAIConfig()
+			NormalizeOpenAIProviderProfile(&oa)
+			ch.Reasoning = oa.Reasoning
+			c.AI.Channels[id] = ch
+		}
+	}
 }
 
 // OpenAIReasoningConfig 全局默认与网关 profile（对话页可通过 ChatRequest.reasoning 覆盖，受 AllowClientReasoning 约束）。
@@ -1066,8 +1114,24 @@ type HitlConfig struct {
 	AuditAgentPromptReviewEdit string `yaml:"audit_agent_prompt_review_edit,omitempty" json:"audit_agent_prompt_review_edit,omitempty"`
 	// RetentionDays 已决策审计日志（hitl_interrupts 非 pending）保留天数；省略时默认 90；0 表示不自动清理。
 	RetentionDays *int `yaml:"retention_days,omitempty" json:"retention_days,omitempty"`
-	// DefaultReviewer 全局默认审批方（human | audit_agent）；未选会话时切换会写入 config.yaml；新建会话无独立配置时沿用。
+	// DefaultMode global default HITL mode (off | approval | review_edit); used for new conversations without per-conversation settings.
+	DefaultMode string `yaml:"default_mode,omitempty" json:"default_mode,omitempty"`
+	// DefaultReviewer global default reviewer (human | audit_agent); used for new conversations without per-conversation settings.
 	DefaultReviewer string `yaml:"default_reviewer,omitempty" json:"default_reviewer,omitempty"`
+	// DefaultTimeoutSeconds global default approval wait in seconds; nil uses the frontend's historical default of 300 seconds, 0 means no time limit.
+	DefaultTimeoutSeconds *int `yaml:"default_timeout_seconds,omitempty" json:"default_timeout_seconds,omitempty"`
+}
+
+// EffectiveDefaultMode returns off, approval, or review_edit; omitted or unknown values default to off.
+func (h HitlConfig) EffectiveDefaultMode() string {
+	switch strings.ToLower(strings.TrimSpace(h.DefaultMode)) {
+	case "feedback", "followup":
+		return "approval"
+	case "approval", "review_edit":
+		return strings.ToLower(strings.TrimSpace(h.DefaultMode))
+	default:
+		return "off"
+	}
 }
 
 // EffectiveDefaultReviewer returns human or audit_agent; omitted or unknown values default to human.
@@ -1078,6 +1142,17 @@ func (h HitlConfig) EffectiveDefaultReviewer() string {
 	default:
 		return "human"
 	}
+}
+
+// EffectiveDefaultTimeoutSeconds returns the default HITL approval timeout; nil defaults to 5 minutes.
+func (h HitlConfig) EffectiveDefaultTimeoutSeconds() int {
+	if h.DefaultTimeoutSeconds == nil {
+		return 300
+	}
+	if *h.DefaultTimeoutSeconds < 0 {
+		return 0
+	}
+	return *h.DefaultTimeoutSeconds
 }
 
 // RetentionDaysEffective returns retention; 0 means keep forever; omitted defaults to 90.
@@ -1120,29 +1195,56 @@ const hitlAuditAgentPromptBase = `你是 CyberStrikeAI 人机协同审计 Agent�
 
 你会收到 JSON，包含 hitlMode、toolName、arguments/argumentsObj、userMessage、thinking、reasoningChain、planning 等字段。
 
+Rule priority:
+- Rules that must reject
+- Rules that must approve
+- Default-approve rule
+
+Rule-matching requirements:
+- If both reject and approve rules are matched, you must reject.
+- Every decision must cite one rule number; never output "matched rule: none".
+- When no explicit reject or approve rule is matched but no clearly destructive behavior is found, match D1: default approve.
+- Never judge a script harmless merely because it "runs locally", "sets a timeout", or "has test in the filename"; you must inspect the actual command, code, or request parameters.
+- If the script's actual content is not visible, state it as "the current arguments show no clearly high-risk operation"; do not assert "no persistent impact".
+
 裁决基调（默认放行）：
-- 常规、低风险的渗透测试操作 → approve（如信息收集、端口/服务扫描、目录枚举、只读查询、无害探测命令）
-- 与用户授权、当前任务目标一致，且未见明确高危迹象 → approve
-- 仅在「可能对系统造成实质影响」时 → reject
+- The vast majority of penetration-testing operations (including all kinds of attack payloads) should be approved
+- Before ruling, determine: 1. What is this request trying to do (understand the request content)? 2. What consequences would this request cause?
+- Only when it would clearly and directly disrupt the normal operation of the target business system, or cause real user data loss / irreversible tampering → reject
+- Insufficient information, somewhat broad arguments, or purely probing intent → approve
+- When unsure → approve (better to let a recoverable test pass than to mistakenly block a legitimate attack)
 
 必须 reject 的高危情形（示例，非穷举）：
-- 删库、清表、批量删除数据、格式化磁盘、不可逆破坏
-- 修改/重置密码、创建或篡改管理员账号、持久化后门、开机自启
-- 向生产环境写入恶意载荷、勒索加密、停止关键服务、修改系统核心配置
-- 明显越权：与任务/授权目标无关的破坏性操作
+- Modifying/resetting any user or administrator password, forcing real users offline
+- Modifying server or service configuration (system configuration, web/database parameters, firewall, startup items, scheduled tasks)
+- Modifying/creating/deleting users, roles, or permissions (tampering with the account system)
+- Deleting or mass-destroying data/files (DROP/TRUNCATE/DELETE on whole tables, rm of important files, wiping databases)
+- Stopping, disabling, or restarting business services (systemctl stop, killing critical processes, shutdown, reboot)
+- Large-scale load testing or high concurrency causing DoS
 
-不应单独作为 reject 理由的情形：
-- 常规 nmap/curl/grep/读文件/枚举类命令本身
-- 参数略显宽泛但无明确破坏意图（审查编辑模式可收窄参数后 approve）
-- 仅因「信息不足」——若无上述高危迹象，应 approve 并可在 comment 中提示注意点`
+The following cases must be approved (even if they look "aggressive" or include write operations):
+- Vulnerability probing and exploitation payloads of all kinds (SQL injection including read/write variants, command injection, deserialization, file inclusion, path traversal, SSRF, SSTI, XXE, etc.)
+- File upload testing, including uploading webshells and writing webshell files
+- Command execution probing, reverse shells, dnslog / data exfiltration probing
+- Database command execution, file writing, scheduled-task writing, in-memory webshell injection, and other getshell exploits
+- Password brute-forcing at normal rates (not DoS-level)
+- Information gathering, port/directory scanning, enumeration, crawling
+- Read, query, and probing operations (including sensitive files)
+- Harmless post-compromise reconnaissance commands (whoami/id/uname/ls/cat, etc.)
+- Requests with broad arguments but no clear destructive intent
+
+Decision principles:
+- "Writing" is not by itself a reason to block — penetration testing relies heavily on write operations (injection, upload, brute-forcing, getshell)
+- What matters is whether it disrupts business availability / critical data integrity
+- Reject only when a case in the reject list above is clearly matched`
 
 const hitlAuditAgentPromptApprovalOutput = `
 仅输出一行 JSON，不要 markdown 代码块：
-{"decision":"approve"|"reject","comment":"简要理由"}`
+{"decision":"approve"|"reject","comment":"Actual operation: ...; consequences on success: ...; matched rule: ..."}`
 
 const hitlAuditAgentPromptReviewEditOutput = `
 仅输出一行 JSON，不要 markdown 代码块：
-{"decision":"approve"|"reject","comment":"简要理由","editedArguments":{...}}
+{"decision":"approve"|"reject","comment":"Actual operation: ...; consequences on success: ...; matched rule: ...","editedArguments":{...}}
 
 editedArguments 规则（仅 approve 且需要改参时填写，否则省略该字段）：
 - 提供完整替换后的工具参数对象，键名与 argumentsObj 一致
@@ -1342,6 +1444,14 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
+	if cfg.ToolGuard != nil {
+		if err := validateToolGuardYAML(data); err != nil {
+			return nil, fmt.Errorf("invalid tool call guard config: %w", err)
+		}
+	}
+	if _, err := toolguard.Compile(cfg.EffectiveToolGuard()); err != nil {
+		return nil, fmt.Errorf("invalid tool call guard config: %w", err)
+	}
 
 	if cfg.Auth.SessionDurationHours <= 0 {
 		cfg.Auth.SessionDurationHours = 12
@@ -1349,8 +1459,9 @@ func Load(path string) (*Config, error) {
 	if cfg.Audit.MaxDetailBytes <= 0 {
 		cfg.Audit.MaxDetailBytes = 8192
 	}
+	cfg.NormalizeAIProviderProfiles()
 	cfg.ApplyDefaultAIChannel()
-	if err := validateModelOutputLimits(cfg.OpenAI, cfg.MultiAgent.EinoMiddleware); err != nil {
+	if err := validateOpenAIOutputLimits(cfg.OpenAI); err != nil {
 		return nil, err
 	}
 	// 如果配置了工具目录，从目录加载工具配置
@@ -1415,21 +1526,9 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-func validateModelOutputLimits(openAI OpenAIConfig, mw MultiAgentEinoMiddlewareConfig) error {
+func validateOpenAIOutputLimits(openAI OpenAIConfig) error {
 	if openAI.MaxCompletionTokens < 0 {
 		return fmt.Errorf("openai.max_completion_tokens 必须为正数")
-	}
-	if mw.MaxToolArgumentsBytes < 0 {
-		return fmt.Errorf("multi_agent.eino_middleware.max_tool_arguments_bytes 必须为正数")
-	}
-	if mw.MaxShellCommandBytes < 0 {
-		return fmt.Errorf("multi_agent.eino_middleware.max_shell_command_bytes 必须为正数")
-	}
-	if mw.ModelOutputRepairMaxAttempts < 0 {
-		return fmt.Errorf("multi_agent.eino_middleware.model_output_repair_max_attempts 必须为正数")
-	}
-	if mw.MaxShellCommandBytesEffective() > mw.MaxToolArgumentsBytesEffective() {
-		return fmt.Errorf("multi_agent.eino_middleware.max_shell_command_bytes 不能大于 max_tool_arguments_bytes")
 	}
 	return nil
 }

@@ -17,7 +17,7 @@ args:
     # ==================================================
 
     # ZoomEye API base URL
-    base_url = "https://api.zoomeye.org/v2/search"
+    base_url = "https://api.zoomeye.ai/v2/search"
 
     # Parse arguments (from JSON string or command line arguments)
     def parse_args():
@@ -78,7 +78,7 @@ args:
                 "status": "error",
                 "message": "Missing ZoomEye configuration: api_key (ZoomEye API key) ",
                 "required_config": ["api_key"],
-                "note": "Please fill in your API key in the ZOOMEYE_API_KEY configuration item in the YAML file, or set it in the environment variable ZOOMEYE_API_KEY. The API key can be obtained from the ZoomEye user center: https://www.zoomeye.org/user"
+                "note": "Please fill in your API key in the ZOOMEYE_API_KEY configuration item in the YAML file, or set it in the environment variable ZOOMEYE_API_KEY. The API key can be obtained from the ZoomEye user center: https://www.zoomeye.ai/user"
             }
             print(json.dumps(error_result, ensure_ascii=False, indent=2))
             sys.exit(1)
@@ -174,6 +174,16 @@ args:
             # Format output results
             # ZoomEye API returned data is in the data field
             data_list = result_data.get('data', [])
+            if isinstance(data_list, dict):
+                nested = None
+                for key in ('data', 'items', 'matches', 'results', 'list', 'records'):
+                    value = data_list.get(key)
+                    if isinstance(value, list):
+                        nested = value
+                        break
+                data_list = nested if nested is not None else []
+            if not isinstance(data_list, list):
+                data_list = []
             output = {
                 "status": "success",
                 "query": result_data.get('query', query),

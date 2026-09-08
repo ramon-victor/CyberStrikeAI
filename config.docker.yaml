@@ -10,7 +10,7 @@
 # ============================================
 
 # Version shown in the frontend (optional; uses the default version when empty)
-version: "v1.7.11"
+version: "v1.7.18"
 # Server settings
 server:
   host: 0.0.0.0 # Bind address; 0.0.0.0 listens on all network interfaces
@@ -36,6 +36,9 @@ auth:
 log:
   level: info # Log level: debug, info, warn, error
   output: stdout # Log output destination: stdout, stderr, or a file path
+  diagnostic_dir: log # Save warn-and-above diagnostic logs separately, split by local date; relative to the process working directory
+  diagnostic_retention_days: 14 # Retention days (including today); omitted or <= 0 uses 14 days
+  diagnostic_disabled: false # true disables the extra diagnostic logs; restart after changing
 # Platform operation audit (Settings -> Audit Log; conversation text and individual tool calls are not recorded)
 audit:
   enabled: true
@@ -99,10 +102,10 @@ fofa:
   base_url: https://fofa.info/api/v1/search/all # Optional; empty uses the default
   api_key: "" # FOFA API Key (optional; recommended to fill in System Settings)
 zoomeye:
-  base_url: https://api.zoomeye.org/v2/search # Optional; empty uses the default
+  base_url: https://api.zoomeye.ai/v2/search # Optional; empty uses the default
   api_key: "" # ZoomEye API Key; can also be configured with the ZOOMEYE_API_KEY environment variable
 quake:
-  base_url: https://quake.360.cn/api/v3/search/quake_service # Optional; empty uses the default
+  base_url: https://quake.360.net/api/v3/search/quake_service # Optional; empty uses the default
   api_key: "" # Quake API Token; can also be configured with the QUAKE_API_KEY environment variable
 shodan:
   base_url: https://api.shodan.io # Optional; empty uses the default
@@ -122,6 +125,18 @@ agent:
   # system_prompt_path: prompts/single-agent.md # Optional: single-agent system prompt file (relative to the directory containing this config); replaces the built-in prompt when non-empty and readable
 
   system_prompt_path: ""
+# Tool call blocking: edit and save under "Security Protection -> Tool Call Blocking"; takes effect immediately; independent of the HITL approval whitelist.
+# Government-domain protection stays enabled by default even when the tool_guard section is omitted. Restart after editing this YAML by hand.
+tool_guard:
+  enabled: true
+  rules:
+    - id: government-domains
+      name: Government website protection
+      enabled: true
+      # Go/RE2 regex; the named capture group "match" feeds the {match} placeholder in the message.
+      pattern: '(?i)(?:^|[^\p{L}\p{M}\p{N}_.-])(?P<match>(?:(?:[\p{L}\p{M}\p{N}_*-]+\.)+gov(?:\.[\p{L}\p{M}\p{N}_*-]+)*|gov(?:\.[\p{L}\p{M}\p{N}_*-]+)+|\.gov(?:\.[\p{L}\p{M}\p{N}_*-]+)*)\.?)(?:$|[^\p{L}\p{M}\p{N}_.-])'
+      # Supports {match}, {tool}, {rule}; leave empty to use the generic reminder.
+      message: 'Blocked {match}: attacking government websites is forbidden. Check the target and authorization scope, and switch to an authorized non-government target.'
 # Human-in-the-loop (HITL) global whitelist: listed tools always bypass approval. It is merged with the conversation-page whitelist; sidebar applications may update it immediately.
 # Non-whitelisted tools use the prompt selected by the session HITL mode when the reviewer is the audit agent:
 #   approval → audit_agent_prompt
@@ -129,6 +144,10 @@ agent:
 hitl:
   # Global reviewer: human or audit_agent. Changes made without a selected session are persisted here.
   default_reviewer: human
+  # Global default HITL mode: off = disabled, approval = approval mode, review_edit = review-edit; used by new conversations without their own setting
+  default_mode: off
+  # Global default approval wait timeout in seconds: 300 = 5 minutes, 0 = unlimited; used by new conversations without their own setting
+  default_timeout_seconds: 300
   # Audit-agent model; empty fields reuse the default AI channel. A smaller model reduces approval cost.
   audit_model:
     provider: "" # openai / claude; empty follows openai.provider

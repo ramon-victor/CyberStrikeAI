@@ -38,6 +38,7 @@ type Params struct {
 	ConversationID   string
 	OrchMode         string
 	OrchestratorName string
+	RunID            string
 }
 
 // AttachAgentRunCallbacks returns ctx wrapped with callbacks.InitCallbacks when enabled.
@@ -53,7 +54,10 @@ func AttachAgentRunCallbacks(ctx context.Context, cfg *config.MultiAgentEinoCall
 	if mode == "off" {
 		return ctx
 	}
-	runID := uuid.New().String()
+	runID := strings.TrimSpace(p.RunID)
+	if runID == "" {
+		runID = uuid.New().String()
+	}
 	if p.Progress != nil && cfg.ShouldEmitEinoTraceSSE(mode) {
 		p.Progress("eino_trace_run", "Eino callbacks session", map[string]interface{}{
 			"runId":            runID,

@@ -47,6 +47,7 @@ function clearAuthStorage() {
     authRoles = [];
     authPermissions = new Set();
     authScope = '';
+    applyRBACToUI();
     try {
         localStorage.removeItem(AUTH_STORAGE_KEY);
     } catch (error) {
@@ -333,6 +334,15 @@ async function refreshAppData(showTaskErrors = false) {
         loadConversations(),
         loadActiveTasks(showTaskErrors),
     ]);
+    // 未登录首屏的项目侧栏可能先收到 401 并显示失败；认证完成后必须主动重试。
+    // 放在对话/任务刷新之后，确保最终渲染一定使用有效登录态且不会被早期失败覆盖。
+    if (typeof window.refreshChatProjectSelector === 'function') {
+        try {
+            await window.refreshChatProjectSelector({ reloadFolders: true });
+        } catch (error) {
+            console.warn('刷新项目侧栏失败:', error);
+        }
+    }
 }
 
 async function bootstrapApp() {
@@ -359,6 +369,7 @@ const PAGE_PERMISSION_MAP = {
     dashboard: 'dashboard:read',
     chat: 'chat:read',
     hitl: 'hitl:read',
+    'tool-guard': 'config:read',
     'info-collect': 'fofa:execute',
     assets: 'asset:read',
     'asset-overview': 'asset:read',
@@ -495,6 +506,12 @@ function installPermissionClickGuard() {
 function applyRBACToUI(root) {
     installPermissionClickGuard();
     document.querySelectorAll('[data-page]').forEach((el) => {
+        // Navigation permissions must also be refreshed during scoped renders.
+        // Explicit rules take precedence over the fallback page permission map.
+        if (el.hasAttribute('data-require-permission') || el.hasAttribute('data-require-permission-any')) {
+            applyPermissionElement(el);
+            return;
+        }
         const page = el.getAttribute('data-page');
         const permission = PAGE_PERMISSION_MAP[page];
         if (!permission) return;
@@ -604,10 +621,10 @@ function setUserMenuOpen(open) {
 function getStatusText(status) {
     const s = (status && String(status).toLowerCase()) || '';
     if (typeof window.t !== 'function') {
-        const fallback = { pending: '等待中', queued: '排队中', running: '执行中', background_running: '后台执行中', completed: '已完成', failed: '失败', cancelled: '已终止', hard_timeout: '硬超时', orphaned: '孤儿记录' };
+        const fallback = { pending: '等待中', queued: '排队中', running: '执行中', background_running: '后台执行中', completed: '已完成', failed: '失败', blocked: '已拦截', cancelled: '已终止', hard_timeout: '硬超时', orphaned: '孤儿记录' };
         return fallback[s] || status;
     }
-    const keyMap = { pending: 'mcpDetailModal.statusPending', queued: 'mcpDetailModal.statusQueued', running: 'mcpDetailModal.statusRunning', background_running: 'timeline.backgroundRunning', completed: 'mcpDetailModal.statusCompleted', failed: 'mcpDetailModal.statusFailed', cancelled: 'mcpDetailModal.statusCancelled', hard_timeout: 'mcpMonitor.statusHardTimeout', orphaned: 'mcpMonitor.statusOrphaned' };
+    const keyMap = { pending: 'mcpDetailModal.statusPending', queued: 'mcpDetailModal.statusQueued', running: 'mcpDetailModal.statusRunning', background_running: 'timeline.backgroundRunning', completed: 'mcpDetailModal.statusCompleted', failed: 'mcpDetailModal.statusFailed', blocked: 'mcpMonitor.statusBlocked', cancelled: 'mcpDetailModal.statusCancelled', hard_timeout: 'mcpMonitor.statusHardTimeout', orphaned: 'mcpMonitor.statusOrphaned' };
     const key = keyMap[s];
     return key ? window.t(key) : status;
 }
@@ -630,6 +647,18 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function escapeJsString(text) {
+    return JSON.stringify(String(text == null ? '' : text));
+}
+
+function escapeAttr(text) {
+    return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function escapeJsStringAttr(text) {
+    return escapeAttr(escapeJsString(text));
 }
 
 /** @param {string} text @param {{ profile?: 'chat'|'timeline' }} [options] */
@@ -863,7 +892,7 @@ async function loadRobotAccountBindings() {
                 <div class="robot-binding-account-name"><strong>${escapeHtml(platformLabels[binding.platform] || binding.platform || '-')}</strong><span>已连接</span></div>
                 <small>账号标识 ${escapeHtml(binding.external_user_hint || '-')} · 更新于 ${escapeHtml(formatRobotBindingTime(binding.updated_at))}</small>
             </div>
-            <button type="button" class="btn-secondary btn-small robot-binding-unbind-btn" onclick="deleteRobotAccountBinding('${escapeHtml(binding.id || '')}')">解除绑定</button>
+            <button type="button" class="btn-secondary btn-small robot-binding-unbind-btn" onclick="deleteRobotAccountBinding(${escapeJsStringAttr(binding.id || '')})">解除绑定</button>
         </div>`).join('');
 	if (typeof window.loadVulnerabilityAlertSubscription === 'function') {
 		window.loadVulnerabilityAlertSubscription();

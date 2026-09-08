@@ -21,6 +21,18 @@ function settingsT(key, fallback) {
     return fallback;
 }
 
+function settingsEscapeJsString(text) {
+    return JSON.stringify(String(text == null ? '' : text));
+}
+
+function settingsEscapeAttr(text) {
+    return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function settingsEscapeJsStringAttr(text) {
+    return settingsEscapeAttr(settingsEscapeJsString(text));
+}
+
 const settingsCustomSelects = new Map();
 let settingsCustomSelectsDocBound = false;
 
@@ -847,6 +859,26 @@ async function loadConfig(loadTools = true, options = {}) {
             maRobotMode.value = mode;
             syncRobotAgentModeSelectOptions(ma.enabled === true);
         }
+        const modelRetryMaxEl = document.getElementById('eino-model-retry-max-retries');
+        if (modelRetryMaxEl) {
+            const v = ma.model_retry_max_retries;
+            modelRetryMaxEl.value = (v !== undefined && v !== null && !Number.isNaN(Number(v))) ? String(Number(v)) : '0';
+        }
+        const modelRetryBackoffEl = document.getElementById('eino-model-retry-max-backoff-sec');
+        if (modelRetryBackoffEl) {
+            const v = ma.model_retry_max_backoff_sec;
+            modelRetryBackoffEl.value = (v !== undefined && v !== null && !Number.isNaN(Number(v))) ? String(Number(v)) : '0';
+        }
+        const modelFailoverChannelsEl = document.getElementById('eino-model-failover-channels');
+        if (modelFailoverChannelsEl) {
+            const channels = ma.model_failover_channels;
+            modelFailoverChannelsEl.value = Array.isArray(channels) ? channels.join('\n') : '';
+        }
+        const modelFailoverMaxEl = document.getElementById('eino-model-failover-max-retries');
+        if (modelFailoverMaxEl) {
+            const v = ma.model_failover_max_retries;
+            modelFailoverMaxEl.value = (v !== undefined && v !== null && !Number.isNaN(Number(v))) ? String(Number(v)) : '0';
+        }
         const userLedgerMaxEl = document.getElementById('summarization-user-ledger-max-runes');
         if (userLedgerMaxEl) {
             const v = ma.summarization_user_intent_ledger_max_runes;
@@ -1371,23 +1403,23 @@ function renderToolsList() {
             const badgeText = externalMcpName ? (typeof window.t === 'function' ? window.t('mcp.externalFrom', { name: escapeHtml(externalMcpName) }) : `外部 (${escapeHtml(externalMcpName)})`) : (typeof window.t === 'function' ? window.t('mcp.externalBadge') : '外部');
             const badgeTitle = externalMcpName ? (typeof window.t === 'function' ? window.t('mcp.externalToolFrom', { name: escapeHtml(externalMcpName) }) + ' — 点击跳转' : `外部MCP工具 - 来源：${escapeHtml(externalMcpName)} — 点击跳转`) : (typeof window.t === 'function' ? window.t('mcp.externalBadge') : '外部MCP工具');
             if (externalMcpName) {
-                externalBadge = `<span class="external-tool-badge clickable" onclick="scrollToExternalMCP('${escapeHtml(externalMcpName)}', event)" title="${badgeTitle}">${badgeText}</span>`;
+                externalBadge = `<span class="external-tool-badge clickable" onclick="scrollToExternalMCP(${settingsEscapeJsStringAttr(externalMcpName)}, event)" title="${settingsEscapeAttr(badgeTitle)}">${badgeText}</span>`;
             } else {
-                externalBadge = `<span class="external-tool-badge" title="${badgeTitle}">${badgeText}</span>`;
+                externalBadge = `<span class="external-tool-badge" title="${settingsEscapeAttr(badgeTitle)}">${badgeText}</span>`;
             }
         }
 
         // 生成唯一的checkbox id，使用工具唯一标识符
-        const checkboxId = `tool-${escapeHtml(toolKey).replace(/::/g, '--')}`;
+        const checkboxId = `tool-${settingsEscapeAttr(toolKey).replace(/::/g, '--')}`;
 
         toolItem.innerHTML = `
-            <input type="checkbox" class="theme-checkbox" id="${checkboxId}" ${toolState.enabled ? 'checked' : ''} ${toolState.is_external || tool.is_external ? 'data-external="true"' : ''} onchange="handleToolCheckboxChange('${escapeHtml(toolKey)}', this.checked)" />
+            <input type="checkbox" class="theme-checkbox" id="${checkboxId}" ${toolState.enabled ? 'checked' : ''} ${toolState.is_external || tool.is_external ? 'data-external="true"' : ''} onchange="handleToolCheckboxChange(${settingsEscapeJsStringAttr(toolKey)}, this.checked)" />
             <div class="tool-item-info">
                 <div class="tool-item-name">
                     ${escapeHtml(tool.name)}
                     ${externalBadge}
                     <label class="tool-resident-toggle" title="${typeof window.t === 'function' ? window.t('mcp.alwaysVisibleHint') : '始终常驻在 Tool Search 可见列表'}" onclick="event.stopPropagation()">
-                        <input type="checkbox" class="theme-checkbox" ${alwaysVisibleChecked ? 'checked' : ''} ${alwaysVisibleLocked ? 'disabled' : ''} onchange="handleToolAlwaysVisibleChange('${escapeHtml(toolKey)}', this.checked)" />
+                        <input type="checkbox" class="theme-checkbox" ${alwaysVisibleChecked ? 'checked' : ''} ${alwaysVisibleLocked ? 'disabled' : ''} onchange="handleToolAlwaysVisibleChange(${settingsEscapeJsStringAttr(toolKey)}, this.checked)" />
                         <span>${typeof window.t === 'function' ? window.t('mcp.alwaysVisibleLabel') : 'Pinned'}</span>
                     </label>
                     ${alwaysVisibleLocked ? `<span class="external-tool-badge" title="${typeof window.t === 'function' ? window.t('mcp.alwaysVisibleBuiltinHint') : '后端内置工具默认常驻，不可关闭'}">${typeof window.t === 'function' ? window.t('mcp.alwaysVisibleBuiltinLabel') : '内置默认'}</span>` : ''}
@@ -1644,11 +1676,11 @@ function renderToolsPagination() {
             </select>
         </div>
         <div class="pagination-controls">
-            <button class="btn-secondary" onclick="loadToolsList(1, '${escapeHtml(toolsSearchKeyword)}')" ${page === 1 ? 'disabled' : ''}>${t('mcp.firstPage')}</button>
-            <button class="btn-secondary" onclick="loadToolsList(${page - 1}, '${escapeHtml(toolsSearchKeyword)}')" ${page === 1 ? 'disabled' : ''}>${t('mcp.prevPage')}</button>
+            <button class="btn-secondary" onclick="loadToolsList(1, ${settingsEscapeJsStringAttr(toolsSearchKeyword)})" ${page === 1 ? 'disabled' : ''}>${t('mcp.firstPage')}</button>
+            <button class="btn-secondary" onclick="loadToolsList(${page - 1}, ${settingsEscapeJsStringAttr(toolsSearchKeyword)})" ${page === 1 ? 'disabled' : ''}>${t('mcp.prevPage')}</button>
             <span class="pagination-page">${paginationT('mcp.pageInfo', { page: page, total: totalPages })}</span>
-            <button class="btn-secondary" onclick="loadToolsList(${page + 1}, '${escapeHtml(toolsSearchKeyword)}')" ${page === totalPages ? 'disabled' : ''}>${t('mcp.nextPage')}</button>
-            <button class="btn-secondary" onclick="loadToolsList(${totalPages}, '${escapeHtml(toolsSearchKeyword)}')" ${page === totalPages ? 'disabled' : ''}>${t('mcp.lastPage')}</button>
+            <button class="btn-secondary" onclick="loadToolsList(${page + 1}, ${settingsEscapeJsStringAttr(toolsSearchKeyword)})" ${page === totalPages ? 'disabled' : ''}>${t('mcp.nextPage')}</button>
+            <button class="btn-secondary" onclick="loadToolsList(${totalPages}, ${settingsEscapeJsStringAttr(toolsSearchKeyword)})" ${page === totalPages ? 'disabled' : ''}>${t('mcp.lastPage')}</button>
         </div>
     `;
     
@@ -1953,6 +1985,7 @@ async function applySettings() {
         const activeChannelId = normalizeAIChannelId(selectedAIChannelId || currentConfig.ai.default_channel || 'default');
         currentConfig.ai.channels[activeChannelId] = readAIChannelFromMainForm(activeChannelId);
         currentConfig.ai.default_channel = activeChannelId;
+        currentConfig.ai = normalizeAIConfigProviderProfiles(currentConfig.ai);
         renderAIChannelSelect();
         const activeChannel = currentConfig.ai.channels[activeChannelId] || {};
         const prevOpenai = activeChannel;
@@ -1967,7 +2000,7 @@ async function applySettings() {
                 return String(s || '').split(/[\n,，]/).map(v => v.trim()).filter(Boolean);
             };
         const config = {
-            ai: currentConfig.ai,
+            ai: normalizeAIConfigProviderProfiles(currentConfig.ai),
             vision: visionPayload,
             fofa: {
                 api_key: document.getElementById('fofa-api-key')?.value.trim() || '',
@@ -2032,11 +2065,24 @@ async function applySettings() {
                 if (!maEnabled && ['deep', 'plan_execute', 'supervisor'].indexOf(robotMode) >= 0) {
                     robotMode = 'eino_single';
                 }
+                const parseNonNegativeInt = function (id) {
+                    const raw = document.getElementById(id)?.value;
+                    const parsed = parseInt(raw, 10);
+                    return Number.isNaN(parsed) ? 0 : Math.max(0, parsed);
+                };
+                const failoverChannelsRaw = document.getElementById('eino-model-failover-channels')?.value || '';
+                const failoverChannels = Array.from(new Set(
+                    failoverChannelsRaw.split(/[\n,，]/).map(s => s.trim()).filter(Boolean)
+                ));
                 return {
                     enabled: maEnabled,
                     robot_default_agent_mode: robotMode,
                     batch_use_multi_agent: currentConfig?.multi_agent?.batch_use_multi_agent === true,
                     plan_execute_loop_max_iterations: peLoop,
+                    model_retry_max_retries: parseNonNegativeInt('eino-model-retry-max-retries'),
+                    model_retry_max_backoff_sec: parseNonNegativeInt('eino-model-retry-max-backoff-sec'),
+                    model_failover_channels: failoverChannels,
+                    model_failover_max_retries: parseNonNegativeInt('eino-model-failover-max-retries'),
                     summarization_user_intent_ledger_max_runes: ledgerMax,
                     summarization_user_intent_ledger_entry_max_runes: ledgerEntryMax,
                     latest_user_message_max_runes: latestMax,
@@ -2488,6 +2534,43 @@ function normalizeAIChannelId(name) {
     return id || 'default';
 }
 
+function aiChannelBaseURLHost(baseUrl) {
+    const raw = String(baseUrl || '').trim();
+    if (!raw) return '';
+    try {
+        return new URL(raw).hostname.toLowerCase().replace(/^www\./, '');
+    } catch (e) {
+        try {
+            return new URL(`https://${raw.replace(/^\/+/, '')}`).hostname.toLowerCase().replace(/^www\./, '');
+        } catch (_) {
+            return '';
+        }
+    }
+}
+
+function isOfficialDeepSeekBaseURL(baseUrl) {
+    return aiChannelBaseURLHost(baseUrl) === 'api.deepseek.com';
+}
+
+function normalizeAIChannelProviderProfile(channel) {
+    if (!channel || typeof channel !== 'object') return channel;
+    if (isOfficialDeepSeekBaseURL(channel.base_url)) {
+        channel.reasoning = {
+            ...(channel.reasoning || {}),
+            profile: 'deepseek'
+        };
+    }
+    return channel;
+}
+
+function normalizeAIConfigProviderProfiles(ai) {
+    if (!ai || typeof ai !== 'object' || !ai.channels || typeof ai.channels !== 'object') return ai;
+    Object.keys(ai.channels).forEach((id) => {
+        ai.channels[id] = normalizeAIChannelProviderProfile(ai.channels[id] || {});
+    });
+    return ai;
+}
+
 function escapeAIChannelHtml(value) {
     return String(value == null ? '' : value)
         .replace(/&/g, '&amp;')
@@ -2514,13 +2597,13 @@ function ensureAIConfigShape(cfg) {
             reasoning: oa.reasoning || {}
         };
     }
-    return { default_channel: def, channels };
+    return normalizeAIConfigProviderProfiles({ default_channel: def, channels });
 }
 
 function readAIChannelFromMainForm(id) {
     const prev = currentConfig?.ai?.channels?.[id] || {};
     const maxCompletionTokens = parseInt(document.getElementById('openai-max-completion-tokens')?.value, 10) || 32768;
-    return {
+    return normalizeAIChannelProviderProfile({
         ...prev,
         name: (document.getElementById('ai-channel-name')?.value || '').trim() || prev.name || id,
         provider: document.getElementById('openai-provider')?.value || 'openai',
@@ -2536,7 +2619,7 @@ function readAIChannelFromMainForm(id) {
             profile: document.getElementById('openai-reasoning-profile')?.value || 'auto',
             allow_client_reasoning: document.getElementById('openai-reasoning-allow-client')?.checked !== false
         }
-    };
+    });
 }
 
 function writeAIChannelToMainForm(id) {
@@ -2549,6 +2632,7 @@ function writeAIChannelToMainForm(id) {
     if (providerEl) {
         const provider = (ch.provider === 'openai' || !ch.provider) ? 'openai_compatible' : ch.provider;
         providerEl.value = provider;
+        syncSettingsCustomSelect(providerEl);
     }
     const keyEl = document.getElementById('openai-api-key');
     if (keyEl) keyEl.value = ch.api_key || '';
@@ -2562,11 +2646,20 @@ function writeAIChannelToMainForm(id) {
     if (maxCompletionTokensEl) maxCompletionTokensEl.value = ch.max_completion_tokens || 32768;
     const r = ch.reasoning || {};
     const modeEl = document.getElementById('openai-reasoning-mode');
-    if (modeEl) modeEl.value = ['auto', 'on', 'off'].includes(String(r.mode || '').toLowerCase()) ? String(r.mode).toLowerCase() : 'auto';
+    if (modeEl) {
+        modeEl.value = ['auto', 'on', 'off'].includes(String(r.mode || '').toLowerCase()) ? String(r.mode).toLowerCase() : 'auto';
+        syncSettingsCustomSelect(modeEl);
+    }
     const effEl = document.getElementById('openai-reasoning-effort');
-    if (effEl) effEl.value = ['', 'low', 'medium', 'high', 'max', 'xhigh'].includes(String(r.effort || '').toLowerCase()) ? String(r.effort || '').toLowerCase() : '';
+    if (effEl) {
+        effEl.value = ['', 'low', 'medium', 'high', 'max', 'xhigh'].includes(String(r.effort || '').toLowerCase()) ? String(r.effort || '').toLowerCase() : '';
+        syncSettingsCustomSelect(effEl);
+    }
     const profileEl = document.getElementById('openai-reasoning-profile');
-    if (profileEl) profileEl.value = ['auto', 'deepseek_compat', 'openai_compat', 'output_config_effort'].includes(String(r.profile || '').toLowerCase()) ? String(r.profile || '').toLowerCase() : 'auto';
+    if (profileEl) {
+        profileEl.value = ['auto', 'deepseek', 'deepseek_compat', 'openai_compat', 'output_config_effort'].includes(String(r.profile || '').toLowerCase()) ? String(r.profile || '').toLowerCase() : 'auto';
+        syncSettingsCustomSelect(profileEl);
+    }
     const allowEl = document.getElementById('openai-reasoning-allow-client');
     if (allowEl) allowEl.checked = r.allow_client_reasoning !== false;
     syncModelListFetchButtons();
@@ -2898,6 +2991,7 @@ async function persistAIChannelsToServer(successMessage, options = {}) {
                 currentConfig.ai.default_channel = latestAI.default_channel || id;
             }
         }
+        currentConfig.ai = normalizeAIConfigProviderProfiles(currentConfig.ai);
         const updateResponse = await apiFetch('/api/config', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -2926,6 +3020,7 @@ async function persistAIConfigOnlyToServer(successMessage) {
     if (typeof requirePermission === 'function' && !requirePermission('config:write')) return false;
     if (!currentConfig) return false;
     currentConfig.ai = ensureAIConfigShape(currentConfig);
+    currentConfig.ai = normalizeAIConfigProviderProfiles(currentConfig.ai);
     showAIChannelSaveHint(settingsT('settingsBasic.aiChannelSaving', 'Saving channel...'), true);
     try {
         const updateResponse = await apiFetch('/api/config', {
@@ -4096,7 +4191,7 @@ function renderExternalMCPList(servers) {
         const selectedClass = toolsExternalMcpFilter === name ? ' selected' : '';
 
         html += `
-            <div class="${cardClass}${selectedClass}" data-mcp-name="${escapeHtml(name)}"${hasTools ? ` onclick="scrollToExternalMCPTools('${escapeHtml(name)}', event)" title="${cardClickTitle}"` : ''}>
+            <div class="${cardClass}${selectedClass}" data-mcp-name="${settingsEscapeAttr(name)}"${hasTools ? ` onclick="scrollToExternalMCPTools(${settingsEscapeJsStringAttr(name)}, event)" title="${settingsEscapeAttr(cardClickTitle)}"` : ''}>
                 <div class="external-mcp-item-header">
                     <div class="external-mcp-item-info">
                         <h4>${transportIcon} ${escapeHtml(name)}${server.tool_count !== undefined && server.tool_count > 0 ? `<span class="tool-count-badge" title="${escapeHtml(statusT('mcp.toolCount'))}">🔧 ${server.tool_count}</span>` : ''}</h4>
@@ -4104,15 +4199,15 @@ function renderExternalMCPList(servers) {
                     </div>
                     <div class="external-mcp-item-actions">
                         ${status === 'connected' || status === 'disconnected' || status === 'error' || status === 'disabled' ?
-                            `<button class="btn-small" id="btn-toggle-${escapeHtml(name)}" onclick="toggleExternalMCP('${escapeHtml(name)}', '${status}')" title="${status === 'connected' ? statusT('mcp.stopConnection') : statusT('mcp.startConnection')}">
+                            `<button class="btn-small" id="btn-toggle-${settingsEscapeAttr(name)}" onclick="toggleExternalMCP(${settingsEscapeJsStringAttr(name)}, ${settingsEscapeJsStringAttr(status)})" title="${settingsEscapeAttr(status === 'connected' ? statusT('mcp.stopConnection') : statusT('mcp.startConnection'))}">
                                 ${status === 'connected' ? '⏸ ' + statusT('mcp.stop') : '▶ ' + statusT('mcp.start')}
                             </button>` :
                             status === 'connecting' ?
-                            `<button class="btn-small" id="btn-toggle-${escapeHtml(name)}" disabled style="opacity: 0.6; cursor: not-allowed;">
+                            `<button class="btn-small" id="btn-toggle-${settingsEscapeAttr(name)}" disabled style="opacity: 0.6; cursor: not-allowed;">
                                 ⏳ ${statusT('mcp.connecting')}
                             </button>` : ''}
-                        <button class="btn-small" onclick="editExternalMCP('${escapeHtml(name)}')" title="${statusT('mcp.editConfig')}" ${status === 'connecting' ? 'disabled' : ''}>✏️ ${statusT('common.edit')}</button>
-                        <button class="btn-small btn-danger" onclick="deleteExternalMCP('${escapeHtml(name)}')" title="${statusT('mcp.deleteConfig')}" ${status === 'connecting' ? 'disabled' : ''}>🗑 ${statusT('common.delete')}</button>
+                        <button class="btn-small" onclick="editExternalMCP(${settingsEscapeJsStringAttr(name)})" title="${settingsEscapeAttr(statusT('mcp.editConfig'))}" ${status === 'connecting' ? 'disabled' : ''}>✏️ ${statusT('common.edit')}</button>
+                        <button class="btn-small btn-danger" onclick="deleteExternalMCP(${settingsEscapeJsStringAttr(name)})" title="${settingsEscapeAttr(statusT('mcp.deleteConfig'))}" ${status === 'connecting' ? 'disabled' : ''}>🗑 ${statusT('common.delete')}</button>
                     </div>
                 </div>
                 ${(status === 'error' || status === 'disconnected') && server.error ? `
