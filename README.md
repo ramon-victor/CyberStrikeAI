@@ -328,7 +328,6 @@ CyberStrikeAI/
 ├── agents/              # Multi-agent Markdown (orchestrator.md + sub-agent *.md)
 ├── docs/                # Topic docs (deployment, config, security, API, knowledge base, C2, WebShell, etc.)
 ├── images/              # Docs screenshots & diagrams
-├── scripts/             # Repository maintenance checks, including documentation validation
 ├── config.yaml          # Runtime configuration
 ├── run.sh               # Convenience launcher
 └── README*.md
@@ -375,18 +374,9 @@ CyberStrikeAI has joined [404Starlink](https://github.com/knownsec/404StarLink)
 - Join the community on [Discord](https://discord.gg/8PjVCMu8Zw).
 
 <details>
-<summary><strong>WeChat group</strong></summary>
+<summary><strong>WeCom group</strong></summary>
 
-<img src="./images/wechat-group-cyberstrikeai-qr.jpg" alt="CyberStrikeAI WeChat group QR code" width="280">
-
-</details>
-
-<details>
-<summary><strong>Sponsorship via WeChat Pay or Alipay</strong></summary>
-
-<div align="center">
-  <img src="./images/sponsor-wechat-alipay-qr.jpg" alt="WeChat Pay and Alipay sponsorship QR codes" width="480">
-</div>
+<img src="./images/wecom-group-cyberstrikeai-qr.png" alt="CyberStrikeAI WeCom group QR code" width="280">
 
 </details>
 

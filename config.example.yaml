@@ -10,7 +10,7 @@
 # ============================================
 
 # Version shown in the frontend (optional; uses the default version when empty)
-version: "v1.7.18"
+version: "v1.7.20"
 # Server settings
 server:
   host: 0.0.0.0 # Bind address; 0.0.0.0 listens on all network interfaces
@@ -48,6 +48,41 @@ audit:
 # Retention for MCP status-monitoring execution records (tool_executions table)
 monitor:
   retention_days: 90 # Defaults to 90 when omitted; 0 means no automatic cleanup
+# Runtime storage cleanup (System Settings -> Storage Cleanup)
+# Retention policy for on-disk artifacts: agent workspaces, tool output caches, C2 artifacts, conversation uploads, etc.
+# auto_clean defaults to off: after an upgrade, existing data is never deleted without the administrator knowing;
+# while it is disabled you can still preview and run cleanup manually on the "Storage Cleanup" page.
+storage:
+  auto_clean: false # true enables scheduled background cleanup
+  interval_minutes: 60 # Background cleanup interval in minutes; minimum 5
+  orphan_grace_days: 1 # When a session/project is deleted but its directories remain, reclaim them after this many idle days
+  active_grace_hours: 24 # Sessions with recent activity are always skipped, to avoid deleting data of running tasks
+  # Per-category retention_days: the defaults below apply when omitted; 0 means no retention-based cleanup (orphan directories are still reclaimed)
+  categories:
+    workspace: # Agent workspace tmp/workspace; default 30 days
+      enabled: true
+      retention_days: 30
+    reduction: # Oversized tool output spill files tmp/reduction; default 7 days (pure derived data)
+      enabled: true
+      retention_days: 7
+    conversation_artifacts: # Summary and oversized-input ledgers data/conversation_artifacts; default 30 days
+      enabled: true
+      retention_days: 30
+    plantask: # Multi-agent plan board skills/.eino/plantask; default 30 days (pure derived data)
+      enabled: true
+      retention_days: 30
+    c2_artifacts: # C2 screenshots/uploads/delivered files/payloads tmp/c2; default 30 days
+      enabled: true # Note: once payloads are cleaned, the corresponding download links stop working
+      retention_days: 30
+    chat_uploads: # Conversation upload attachments chat_uploads; default 90 days
+      enabled: true
+      retention_days: 90
+    workflow_checkpoints: # Workflow checkpoints data/workflow-checkpoints; default 7 days
+      enabled: true
+      retention_days: 7
+    diagnostic_logs: # Diagnostic logs log/diagnostic-*.log; default 14 days
+      enabled: true # Independent from log.diagnostic_retention_days; whichever expires first applies
+      retention_days: 14
 # ============================================
 # Conversation settings
 # ============================================
@@ -157,19 +192,20 @@ hitl:
   default_reviewer: human
   # Global default approval wait timeout (seconds): 300 = 5 minutes, 0 = unlimited; inherited when a new conversation has no session-specific setting
   default_timeout_seconds: 300
-  # Dedicated model for the audit Agent; empty fields reuse the AI channel configuration above. Set model to a smaller model to reduce approval cost.
+  # HITL audit agent backend, choose one: openai = OpenAI-compatible chat model (JSON prompt); typesafe = TypeSafe Jev structured allow/block decisions.
+  audit_backend: openai
+  # Dedicated model for the audit agent. With the openai backend, empty fields reuse the main model; with the typesafe backend, api_key is required and never inherits the main model key.
   audit_model:
-    provider: "" # openai / claude; empty follows openai.provider
-    base_url: "" # Empty follows openai.base_url
-    api_key: "" # Empty follows openai.api_key
-    model: "" # Empty follows openai.model; examples: gpt-4o-mini / qwen-turbo / deepseek-chat
+    provider: "" # openai / claude; only effective for the openai backend; empty follows openai.provider
+    base_url: "" # openai backend: empty follows the main model; typesafe backend: empty uses https://api.typesafe.ai
+    api_key: "" # openai backend: empty follows the main model; typesafe backend: enter your TypeSafe API key
+    model: "" # openai backend: a smaller model is recommended; typesafe backend: empty uses jev-latest
   # Retention days for decided audit logs (same as MCP monitoring; defaults to 90 when omitted; 0 means no automatic cleanup)
   retention_days: 90
   # Add/remove entries to match the real tool names in your environment (consistent with the sidebar, case-insensitive); change to [] if global approval bypass is not needed
   tool_whitelist: [read_file, ls, list_dir, glob, grep, tool_search, upsert_project_fact, get_project_fact, list_project_facts, search_project_facts, list_vulnerabilities, get_vulnerability, get_asset, query_assets, list_knowledge_risk_types, get_tool_execution, wait_tool_execution, batch_task_list, batch_task_get, manage_webshell_list, c2_event, c2_file]
-  # audit_agent_prompt: |  # Approval mode; empty uses the built-in default and can be edited on the "Human-in-the-Loop" page
+  # audit_agent_prompt: |  # Approval mode; empty uses the built-in default and can be edited on the "Human-in-the-Loop" page. Chat prompt for the openai backend; Jev organization policy for the typesafe backend
   # audit_agent_prompt_review_edit: |  # Review-edit mode; empty uses the built-in default
-
   audit_agent_prompt: |-
     You are the CyberStrikeAI Human-in-the-Loop (HITL) audit Agent. Review whether the tool call the Agent is about to execute could cause material harm to the system.
 
@@ -313,7 +349,7 @@ multi_agent:
     reduction_clear_exclude: [] # Additional list of tool names excluded from the "cleanup stage" (merged with built-in exclusions such as task/transfer/exit); fill with a YAML list when needed
     reduction_sub_agents: true # true: sub-agents also get reduction; false: only the orchestration main agent uses reduction
     summarization_trigger_ratio: 0.8 # Summarization trigger ratio (max_total_tokens * ratio); 0.75~0.85 recommended
-    summarization_output_reserve_tokens: 8192 # Tokens reserved for summary-model output; summary input budget = trigger threshold - this value
+    summarization_output_reserve_tokens: 40960 # Tokens reserved for summary-model output; summary input budget = trigger threshold - this value
     summarization_emit_internal_events: true # true: emit internal summarization events (helps diagnostics)
     summarization_user_intent_ledger_max_runes: 96000 # Total character limit of the "raw user input and constraints ledger" injected into model context after compression; raw DB messages are not truncated
     summarization_user_intent_ledger_entry_max_runes: 16000 # Character limit for a single user message in the ledger; beyond it only the model-visible ledger is truncated, the DB original is unaffected
@@ -364,6 +400,15 @@ database:
 # The system loads all .yaml tool configuration files from this directory
 # Recommended: create a separate configuration file for each tool under the tools/ directory
 security:
+  # auto: native Job Object on Windows; Unix watchdog unless cgroup_root is set.
+  # Linux production: configure a systemd service with Delegate=cpu memory pids; set
+  # mode: required, cgroup_root: auto. Explicit isolation errors fail closed.
+  process_isolation:
+    mode: auto
+    cgroup_root: ""
+    max_processes: 256
+    memory_max_bytes: 2147483648
+    cpu_quota_micros: 0 # 0=no CPU cap; 100000=one core (100 ms period)
   tools_dir: tools # Tool configuration file directory (relative to the directory containing this config)
   # Tool description mode: source of the description exposed to AI/API when loading tools under tools
   #   short - prefer short_description (brief description, saves tokens); if empty, use description

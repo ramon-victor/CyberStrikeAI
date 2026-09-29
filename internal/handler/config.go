@@ -24,6 +24,7 @@ import (
 	"cyberstrike-ai/internal/openai"
 	"cyberstrike-ai/internal/security"
 	"cyberstrike-ai/internal/toolguard"
+	"cyberstrike-ai/internal/typesafe"
 
 	"github.com/cloudwego/eino/schema"
 	"github.com/gin-gonic/gin"
@@ -731,6 +732,7 @@ type UpdateConfigRequest struct {
 	Robots     *config.RobotsConfig        `json:"robots,omitempty"`
 	MultiAgent *config.MultiAgentAPIUpdate `json:"multi_agent,omitempty"`
 	C2         *config.C2APIUpdate         `json:"c2,omitempty"`
+	Storage    *config.StorageConfig       `json:"storage,omitempty"`
 }
 
 // AgentConfigUpdate 用于 PATCH /api/config 的 agent 段：仅 JSON 中出现的字段（指针非 nil）覆盖内存配置。
@@ -891,6 +893,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 	}
 
 	if req.Hitl != nil {
+		h.config.Hitl.AuditBackend = req.Hitl.EffectiveAuditBackend()
 		h.config.Hitl.AuditModel = req.Hitl.AuditModel
 		h.config.Hitl.ToolWhitelist = mergeHitlToolWhitelistSlice(nil, req.Hitl.ToolWhitelist)
 		if strings.TrimSpace(req.Hitl.DefaultMode) != "" {
@@ -911,8 +914,69 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 			h.config.Hitl.RetentionDays = &v
 		}
 		h.logger.Info("更新HITL配置",
+			zap.String("audit_backend", h.config.Hitl.AuditBackend),
 			zap.String("default_reviewer", h.config.Hitl.DefaultReviewer),
 			zap.Int("tool_whitelist", len(h.config.Hitl.ToolWhitelist)),
+		)
+	}
+
+	if req.Storage != nil {
+		st := &h.config.Storage
+		if req.Storage.AutoClean != nil {
+			v := *req.Storage.AutoClean
+			st.AutoClean = &v
+		}
+		if req.Storage.IntervalMinutes != nil {
+			v := *req.Storage.IntervalMinutes
+			if v < 5 {
+				v = 5
+			}
+			st.IntervalMinutes = &v
+		}
+		if req.Storage.OrphanGraceDays != nil {
+			v := *req.Storage.OrphanGraceDays
+			if v < 0 {
+				v = 0
+			}
+			st.OrphanGraceDays = &v
+		}
+		if req.Storage.ActiveGraceHours != nil {
+			v := *req.Storage.ActiveGraceHours
+			if v < 1 {
+				v = 1
+			}
+			st.ActiveGraceHours = &v
+		}
+		if req.Storage.Categories != nil {
+			if st.Categories == nil {
+				st.Categories = make(map[string]config.StorageCategoryConfig, len(req.Storage.Categories))
+			}
+			// 只接受注册表内的类别键，未注册的键直接忽略，避免被写进 config.yaml。
+			for _, key := range config.StorageCategoryOrder {
+				patch, ok := req.Storage.Categories[key]
+				if !ok {
+					continue
+				}
+				cur := st.Categories[key]
+				if patch.Enabled != nil {
+					v := *patch.Enabled
+					cur.Enabled = &v
+				}
+				if patch.RetentionDays != nil {
+					v := *patch.RetentionDays
+					if v < 0 {
+						v = 0
+					}
+					cur.RetentionDays = &v
+				}
+				st.Categories[key] = cur
+			}
+		}
+		h.logger.Info("更新运行空间清理配置",
+			zap.Bool("auto_clean", st.AutoCleanEffective()),
+			zap.Int("interval_minutes", st.IntervalMinutesEffective()),
+			zap.Int("orphan_grace_days", st.OrphanGraceDaysEffective()),
+			zap.Int("active_grace_hours", st.ActiveGraceHoursEffective()),
 		)
 	}
 
@@ -1315,6 +1379,61 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 		"success":    true,
 		"model":      chatResp.Model,
 		"latency_ms": latency.Milliseconds(),
+	})
+}
+
+// TestTypeSafeRequest 测试 TypeSafe / Jev 连接。
+type TestTypeSafeRequest struct {
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+	Model   string `json:"model"`
+}
+
+// TestTypeSafe 用一条最小 Noul 验证 TypeSafe System One 是否可用。
+func (h *ConfigHandler) TestTypeSafe(c *gin.Context) {
+	var req TestTypeSafeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		return
+	}
+	if strings.TrimSpace(req.APIKey) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "TypeSafe API Key 不能为空"})
+		return
+	}
+
+	client := typesafe.NewClient(req.BaseURL, req.APIKey, req.Model, nil)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	result, err := client.SystemOne(ctx, "connectivity ping", map[string]typesafe.Question{
+		"ok": typesafe.Noul("Is this a connectivity test ping?", "Yes, this is only a ping.", "No."),
+	})
+	if err != nil {
+		if apiErr, ok := err.(*typesafe.APIError); ok {
+			c.JSON(http.StatusOK, gin.H{
+				"success":     false,
+				"error":       fmt.Sprintf("API 返回错误 (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
+				"status_code": apiErr.StatusCode,
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"error":   "连接失败: " + err.Error(),
+		})
+		return
+	}
+	model := strings.TrimSpace(req.Model)
+	if result != nil && strings.TrimSpace(result.Model) != "" {
+		model = result.Model
+	}
+	if model == "" {
+		model = config.TypeSafeDefaultModel
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success":    true,
+		"model":      model,
+		"latency_ms": time.Since(start).Milliseconds(),
 	})
 }
 
@@ -1781,6 +1900,7 @@ func (h *ConfigHandler) saveConfig() error {
 	updateC2Config(root, h.config.C2)
 	updateRobotsConfig(root, h.config.Robots)
 	updateHitlConfig(root, h.config.Hitl)
+	updateStorageConfig(root, h.config.Storage)
 	updateMultiAgentConfig(root, h.config.MultiAgent)
 	// 更新外部MCP配置（使用external_mcp.go中的函数，同一包中可直接调用）
 	updateExternalMCPConfig(root, h.config.ExternalMCP)
@@ -2150,6 +2270,7 @@ func (h *ConfigHandler) MergeHitlToolWhitelistIntoConfig(add []string) error {
 func updateHitlConfig(doc *yaml.Node, cfg config.HitlConfig) {
 	root := doc.Content[0]
 	hitlNode := ensureMap(root, "hitl")
+	setStringInMap(hitlNode, "audit_backend", cfg.EffectiveAuditBackend())
 	auditModelNode := ensureMap(hitlNode, "audit_model")
 	setStringInMap(auditModelNode, "provider", cfg.AuditModel.Provider)
 	setStringInMap(auditModelNode, "base_url", cfg.AuditModel.BaseURL)
@@ -2163,6 +2284,24 @@ func updateHitlConfig(doc *yaml.Node, cfg config.HitlConfig) {
 	setIntInMap(hitlNode, "retention_days", cfg.RetentionDaysEffective())
 	setStringInMap(hitlNode, "audit_agent_prompt", cfg.AuditAgentPrompt)
 	setStringInMap(hitlNode, "audit_agent_prompt_review_edit", cfg.AuditAgentPromptReviewEdit)
+}
+
+// updateStorageConfig writes the runtime storage cleanup policy back to config.yaml, preserving the rest of the file and its comments.
+func updateStorageConfig(doc *yaml.Node, cfg config.StorageConfig) {
+	root := doc.Content[0]
+	storageNode := ensureMap(root, "storage")
+	setBoolInMap(storageNode, "auto_clean", cfg.AutoCleanEffective())
+	setIntInMap(storageNode, "interval_minutes", cfg.IntervalMinutesEffective())
+	setIntInMap(storageNode, "orphan_grace_days", cfg.OrphanGraceDaysEffective())
+	setIntInMap(storageNode, "active_grace_hours", cfg.ActiveGraceHoursEffective())
+
+	// Emit categories in a fixed order so saving does not reorder the whole file due to map iteration order.
+	categoriesNode := ensureMap(storageNode, "categories")
+	for _, key := range config.StorageCategoryOrder {
+		categoryNode := ensureMap(categoriesNode, key)
+		setBoolInMap(categoryNode, "enabled", cfg.CategoryEnabled(key))
+		setIntInMap(categoryNode, "retention_days", cfg.CategoryRetentionDays(key))
+	}
 }
 
 // UpdateHitlDefaultConfig updates the global default HITL config and writes it to config.yaml.

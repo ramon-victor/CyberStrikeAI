@@ -107,6 +107,7 @@ agent:
 ```yaml
 hitl:
   default_reviewer: audit_agent
+  audit_backend: openai
   retention_days: 90
   tool_whitelist: [read_file, list_dir, glob, grep, tool_search]
   audit_model:
@@ -117,9 +118,10 @@ hitl:
 ```
 
 - `default_reviewer`：`human` 或 `audit_agent`。
+- `audit_backend`：`openai`（默认，兼容协议聊天模型）或 `typesafe`（TypeSafe Jev）。
 - `tool_whitelist`：全局免审批工具列表，会与会话白名单合并。
-- `audit_model`：审计 Agent 独立模型；留空复用主模型。
-- `audit_agent_prompt` / `audit_agent_prompt_review_edit`：可覆盖默认审批策略。
+- `audit_model`：openai 后端留空复用主模型；typesafe 后端需填写 TypeSafe API Key，不继承主模型密钥。
+- `audit_agent_prompt` / `audit_agent_prompt_review_edit`：openai 后端作为聊天提示词；typesafe 后端作为 Jev 的组织策略（`operatorPolicy`）。内置默认提示词与 Jev 问题重复，不会再复制进 state。
 
 更多策略见 [人机协同最佳实践](hitl-best-practices.md)。
 
@@ -215,6 +217,38 @@ monitor:
 - `audit` 记录平台操作，不记录对话正文和每次工具调用正文。
 - `monitor` 管理工具执行记录保留时间。
 
+## 存储清理
+
+```yaml
+storage:
+  auto_clean: false
+  interval_minutes: 60
+  orphan_grace_days: 1
+  active_grace_hours: 24
+  categories:
+    workspace:
+      enabled: true
+      retention_days: 30
+```
+
+清理运行期间产生的磁盘垃圾，入口在「系统设置 → 存储清理」，也可用 `POST /api/storage/cleanup` 触发。
+
+- `auto_clean` 默认关闭：升级后不会在管理员不知情的情况下删除既有数据；关闭时仍可手动预览与清理。
+- `interval_minutes` 后台清理间隔，最小 5；`orphan_grace_days` 是会话/项目已删除但目录残留时的最小保留天数；`active_grace_hours` 内的活动会话一律跳过。
+- 各类别 `retention_days` 为 0 表示不按保留期清理，但**孤儿目录仍会回收**（会话已删除的目录没有保留价值）。
+- 删除不可逆。API 层要求真实删除必须同时传 `dry_run=false` 与 `confirm=true`，省略 `dry_run` 按预览处理。
+
+| 类别 | 默认保留 | 目标目录 |
+| --- | --- | --- |
+| `workspace` | 30 天 | Agent 工作区 `tmp/workspace` |
+| `reduction` | 7 天 | 超长工具输出落盘 `tmp/reduction` |
+| `conversation_artifacts` | 30 天 | 摘要与超长输入台账 `data/conversation_artifacts` |
+| `plantask` | 30 天 | 多代理计划看板 `skills/.eino/plantask` |
+| `c2_artifacts` | 30 天 | C2 回传/上传/下发/payload `tmp/c2`（清理 payload 后下载链接失效） |
+| `chat_uploads` | 90 天 | 对话上传附件 `chat_uploads` |
+| `workflow_checkpoints` | 7 天 | 工作流断点 `data/workflow-checkpoints` |
+| `diagnostic_logs` | 14 天 | 诊断日志 `log/diagnostic-*.log` |
+
 ## C2、WebShell、项目
 
 ```yaml
@@ -264,7 +298,7 @@ project:
 几个字段有“留空复用”的关系：
 
 - `vision.api_key/base_url/provider` 留空时复用 `openai`。
-- `hitl.audit_model` 留空时复用默认 AI 通道解析后的 `openai`。
+- `hitl.audit_model` 在 `audit_backend=openai` 时留空复用默认 AI 通道；typesafe 后端不继承主模型密钥。
 - `knowledge.embedding.base_url/api_key` 留空时复用主模型或 embedding 默认配置。
 - `knowledge.retrieval.rerank.base_url/api_key` 留空时复用 embedding/openai。
 - `database.knowledge_db_path` 留空时可以复用主会话数据库，但独立文件更利于备份。

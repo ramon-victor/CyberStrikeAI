@@ -10,6 +10,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
+	schemaopenai "github.com/cloudwego/eino/schema/openai"
 )
 
 func TestNewEinoAgenticSummarizationMiddlewareCompactsWithNativeTypedMiddleware(t *testing.T) {
@@ -18,7 +19,8 @@ func TestNewEinoAgenticSummarizationMiddlewareCompactsWithNativeTypedMiddleware(
 	emit := false
 	summaryModel := &capturingAgenticChatModel{
 		output: &schema.AgenticMessage{
-			Role: schema.AgenticRoleTypeAssistant,
+			Role:         schema.AgenticRoleTypeAssistant,
+			ResponseMeta: &schema.AgenticResponseMeta{OpenAIExtension: &schemaopenai.ResponseMetaExtension{Status: schemaopenai.ResponseStatusCompleted}},
 			ContentBlocks: []*schema.ContentBlock{schema.NewContentBlock(&schema.AssistantGenText{Text: `<analysis>review history</analysis>
 <summary>
 ## 1. Authorization scope and constraints
@@ -246,6 +248,7 @@ func TestAppendEinoAgenticChatModelTailMiddlewaresIncludesTypedSummarization(t *
 func agenticAssistantTextMessage(text string) *schema.AgenticMessage {
 	return &schema.AgenticMessage{
 		Role:          schema.AgenticRoleTypeAssistant,
+		ResponseMeta:  &schema.AgenticResponseMeta{OpenAIExtension: &schemaopenai.ResponseMetaExtension{Status: schemaopenai.ResponseStatusCompleted}},
 		ContentBlocks: []*schema.ContentBlock{schema.NewContentBlock(&schema.AssistantGenText{Text: text})},
 	}
 }

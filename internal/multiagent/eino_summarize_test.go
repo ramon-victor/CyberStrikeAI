@@ -392,7 +392,7 @@ func TestEinoSummarizationMiddlewareRetriesWhenSummaryModelReturnsEmpty(t *testi
 	emit := false
 	summaryModel := &capturingClassicChatModel{outputs: []*schema.Message{
 		schema.AssistantMessage("", nil),
-		schema.AssistantMessage("<summary>Valid summary: continue verifying the SQL injection path</summary>", nil),
+		{Role: schema.Assistant, Content: "<summary>Valid summary: continue verifying the SQL injection path</summary>", ResponseMeta: &schema.ResponseMeta{FinishReason: "stop"}},
 	}}
 	appCfg := &config.Config{}
 	appCfg.OpenAI.Model = "gpt-4o"

@@ -53,6 +53,7 @@ type DB struct {
 	einoCheckpointBaseDir    string // checkpoint_dir root (per-conversation subdirs)
 	einoReductionRootDir     string // reduction_root_dir or default tmp/reduction (conversations/<id> subdirs)
 	einoWorkspaceRootDir     string // workspace_root_dir or default tmp/workspace (projects|conversations/<id> subdirs)
+	chatUploadsDir           string // chat_uploads root (<date>/<conversationID> subdirs)
 	checkpointLoopName       string
 	checkpointStop           chan struct{}
 	checkpointDone           chan struct{}
@@ -176,6 +177,16 @@ func (db *DB) SetEinoConversationDirs(plantaskBase, checkpointBase, reductionRoo
 	db.einoCheckpointBaseDir = strings.TrimSpace(checkpointBase)
 	db.einoReductionRootDir = strings.TrimSpace(reductionRoot)
 	db.einoWorkspaceRootDir = strings.TrimSpace(workspaceRoot)
+}
+
+// SetChatUploadsDir configures the chat_uploads root so DeleteConversation can remove
+// uploaded attachment files. Their chat_upload_artifacts rows already disappear via
+// ON DELETE CASCADE; without this the files themselves would linger forever.
+func (db *DB) SetChatUploadsDir(dir string) {
+	if db == nil {
+		return
+	}
+	db.chatUploadsDir = strings.TrimSpace(dir)
 }
 
 // initTables 初始化数据库表
@@ -469,6 +480,7 @@ func (db *DB) initTables() error {
 		title TEXT,
 		role TEXT,
 		agent_mode TEXT NOT NULL DEFAULT 'eino_single',
+		hitl_policy TEXT NOT NULL DEFAULT '',
 		schedule_mode TEXT NOT NULL DEFAULT 'manual',
 		cron_expr TEXT,
 		next_run_at DATETIME,
@@ -1377,6 +1389,16 @@ func (db *DB) migrateBatchTaskQueuesTable() error {
 	} else if projectIDCount == 0 {
 		if _, err := db.Exec("ALTER TABLE batch_task_queues ADD COLUMN project_id TEXT"); err != nil {
 			db.logger.Warn("添加batch_task_queues.project_id字段失败", zap.Error(err))
+		}
+	}
+
+	var hitlPolicyCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('batch_task_queues') WHERE name='hitl_policy'").Scan(&hitlPolicyCount); err != nil {
+		return fmt.Errorf("检查队列审批字段失败: %w", err)
+	}
+	if hitlPolicyCount == 0 {
+		if _, err := db.Exec("ALTER TABLE batch_task_queues ADD COLUMN hitl_policy TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("添加队列审批字段失败: %w", err)
 		}
 	}
 

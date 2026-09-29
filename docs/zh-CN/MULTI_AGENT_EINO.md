@@ -11,7 +11,7 @@
 
 | 项 | 说明 |
 |----|------|
-| 依赖与代理 | `go.mod` 直接依赖 `github.com/cloudwego/eino`、`eino-ext/.../openai`；`go.mod` 注释与 `scripts/bootstrap-go.sh` 指导 **GOPROXY**（如 `https://goproxy.cn,direct`）。 |
+| 依赖与代理 | `go.mod` 直接依赖 `github.com/cloudwego/eino`、`eino-ext/.../openai`；`go.mod` 注释指导 **GOPROXY**（如 `https://goproxy.cn,direct`）。 |
 | 配置 | `config.yaml` → `agent.max_iterations` 为全局 ReAct 上限（主/子代理统一）；`multi_agent`：`enabled`、`robot_use_multi_agent`、`sub_agents`（含可选 `bind_role`）、`eino_skills`、`eino_middleware` 等；结构体见 `internal/config/config.go`。 |
 | Markdown 子代理 / 主代理 | 在 `agents_dir` 下放 `*.md`。**子代理**：供 Deep `task` 与 `supervisor` `transfer`。**主代理（按模式分离）**：`orchestrator.md`（或 `kind: orchestrator` 的**单个**其他 .md）→ **Deep**；固定名 `orchestrator-plan-execute.md` → **plan_execute**；固定名 `orchestrator-supervisor.md` → **supervisor**。正文优先于 YAML：`multi_agent.orchestrator_instruction`、`orchestrator_instruction_plan_execute`、`orchestrator_instruction_supervisor`；plan_execute / supervisor **不会**回退到 Deep 的 `orchestrator_instruction`。皆空时 plan_execute / supervisor 使用代码内置默认提示。管理：**Agents → Agent管理**；API：`/api/multi-agent/markdown-agents*`。 |
 | MCP 桥 | `internal/einomcp`：`ToolsFromDefinitions` + 会话 ID 持有者，执行走 `Agent.ExecuteMCPToolForConversation`。 |
@@ -73,3 +73,4 @@
 | 2026-08-14 | **本地 MCP 审计回归**：新增真实 `mcp.Server` 覆盖，验证 Eino ADK filesystem begin/finish 复用同一 execution id，并在 `tool_result` 后把模型可见正文更新回 MCP display result。 |
 | 2026-08-14 | **Agentic 上下文压缩端到端**：新增 typed agent 测试，证明 `summarization.NewTyped[*schema.AgenticMessage]` 会先压缩历史，再把摘要、ledger 与 transcript 提示送入业务 AgenticModel。 |
 | 2026-08-14 | **Agentic 主路径切换**：`RunEinoSingleChatModelAgent`、Deep 主/子代理、Supervisor 主/子代理与 plan_execute Executor 切到 `TypedChatModelAgent[*schema.AgenticMessage]` / `deep.NewTyped[*schema.AgenticMessage]`；官方 typed patchtoolcalls / toolsearch / plantask / reduction / filesystem / skill / summarization 与 Agentic retry/failover 进入生产装配；adapter 补 `adk.ResumableAgent`，保持 Runner checkpoint、TurnLoop、SSE 与 MCP drain 边界稳定。 |
+| 2026-09-22 | **Agentic builtin action 状态对齐**：Eino v0.9.14 官方 `ExitTool` / `transfer_to_agent` 仍通过 `SendToolGenAction` 写 `typedState[*schema.Message]`。Agentic 主路径改为兼容 exit/transfer 的 typed state 写入，并拦截 HITL 拒绝 transfer 时的 returnDirectly 清理，避免工具执行报 `cannot find state with type ... AgenticMessage`。 |

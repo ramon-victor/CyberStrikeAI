@@ -171,19 +171,14 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 	taskCtx, timeoutCancel := context.WithTimeout(baseCtx, 6*time.Hour)
 
 	registered := false
+	var taskRunID string
 	finishStatus := "completed"
 
 	defer func() {
 		h.batchTaskManager.SetTaskCancel(queueID, task.ID, nil)
 		timeoutCancel()
 		if registered {
-			if h.taskEventBus != nil {
-				ev := StreamEvent{Type: "done", Message: "", Data: map[string]interface{}{"conversationId": conversationID}}
-				if b, err := json.Marshal(ev); err == nil {
-					h.taskEventBus.Publish(conversationID, append(append([]byte("data: "), b...), '\n', '\n'))
-				}
-			}
-			h.tasks.FinishTask(conversationID, finishStatus)
+			h.tasks.FinishTaskRun(conversationID, taskRunID, finishStatus)
 		}
 		cancelWithCause(nil)
 	}()
@@ -204,7 +199,7 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 		h.taskEventBus.Publish(conversationID, line)
 	}
 
-	if _, err := h.tasks.StartTask(conversationID, task.Message, cancelWithCause); err != nil {
+	if startedTask, err := h.tasks.StartTask(conversationID, task.Message, cancelWithCause); err != nil {
 		h.logger.Warn("批量队列子任务注册会话运行状态失败",
 			zap.String("queueId", queueID),
 			zap.String("taskId", task.ID),
@@ -216,9 +211,35 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 		}
 		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", failMsg)
 		return
+	} else {
+		taskRunID = startedTask.RunID
 	}
+	baseCtx = h.tasks.BindProcessScope(baseCtx, conversationID, taskRunID)
+	taskCtx = h.tasks.BindProcessScope(taskCtx, conversationID, taskRunID)
 	registered = true
 	h.batchTaskManager.SetTaskCancel(queueID, task.ID, timeoutCancel)
+
+	if err := validateBatchHITLPolicy(queue.HITLPolicy); err != nil {
+		finishStatus = "failed"
+		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", err.Error())
+		return
+	}
+	if h.hitlManager == nil {
+		finishStatus = "failed"
+		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", "审批服务未初始化")
+		return
+	}
+	hitlReq := h.batchHITLRequest(queue.HITLPolicy)
+	if err := h.hitlManager.SaveConversationConfig(conversationID, hitlReq); err != nil {
+		finishStatus = "failed"
+		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", "保存审批设置失败: "+err.Error())
+		return
+	}
+	h.activateHITLForConversation(conversationID, hitlReq)
+	defer h.hitlManager.DeactivateConversation(conversationID)
+	taskCtx = multiagent.WithHITLToolInterceptor(taskCtx, func(ctx context.Context, toolName, arguments string) (string, error) {
+		return h.interceptHITLForEinoTool(ctx, cancelWithCause, conversationID, assistantMessageID, sendEvent, toolName, arguments)
+	})
 
 	progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
 	taskCtx = mcp.WithMCPConversationID(taskCtx, conversationID)
@@ -320,6 +341,10 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 		}
 	}
 
+	if cleanupErr := h.tasks.FinishTaskRun(conversationID, taskRunID, finishStatus); cleanupErr != nil {
+		h.batchTaskManager.UpdateTaskStatusWithConversationID(queueID, task.ID, BatchTaskStatusFailed, resText, cleanupErr.Error(), conversationID)
+		return
+	}
 	if !decision.Finalizable {
 		h.batchTaskManager.UpdateTaskStatusWithConversationID(queueID, task.ID, BatchTaskStatusFailed, resText, finalizationCheckMessage(decision), conversationID)
 		return
