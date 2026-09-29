@@ -10,7 +10,7 @@
 # ============================================
 
 # Version shown in the frontend (optional; uses the default version when empty)
-version: "v1.7.18"
+version: "v1.7.20"
 # Server settings
 server:
   host: 0.0.0.0 # Bind address; 0.0.0.0 listens on all network interfaces

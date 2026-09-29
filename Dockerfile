@@ -2,7 +2,7 @@
 
 FROM golang:1.25-bookworm AS app-builder
 
-ARG APP_VERSION=v1.7.18
+ARG APP_VERSION=v1.7.20
 
 WORKDIR /src
 
@@ -70,7 +70,7 @@ RUN npm install -g @stoplight/spectral-cli tslib \
 
 FROM debian:bookworm-slim AS runtime
 
-ARG APP_VERSION=v1.7.18
+ARG APP_VERSION=v1.7.20
 
 ENV APP_HOME=/app \
     CYBERSTRIKE_APP_VERSION=${APP_VERSION} \

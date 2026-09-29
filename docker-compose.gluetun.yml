@@ -22,8 +22,8 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        APP_VERSION: v1.7.18
-    image: cyberstrikeai:v1.7.18
+        APP_VERSION: v1.7.20
+    image: cyberstrikeai:v1.7.20
     container_name: cyberstrikeai
     restart: unless-stopped
     network_mode: "service:gluetun"
