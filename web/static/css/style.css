@@ -46457,7 +46457,7 @@ html[data-theme="dark"] { --tool-blocked-color: #f4bc62; }
 .mcp-stats-tool-item__rate.is-muted { color: var(--text-muted); }
 
 /* ============================================
-   系统设置 -> 存储清理（运行空间垃圾回收）
+   System Settings -> Storage Cleanup (runtime garbage collection)
    ============================================ */
 .storage-desc {
     margin: 0 0 16px;
@@ -46466,7 +46466,7 @@ html[data-theme="dark"] { --tool-blocked-color: #f4bc62; }
     line-height: 1.6;
 }
 
-/* display:grid/flex 会盖过 UA 的 [hidden]，需显式提权 */
+/* display:grid/flex overrides the UA's [hidden]; raise specificity explicitly */
 .storage-overview[hidden],
 .storage-result[hidden] { display: none; }
 

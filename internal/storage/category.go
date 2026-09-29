@@ -1,10 +1,10 @@
-// Package storage 负责枚举、评估并清理运行空间产生的磁盘垃圾。
+// Package storage enumerates, evaluates, and cleans up the disk garbage produced by the runtime workspace.
 //
-// 设计约束（误删活跃任务数据的代价远高于省下磁盘，故以下均为硬约束）：
-//   - 每个类别只在固定根目录下的固定层级枚举删除单元，不做无界递归删除；
-//   - 删除单元必须通过 confined 校验，杜绝路径逃逸；
-//   - 目录清理采用「原子改名 + RemoveAll」，进程崩溃只留下带标记的残骸，下一轮补删；
-//   - 会话型单元在删除前查询数据库最近活动时间，活跃会话一律跳过；查询失败时保守跳过（fail closed）。
+// Design constraints (deleting active task data costs far more than the disk it saves, so all of these are hard constraints):
+//   - Each category enumerates deletion units only at fixed levels under a fixed root; no unbounded recursive deletion;
+//   - Every deletion unit must pass the confined check, ruling out path escapes;
+//   - Directory cleanup uses "atomic rename + RemoveAll"; a crashed process only leaves a marked remnant that the next round finishes deleting;
+//   - Session-scoped units query the database for last activity before deletion; active sessions are always skipped; on query failure, skip conservatively (fail closed).
 package storage
 
 import (
@@ -16,25 +16,25 @@ import (
 	"cyberstrike-ai/internal/config"
 )
 
-// deletionMarkerSuffix 标记「已判定删除、正在移除」的目录。
-// 沿用 Prometheus TSDB 的做法：改名是原子的，崩溃后不会留下半删状态的原始目录名。
+// deletionMarkerSuffix marks a directory that has been condemned and is being removed.
+// This follows the Prometheus TSDB approach: renaming is atomic, so a crash never leaves the original directory name in a half-deleted state.
 const deletionMarkerSuffix = ".tmp-for-deletion"
 
-// Scope 描述删除单元与会话/项目的绑定关系。
+// Scope describes how a deletion unit is bound to a session/project.
 type Scope int
 
 const (
-	// ScopeNone 与会话无关，仅按保留期判定（日志、checkpoint、C2 产物）。
+	// ScopeNone is session-independent, judged only by retention period (logs, checkpoints, C2 artifacts).
 	ScopeNone Scope = iota
-	// ScopeConversation 目录名即会话 ID，可查询会话是否仍存在及最近活动时间。
+	// ScopeConversation: the directory name is the conversation ID; conversation existence and last activity can be queried.
 	ScopeConversation
-	// ScopeProject 目录名即项目 ID。
+	// ScopeProject: the directory name is the project ID.
 	ScopeProject
 )
 
-// Paths 汇总各类别根目录。
-// 由 app 层按既有解析规则注入（与 database.SetEinoConversationDirs 使用同一批值），
-// 避免本包重复推导路径导致清理目录与实际写入目录不一致。
+// Paths collects the root directories of all categories.
+// Injected by the app layer using the existing resolution rules (the same values as database.SetEinoConversationDirs),
+// so this package never re-derives paths and cleans exactly the directories that are written.
 type Paths struct {
 	Workspace            string
 	Reduction            string
@@ -46,17 +46,17 @@ type Paths struct {
 	DiagnosticLogs       string
 }
 
-// Unit 是一个可独立删除的清理单元（目录或文件）。
+// Unit is an independently deletable cleanup unit (directory or file).
 type Unit struct {
 	Path    string
-	Session string // Scope 非 ScopeNone 时为对应 ID，否则为空
+	Session string // For non-ScopeNone scopes, the corresponding ID; empty otherwise
 	Scope   Scope
 	IsDir   bool
 	ModTime time.Time
 	Size    int64
 }
 
-// Age 返回单元相对 now 的闲置时长；未来时间戳（时钟异常）按 0 处理。
+// Age returns how long the unit has been idle relative to now; future timestamps (clock skew) count as 0.
 func (u Unit) Age(now time.Time) time.Duration {
 	if u.ModTime.IsZero() {
 		return 0
@@ -67,27 +67,27 @@ func (u Unit) Age(now time.Time) time.Duration {
 	return 0
 }
 
-// scanner 枚举某个根目录下的全部删除单元。
+// scanner enumerates all deletion units under a root directory.
 type scanner func(root string) ([]Unit, error)
 
-// category 是一个具名清理任务，对应 Gitea 的 [cron.*] 子任务模型。
+// category is a named cleanup task, mirroring Gitea's [cron.*] subtask model.
 type category struct {
 	key        string
 	label      string
 	hint       string
 	root       func(Paths) string
 	scan       scanner
-	pruneEmpty bool // 删除单元后回收空掉的父目录（chat_uploads 的日期层）
+	pruneEmpty bool // Reclaim parent directories emptied by unit deletion (the chat_uploads date layer)
 }
 
-// CategoryInfo 是一个清理类别的静态元信息，供 API 与前端展示。
+// CategoryInfo is the static metadata of a cleanup category, served to the API and frontend.
 type CategoryInfo struct {
 	Key   string `json:"key"`
 	Label string `json:"label"`
 	Hint  string `json:"hint"`
 }
 
-// DescribeCategories 按注册表顺序返回全部类别元信息。
+// DescribeCategories returns all category metadata in registry order.
 func DescribeCategories() []CategoryInfo {
 	all := categories()
 	out := make([]CategoryInfo, 0, len(all))
@@ -97,41 +97,41 @@ func DescribeCategories() []CategoryInfo {
 	return out
 }
 
-// categories 按固定顺序返回全部类别；root 为空的类别会被调用方跳过。
+// categories returns all categories in a fixed order; the caller skips categories with an empty root.
 func categories() []category {
 	return []category{
 		{
 			key:   config.StorageCategoryWorkspace,
-			label: "Agent 工作区",
-			hint:  "Agent 下载与扫描产物的工作目录（tmp/workspace），按项目/会话分目录。",
+			label: "Agent workspace",
+			hint:  "Working directory for agent downloads and scan artifacts (tmp/workspace), split by project/conversation.",
 			root:  func(p Paths) string { return p.Workspace },
 			scan:  scanScopedDirs,
 		},
 		{
 			key:   config.StorageCategoryReduction,
-			label: "工具输出缓存",
-			hint:  "超长工具输出落盘的截断文件（tmp/reduction），每条执行一个文件，属纯派生数据。",
+			label: "Tool output cache",
+			hint:  "Truncated spill files of oversized tool output (tmp/reduction), one file per execution; purely derived data.",
 			root:  func(p Paths) string { return p.Reduction },
 			scan:  scanScopedDirs,
 		},
 		{
 			key:   config.StorageCategoryConversationArtifact,
-			label: "会话产物",
-			hint:  "摘要记录与超长用户输入台账（data/conversation_artifacts）。",
+			label: "Conversation artifacts",
+			hint:  "Summary records and oversized user-input ledgers (data/conversation_artifacts).",
 			root:  func(p Paths) string { return p.ConversationArtifact },
 			scan:  func(root string) ([]Unit, error) { return scanSessionDirs(root, ScopeConversation) },
 		},
 		{
 			key:   config.StorageCategoryPlantask,
-			label: "计划任务看板",
-			hint:  "Eino 多代理计划看板 JSON（skills/.eino/plantask），属纯派生数据。",
+			label: "Plan task board",
+			hint:  "Eino multi-agent plan board JSON (skills/.eino/plantask); purely derived data.",
 			root:  func(p Paths) string { return p.Plantask },
 			scan:  func(root string) ([]Unit, error) { return scanSessionDirs(root, ScopeConversation) },
 		},
 		{
 			key:   config.StorageCategoryC2Artifacts,
-			label: "C2 产物",
-			hint:  "C2 回传截图、上传件、下发文件与已生成的 payload 二进制（tmp/c2）。清理后对应 payload 下载链接会失效。",
+			label: "C2 artifacts",
+			hint:  "C2 screenshots, uploads, delivered files, and generated payload binaries (tmp/c2). After cleanup, the corresponding payload download links stop working.",
 			root:  func(p Paths) string { return p.C2 },
 			scan: func(root string) ([]Unit, error) {
 				return scanSubdirFiles(root, "results", "uploads", "downstream", "payloads")
@@ -139,16 +139,16 @@ func categories() []category {
 		},
 		{
 			key:        config.StorageCategoryChatUploads,
-			label:      "对话上传文件",
-			hint:       "用户在对话中上传的附件（chat_uploads/日期/会话）。",
+			label:      "Conversation uploads",
+			hint:       "Attachments uploaded by users in conversations (chat_uploads/date/conversation).",
 			root:       func(p Paths) string { return p.ChatUploads },
 			scan:       scanDatedSessionDirs,
 			pruneEmpty: true,
 		},
 		{
 			key:   config.StorageCategoryWorkflowCheckpoints,
-			label: "工作流检查点",
-			hint:  "工作流运行断点文件（data/workflow-checkpoints），仅用于恢复中断的运行。",
+			label: "Workflow checkpoints",
+			hint:  "Workflow run checkpoint files (data/workflow-checkpoints), used only to resume interrupted runs.",
 			root:  func(p Paths) string { return p.WorkflowCheckpoints },
 			scan: func(root string) ([]Unit, error) {
 				return scanPatternFiles(root, "*.ckpt", "*.ckpt.tmp")
@@ -156,8 +156,8 @@ func categories() []category {
 		},
 		{
 			key:   config.StorageCategoryDiagnosticLogs,
-			label: "诊断日志",
-			hint:  "按天轮转的诊断日志（log/diagnostic-*.log）。",
+			label: "Diagnostic logs",
+			hint:  "Daily-rotated diagnostic logs (log/diagnostic-*.log).",
 			root:  func(p Paths) string { return p.DiagnosticLogs },
 			scan: func(root string) ([]Unit, error) {
 				return scanPatternFiles(root, "diagnostic-*.log")
@@ -166,11 +166,12 @@ func categories() []category {
 	}
 }
 
-// chatUploadsPlaceholderConvs 是上传时还没有会话 ID 的占位目录名，
-// 不能当作会话 ID 去数据库查询，按非会话型处理（仅按保留期判定）。
+// chatUploadsPlaceholderConvs holds placeholder directory names used when an upload happens
+// before a conversation ID exists; they cannot be queried as conversation IDs, so they are
+// treated as non-session units (retention only).
 var chatUploadsPlaceholderConvs = map[string]bool{"_new": true, "_manual": true}
 
-// scanScopedDirs 枚举 root/projects/<id> 与 root/conversations/<id>。
+// scanScopedDirs enumerates root/projects/<id> and root/conversations/<id>.
 func scanScopedDirs(root string) ([]Unit, error) {
 	scopes := []struct {
 		dir   string
@@ -201,7 +202,7 @@ func scanScopedDirs(root string) ([]Unit, error) {
 	return units, nil
 }
 
-// scanSessionDirs 枚举 root/<id>，目录名即会话 ID。
+// scanSessionDirs enumerates root/<id>, where the directory name is the conversation ID.
 func scanSessionDirs(root string, scope Scope) ([]Unit, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -224,7 +225,7 @@ func scanSessionDirs(root string, scope Scope) ([]Unit, error) {
 	return units, nil
 }
 
-// scanDatedSessionDirs 枚举 root/<YYYY-MM-DD>/<会话ID|占位名>。
+// scanDatedSessionDirs enumerates root/<YYYY-MM-DD>/<conversationID|placeholder>.
 func scanDatedSessionDirs(root string) ([]Unit, error) {
 	dates, err := os.ReadDir(root)
 	if err != nil {
@@ -245,7 +246,7 @@ func scanDatedSessionDirs(root string) ([]Unit, error) {
 		}
 		for _, cd := range convs {
 			if !cd.IsDir() {
-				// 直接落在日期目录下的散文件：按非会话型文件清理。
+				// Stray files directly under the date directory: cleaned as non-session files.
 				if u, err := statUnit(filepath.Join(dateDir, cd.Name()), "", ScopeNone); err == nil {
 					units = append(units, u)
 				}
@@ -263,7 +264,7 @@ func scanDatedSessionDirs(root string) ([]Unit, error) {
 	return units, nil
 }
 
-// scanSubdirFiles 枚举 root/<subdir>/ 下的文件（不递归），用于 C2 产物。
+// scanSubdirFiles enumerates files under root/<subdir>/ (non-recursive), used for C2 artifacts.
 func scanSubdirFiles(root string, subdirs ...string) ([]Unit, error) {
 	var units []Unit
 	for _, sub := range subdirs {
@@ -287,7 +288,7 @@ func scanSubdirFiles(root string, subdirs ...string) ([]Unit, error) {
 	return units, nil
 }
 
-// scanPatternFiles 枚举 root 下匹配任一 glob 的文件。
+// scanPatternFiles enumerates files under root matching any of the globs.
 func scanPatternFiles(root string, patterns ...string) ([]Unit, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -318,8 +319,9 @@ func scanPatternFiles(root string, patterns ...string) ([]Unit, error) {
 	return units, nil
 }
 
-// statUnit 采集单元的大小与最近修改时间。
-// 使用 Lstat：符号链接只统计链接自身，绝不跟随到目标（否则会把工作目录外的数据算进来甚至删掉）。
+// statUnit collects a unit's size and last modification time.
+// Uses Lstat: symbolic links count only the link itself and are never followed (otherwise data
+// outside the working directory could be counted or even deleted).
 func statUnit(path, session string, scope Scope) (Unit, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -346,8 +348,9 @@ func statUnit(path, session string, scope Scope) (Unit, error) {
 	return u, nil
 }
 
-// dirStats 汇总目录占用字节与其中最新的修改时间。
-// filepath.WalkDir 不跟随符号链接，且单个子树不可读时按尽力而为跳过，不中断整体统计。
+// dirStats sums a directory's bytes and the newest modification time inside it.
+// filepath.WalkDir does not follow symlinks and skips unreadable subtrees best-effort,
+// without aborting the whole scan.
 func dirStats(root string) (int64, time.Time) {
 	var size int64
 	var newest time.Time
@@ -370,7 +373,7 @@ func dirStats(root string) (int64, time.Time) {
 	return size, newest
 }
 
-// confined 校验 candidate 确实位于 root 之内，防止任何形式的路径逃逸。
+// confined verifies that candidate really is inside root, preventing any form of path escape.
 func confined(root, candidate string) bool {
 	if root == "" || candidate == "" {
 		return false
@@ -385,9 +388,9 @@ func confined(root, candidate string) bool {
 	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// pruneEmptyDirs 自底向上回收空目录，最多下探 depth 层。
-// chat_uploads 删完会话目录后会留下空的日期目录，需要一并回收。
-// 只删除「确实为空」的子孙目录，root 自身永不删除。
+// pruneEmptyDirs reclaims empty directories bottom-up, descending at most depth levels.
+// After chat_uploads removes conversation directories, empty date directories remain and must
+// be reclaimed too. Only descendants that are truly empty are deleted; root itself is never deleted.
 func pruneEmptyDirs(root string, depth int) int {
 	if depth <= 0 {
 		return 0

@@ -228,9 +228,9 @@ func (h *AgentHandler) CancelRunningTaskForConversation(conversationID string) {
 	}
 	if h.logger != nil {
 		if err != nil {
-			h.logger.Warn("取消会话运行中任务失败", zap.String("conversationId", conversationID), zap.Error(err))
+			h.logger.Warn("Failed to cancel the conversation's running task", zap.String("conversationId", conversationID), zap.Error(err))
 		} else if ok {
-			h.logger.Info("已取消会话运行中任务", zap.String("conversationId", conversationID))
+			h.logger.Info("Cancelled the conversation's running task", zap.String("conversationId", conversationID))
 		}
 	}
 

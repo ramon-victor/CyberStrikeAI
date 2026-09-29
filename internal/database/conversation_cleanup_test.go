@@ -60,8 +60,8 @@ func TestDeleteConversationRemovesEinoScopedDirs(t *testing.T) {
 	}
 }
 
-// chat_uploads 比其他产物多一层日期目录（chat_uploads/<日期>/<会话ID>），
-// 历史上删除会话只清了数据库行（ON DELETE CASCADE），磁盘文件会永久残留。
+// chat_uploads has an extra date layer compared with other artifacts (chat_uploads/<date>/<conversationID>);
+// historically, deleting a conversation only cleared the database rows (ON DELETE CASCADE) and the files lingered forever.
 func TestDeleteConversationRemovesChatUploads(t *testing.T) {
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "conversations.db")
@@ -85,7 +85,7 @@ func TestDeleteConversationRemovesChatUploads(t *testing.T) {
 	targetSeg := sanitizeConversationPathSegment(target.ID)
 	siblingSeg := sanitizeConversationPathSegment(sibling.ID)
 
-	// 同一会话跨两个日期目录都有上传件，另一个会话的上传件必须保留。
+	// The same conversation has uploads across two date directories; the other conversation's uploads must be kept.
 	for _, dir := range []string{
 		filepath.Join(uploads, "2026-06-01", targetSeg),
 		filepath.Join(uploads, "2026-06-02", targetSeg),
@@ -111,13 +111,13 @@ func TestDeleteConversationRemovesChatUploads(t *testing.T) {
 	}
 	siblingDir := filepath.Join(uploads, "2026-06-01", siblingSeg)
 	if _, statErr := os.Stat(filepath.Join(siblingDir, "report.pdf")); statErr != nil {
-		t.Errorf("其他会话的上传件被误删: %v", statErr)
+		t.Errorf("another conversation's uploads were deleted by mistake: %v", statErr)
 	}
 	if _, statErr := os.Stat(uploads); statErr != nil {
-		t.Errorf("chat_uploads 根目录不应被删除: %v", statErr)
+		t.Errorf("the chat_uploads root must not be deleted: %v", statErr)
 	}
 	if _, statErr := os.Stat(filepath.Join(uploads, "2026-06-01")); statErr != nil {
-		t.Errorf("仍有数据的日期目录不应被删除: %v", statErr)
+		t.Errorf("a date directory that still has data must not be deleted: %v", statErr)
 	}
 }
 

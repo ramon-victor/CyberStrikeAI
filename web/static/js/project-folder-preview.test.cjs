@@ -139,7 +139,7 @@ test('对话悬浮预览标题与时间分行显示并保留更多标题内容',
     assert.doesNotMatch(titleStyles, /white-space: nowrap;/);
 });
 
-test('项目预览任务统计使用闭合圆环，避免刷新箭头在小尺寸下变成毛刺', () => {
+test('project preview task stats use a closed ring so the refresh arrow does not fray at small sizes', () => {
     const source = functionSource(projects, 'ensureProjectFolderPreview', 'positionProjectFolderPreview');
 
     assert.match(source, /class="project-folder-preview-stats"/);

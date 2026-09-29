@@ -104,8 +104,8 @@ func buildEinoRunResultFromAccumulated(
 			cleaned = UnwrapPlanExecuteUserText(cleaned)
 		}
 	}
-	// exit.final_result 是正式交付物：即使助手正文已有过渡语（如「交付终审报告：」），
-	// 也必须优先采用 exit 内容，避免 supervisor 等模式只展示空壳开场白。
+	// exit.final_result is the formal deliverable: even when the assistant body already has transitional
+	// wording (e.g. "final report:"), the exit content must win, so supervisor-style modes never show only an empty intro.
 	if exitFinal := strings.TrimSpace(einoExtractExitDeliverableFromMsgs(runAccumulatedMsgs)); exitFinal != "" {
 		cleaned = einoMergeAssistantIntroWithExitFinal(cleaned, exitFinal)
 	} else if cleaned == "" {
@@ -170,7 +170,7 @@ func einoExtractExitDeliverableFromMsgs(msgs []adk.Message) string {
 				if content != "" && !strings.HasPrefix(content, einomcp.ToolErrorPrefix) {
 					return content
 				}
-				// exit 工具输出为空时，继续向前从 assistant 参数回填。
+				// When the exit tool output is empty, keep scanning back to the assistant arguments.
 				continue
 			}
 			return ""
@@ -198,8 +198,8 @@ func einoAssistantHasNonExitToolCall(msg *schema.Message) bool {
 	return false
 }
 
-// einoMergeAssistantIntroWithExitFinal 合并助手过渡语与 exit 交付正文。
-// exit 内容优先；若助手正文只是开场白且未被 exit 文本包含，则前置保留。
+// einoMergeAssistantIntroWithExitFinal merges the assistant's transitional wording with the exit deliverable body.
+// Exit content wins; if the assistant body is just an intro and is not contained in the exit text, it is kept as a prefix.
 func einoMergeAssistantIntroWithExitFinal(assistant, exitFinal string) string {
 	assistant = strings.TrimSpace(assistant)
 	exitFinal = strings.TrimSpace(exitFinal)
@@ -218,14 +218,15 @@ func einoMergeAssistantIntroWithExitFinal(assistant, exitFinal string) string {
 	return assistant + "\n\n" + exitFinal
 }
 
-// einoExtractFallbackAssistantFromMsgs 在「主通道未产出助手正文」时，从 Eino ADK
-// 原生消息轨迹中回填用户可见回复。这里保持克制：只采纳倒序最近的可交付终态，
-// 避免把工具调用前的过渡语或子任务过程误升为最终回复。
+// einoExtractFallbackAssistantFromMsgs backfills a user-visible reply from the Eino ADK
+// native message trace when the main channel produced no assistant body. Stay conservative:
+// only accept the most recent deliverable final state in reverse order, so transitional text
+// before tool calls or subtask progress is never promoted into the final reply.
 //
-// 可交付终态：
-// - exit 工具输出；
-// - assistant 调用 exit 时 arguments.final_result；
-// - 没有后续普通工具结果截断的纯 assistant 正文。
+// Deliverable final states:
+// - exit tool output;
+// - arguments.final_result when the assistant calls exit;
+// - a plain assistant body not cut off by a later ordinary tool result.
 func einoExtractFallbackAssistantFromMsgs(msgs []adk.Message) string {
 	if s := einoExtractExitDeliverableFromMsgs(msgs); s != "" {
 		return s
@@ -237,7 +238,8 @@ func einoExtractFallbackAssistantFromMsgs(msgs []adk.Message) string {
 		}
 		switch m.Role {
 		case schema.Tool:
-			// 最近一条是普通工具结果：说明助手尚未给出最终正文，勿回退到更早过程语。
+			// The latest message is an ordinary tool result: the assistant has not produced the
+			// final body yet; do not fall back to earlier progress text.
 			return ""
 		case schema.Assistant:
 			if len(m.ToolCalls) == 0 {

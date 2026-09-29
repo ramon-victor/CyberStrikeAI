@@ -43,7 +43,7 @@ type AgentTask struct {
 	Message          string    `json:"message,omitempty"`
 	StartedAt        time.Time `json:"startedAt"`
 	Status           string    `json:"status"`
-	CancellingAt     time.Time `json:"-"` // 进入 cancelling 状态的时间，用于清理长时间卡住的任务
+	CancellingAt     time.Time `json:"-"` // When the task entered cancelling; used to clean up tasks stuck too long
 
 	// ActiveMCPExecutionID 当前正在执行的 MCP 工具 executionId（仅内存，供「中断并继续」= 仅掐当前工具）
 	ActiveMCPExecutionID string `json:"-"`

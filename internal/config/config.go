@@ -1115,9 +1115,9 @@ type AgentConfig struct {
 // tool_whitelist 可在侧栏「应用」时合并写入 config.yaml 并立即生效。
 // audit_agent_prompt / audit_agent_prompt_review_edit 可在人机协同页编辑并立即生效；空则使用内置默认。
 type HitlConfig struct {
-	// AuditBackend 审计 Agent 后端：openai（兼容协议聊天模型）或 typesafe（Jev 结构化裁决）。空值视为 openai。
+	// AuditBackend selects the audit agent backend: openai (OpenAI-compatible chat model) or typesafe (Jev structured verdicts). Empty means openai.
 	AuditBackend string `yaml:"audit_backend,omitempty" json:"audit_backend,omitempty"`
-	// AuditModel 审计 Agent 专用模型。openai 后端空字段继承主模型；typesafe 后端 api_key 必填，不继承主模型密钥。
+	// AuditModel is the dedicated audit agent model. With the openai backend, empty fields inherit the main model; with typesafe, api_key is required and never inherits the main model key.
 	AuditModel OpenAIConfig `yaml:"audit_model,omitempty" json:"audit_model,omitempty"`
 	// ToolWhitelist 全局免审批工具名（与白名单内工具不触发 HITL 审批）。
 	ToolWhitelist []string `yaml:"tool_whitelist,omitempty" json:"tool_whitelist,omitempty"`
@@ -1371,7 +1371,7 @@ func (m MonitorConfig) RetentionDaysEffective() int {
 	return *m.RetentionDays
 }
 
-// 运行空间垃圾清理的类别键。顺序即前端展示顺序，勿依赖 map 迭代顺序。
+// Category keys for runtime garbage cleanup. The order is the frontend display order; do not rely on map iteration order.
 const (
 	StorageCategoryWorkspace            = "workspace"
 	StorageCategoryReduction            = "reduction"
@@ -1383,7 +1383,7 @@ const (
 	StorageCategoryDiagnosticLogs       = "diagnostic_logs"
 )
 
-// StorageCategoryOrder 列出全部可清理类别，供 UI 与报表稳定排序。
+// StorageCategoryOrder lists all cleanable categories for stable UI and report ordering.
 var StorageCategoryOrder = []string{
 	StorageCategoryWorkspace,
 	StorageCategoryReduction,
@@ -1395,8 +1395,8 @@ var StorageCategoryOrder = []string{
 	StorageCategoryDiagnosticLogs,
 }
 
-// StorageCategoryDefaults 各类别默认保留天数。取较短值的是纯派生产物
-// （reduction/checkpoint），取较长值的是可能仍需人工回看的上传件。
+// StorageCategoryDefaults holds the default retention days per category. Shorter values are
+// pure derived products (reduction/checkpoints); longer ones are uploads that may still need human review.
 var StorageCategoryDefaults = map[string]int{
 	StorageCategoryWorkspace:            30,
 	StorageCategoryReduction:            7,
@@ -1408,27 +1408,27 @@ var StorageCategoryDefaults = map[string]int{
 	StorageCategoryDiagnosticLogs:       14,
 }
 
-// StorageCategoryConfig 单个清理类别的策略覆盖。
+// StorageCategoryConfig is the policy override for a single cleanup category.
 type StorageCategoryConfig struct {
-	// Enabled 省略时默认 true；显式 false 表示该类别既不自动清理也不出现在手动清理范围内。
+	// Enabled defaults to true when omitted; an explicit false means the category is neither auto-cleaned nor offered for manual cleanup.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	// RetentionDays 省略时使用 StorageCategoryDefaults；0 表示不按保留期清理（孤儿目录仍会回收）。
+	// RetentionDays falls back to StorageCategoryDefaults when omitted; 0 means no retention-based cleanup (orphan directories are still reclaimed).
 	RetentionDays *int `yaml:"retention_days,omitempty" json:"retention_days,omitempty"`
 }
 
-// StorageConfig 运行空间垃圾清理策略。
-// 自动清理默认关闭：与 Argo ttlStrategy / K8s ttlSecondsAfterFinished 的 unset 语义一致，
-// 升级后不会在管理员不知情的情况下删除既有数据。
+// StorageConfig is the runtime garbage cleanup policy.
+// Auto cleanup is off by default: the same unset semantics as Argo ttlStrategy / K8s
+// ttlSecondsAfterFinished, so an upgrade never deletes existing data without the administrator knowing.
 type StorageConfig struct {
-	// AutoClean 省略或 false 关闭后台自动清理；显式 true 才启用。
+	// AutoClean omitted or false disables background auto cleanup; only an explicit true enables it.
 	AutoClean *bool `yaml:"auto_clean,omitempty" json:"auto_clean,omitempty"`
-	// IntervalMinutes 后台清理轮询间隔；省略默认 60，最小 5。
+	// IntervalMinutes is the background cleanup polling interval; defaults to 60, minimum 5.
 	IntervalMinutes *int `yaml:"interval_minutes,omitempty" json:"interval_minutes,omitempty"`
-	// OrphanGraceDays 会话/项目已删除但目录残留时的最小保留天数；省略默认 1。
+	// OrphanGraceDays is the minimum retention for directories left behind by deleted sessions/projects; defaults to 1.
 	OrphanGraceDays *int `yaml:"orphan_grace_days,omitempty" json:"orphan_grace_days,omitempty"`
-	// ActiveGraceHours 最近有活动的会话一律跳过清理；省略默认 24。
+	// ActiveGraceHours: sessions with recent activity are always skipped; defaults to 24.
 	ActiveGraceHours *int `yaml:"active_grace_hours,omitempty" json:"active_grace_hours,omitempty"`
-	// Categories 按类别覆盖策略；未列出的类别使用内置默认值。
+	// Categories overrides policy per category; unlisted categories use the built-in defaults.
 	Categories map[string]StorageCategoryConfig `yaml:"categories,omitempty" json:"categories,omitempty"`
 }
 

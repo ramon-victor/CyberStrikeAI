@@ -1,6 +1,6 @@
 package storage
 
-// Filesystem 描述某个路径所在文件系统的容量。
+// Filesystem describes the capacity of the filesystem holding a path.
 type Filesystem struct {
 	Path        string  `json:"path"`
 	TotalBytes  int64   `json:"total_bytes"`
@@ -9,11 +9,11 @@ type Filesystem struct {
 	UsedPercent float64 `json:"used_percent"`
 	InodesTotal int64   `json:"inodes_total"`
 	InodesFree  int64   `json:"inodes_free"`
-	// Available 为 false 表示当前平台不支持查询，前端应隐藏容量卡片而不是显示 0。
+	// Available=false means the platform does not support the query; the frontend should hide the capacity card instead of showing 0.
 	Available bool `json:"available"`
 }
 
-// FilesystemUsage 返回 path 所在文件系统的容量信息。
+// FilesystemUsage returns capacity info for the filesystem holding path.
 func FilesystemUsage(path string) (Filesystem, error) {
 	return filesystemUsage(path)
 }

@@ -322,7 +322,7 @@ func (s *ExecutionService) finishEntry(ctx context.Context, entry *executionEntr
 	}
 	if cancellationUnconfirmed {
 		entry.exec.Status = ToolExecutionStatusOrphaned
-		entry.exec.Error = "取消已请求，但远端 MCP 未确认执行已停止"
+		entry.exec.Error = "Cancellation requested, but the remote MCP has not confirmed the execution stopped"
 		runlease.FromContext(ctx).MarkUnconfirmed(id, entry.exec.Error)
 	}
 	finalExec := cloneToolExecution(entry.exec)

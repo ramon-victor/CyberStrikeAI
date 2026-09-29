@@ -267,7 +267,7 @@ func (m *BatchTaskManager) CreateBatchQueue(
 			dbTasks,
 			policy,
 		); err != nil {
-			return nil, fmt.Errorf("保存任务队列失败: %w", err)
+			return nil, fmt.Errorf("failed to save the task queue: %w", err)
 		}
 	}
 
@@ -777,7 +777,7 @@ func (m *BatchTaskManager) UpdateQueueMetadata(queueID, title, role, agentMode s
 	policy := queue.HITLPolicy
 	if len(hitlPolicies) > 0 {
 		if !queueAllowsTaskListMutationLocked(queue) {
-			return fmt.Errorf("队列有正在执行的任务，无法修改审批设置")
+			return fmt.Errorf("the queue has running tasks; approval settings cannot be changed")
 		}
 		policy = hitlPolicies[0]
 		if err := validateBatchHITLPolicy(policy); err != nil {
@@ -798,7 +798,7 @@ func (m *BatchTaskManager) UpdateQueueMetadata(queueID, title, role, agentMode s
 
 	if m.db != nil {
 		if err := m.db.UpdateBatchQueueMetadata(queueID, title, role, agentMode, nextConcurrency, policy); err != nil {
-			return fmt.Errorf("保存任务队列失败: %w", err)
+			return fmt.Errorf("failed to save the task queue: %w", err)
 		}
 	}
 	queue.Title = title

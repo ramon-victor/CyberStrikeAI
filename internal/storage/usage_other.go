@@ -2,7 +2,7 @@
 
 package storage
 
-// errPlatformUnsupported 由调用方转换为 Available=false，不视为致命错误。
+// errPlatformUnsupported is converted to Available=false by the caller; not treated as fatal.
 var errPlatformUnsupported = &unsupportedPlatformError{}
 
 type unsupportedPlatformError struct{}

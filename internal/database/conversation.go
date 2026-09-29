@@ -835,7 +835,7 @@ func (db *DB) removeConversationScopedDirs(conversationID, projectID string) {
 	db.removeConversationScopedDir(db.einoPlantaskBaseDir, conversationID, "plantask")
 	// Eino ADK runner checkpoints (checkpoint_dir/<id>/).
 	db.removeConversationScopedDir(db.einoCheckpointBaseDir, conversationID, "eino_checkpoint")
-	// 上传附件始终归属单个会话，项目绑定的会话也要删，故放在 projectID 判断之外。
+	// Uploaded attachments always belong to a single conversation; conversations bound to a project must be deleted too, hence this sits outside the projectID check.
 	db.removeChatUploadDirs(conversationID)
 	// Eino reduction persisted tool outputs (tmp/reduction/conversations/<id>/).
 	// Project-bound sessions share projects/<id>/ — skip on single conversation delete.
@@ -847,8 +847,8 @@ func (db *DB) removeConversationScopedDirs(conversationID, projectID string) {
 	}
 }
 
-// removeChatUploadDirs 删除 chat_uploads/<日期>/<会话ID>/ 下属于该会话的上传目录。
-// 该根目录比其他产物多一层日期目录，无法复用 removeConversationScopedDir。
+// removeChatUploadDirs deletes a conversation's upload directories under chat_uploads/<date>/<conversationID>/.
+// This root has an extra date layer compared with other artifacts, so removeConversationScopedDir cannot be reused.
 func (db *DB) removeChatUploadDirs(conversationID string) {
 	base := strings.TrimSpace(db.chatUploadsDir)
 	if base == "" || strings.TrimSpace(conversationID) == "" {
@@ -865,7 +865,7 @@ func (db *DB) removeChatUploadDirs(conversationID string) {
 		}
 		dir := filepath.Join(base, dateDir.Name(), seg)
 		if rmErr := os.RemoveAll(dir); rmErr != nil && db.logger != nil {
-			db.logger.Warn("删除会话上传目录失败",
+			db.logger.Warn("Failed to delete conversation upload directory",
 				zap.String("conversationId", conversationID),
 				zap.String("kind", "chat_uploads"),
 				zap.String("dir", dir),

@@ -9,27 +9,28 @@ import (
 	"go.uber.org/zap"
 )
 
-// minSweepInterval 是后台清理的下限，避免把 interval_minutes 配成极小值后持续遍历磁盘。
+// minSweepInterval is the floor for background cleanup, so a tiny interval_minutes cannot keep traversing the disk continuously.
 const minSweepInterval = 5 * time.Minute
 
-// sweepCheckInterval 是后台循环的唤醒粒度。
-// 不能按 interval 直接睡一整段：那样把 interval_minutes 从 60 改成 5 后，
-// 必须等当前这段 60 分钟睡眠结束才生效。短粒度唤醒 + 到期判断把延迟限制在一个粒度内。
+// sweepCheckInterval is the wake-up granularity of the background loop.
+// It cannot sleep a whole interval: after changing interval_minutes from 60 to 5, the change
+// would only apply once the ongoing 60-minute sleep ended. Fine-grained wake-ups plus an
+// expiry check bound the delay to one granularity step.
 const sweepCheckInterval = time.Minute
 
-// Service 驱动后台自动清理。
+// Service drives background automatic cleanup.
 type Service struct {
 	cleaner *Cleaner
 	cfg     *config.Config
 	logger  *zap.Logger
 }
 
-// NewService 创建后台清理服务。
+// NewService creates the background cleanup service.
 func NewService(cleaner *Cleaner, cfg *config.Config, logger *zap.Logger) *Service {
 	return &Service{cleaner: cleaner, cfg: cfg, logger: logger}
 }
 
-// AutoCleanEnabled 返回后台自动清理是否开启（默认关闭）。
+// AutoCleanEnabled reports whether background automatic cleanup is on (off by default).
 func (s *Service) AutoCleanEnabled() bool {
 	if s == nil || s.cfg == nil {
 		return false
@@ -37,7 +38,7 @@ func (s *Service) AutoCleanEnabled() bool {
 	return s.cfg.Storage.AutoCleanEffective()
 }
 
-// Interval 返回清理间隔；每轮重新读取，因此改配置无需重启。
+// Interval returns the cleanup interval; re-read every round, so config changes need no restart.
 func (s *Service) Interval() time.Duration {
 	if s == nil || s.cfg == nil {
 		return minSweepInterval
@@ -49,31 +50,32 @@ func (s *Service) Interval() time.Duration {
 	return d
 }
 
-// PurgeExpired 执行一轮自动清理；未开启自动清理时直接返回。
+// PurgeExpired runs one automatic cleanup round; returns immediately when auto cleanup is off.
 func (s *Service) PurgeExpired() {
 	if s == nil || s.cleaner == nil || !s.AutoCleanEnabled() {
 		return
 	}
 	if _, err := s.cleaner.Clean(CleanRequest{Trigger: "schedule"}); err != nil {
 		if s.logger != nil {
-			// 并发冲突不是故障：说明已有一轮在跑，跳过即可。
+			// A concurrency conflict is not a failure: a round is already running, just skip.
 			if errors.Is(err, ErrCleanupInProgress) {
-				s.logger.Debug("已有存储清理在执行，跳过本轮")
+				s.logger.Debug("A storage cleanup is already running, skipping this round")
 				return
 			}
-			s.logger.Warn("运行空间自动清理失败", zap.Error(err))
+			s.logger.Warn("Runtime storage automatic cleanup failed", zap.Error(err))
 		}
 	}
 }
 
-// StartRetentionLoop 按配置间隔周期性清理运行空间垃圾。
-// 以 sweepCheckInterval 粒度唤醒、到期才执行，因此 interval_minutes 的改动最多一个粒度后生效。
+// StartRetentionLoop periodically cleans runtime-space garbage at the configured interval.
+// It wakes at sweepCheckInterval granularity and runs only when due, so an interval_minutes
+// change takes effect after at most one granularity step.
 func StartRetentionLoop(s *Service, logger *zap.Logger) {
 	if s == nil || s.cleaner == nil {
 		return
 	}
-	// 启动后先跑一轮，避免「配置好了但要等一个间隔才见效」；
-	// 放在 goroutine 里，全量目录遍历不阻塞启动流程。
+	// Run one round right after startup, so a fresh configuration does not wait a full interval;
+	// it runs in a goroutine so the full directory traversal does not block startup.
 	go func() {
 		s.PurgeExpired()
 		last := time.Now()

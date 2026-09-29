@@ -3470,9 +3470,9 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			},
 			"/api/storage/meta": map[string]interface{}{
 				"get": map[string]interface{}{
-					"tags":        []string{"存储清理"},
-					"summary":     "获取存储清理策略",
-					"description": "返回自动清理开关、间隔、宽限窗口与全部清理类别的启用状态及保留天数",
+					"tags":        []string{"Storage cleanup"},
+					"summary":     "Get storage cleanup policy",
+					"description": "Returns the auto-clean switch, interval, grace windows, and the enabled state and retention days of every cleanup category",
 					"operationId": "getStorageMeta",
 					"responses": map[string]interface{}{
 						"200": map[string]interface{}{
@@ -3482,22 +3482,22 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"description": "未授权",
 						},
 						"403": map[string]interface{}{
-							"description": "缺少 storage:read 权限",
+							"description": "Missing storage:read permission",
 						},
 					},
 				},
 			},
 			"/api/storage/status": map[string]interface{}{
 				"get": map[string]interface{}{
-					"tags":        []string{"存储清理"},
-					"summary":     "获取运行空间占用",
-					"description": "返回文件系统容量（含 inode）与各类别的占用、可回收量；结果按短 TTL 缓存",
+					"tags":        []string{"Storage cleanup"},
+					"summary":     "Get runtime storage usage",
+					"description": "Returns filesystem capacity (including inodes) plus per-category usage and reclaimable space; results are cached with a short TTL",
 					"operationId": "getStorageStatus",
 					"parameters": []interface{}{
 						map[string]interface{}{
 							"name":        "refresh",
 							"in":          "query",
-							"description": "为 true 时强制重新遍历目录，绕过缓存",
+							"description": "When true, force a fresh directory traversal, bypassing the cache",
 							"required":    false,
 							"schema":      map[string]interface{}{"type": "boolean"},
 						},
@@ -3510,16 +3510,16 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"description": "未授权",
 						},
 						"403": map[string]interface{}{
-							"description": "缺少 storage:read 权限",
+							"description": "Missing storage:read permission",
 						},
 					},
 				},
 			},
 			"/api/storage/cleanup": map[string]interface{}{
 				"post": map[string]interface{}{
-					"tags":        []string{"存储清理"},
-					"summary":     "预览或执行运行空间清理",
-					"description": "默认 dry_run=true 只统计不删除；真实删除必须同时传 dry_run=false 与 confirm=true。仅处理已启用的类别，同一时刻只允许一轮执行",
+					"tags":        []string{"Storage cleanup"},
+					"summary":     "Preview or run runtime storage cleanup",
+					"description": "Defaults to dry_run=true (report only, nothing deleted); a real deletion requires both dry_run=false and confirm=true. Only enabled categories are processed, and only one round may run at a time",
 					"operationId": "runStorageCleanup",
 					"requestBody": map[string]interface{}{
 						"required": false,
@@ -3530,15 +3530,15 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 									"properties": map[string]interface{}{
 										"dry_run": map[string]interface{}{
 											"type":        "boolean",
-											"description": "省略时按 true 处理",
+											"description": "Defaults to true when omitted",
 										},
 										"confirm": map[string]interface{}{
 											"type":        "boolean",
-											"description": "dry_run=false 时必须为 true",
+											"description": "Must be true when dry_run=false",
 										},
 										"categories": map[string]interface{}{
 											"type":        "array",
-											"description": "限定类别；省略表示全部已启用类别",
+											"description": "Restrict to these categories; omitted means all enabled categories",
 											"items":       map[string]interface{}{"type": "string"},
 										},
 									},
@@ -3548,19 +3548,19 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 					"responses": map[string]interface{}{
 						"200": map[string]interface{}{
-							"description": "执行完成（或预览完成）",
+							"description": "Execution finished (or preview finished)",
 						},
 						"400": map[string]interface{}{
-							"description": "缺少 confirm、或类别键未注册",
+							"description": "Missing confirm, or an unregistered category key",
 						},
 						"401": map[string]interface{}{
 							"description": "未授权",
 						},
 						"403": map[string]interface{}{
-							"description": "缺少 storage:write 权限",
+							"description": "Missing storage:write permission",
 						},
 						"409": map[string]interface{}{
-							"description": "已有一轮清理在执行",
+							"description": "A cleanup round is already running",
 						},
 					},
 				},
@@ -5013,8 +5013,8 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"/api/config/test-typesafe": map[string]interface{}{
 				"post": map[string]interface{}{
 					"tags":        []string{"配置管理"},
-					"summary":     "测试 TypeSafe Jev 连接",
-					"description": "发送一条最小 Noul 请求，验证 TypeSafe System One API Key 是否可用。",
+					"summary":     "Test the TypeSafe Jev connection",
+					"description": "Sends a minimal Noul request to verify that the TypeSafe System One API key works.",
 					"operationId": "testTypeSafe",
 					"requestBody": map[string]interface{}{
 						"required": true,
@@ -5024,9 +5024,9 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 									"type":     "object",
 									"required": []string{"api_key"},
 									"properties": map[string]interface{}{
-										"base_url": map[string]interface{}{"type": "string", "description": "可选，默认 https://api.typesafe.ai"},
+										"base_url": map[string]interface{}{"type": "string", "description": "Optional; defaults to https://api.typesafe.ai"},
 										"api_key":  map[string]interface{}{"type": "string", "description": "TypeSafe API Key"},
-										"model":    map[string]interface{}{"type": "string", "description": "可选，默认 jev-latest", "example": "jev-latest"},
+										"model":    map[string]interface{}{"type": "string", "description": "Optional; defaults to jev-latest", "example": "jev-latest"},
 									},
 								},
 							},

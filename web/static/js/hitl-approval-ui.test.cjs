@@ -361,7 +361,7 @@ test('旧会话首次升级到五分钟默认审批时限，仍允许用户之�
     assert.match(fs.readFileSync('web/static/js/hitl.js', 'utf8'), /markLegacyHitlTimeoutMigrated/);
 });
 
-test('人机协同页和日志展示 Jev / OpenAI 审批引擎', () => {
+test('HITL page and logs show the Jev / OpenAI audit engine', () => {
     const hitlPage = fs.readFileSync('web/static/js/hitl.js', 'utf8');
     assert.match(template, /id="hitl-page-audit-engine"/);
     assert.match(template, /id="hitl-log-detail-engine"/);

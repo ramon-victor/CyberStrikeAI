@@ -26,9 +26,10 @@ func PrintConfigCreated() {
 	s.BlankLine()
 }
 
-// startupHosts 返回横幅应展示的访问地址。通配地址（含空 host）展开为回环地址
-// 加本机非回环 IPv4；显式 host 原样展示。横幅此前硬编码 127.0.0.1，导致
-// 绑定 0.0.0.0 的用户误以为 server.host 配置未生效（issue #301）。
+// startupHosts returns the access addresses shown in the banner. Wildcard addresses (including
+// an empty host) expand to the loopback address plus local non-loopback IPv4; an explicit host
+// is shown as-is. The banner previously hardcoded 127.0.0.1, so users binding 0.0.0.0 thought
+// their server.host setting had no effect (issue #301).
 func startupHosts(host string) []string {
 	host = strings.TrimSpace(host)
 	if host != "" && host != "0.0.0.0" && host != "::" && host != "[::]" {

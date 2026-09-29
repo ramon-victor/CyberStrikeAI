@@ -3685,18 +3685,18 @@ function syncHitlAuditBackendUI() {
     const modelEl = document.getElementById('hitl-audit-model-name');
     if (baseUrlEl) {
         baseUrlEl.placeholder = ts
-            ? tFn('settings.hitl.auditModelTypeSafeBaseUrlPlaceholder', '留空使用 https://api.typesafe.ai')
-            : tFn('settings.hitl.auditModelBaseUrlPlaceholder', '留空则复用主模型 Base URL');
+            ? tFn('settings.hitl.auditModelTypeSafeBaseUrlPlaceholder', 'Leave empty to use https://api.typesafe.ai')
+            : tFn('settings.hitl.auditModelBaseUrlPlaceholder', 'Leave empty to reuse the main model Base URL');
     }
     if (apiKeyEl) {
         apiKeyEl.placeholder = ts
-            ? tFn('settings.hitl.auditModelTypeSafeApiKeyPlaceholder', 'TypeSafe API Key（必填，不复用主模型）')
-            : tFn('settings.hitl.auditModelApiKeyPlaceholder', '留空则复用主模型 API Key');
+            ? tFn('settings.hitl.auditModelTypeSafeApiKeyPlaceholder', 'TypeSafe API key (required; never reuses the main model)')
+            : tFn('settings.hitl.auditModelApiKeyPlaceholder', 'Leave empty to reuse the main model API key');
     }
     if (modelEl) {
         modelEl.placeholder = ts
-            ? tFn('settings.hitl.auditModelTypeSafeNamePlaceholder', '留空使用 jev-latest')
-            : tFn('settings.hitl.auditModelNamePlaceholder', '留空则复用主模型；建议填写小模型');
+            ? tFn('settings.hitl.auditModelTypeSafeNamePlaceholder', 'Leave empty to use jev-latest')
+            : tFn('settings.hitl.auditModelNamePlaceholder', 'Leave empty to reuse the main model; a smaller model is recommended');
     }
 }
 window.syncHitlAuditBackendUI = syncHitlAuditBackendUI;
@@ -3736,8 +3736,8 @@ async function testHitlAuditModelConnection() {
             if (resultEl) {
                 resultEl.style.color = 'var(--danger-color, #e53e3e)';
                 resultEl.textContent = typeof settingsT === 'function'
-                    ? settingsT('settings.hitl.testTypeSafeFillRequired', '请先填写 TypeSafe API Key')
-                    : '请先填写 TypeSafe API Key';
+                    ? settingsT('settings.hitl.testTypeSafeFillRequired', 'Please enter the TypeSafe API key first')
+                    : 'Please enter the TypeSafe API key first';
             }
             return;
         }

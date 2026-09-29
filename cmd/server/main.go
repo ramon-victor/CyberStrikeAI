@@ -129,16 +129,16 @@ func main() {
 	defer log.Sync()
 
 	if err := configureProcessIsolation(cfg); err != nil {
-		log.Fatal("进程隔离初始化失败", "error", err)
+		log.Fatal("process isolation initialization failed", "error", err)
 	}
 
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	backend, probeErr := processguard.Check(probeCtx)
 	probeCancel()
 	if probeErr != nil {
-		log.Fatal("进程隔离启动检查失败", "error", probeErr)
+		log.Fatal("process isolation startup probe failed", "error", probeErr)
 	}
-	log.Info("任务进程隔离已就绪", zap.String("backend", backend))
+	log.Info("Task process isolation is ready", zap.String("backend", backend))
 
 	// 创建可取消的根 context，用于优雅关闭
 	ctx, cancel := context.WithCancel(context.Background())

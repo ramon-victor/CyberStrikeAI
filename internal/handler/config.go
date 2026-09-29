@@ -951,7 +951,8 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 			if st.Categories == nil {
 				st.Categories = make(map[string]config.StorageCategoryConfig, len(req.Storage.Categories))
 			}
-			// 只接受注册表内的类别键，未注册的键直接忽略，避免被写进 config.yaml。
+			// Only category keys in the registry are accepted; unregistered keys are ignored
+			// so they never get written into config.yaml.
 			for _, key := range config.StorageCategoryOrder {
 				patch, ok := req.Storage.Categories[key]
 				if !ok {
@@ -972,7 +973,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 				st.Categories[key] = cur
 			}
 		}
-		h.logger.Info("更新运行空间清理配置",
+		h.logger.Info("Updated runtime storage cleanup config",
 			zap.Bool("auto_clean", st.AutoCleanEffective()),
 			zap.Int("interval_minutes", st.IntervalMinutesEffective()),
 			zap.Int("orphan_grace_days", st.OrphanGraceDaysEffective()),
@@ -1262,7 +1263,7 @@ type TestOpenAIRequest struct {
 func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 	var req TestOpenAIRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters: " + err.Error()})
 		return
 	}
 
@@ -1347,14 +1348,14 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 		if apiErr, ok := err.(*openai.APIError); ok {
 			c.JSON(http.StatusOK, gin.H{
 				"success":     false,
-				"error":       fmt.Sprintf("API 返回错误 (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
+				"error":       fmt.Sprintf("API returned an error (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
 				"status_code": apiErr.StatusCode,
 			})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"error":   "连接失败: " + err.Error(),
+			"error":   "connection failed: " + err.Error(),
 		})
 		return
 	}
@@ -1382,22 +1383,22 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 	})
 }
 
-// TestTypeSafeRequest 测试 TypeSafe / Jev 连接。
+// TestTypeSafeRequest tests the TypeSafe / Jev connection.
 type TestTypeSafeRequest struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
 	Model   string `json:"model"`
 }
 
-// TestTypeSafe 用一条最小 Noul 验证 TypeSafe System One 是否可用。
+// TestTypeSafe verifies TypeSafe System One availability with a minimal Noul request.
 func (h *ConfigHandler) TestTypeSafe(c *gin.Context) {
 	var req TestTypeSafeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters: " + err.Error()})
 		return
 	}
 	if strings.TrimSpace(req.APIKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "TypeSafe API Key 不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "TypeSafe API Key must not be empty"})
 		return
 	}
 
@@ -1412,14 +1413,14 @@ func (h *ConfigHandler) TestTypeSafe(c *gin.Context) {
 		if apiErr, ok := err.(*typesafe.APIError); ok {
 			c.JSON(http.StatusOK, gin.H{
 				"success":     false,
-				"error":       fmt.Sprintf("API 返回错误 (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
+				"error":       fmt.Sprintf("API returned an error (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
 				"status_code": apiErr.StatusCode,
 			})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"error":   "连接失败: " + err.Error(),
+			"error":   "connection failed: " + err.Error(),
 		})
 		return
 	}
@@ -1448,7 +1449,7 @@ type ListModelsRequest struct {
 func (h *ConfigHandler) ListModels(c *gin.Context) {
 	var req ListModelsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters: " + err.Error()})
 		return
 	}
 
@@ -1521,7 +1522,7 @@ type TestVisionRequest struct {
 func (h *ConfigHandler) TestVision(c *gin.Context) {
 	var req TestVisionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters: " + err.Error()})
 		return
 	}
 	oa := req.Vision.OpenAICfgEffective(req.OpenAI)
@@ -1578,14 +1579,14 @@ func (h *ConfigHandler) TestVision(c *gin.Context) {
 		if apiErr, ok := err.(*openai.APIError); ok {
 			c.JSON(http.StatusOK, gin.H{
 				"success":     false,
-				"error":       fmt.Sprintf("API 返回错误 (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
+				"error":       fmt.Sprintf("API returned an error (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
 				"status_code": apiErr.StatusCode,
 			})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"error":   "连接失败: " + err.Error(),
+			"error":   "connection failed: " + err.Error(),
 		})
 		return
 	}

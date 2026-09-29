@@ -13,7 +13,7 @@ import (
 	"cyberstrike-ai/internal/config"
 )
 
-// fakeActivity 是 Activity 的测试替身。
+// fakeActivity is a test double for Activity.
 type fakeActivity struct {
 	conversations map[string]time.Time
 	projects      map[string]time.Time
@@ -36,9 +36,9 @@ func (f fakeActivity) ProjectLastActivity(id string) (time.Time, bool, error) {
 	return at, ok, nil
 }
 
-// ageTree 在 root 下建一棵目录树，并把全部文件与目录的 mtime 统一改成 now-age。
-// 目录自身的 mtime 也要改：statUnit 取「目录与其内容的最新 mtime」，
-// 只改文件的话新建目录的 mtime 仍是当下，单元会被活跃保护挡住。
+// ageTree builds a directory tree under root and sets the mtime of every file and directory to now-age.
+// Directory mtimes must change too: statUnit takes the newest mtime of the directory and its
+// contents, so a freshly created directory would otherwise be protected by the activity guard.
 func ageTree(t *testing.T, root string, files map[string]int, age time.Duration, now time.Time) {
 	t.Helper()
 	stamp := now.Add(-age)
@@ -58,7 +58,7 @@ func ageTree(t *testing.T, root string, files map[string]int, age time.Duration,
 			dirs[dir] = true
 		}
 	}
-	// 自底向上：改动子目录会刷新父目录 mtime，顺序反了父目录仍是新的。
+	// Bottom-up: touching a subdirectory refreshes the parent mtime; the reverse order would leave parents looking new.
 	order := make([]string, 0, len(dirs))
 	for dir := range dirs {
 		order = append(order, dir)
@@ -86,7 +86,7 @@ func newTestCleaner(t *testing.T, cfg *config.Config, paths Paths, activity Acti
 		Paths:    paths,
 		Activity: activity,
 		Now:      func() time.Time { return now },
-		CacheTTL: -1, // 测试里禁用缓存，保证每次都真实遍历
+		CacheTTL: -1, // Disable caching in tests so every call really traverses
 	})
 }
 
@@ -97,7 +97,7 @@ func categoryCfg(days int) config.StorageCategoryConfig {
 	return config.StorageCategoryConfig{RetentionDays: intPtr(days)}
 }
 
-// workspace 根目录布局：tmp/workspace/{projects,conversations}/<id>/
+// workspace root layout: tmp/workspace/{projects,conversations}/<id>/
 func TestCleanExpiresIdleWorkspaceAndKeepsFresh(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -124,10 +124,10 @@ func TestCleanExpiresIdleWorkspaceAndKeepsFresh(t *testing.T) {
 		t.Fatalf("Clean: %v", err)
 	}
 	if !exists(fresh) {
-		t.Errorf("未过期的工作区被删除: %s", fresh)
+		t.Errorf("unexpired workspace was deleted: %s", fresh)
 	}
 	if exists(old) {
-		t.Errorf("超过保留期的工作区未被删除: %s", old)
+		t.Errorf("workspace past retention was not deleted: %s", old)
 	}
 	cat := findCategory(t, rep, config.StorageCategoryWorkspace)
 	if cat.RemovedUnits != 1 {
@@ -158,17 +158,17 @@ func TestDryRunDeletesNothing(t *testing.T) {
 		t.Fatalf("Clean: %v", err)
 	}
 	if !exists(old) {
-		t.Fatal("dry-run 删除了文件")
+		t.Fatal("dry-run deleted files")
 	}
 	if rep.Totals.ReclaimableBytes != 2048 {
 		t.Errorf("ReclaimableBytes = %d, want 2048", rep.Totals.ReclaimableBytes)
 	}
 	if rep.Totals.RemovedUnits != 0 {
-		t.Errorf("dry-run 不应有 RemovedUnits，got %d", rep.Totals.RemovedUnits)
+		t.Errorf("dry-run should have no RemovedUnits, got %d", rep.Totals.RemovedUnits)
 	}
 }
 
-// 会话已从数据库消失 → 孤儿目录，按较短的 orphan_grace_days 回收。
+// Conversation gone from the database -> orphan directory, reclaimed under the shorter orphan_grace_days.
 func TestOrphanReclaimedEvenWhenRetentionIsZero(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -176,7 +176,7 @@ func TestOrphanReclaimedEvenWhenRetentionIsZero(t *testing.T) {
 	orphan := filepath.Join(ws, "conversations", "conv-gone")
 	ageTree(t, orphan, map[string]int{"a.txt": 10}, 5*24*time.Hour, now)
 
-	// retention_days: 0 表示不按保留期清理，但孤儿目录仍应回收。
+	// retention_days: 0 means no retention-based cleanup, but orphan directories are still reclaimed.
 	cfg := &config.Config{Storage: config.StorageConfig{
 		OrphanGraceDays: intPtr(1),
 		Categories: map[string]config.StorageCategoryConfig{
@@ -189,11 +189,11 @@ func TestOrphanReclaimedEvenWhenRetentionIsZero(t *testing.T) {
 		t.Fatalf("Clean: %v", err)
 	}
 	if exists(orphan) {
-		t.Error("孤儿目录未被回收")
+		t.Error("orphan directory was not reclaimed")
 	}
 }
 
-// 会话仍存在且最近有活动 → 即使目录 mtime 很旧也必须保护。
+// Conversation still exists with recent activity -> must be protected even if the directory mtime is old.
 func TestActiveSessionIsProtected(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -202,7 +202,7 @@ func TestActiveSessionIsProtected(t *testing.T) {
 	ageTree(t, dir, map[string]int{"a.txt": 10}, 40*24*time.Hour, now)
 
 	activity := fakeActivity{conversations: map[string]time.Time{
-		"conv-busy": now.Add(-10 * time.Minute), // 10 分钟前还在跑
+		"conv-busy": now.Add(-10 * time.Minute), // still running 10 minutes ago
 	}}
 	cfg := &config.Config{Storage: config.StorageConfig{
 		Categories: map[string]config.StorageCategoryConfig{
@@ -216,14 +216,14 @@ func TestActiveSessionIsProtected(t *testing.T) {
 		t.Fatalf("Clean: %v", err)
 	}
 	if !exists(dir) {
-		t.Fatal("活跃会话的工作区被删除")
+		t.Fatal("workspace of an active conversation was deleted")
 	}
 	if rep.Totals.SkippedActive != 1 {
 		t.Errorf("SkippedActive = %d, want 1", rep.Totals.SkippedActive)
 	}
 }
 
-// 活跃状态查询失败时必须保守跳过：宁可少删，不可误删正在跑的任务数据。
+// When the activity lookup fails, skip conservatively: better to delete too little than to delete the data of a running task.
 func TestActivityLookupErrorFailsClosed(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -242,14 +242,14 @@ func TestActivityLookupErrorFailsClosed(t *testing.T) {
 		t.Fatalf("Clean: %v", err)
 	}
 	if !exists(dir) {
-		t.Fatal("查询失败时不应删除任何数据")
+		t.Fatal("no data should be deleted when the lookup fails")
 	}
 }
 
-// 指向目录的符号链接不会被任何 scanner 当作删除单元：
-// os.ReadDir 的 DirEntry.IsDir() 对符号链接返回 false。
-// 这是更安全的行为 —— 工作区里被塞进一个指向 /etc 的软链时，
-// 既不会跟随它，也不会把它当成会话目录处理。
+// A symlink pointing at a directory is never treated as a deletion unit by any scanner:
+// os.ReadDir's DirEntry.IsDir() returns false for symlinks.
+// That is the safer behavior — when a symlink to /etc is planted in the workspace,
+// it is neither followed nor treated as a conversation directory.
 func TestSymlinkInsideRootIsNeverADeletionUnit(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -269,7 +269,7 @@ func TestSymlinkInsideRootIsNeverADeletionUnit(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, link); err != nil {
-		t.Skipf("symlink 不可用: %v", err)
+		t.Skipf("symlink unavailable: %v", err)
 	}
 	stamp := now.Add(-400 * 24 * time.Hour)
 	if err := os.Chtimes(link, stamp, stamp); err != nil {
@@ -288,24 +288,24 @@ func TestSymlinkInsideRootIsNeverADeletionUnit(t *testing.T) {
 		t.Fatalf("Clean: %v", err)
 	}
 	if !exists(link) {
-		t.Error("符号链接不应被当作删除单元移除")
+		t.Error("a symlink must not be removed as a deletion unit")
 	}
 	if !exists(victim) {
-		t.Fatal("符号链接目标被删除，发生路径逃逸")
+		t.Fatal("symlink target deleted: path escape")
 	}
 	if rep.Totals.Units != 0 {
-		t.Errorf("Units = %d, want 0（符号链接不计入）", rep.Totals.Units)
+		t.Errorf("Units = %d, want 0 (symlinks not counted)", rep.Totals.Units)
 	}
 }
 
-// 上一轮清理崩溃留下的标记目录必须被无条件补删，
-// 否则它的 mtime 是刚改名的时间，会被活跃保护永久挡住。
+// A marker directory left by a crashed cleanup round must be deleted unconditionally;
+// otherwise its mtime is the rename time and the activity guard would block it forever.
 func TestLeftoverDeletionMarkerIsReclaimed(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
 	ws := filepath.Join(tmp, "workspace")
 	marker := filepath.Join(ws, "conversations", "conv-crash"+deletionMarkerSuffix)
-	// mtime 就是「刚刚」，模拟崩溃后立即重跑。
+	// The mtime is "right now", simulating an immediate rerun after a crash.
 	ageTree(t, marker, map[string]int{"a.txt": 10}, 0, now)
 
 	cfg := &config.Config{Storage: config.StorageConfig{
@@ -319,11 +319,11 @@ func TestLeftoverDeletionMarkerIsReclaimed(t *testing.T) {
 		t.Fatalf("Clean: %v", err)
 	}
 	if exists(marker) {
-		t.Error("崩溃残留的标记目录未被补删")
+		t.Error("crash-leftover marker directory was not finished")
 	}
 }
 
-// chat_uploads 是 root/<日期>/<会话> 三层布局，删完会话目录后空的日期目录也要回收。
+// chat_uploads uses a root/<date>/<conversation> layout; after conversation directories are deleted, empty date directories must be reclaimed too.
 func TestChatUploadsDatedLayoutAndEmptyDirPrune(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -344,15 +344,15 @@ func TestChatUploadsDatedLayoutAndEmptyDirPrune(t *testing.T) {
 		t.Fatalf("Clean: %v", err)
 	}
 	if exists(convDir) {
-		t.Error("过期上传目录未被删除")
+		t.Error("expired upload directory was not deleted")
 	}
 	if exists(dateDir) {
-		t.Error("空的日期目录未被回收")
+		t.Error("empty date directory was not reclaimed")
 	}
 	if !exists(uploads) {
-		t.Error("类别根目录不应被删除")
+		t.Error("the category root must not be deleted")
 	}
-	// Clean 未指定类别时会返回全部已注册类别，必须按 key 取，不能依赖下标。
+	// Clean with no categories returns all registered categories; look them up by key, never by index.
 	cat := findCategory(t, rep, config.StorageCategoryChatUploads)
 	if cat.RemovedEmptyDirs != 1 {
 		t.Errorf("RemovedEmptyDirs = %d, want 1", cat.RemovedEmptyDirs)
@@ -362,7 +362,7 @@ func TestChatUploadsDatedLayoutAndEmptyDirPrune(t *testing.T) {
 	}
 }
 
-// findCategory 按 key 取报表条目；缺失时直接失败，避免用错下标断言到别的类别。
+// findCategory returns a report entry by key; it fails fast when missing, so a wrong index cannot assert against another category.
 func findCategory(t *testing.T, rep *Report, key string) CategoryReport {
 	t.Helper()
 	for _, cat := range rep.Categories {
@@ -370,11 +370,11 @@ func findCategory(t *testing.T, rep *Report, key string) CategoryReport {
 			return cat
 		}
 	}
-	t.Fatalf("报表中缺少类别 %s", key)
+	t.Fatalf("category %s missing from the report", key)
 	return CategoryReport{}
 }
 
-// 占位目录 _new / _manual 不是会话 ID，不能拿去查数据库，按非会话型处理。
+// Placeholder directories _new / _manual are not conversation IDs; they must not be queried in the database and are treated as non-session units.
 func TestChatUploadsPlaceholderDirIsNotSessionScoped(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -382,7 +382,7 @@ func TestChatUploadsPlaceholderDirIsNotSessionScoped(t *testing.T) {
 	placeholder := filepath.Join(uploads, "2026-06-01", "_new")
 	ageTree(t, placeholder, map[string]int{"a.png": 10}, 120*24*time.Hour, now)
 
-	// Activity 对任何查询都报错：若占位目录被当成会话，会因 fail-closed 而被保留。
+	// Activity errors on every lookup: if placeholders were treated as conversations, fail-closed would keep them.
 	cfg := &config.Config{Storage: config.StorageConfig{
 		Categories: map[string]config.StorageCategoryConfig{
 			config.StorageCategoryChatUploads: categoryCfg(90),
@@ -395,11 +395,11 @@ func TestChatUploadsPlaceholderDirIsNotSessionScoped(t *testing.T) {
 		t.Fatalf("Clean: %v", err)
 	}
 	if exists(placeholder) {
-		t.Error("占位目录应按保留期清理，而不是走会话查询")
+		t.Error("placeholder directories should be cleaned by retention, not via the conversation lookup")
 	}
 }
 
-// glob 型类别：只删匹配的文件，同目录下的其他文件不受影响。
+// Glob-style category: only matching files are deleted; other files in the same directory are untouched.
 func TestPatternCategoryOnlyMatchesItsGlob(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -430,10 +430,10 @@ func TestPatternCategoryOnlyMatchesItsGlob(t *testing.T) {
 		t.Fatalf("Clean: %v", err)
 	}
 	if exists(stale) {
-		t.Error("过期诊断日志未被删除")
+		t.Error("expired diagnostic log was not deleted")
 	}
 	if !exists(keepName) {
-		t.Error("不匹配 glob 的文件被误删")
+		t.Error("a file not matching the glob was deleted by mistake")
 	}
 }
 
@@ -451,14 +451,14 @@ func TestDisabledCategoryIsReportedButNotCleaned(t *testing.T) {
 	}}
 	c := newTestCleaner(t, cfg, Paths{Workspace: ws}, fakeActivity{}, now)
 
-	// Inspect 仍应展示被关闭的类别，让管理员看到可回收量后再决定是否开启。
+	// Inspect should still list disabled categories so administrators can see the reclaimable space before enabling them.
 	inspected := c.Inspect(true)
 	var found bool
 	for _, cat := range inspected.Categories {
 		if cat.Key == config.StorageCategoryWorkspace {
 			found = true
 			if cat.Enabled {
-				t.Error("类别应为 disabled")
+				t.Error("category should be disabled")
 			}
 			if cat.ReclaimableUnits != 1 {
 				t.Errorf("ReclaimableUnits = %d, want 1", cat.ReclaimableUnits)
@@ -466,14 +466,14 @@ func TestDisabledCategoryIsReportedButNotCleaned(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("Inspect 未返回 workspace 类别")
+		t.Fatal("Inspect did not return the workspace category")
 	}
 
 	if _, err := c.Clean(CleanRequest{}); err != nil {
 		t.Fatalf("Clean: %v", err)
 	}
 	if !exists(dir) {
-		t.Error("被关闭的类别不应被清理")
+		t.Error("a disabled category must not be cleaned")
 	}
 }
 
@@ -495,9 +495,9 @@ func TestConcurrentCleanIsRejected(t *testing.T) {
 	}
 	c := newTestCleaner(t, nil, Paths{Workspace: ws}, fakeActivity{}, now)
 
-	// 手动占住执行位，模拟「已有一轮在跑」。
+	// Hold the execution slot manually, simulating "a round already running".
 	if !c.running.CompareAndSwap(false, true) {
-		t.Fatal("无法占用执行位")
+		t.Fatal("could not acquire the execution slot")
 	}
 	if _, err := c.Clean(CleanRequest{}); !errors.Is(err, ErrCleanupInProgress) {
 		t.Errorf("err = %v, want ErrCleanupInProgress", err)
@@ -505,11 +505,11 @@ func TestConcurrentCleanIsRejected(t *testing.T) {
 	c.running.Store(false)
 
 	if _, err := c.Clean(CleanRequest{}); err != nil {
-		t.Fatalf("释放后应可再次清理: %v", err)
+		t.Fatalf("cleanup should succeed after release: %v", err)
 	}
 }
 
-// 并发触发清理时只允许一轮真正执行，其余应立即得到 ErrCleanupInProgress 而不是排队删除。
+// When cleanup is triggered concurrently, only one round may actually run; the rest should immediately get ErrCleanupInProgress instead of queueing up deletions.
 func TestParallelCleanHasSingleWinner(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	tmp := t.TempDir()
@@ -542,11 +542,11 @@ func TestParallelCleanHasSingleWinner(t *testing.T) {
 		case errors.Is(err, ErrCleanupInProgress):
 			inProgress++
 		default:
-			t.Errorf("意外错误: %v", err)
+			t.Errorf("unexpected error: %v", err)
 		}
 	}
 	if inProgress == 0 {
-		t.Log("提示：本轮所有 goroutine 都串行完成了，未观察到并发冲突（非失败）")
+		t.Log("note: all goroutines finished serially this round, no concurrency conflict observed (not a failure)")
 	}
 }
 
@@ -570,11 +570,11 @@ func TestConfinedRejectsEscapes(t *testing.T) {
 		}
 	}
 	if confined("", filepath.Join(root, "x")) {
-		t.Error("空 root 不应通过校验")
+		t.Error("an empty root must not pass validation")
 	}
 }
 
-// 根目录不存在时不应报错，只标记 Missing —— 系统尚未产生该类垃圾是正常状态。
+// A missing root must not be an error, just a Missing flag — it is normal for the system not to have produced that kind of garbage yet.
 func TestMissingRootIsNotAnError(t *testing.T) {
 	now := time.Now()
 	c := newTestCleaner(t, nil, Paths{Workspace: filepath.Join(t.TempDir(), "never-created")}, nil, now)
@@ -585,10 +585,10 @@ func TestMissingRootIsNotAnError(t *testing.T) {
 	}
 	for _, cat := range rep.Categories {
 		if !cat.Missing {
-			t.Errorf("类别 %s 的根目录不存在/未配置，应标记 Missing", cat.Key)
+			t.Errorf("category %s has no/absent root and should be flagged Missing", cat.Key)
 		}
 		if cat.Units != 0 || len(cat.Errors) != 0 {
-			t.Errorf("类别 %s 不应有统计或错误: units=%d errors=%v", cat.Key, cat.Units, cat.Errors)
+			t.Errorf("category %s should have no stats or errors: units=%d errors=%v", cat.Key, cat.Units, cat.Errors)
 		}
 	}
 	if _, err := c.Clean(CleanRequest{}); err != nil {
@@ -613,36 +613,36 @@ func TestInspectCachesUntilRefresh(t *testing.T) {
 
 	first := c.Inspect(false)
 	if first.Totals.Units != 1 {
-		t.Fatalf("首次统计 Units = %d, want 1", first.Totals.Units)
+		t.Fatalf("first inspect Units = %d, want 1", first.Totals.Units)
 	}
-	// 缓存生效期间新增目录不应被看到。
+	// Directories added while the cache is warm must not be visible.
 	ageTree(t, filepath.Join(ws, "conversations", "conv-b"), map[string]int{"b.txt": 10}, 400*24*time.Hour, now)
 	if cached := c.Inspect(false); cached.Totals.Units != 1 {
-		t.Errorf("缓存期内 Units = %d, want 1", cached.Totals.Units)
+		t.Errorf("cached Units = %d, want 1", cached.Totals.Units)
 	}
 	if refreshed := c.Inspect(true); refreshed.Totals.Units != 2 {
-		t.Errorf("refresh 后 Units = %d, want 2", refreshed.Totals.Units)
+		t.Errorf("after refresh Units = %d, want 2", refreshed.Totals.Units)
 	}
-	// 清理后缓存必须失效，否则状态页仍显示已删除的内容。
+	// The cache must be invalidated after cleanup, otherwise the status page keeps showing deleted content.
 	if _, err := c.Clean(CleanRequest{}); err != nil {
 		t.Fatalf("Clean: %v", err)
 	}
 	if after := c.Inspect(false); after.Totals.Units != 0 {
-		t.Errorf("清理后 Units = %d, want 0", after.Totals.Units)
+		t.Errorf("after cleanup Units = %d, want 0", after.Totals.Units)
 	}
 }
 
 func TestRetentionLoopDisabledByDefault(t *testing.T) {
 	s := NewService(nil, &config.Config{}, nil)
 	if s.AutoCleanEnabled() {
-		t.Error("auto_clean 默认必须为关闭")
+		t.Error("auto_clean must default to off")
 	}
-	// 关闭时 PurgeExpired 是 no-op，不应 panic。
+	// With it off, PurgeExpired is a no-op and must not panic.
 	s.PurgeExpired()
 
 	enabled := &config.Config{Storage: config.StorageConfig{AutoClean: boolPtr(true)}}
 	if !NewService(nil, enabled, nil).AutoCleanEnabled() {
-		t.Error("显式 true 时应开启")
+		t.Error("should be on when explicitly true")
 	}
 }
 

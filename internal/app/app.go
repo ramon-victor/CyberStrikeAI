@@ -73,7 +73,7 @@ type App struct {
 	c2Watchdog         *c2.SessionWatchdog       // C2 会话看门狗
 	c2WatchdogCancel   context.CancelFunc        // 看门狗取消函数
 	c2Handler          *handler.C2Handler        // C2 REST（与 Manager 生命周期同步）
-	storageHandler     *handler.StorageHandler   // 运行空间占用统计与垃圾清理
+	storageHandler     *handler.StorageHandler   // Runtime storage usage stats and garbage cleanup
 	auditSvc           *audit.Service
 }
 
@@ -370,8 +370,8 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	workspaceRoot := strings.TrimSpace(cfg.Agent.WorkspaceRootDir)
 	db.SetEinoConversationDirs(plantaskBase, checkpointBase, reductionRoot, workspaceRoot)
 
-	// 运行空间垃圾清理：根目录一律复用上面已解析好的同一批值，
-	// 避免在 storage 包内重新推导导致「清理的目录」与「实际写入的目录」不一致。
+	// Runtime garbage cleanup: roots always reuse the same values resolved above, so the
+	// storage package never re-derives paths and the cleaned directories match the written ones.
 	workspaceRootDir := strings.TrimSpace(workspaceRoot)
 	if workspaceRootDir == "" {
 		workspaceRootDir = filepath.Join("tmp", "workspace")
@@ -384,12 +384,12 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	if diagnosticLogDir == "" {
 		diagnosticLogDir = "log"
 	}
-	// chat_uploads 与 tmp/c2 目前均为相对进程工作目录的固定路径
-	// （见 handler.chatUploadsRootDirName 与 app/c2_lifecycle.go 的 c2.NewManager）。
+	// chat_uploads and tmp/c2 are currently fixed paths relative to the process working
+	// directory (see handler.chatUploadsRootDirName and c2.NewManager in app/c2_lifecycle.go).
 	chatUploadsRoot := "chat_uploads"
 	c2Root := filepath.Join("tmp", "c2")
-	// 让 DeleteConversation 一并删除上传附件：其 chat_upload_artifacts 行已由
-	// ON DELETE CASCADE 清除，此前磁盘文件会永久残留。
+	// Have DeleteConversation also delete uploaded attachments: their chat_upload_artifacts
+	// rows were already removed by ON DELETE CASCADE, but the files used to linger forever.
 	db.SetChatUploadsDir(chatUploadsRoot)
 	storageCleaner := storage.NewCleaner(storage.Options{
 		Config: cfg,
@@ -1134,7 +1134,7 @@ func setupRoutes(
 		protected.GET("/audit/logs/export", auditHandler.ExportLogs)
 		protected.GET("/audit/logs/:id", auditHandler.GetLog)
 
-		// 运行空间占用与垃圾清理
+		// Runtime storage usage and garbage cleanup
 		protected.GET("/storage/meta", app.storageHandler.Meta)
 		protected.GET("/storage/status", app.storageHandler.Status)
 		protected.POST("/storage/cleanup", app.storageHandler.Cleanup)

@@ -226,13 +226,13 @@ func (h *AgentHandler) executeOneBatchSubTask(queueID string, queue *BatchTaskQu
 	}
 	if h.hitlManager == nil {
 		finishStatus = "failed"
-		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", "审批服务未初始化")
+		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", "approval service not initialized")
 		return
 	}
 	hitlReq := h.batchHITLRequest(queue.HITLPolicy)
 	if err := h.hitlManager.SaveConversationConfig(conversationID, hitlReq); err != nil {
 		finishStatus = "failed"
-		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", "保存审批设置失败: "+err.Error())
+		h.batchTaskManager.UpdateTaskStatus(queueID, task.ID, BatchTaskStatusFailed, "", "failed to save approval settings: "+err.Error())
 		return
 	}
 	h.activateHITLForConversation(conversationID, hitlReq)

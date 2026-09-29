@@ -1090,7 +1090,7 @@ function currentHitlAuditModelLabel() {
 function currentHitlAuditEngineLabel() {
     const engine = currentHitlAuditBackend() === 'typesafe'
         ? chatTranslate('settings.hitl.auditBackendTypeSafe', 'TypeSafe Jev')
-        : chatTranslate('settings.hitl.auditBackendOpenAI', 'OpenAI 协议模型');
+        : chatTranslate('settings.hitl.auditBackendOpenAI', 'OpenAI-protocol model');
     const model = currentHitlAuditModelLabel();
     return engine + (model ? ' · ' + model : '');
 }

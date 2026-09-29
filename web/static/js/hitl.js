@@ -1282,7 +1282,7 @@ function hitlAuditEngineFromItem(item) {
     }
     if (!backend) {
         const comment = String(data.comment || '');
-        if (/TypeSafe|破坏分|choice=|Jev/i.test(comment)) backend = 'typesafe';
+        if (/TypeSafe|damage score|破坏分|choice=|Jev/i.test(comment)) backend = 'typesafe';
         else if (hitlReviewerNormalize(data.decidedBy || data.decided_by) === 'audit_agent') backend = 'openai';
     }
     if (backend === 'typesafe' && !model) model = 'jev-latest';
