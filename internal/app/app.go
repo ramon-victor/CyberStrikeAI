@@ -1468,7 +1468,7 @@ func setupRoutes(
 	router.GET("/", func(c *gin.Context) {
 		version := app.config.Version
 		if version == "" {
-			version = "v1.7.18"
+			version = "v1.7.20"
 		}
 		c.HTML(http.StatusOK, "index.html", gin.H{"Version": version})
 	})
