@@ -38,7 +38,8 @@ const (
 
 // einoSSESanitizingRoundTripper 包装下游 RoundTripper, 对 SSE 响应做行级清洗。
 type einoSSESanitizingRoundTripper struct {
-	base http.RoundTripper
+	base              http.RoundTripper
+	coalesceToolCalls bool
 }
 
 func (rt *einoSSESanitizingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -49,7 +50,11 @@ func (rt *einoSSESanitizingRoundTripper) RoundTrip(req *http.Request) (*http.Res
 	if !isSSEResponse(resp) {
 		return resp, nil
 	}
-	resp.Body = newEinoSSESanitizingBody(resp.Body)
+	body := newEinoSSESanitizingBody(resp.Body)
+	if rt.coalesceToolCalls {
+		body.toolCalls = &einoToolCallStream{}
+	}
+	resp.Body = body
 	return resp, nil
 }
 
@@ -70,10 +75,11 @@ func isSSEResponse(resp *http.Response) bool {
 
 // einoSSESanitizingBody 是包装后的响应体: 只放行 data: 行, 其它行吞掉。
 type einoSSESanitizingBody struct {
-	upstream io.ReadCloser
-	reader   *bufio.Reader
-	pending  []byte // 已清洗、待返回给下游的字节 (永远以 \n 结尾的完整 data: 行)
-	err      error  // upstream 终态错误 (io.EOF 或网络错误)
+	upstream  io.ReadCloser
+	reader    *bufio.Reader
+	pending   []byte // 已清洗、待返回给下游的字节 (永远以 \n 结尾的完整 data: 行)
+	toolCalls *einoToolCallStream
+	err       error // upstream 终态错误 (io.EOF 或网络错误)
 }
 
 func newEinoSSESanitizingBody(body io.ReadCloser) *einoSSESanitizingBody {
@@ -108,7 +114,13 @@ func (b *einoSSESanitizingBody) Read(p []byte) (int, error) {
 				if !bytes.Equal(payload, normalized) {
 					line = append(append([]byte("data: "), normalized...), '\n')
 				}
+				if b.toolCalls != nil {
+					line = b.toolCalls.rewrite(line)
+				}
 				b.pending = line
+				if err == io.EOF && b.toolCalls != nil {
+					b.pending = append(b.pending, b.toolCalls.flushAll()...)
+				}
 				if err != nil {
 					b.err = err
 				}
@@ -118,6 +130,9 @@ func (b *einoSSESanitizingBody) Read(p []byte) (int, error) {
 			// 全部吞掉, 不向下游透出, 继续循环读下一行。
 		}
 		if err != nil {
+			if err == io.EOF && b.toolCalls != nil {
+				b.pending = append(b.pending, b.toolCalls.flushAll()...)
+			}
 			b.err = err
 			break
 		}

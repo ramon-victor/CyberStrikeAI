@@ -104,7 +104,7 @@ func newEinoAgenticChatModelFactory(
 		if isEinoAgenticClaudeProvider(oa.Provider) {
 			return newEinoClaudeAgenticChatModel(ctx, oa, mode, baseHTTPClient, reasoningClient)
 		}
-		httpClient := openai.NewEinoHTTPClient(&oa, baseHTTPClient)
+		httpClient := openai.NewEinoAgenticHTTPClient(&oa, baseHTTPClient)
 		openai.AttachSummarizationDiagTransport(httpClient, logger)
 		maxCompletionTokens := oa.MaxCompletionTokensEffective()
 		modelCfg := &agenticopenai.ChatConfig{

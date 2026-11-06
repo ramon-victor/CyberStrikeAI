@@ -1,7 +1,9 @@
 package multiagent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/cloudwego/eino/adk"
@@ -153,5 +155,32 @@ func TestAgenticOrphanToolPrunerNoopWhenClean(t *testing.T) {
 	}
 	if len(out.Messages) != 2 {
 		t.Fatalf("messages = %d, want 2", len(out.Messages))
+	}
+}
+
+func TestAgenticToolPairReconcilerQuarantinesUnnamedSavedCalls(t *testing.T) {
+	original := &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant, ContentBlocks: []*schema.ContentBlock{
+		schema.NewContentBlock(&schema.FunctionToolCall{CallID: "valid", Name: "skill", Arguments: `{"name":"recon"}`}),
+		schema.NewContentBlock(&schema.FunctionToolCall{CallID: "fragment", Arguments: `{"name":"web"}`}),
+	}}
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: []*schema.AgenticMessage{original, makeAgenticPatchedToolResult("valid", "skill"), makeAgenticPatchedToolResult("fragment", "")}}
+	_, out, err := newAgenticToolPairReconcilerMiddleware(nil, "test").BeforeModelRewriteState(context.Background(), state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := agenticFunctionToolCalls(out.Messages[0])
+	if len(calls) != 1 || calls[0].Name != "skill" || calls[0].Arguments != `{"name":"recon"}` || len(out.Messages) != 2 {
+		t.Fatalf("invalid repaired history: %+v", out)
+	}
+	encoded, _ := json.Marshal(out.Messages[0])
+	if !bytes.Contains(encoded, []byte("quoted historical data")) || !bytes.Contains(encoded, []byte("web")) {
+		t.Fatal("lost anonymous fragment evidence")
+	}
+	if len(agenticFunctionToolCalls(original)) != 2 {
+		t.Fatal("mutated persisted input")
+	}
+	_, again, err := newAgenticToolPairReconcilerMiddleware(nil, "test").BeforeModelRewriteState(context.Background(), out, nil)
+	if err != nil || again != out {
+		t.Fatal("repair is not idempotent")
 	}
 }
