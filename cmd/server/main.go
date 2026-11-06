@@ -27,7 +27,14 @@ func main() {
 	var httpBootstrap = flag.Bool("http", false, "Force plain HTTP for the main site, overriding TLS settings in the configuration file")
 	var resetAdminPassword = flag.Bool("reset-admin-password", false, "Interactively reset the built-in admin password and exit")
 	checkIsolation := flag.Bool("check-process-isolation", false, "Probe task containment and cleanup, then exit without starting services")
+	checkUpdate := flag.Bool("check-update", false, "Report whether this installation's own repository has anything newer, then exit")
+	applyUpdate := flag.Bool("update", false, "Fast-forward this installation to its own remote, rebuild the binary, and exit")
+	updateRollback := flag.Bool("update-rollback", false, "Undo the last --update: back to the commit and binary kept before it")
 	flag.Parse()
+
+	if handled, code := updateCommandIfNeeded(strings.TrimSpace(*configPath), *checkUpdate, *applyUpdate, *updateRollback); handled {
+		os.Exit(code)
+	}
 
 	// 环境变量兼容（便于 systemd/docker 等不传参场景）
 	if *httpsBootstrap && *httpBootstrap {
@@ -151,13 +158,13 @@ func main() {
 	// 创建应用
 	application, err := app.New(cfg, log, cp)
 	if err != nil {
-		log.Fatal("应用初始化失败", "error", err)
+		log.Fatal("Application initialization failed", "error", err)
 	}
 
 	// 在后台监听信号
 	go func() {
 		sig := <-sigCh
-		log.Info("收到系统信号，开始优雅关闭: " + sig.String())
+		log.Info("Receive system signal and start graceful shutdown: " + sig.String())
 		application.Shutdown()
 		cancel()
 	}()
@@ -166,9 +173,9 @@ func main() {
 	if err := application.RunWithContext(ctx); err != nil {
 		// context 取消导致的关闭不视为错误
 		if ctx.Err() != nil {
-			log.Info("服务器已优雅关闭")
+			log.Info("The server has shut down gracefully")
 		} else {
-			log.Fatal("服务器启动失败", "error", err)
+			log.Fatal("Server startup failed", "error", err)
 		}
 	}
 }

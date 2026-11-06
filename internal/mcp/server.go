@@ -430,19 +430,19 @@ func (s *Server) handleMessage(ctx context.Context, msg *Message) *Message {
 		return s.handleSamplingRequest(msg)
 	case "notifications/initialized":
 		// 通知类型，不需要响应
-		s.logger.Debug("收到 initialized 通知")
+		s.logger.Debug("Receive initialized notification")
 		return nil
 	case "":
 		// 空方法名，可能是通知，不返回错误
 		if isNotification {
-			s.logger.Debug("收到无方法名的通知消息")
+			s.logger.Debug("Received notification message without method name")
 			return nil
 		}
 		fallthrough
 	default:
 		// 如果是通知，不返回错误响应
 		if isNotification {
-			s.logger.Debug("收到未知通知", zap.String("method", msg.Method))
+			s.logger.Debug("Received unknown notification", zap.String("method", msg.Method))
 			return nil
 		}
 		// 对于请求，返回方法未找到错误
@@ -505,7 +505,7 @@ func (s *Server) handleListTools(msg *Message) *Message {
 		tools = append(tools, tool)
 	}
 	s.mu.RUnlock()
-	s.logger.Debug("tools/list 请求", zap.Int("返回工具数", len(tools)))
+	s.logger.Debug("tools/list request", zap.Int("Return the number of tools", len(tools)))
 
 	response := ListToolsResponse{Tools: tools}
 	result, _ := json.Marshal(response)
@@ -561,7 +561,7 @@ func (s *Server) handleCallTool(requestCtx context.Context, msg *Message) *Messa
 
 	if s.storage != nil {
 		if err := s.storage.SaveToolExecution(execution); err != nil {
-			s.logger.Warn("保存执行记录到数据库失败", zap.Error(err))
+			s.logger.Warn("Failed to save execution records to database", zap.Error(err))
 		}
 	}
 
@@ -578,7 +578,7 @@ func (s *Server) handleCallTool(requestCtx context.Context, msg *Message) *Messa
 
 		if s.storage != nil {
 			if err := s.storage.SaveToolExecution(execution); err != nil {
-				s.logger.Warn("保存执行记录到数据库失败", zap.Error(err))
+				s.logger.Warn("Failed to save execution records to database", zap.Error(err))
 			}
 			s.mu.Lock()
 			delete(s.executions, executionID)
@@ -604,7 +604,7 @@ func (s *Server) handleCallTool(requestCtx context.Context, msg *Message) *Messa
 		s.unregisterRunningCancel(executionID)
 	}()
 
-	s.logger.Info("开始执行工具",
+	s.logger.Info("Start executing tool",
 		zap.String("toolName", req.Name),
 		zap.Any("arguments", req.Arguments),
 	)
@@ -661,7 +661,7 @@ func (s *Server) handleCallTool(requestCtx context.Context, msg *Message) *Messa
 
 	if s.storage != nil {
 		if err := s.storage.SaveToolExecution(execution); err != nil {
-			s.logger.Warn("保存执行记录到数据库失败", zap.Error(err))
+			s.logger.Warn("Failed to save execution records to database", zap.Error(err))
 		}
 	}
 
@@ -674,7 +674,7 @@ func (s *Server) handleCallTool(requestCtx context.Context, msg *Message) *Messa
 	}
 
 	if err != nil {
-		s.logger.Error("工具执行失败",
+		s.logger.Error("Tool execution failed",
 			zap.String("toolName", req.Name),
 			zap.Error(err),
 		)
@@ -698,7 +698,7 @@ func (s *Server) handleCallTool(requestCtx context.Context, msg *Message) *Messa
 	}
 
 	if finalResult != nil && finalResult.IsError {
-		s.logger.Warn("工具执行返回错误结果",
+		s.logger.Warn("tool execution returned an error result",
 			zap.String("toolName", req.Name),
 		)
 
@@ -729,7 +729,7 @@ func (s *Server) handleCallTool(requestCtx context.Context, msg *Message) *Messa
 		IsError: false,
 	})
 
-	s.logger.Info("工具执行完成",
+	s.logger.Info("Tool execution completed",
 		zap.String("toolName", req.Name),
 		zap.Bool("isError", finalResult.IsError),
 	)
@@ -755,7 +755,7 @@ func (s *Server) updateStats(toolName string, status string) {
 			successCalls = 1
 		}
 		if err := s.storage.UpdateToolStats(toolName, totalCalls, successCalls, failedCalls, &now); err != nil {
-			s.logger.Warn("保存统计信息到数据库失败", zap.Error(err))
+			s.logger.Warn("Failed to save statistics to database", zap.Error(err))
 		}
 		return
 	}
@@ -816,7 +816,7 @@ func (s *Server) loadHistoricalData() {
 	// 加载历史执行记录（最近1000条）
 	executions, err := s.storage.LoadToolExecutions()
 	if err != nil {
-		s.logger.Warn("加载历史执行记录失败", zap.Error(err))
+		s.logger.Warn("Failed to load historical execution records", zap.Error(err))
 	} else {
 		s.mu.Lock()
 		for _, exec := range executions {
@@ -828,20 +828,20 @@ func (s *Server) loadHistoricalData() {
 			}
 		}
 		s.mu.Unlock()
-		s.logger.Info("加载历史执行记录", zap.Int("count", len(executions)))
+		s.logger.Info("Load historical execution records", zap.Int("count", len(executions)))
 	}
 
 	// 加载历史统计信息
 	stats, err := s.storage.LoadToolStats()
 	if err != nil {
-		s.logger.Warn("加载历史统计信息失败", zap.Error(err))
+		s.logger.Warn("Failed to load historical statistics", zap.Error(err))
 	} else {
 		s.mu.Lock()
 		for k, v := range stats {
 			s.stats[k] = v
 		}
 		s.mu.Unlock()
-		s.logger.Info("加载历史统计信息", zap.Int("count", len(stats)))
+		s.logger.Info("Load historical statistics", zap.Int("count", len(stats)))
 	}
 }
 
@@ -871,7 +871,7 @@ func (s *Server) GetAllExecutions() []*ToolExecution {
 			}
 			return result
 		} else {
-			s.logger.Warn("从数据库加载执行记录失败", zap.Error(err))
+			s.logger.Warn("Failed to load execution records from database", zap.Error(err))
 		}
 	}
 
@@ -892,7 +892,7 @@ func (s *Server) GetStats() map[string]*ToolStats {
 		if err == nil {
 			return dbStats
 		}
-		s.logger.Warn("从数据库加载统计信息失败", zap.Error(err))
+		s.logger.Warn("Loading statistics from database failed", zap.Error(err))
 	}
 
 	s.mu.RLock()
@@ -1055,7 +1055,7 @@ func (s *Server) BeginToolExecution(ctx context.Context, toolName string, args m
 
 	if s.storage != nil {
 		if err := s.storage.SaveToolExecution(execution); err != nil {
-			s.logger.Warn("保存执行记录到数据库失败", zap.Error(err))
+			s.logger.Warn("Failed to save execution records to database", zap.Error(err))
 		}
 	}
 	return executionID
@@ -1137,7 +1137,7 @@ func (s *Server) FinishToolExecution(ctx context.Context, executionID, toolName 
 
 	if s.storage != nil {
 		if err := s.storage.SaveToolExecution(exec); err != nil {
-			s.logger.Warn("保存执行记录到数据库失败", zap.Error(err))
+			s.logger.Warn("Failed to save execution records to database", zap.Error(err))
 		}
 	}
 
@@ -1239,7 +1239,7 @@ func (s *Server) cleanupOldExecutions() {
 		delete(s.executions, execs[i].id)
 	}
 
-	s.logger.Debug("清理旧的执行记录",
+	s.logger.Debug("Clean up old execution records",
 		zap.Int("before", len(execs)),
 		zap.Int("after", len(s.executions)),
 		zap.Int("deleted", toDelete),
@@ -1688,7 +1688,7 @@ func (s *Server) HandleStdio() error {
 				break
 			}
 			// 日志输出到 stderr，避免干扰 stdout 的 JSON-RPC 通信
-			s.logger.Error("读取消息失败", zap.Error(err))
+			s.logger.Error("Failed to read message", zap.Error(err))
 			// 发送错误响应
 			errorMsg := Message{
 				ID:      msg.ID,
@@ -1697,10 +1697,10 @@ func (s *Server) HandleStdio() error {
 				Error:   &Error{Code: -32700, Message: "Parse error", Data: err.Error()},
 			}
 			if err := encoder.Encode(errorMsg); err != nil {
-				return fmt.Errorf("发送错误响应失败: %w", err)
+				return fmt.Errorf("Failed to send error response: %w", err)
 			}
 			if err := stdout.Flush(); err != nil {
-				return fmt.Errorf("刷新 stdout 失败: %w", err)
+				return fmt.Errorf("Failed to refresh stdout: %w", err)
 			}
 			continue
 		}
@@ -1715,10 +1715,10 @@ func (s *Server) HandleStdio() error {
 
 		// 发送响应
 		if err := encoder.Encode(response); err != nil {
-			return fmt.Errorf("发送响应失败: %w", err)
+			return fmt.Errorf("Failed to send response: %w", err)
 		}
 		if err := stdout.Flush(); err != nil {
-			return fmt.Errorf("刷新 stdout 失败: %w", err)
+			return fmt.Errorf("Failed to refresh stdout: %w", err)
 		}
 	}
 

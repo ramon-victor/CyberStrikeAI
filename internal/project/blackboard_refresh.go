@@ -6,7 +6,7 @@ import "strings"
 const FactIndexSectionHeading = "## Project blackboard index"
 
 // LegacyFactIndexSectionHeading remains recognized in persisted historical prompts.
-const LegacyFactIndexSectionHeading = "## 项目黑板索引"
+const LegacyFactIndexSectionHeading = "## Project blackboard index"
 
 // FactIndexSectionStartMarker / EndMarker：HTML 注释边界，供程序化替换；对模型无指令语义。
 const (
@@ -32,10 +32,31 @@ func ReplaceFactIndexSection(content, freshIndex string) (string, bool) {
 	return content[:start] + freshIndex + content[end:], true
 }
 
+// RemoveFactIndexSection removes only a complete host-delimited index after a
+// successful build returns no block (e.g. a budget too small for framing).
+func RemoveFactIndexSection(content string) (string, bool) {
+	start, ok := factIndexSectionStart(content)
+	if !ok {
+		return content, false
+	}
+	end, ok := factIndexSectionEnd(content, start)
+	if !ok || end <= start {
+		return content, false
+	}
+	return content[:start] + content[end:], true
+}
+
 // wrapFactIndexBlock 为 BuildFactIndexBlock 正文加上统一起止 HTML 注释边界。
 func wrapFactIndexBlock(content string) string {
 	content = strings.TrimSpace(content)
 	return FactIndexSectionStartMarker + "\n" + content + "\n" + FactIndexSectionEndMarker + "\n"
+}
+
+// factIndexSafeText 去掉事实文本里的宿主定界符。索引块按字面量定位起止，内容里
+// 出现同名注释会提前闭合块，把其余索引内容甩到系统提示的块外。
+func factIndexSafeText(s string) string {
+	s = strings.ReplaceAll(s, FactIndexSectionStartMarker, "")
+	return strings.ReplaceAll(s, FactIndexSectionEndMarker, "")
 }
 
 func factIndexSectionStart(content string) (int, bool) {

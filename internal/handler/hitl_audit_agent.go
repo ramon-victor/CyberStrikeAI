@@ -51,8 +51,9 @@ func (h *AgentHandler) auditAgentReview(ctx context.Context, hitlMode, toolName 
 		},
 		"temperature":           0.1,
 		"max_completion_tokens": 1024,
-		// The audit verdict needs structured JSON; thinking is disabled so models like Qwen do not put the body into reasoning_content and break parsing.
-		"thinking": map[string]interface{}{"type": "disabled"},
+	}
+	if auditDisableThinking(llmCfg) {
+		requestBody["thinking"] = map[string]interface{}{"type": "disabled"}
 	}
 
 	var apiResponse struct {
@@ -259,12 +260,12 @@ func parseAuditAgentDecisionObject(jsonText string) (decision, comment string, e
 	if err := json.Unmarshal([]byte(jsonText), &parsed); err != nil {
 		return "", "", nil, err
 	}
-	rawDecision := auditAgentPickString(parsed, "decision", "Decision", "result", "action", "verdict", "决策", "决定")
+	rawDecision := auditAgentPickString(parsed, "decision", "Decision", "result", "action", "verdict", "Decision", "Decide")
 	decision = normalizeAuditAgentDecision(rawDecision)
 	if decision == "" {
 		return "", "", nil, fmt.Errorf("missing decision")
 	}
-	comment = auditAgentPickString(parsed, "comment", "Comment", "reason", "message", "rationale", "备注", "理由", "说明")
+	comment = auditAgentPickString(parsed, "comment", "Comment", "reason", "message", "rationale", "Comment", "reason", "Message")
 	editedArgs = auditAgentPickObject(parsed, "editedArguments", "edited_arguments", "editedArgs")
 	return decision, strings.TrimSpace(comment), editedArgs, nil
 }
@@ -367,7 +368,7 @@ func (h *AgentHandler) UpdateHITLAuditStrategy(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "hitl", "audit_strategy_update", "HITL 审计策略更新", "hitl_config", "audit_agent_prompt", nil)
+		h.audit.RecordOK(c, "hitl", "audit_strategy_update", "HITL audit policy update", "hitl_config", "audit_agent_prompt", nil)
 	}
 	if h.config != nil {
 		h.config.Hitl.AuditAgentPrompt = approvalPrompt

@@ -114,11 +114,11 @@ func (h *AuditHandler) GetLog(c *gin.Context) {
 	}
 	row, err := h.db.GetAuditLogByID(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "审计记录不存在"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Audit record does not exist"})
 		return
 	}
 	if session, ok := security.CurrentSession(c); !ok || (session.Scope != database.RBACScopeAll && row.Actor != session.Username) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 	audit.ApplyResourceAvailability(h.db, row)

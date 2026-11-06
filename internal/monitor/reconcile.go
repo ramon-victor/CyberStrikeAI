@@ -38,15 +38,15 @@ func (r *ExecutionReconciler) ReconcileOnStartup() {
 		return
 	}
 	now := time.Now()
-	n, err := r.db.CancelOrphanedRunningToolExecutions(now, "执行已中断（服务重启）")
+	n, err := r.db.CancelOrphanedRunningToolExecutions(now, "Execution interrupted (service restarted)")
 	if err != nil {
 		if r.logger != nil {
-			r.logger.Warn("启动时清理孤儿 running 工具执行记录失败", zap.Error(err))
+			r.logger.Warn("Failed to finalize orphaned running tool executions at startup", zap.Error(err))
 		}
 		return
 	}
 	if n > 0 && r.logger != nil {
-		r.logger.Info("启动时已收尾孤儿 running 工具执行记录", zap.Int64("count", n))
+		r.logger.Info("Finalized orphaned running tool executions at startup", zap.Int64("count", n))
 	}
 }
 
@@ -71,15 +71,15 @@ func (r *ExecutionReconciler) ReconcileStaleRunning() {
 		return
 	}
 	now := time.Now()
-	n, err := r.db.FinalizeStaleRunningToolExecutions(now, staleRunningMinAge, r.activeExecutionIDs(), "执行已中断（会话已结束）")
+	n, err := r.db.FinalizeStaleRunningToolExecutions(now, staleRunningMinAge, r.activeExecutionIDs(), "Execution interrupted (session ended)")
 	if err != nil {
 		if r.logger != nil {
-			r.logger.Warn("定期收尾 stale running 工具执行记录失败", zap.Error(err))
+			r.logger.Warn("Periodic finalization of stale running tool executions failed", zap.Error(err))
 		}
 		return
 	}
 	if n > 0 && r.logger != nil {
-		r.logger.Info("已收尾 stale running 工具执行记录", zap.Int64("count", n))
+		r.logger.Info("Finalized stale running tool executions", zap.Int64("count", n))
 	}
 }
 

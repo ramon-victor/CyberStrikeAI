@@ -15,6 +15,7 @@
 
     let workflows = [];
     let currentWorkflowId = '';
+    let workflowMetaSavePending = false;
     let cy = null;
     let nodeSeq = 1;
     let edgeSeq = 1;
@@ -47,17 +48,17 @@
     const WORKFLOW_PACKAGE_IMPORT_STORAGE_KEY = 'csai.workflow-package.import-id';
 
     const KNOWN_NODE_LABELS = {
-        start: ['开始', 'Start'],
-        tool: ['工具', 'Tool'],
+        start: ["Start", 'Start'],
+        tool: ["Tool", 'Tool'],
         agent: ['Agent'],
-        condition: ['条件', 'Condition'],
-        hitl: ['审批', 'Approval'],
-        output: ['输出', 'Output'],
-        end: ['结束', 'End']
+        condition: ["Condition", 'Condition'],
+        hitl: ["Approval", 'Approval'],
+        output: ["Output", 'Output'],
+        end: ["End", 'End']
     };
     const KNOWN_EDGE_LABELS = {
-        yes: ['是', 'Yes'],
-        no: ['否', 'No']
+        yes: ["Yes", 'Yes'],
+        no: ["No", 'No']
     };
 
     function wfNodeLabel(type) {
@@ -74,14 +75,14 @@
 
     const WORKFLOW_EDIT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
     const WORKFLOW_AI_TOOL_HINTS = [
-        { keywords: ['子域名', 'subdomain', 'subfinder', 'amass'], tools: ['subfinder', 'amass'], label: '子域名发现' },
-        { keywords: ['端口', 'port', 'nmap', 'rustscan', 'masscan'], tools: ['nmap', 'rustscan', 'masscan'], label: '端口扫描' },
-        { keywords: ['漏洞', 'vuln', '漏洞扫描', 'nuclei', 'nikto', 'zap'], tools: ['nuclei', 'nikto', 'zap'], label: '漏洞扫描' },
-        { keywords: ['目录', '路径', '暴露页面', 'dir', 'ffuf', 'gobuster', 'feroxbuster'], tools: ['ffuf', 'gobuster', 'feroxbuster', 'dirsearch'], label: '暴露面探测' },
-        { keywords: ['证书', 'certificate', 'crt'], tools: ['subfinder'], label: '证书与域名线索收集' },
-        { keywords: ['云', 'cloud', '配置审计', 'prowler', 'scout'], tools: ['prowler', 'scout-suite'], label: '云配置审计' },
-        { keywords: ['容器', '镜像', 'k8s', 'kubernetes', 'trivy', 'kube'], tools: ['trivy', 'kube-bench', 'kube-hunter'], label: '容器安全检查' },
-        { keywords: ['情报', '威胁情报', 'threat', 'ioc', 'virustotal', 'shodan', 'fofa'], tools: ['virustotal_search', 'shodan_search', 'fofa_search'], label: '威胁情报收集' }
+        { keywords: ["subdomain", 'subdomain', 'subfinder', 'amass'], tools: ['subfinder', 'amass'], label: "Subdomain discovery" },
+        { keywords: ["Port", 'port', 'nmap', 'rustscan', 'masscan'], tools: ['nmap', 'rustscan', 'masscan'], label: "Port scan" },
+        { keywords: ["Vulnerability", 'vuln', "Vulnerability Scan", 'nuclei', 'nikto', 'zap'], tools: ['nuclei', 'nikto', 'zap'], label: "Vulnerability Scan" },
+        { keywords: ["Directory", "path", "exposed page", 'dir', 'ffuf', 'gobuster', 'feroxbuster'], tools: ['ffuf', 'gobuster', 'feroxbuster', 'dirsearch'], label: "Attack-surface discovery" },
+        { keywords: ["Certificate", 'certificate', 'crt'], tools: ['subfinder'], label: "Certificate and domain intelligence" },
+        { keywords: ["cloud", 'cloud', "Configure auditing", 'prowler', 'scout'], tools: ['prowler', 'scout-suite'], label: "Cloud configuration audit" },
+        { keywords: ["container", "mirror", 'k8s', 'kubernetes', 'trivy', 'kube'], tools: ['trivy', 'kube-bench', 'kube-hunter'], label: "Container security check" },
+        { keywords: ["intelligence", "Threat intelligence", 'threat', 'ioc', 'virustotal', 'shodan', 'fofa'], tools: ['virustotal_search', 'shodan_search', 'fofa_search'], label: "Threat intelligence collection" }
     ];
     const WORKFLOW_AI_HIGH_RISK_RE = /(隔离|封禁|加固|修复|执行|命令|脚本|删除|清理|阻断|封锁|攻击|利用|getshell|shell|payload|exploit|isolate|block|execute|script|delete|exploit|payload)/i;
     const WORKFLOW_AI_PROGRESS_STEPS = ['understand', 'match', 'draft', 'audit'];
@@ -266,7 +267,9 @@
                     style: {
                         'shape': 'round-rectangle',
                         'width': 150,
-                        'height': 52,
+                        'height': 'label',
+                        'min-height': 32,
+                        'padding': 10,
                         'background-color': '#1d4ed8',
                         'border-width': 1,
                         'border-color': '#60a5fa',
@@ -277,13 +280,14 @@
                         'text-valign': 'center',
                         'text-halign': 'center',
                         'text-wrap': 'wrap',
+                        'text-overflow-wrap': 'anywhere',
                         'text-max-width': 132
                     }
                 },
                 { selector: 'node[type="start"]', style: { 'background-color': '#047857', 'border-color': '#34d399' } },
                 { selector: 'node[type="tool"]', style: { 'background-color': '#1d4ed8', 'border-color': '#60a5fa' } },
                 { selector: 'node[type="agent"]', style: { 'background-color': '#7c3aed', 'border-color': '#c4b5fd' } },
-                { selector: 'node[type="condition"]', style: { 'shape': 'diamond', 'background-color': '#b45309', 'border-color': '#fbbf24', 'width': 118, 'height': 86 } },
+                { selector: 'node[type="condition"]', style: { 'shape': 'diamond', 'background-color': '#b45309', 'border-color': '#fbbf24', 'width': 150, 'height': 86, 'padding': 0, 'text-wrap': 'ellipsis', 'text-max-width': 110 } },
                 { selector: 'node[type="hitl"]', style: { 'background-color': '#0f766e', 'border-color': '#5eead4' } },
                 { selector: 'node[type="output"]', style: { 'background-color': '#4338ca', 'border-color': '#a5b4fc' } },
                 { selector: 'node[type="end"]', style: { 'background-color': '#be123c', 'border-color': '#fb7185' } },
@@ -350,6 +354,10 @@
             }
         });
         cy.on('add remove', updateEmptyState);
+        cy.on('add remove data', () => {
+            updateWorkflowCanvasTitle();
+            renderWorkflowList();
+        });
         document.addEventListener('keydown', event => {
             const active = document.activeElement;
             const editing = active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName);
@@ -778,6 +786,19 @@
         };
     }
 
+    function workflowValidationError(wf) {
+        if (cy && wf && wf.id === currentWorkflowId) {
+            const errors = validateWorkflowGraph(elementsToGraph());
+            if (errors.length) return errors.join('；');
+        }
+        return wf && wf.validation_error || '';
+    }
+
+    function workflowStatusKey(wf, enabled) {
+        return workflowValidationError(wf) ? 'workflows.statusInvalid'
+            : (enabled ? 'workflows.statusEnabled' : 'workflows.statusDisabled');
+    }
+
     function updateWorkflowCanvasTitle() {
         const titleEl = document.getElementById('workflow-canvas-title');
         const subtitleEl = document.getElementById('workflow-canvas-subtitle');
@@ -795,7 +816,7 @@
             const parts = [];
             if (meta.id) parts.push(meta.id);
             if (wf && wf.version) parts.push(`v${wf.version}`);
-            parts.push(meta.enabled ? _t('workflows.statusEnabled') : _t('workflows.statusDisabled'));
+            parts.push(_t(workflowStatusKey(wf || {id: currentWorkflowId}, meta.enabled)));
             subtitleEl.textContent = parts.join(' · ');
             subtitleEl.hidden = !parts.length;
         }
@@ -848,10 +869,11 @@
         list.innerHTML = workflows.map(wf => {
             const encodedId = encodeURIComponent(wf.id);
             const isActive = wf.id === currentWorkflowId;
-            const toggleTitle = esc(_t('workflows.toggleEnabled'));
+            const validationError = workflowValidationError(wf);
+            const toggleTitle = esc(validationError || _t('workflows.toggleEnabled'));
             const editTitle = esc(_t('workflows.editMeta'));
             const enabled = wf.enabled !== false;
-            const statusText = esc(_t(enabled ? 'workflows.statusEnabled' : 'workflows.statusDisabled'));
+            const statusText = esc(_t(workflowStatusKey(wf, enabled)));
             return `
                 <div class="workflow-list-item ${isActive ? 'is-active' : ''}">
                     <button type="button" class="workflow-list-main" onclick="selectWorkflow(decodeURIComponent('${encodedId}'))">
@@ -859,7 +881,7 @@
                         <span class="workflow-list-meta">${esc(wf.id)} · v${wf.version || 1}</span>
                     </button>
                     <div class="workflow-list-actions">
-                        <button type="button" class="workflow-status-toggle ${enabled ? 'is-enabled' : 'is-disabled'}" title="${toggleTitle}" aria-label="${toggleTitle}" aria-pressed="${enabled ? 'true' : 'false'}" onclick="event.stopPropagation(); toggleWorkflowEnabled(decodeURIComponent('${encodedId}'), ${enabled ? 'false' : 'true'})">
+                        <button type="button" class="workflow-status-toggle ${validationError ? 'is-invalid' : (enabled ? 'is-enabled' : 'is-disabled')}" title="${toggleTitle}" aria-label="${toggleTitle}" aria-pressed="${enabled ? 'true' : 'false'}" onclick="event.stopPropagation(); toggleWorkflowEnabled(decodeURIComponent('${encodedId}'), ${enabled ? 'false' : 'true'})">
                             <span class="workflow-status-dot" aria-hidden="true"></span>
                             <span>${statusText}</span>
                         </button>
@@ -1034,8 +1056,8 @@
                         <label for="workflow-edge-branch">${esc(_t('workflows.config.edgeBranch') || 'Condition branch')}</label>
                         <select id="workflow-edge-branch" class="workflow-form-select-native" onchange="updateWorkflowTypedConfig()">
                             <option value="">${esc(_t('workflows.config.selectBranch') || 'Select')}</option>
-                            <option value="true" ${cfg.branch === 'true' ? 'selected' : ''}>true / 是</option>
-                            <option value="false" ${cfg.branch === 'false' ? 'selected' : ''}>false / 否</option>
+                            <option value="true" ${cfg.branch === 'true' ? 'selected' : ''}>true / is </option>
+                            <option value="false" ${cfg.branch === 'false' ? 'selected' : ''}>false / no</option>
                         </select>
                     </div>
                     <p class="workflow-config-hint">${esc(_t('workflows.config.edgeBranchHint'))}</p>
@@ -1544,7 +1566,7 @@
             } : {
                 agent_mode: 'eino_single',
                 input_binding: { from: 'previous', field: 'output' },
-                instruction: capability.label + '。根据用户需求执行安全流程步骤，并输出结构化结果：' + prompt,
+                instruction: capability.label + ". Perform this security workflow step according to the user's request and return a structured result:" + prompt,
                 output_key: 'agent_result',
                 join_strategy: 'all_merge',
                 missing_tool_candidates: capability.tool_candidates.join(', ')
@@ -1552,18 +1574,18 @@
             connect(previous, id);
             previous = id;
             if (!hasTool && capability.tool_candidates.length) {
-                assumptions.push(capability.label + ' 未匹配到已启用工具，已生成 Agent 草稿节点。');
+                assumptions.push(capability.label + " did not match an enabled tool, so an Agent draft node was generated.");
             }
         });
 
         if (wantsCondition) {
-            const condition = add('condition', highRisk ? '是否需要高风险处置' : '是否满足触发条件', {
-                expression: highRisk ? '{{previous.output}} contains "高危"' : '{{previous.output}} != ""',
+            const condition = add('condition', highRisk ? "High-risk response required?" : "Trigger condition met?", {
+                expression: highRisk ? "{{previous.output}} contains \"high risk\"" : '{{previous.output}} != ""',
                 join_strategy: 'all_merge'
             });
             connect(previous, condition);
             openConditionId = condition;
-            const report = add('output', wantsReport ? '输出报告' : wfNodeLabel('output'), {
+            const report = add('output', wantsReport ? "Output report" : wfNodeLabel('output'), {
                 output_key: 'result',
                 source_binding: { from: 'previous', field: 'output' },
                 static_value: '',
@@ -1576,8 +1598,8 @@
         if (highRisk) {
             let insertedApproval = false;
             if (!options.allowHighRisk || wantsApproval) {
-                const approval = add('hitl', '人工审批', {
-                    prompt: '请确认是否允许继续执行高风险处置：' + prompt,
+                const approval = add('hitl', "Human approval", {
+                    prompt: "Confirm whether this high-risk response may proceed:" + prompt,
                     prompt_binding: { from: 'previous', field: 'output' },
                     reviewer: 'human',
                     join_strategy: 'all_merge',
@@ -1588,10 +1610,10 @@
                 previous = approval;
                 insertedApproval = true;
             }
-            const action = add('agent', '执行受控处置', {
+            const action = add('agent', "Controlled response", {
                 agent_mode: 'eino_single',
                 input_binding: { from: 'previous', field: 'output' },
-                instruction: '仅在授权范围内生成处置步骤草稿；实际执行前必须由人工确认。用户需求：' + prompt,
+                instruction: "Draft response steps only within the authorized scope. Human confirmation is required before actual execution. User request:" + prompt,
                 output_key: 'remediation_plan',
                 join_strategy: 'all_merge',
                 risk_level: 'high',
@@ -1601,11 +1623,11 @@
             if (previous === openConditionId) openConditionId = '';
             previous = action;
             riskWarnings.push(insertedApproval
-                ? '检测到高风险动作，已加入人工确认与 requires_human_confirmation 标记。'
-                : '检测到高风险动作，已保留为草稿并添加 requires_human_confirmation 标记。');
+                ? "High-risk actions have been detected, and human confirmation and requires_human_confirmation tags have been added."
+                : "High risk action detected, kept as draft and added requires_human_confirmation tag.");
         } else if (wantsApproval && !nodes.some(node => node.type === 'hitl')) {
-            const approval = add('hitl', '人工审批', {
-                prompt: '请审核工作流阶段结果：' + prompt,
+            const approval = add('hitl', "Human approval", {
+                prompt: "Review the workflow stage result:" + prompt,
                 prompt_binding: { from: 'previous', field: 'output' },
                 reviewer: 'human',
                 join_strategy: 'all_merge'
@@ -1614,7 +1636,7 @@
             previous = approval;
         }
 
-        const output = add('output', wantsReport ? '输出报告' : wfNodeLabel('output'), {
+        const output = add('output', wantsReport ? "Output report" : wfNodeLabel('output'), {
             output_key: 'result',
             source_binding: { from: 'previous', field: 'output' },
             static_value: '',
@@ -1634,7 +1656,7 @@
         };
         if (options.allowSchedule && /(每天|每周|定时|周期|持续|daily|weekly|schedule|monitor)/i.test(prompt)) {
             graph.config.trigger_suggestion = /(每天|daily)/i.test(prompt) ? 'daily' : 'scheduled';
-            assumptions.push('已记录定时触发建议；保存后仍需在触发器或角色绑定处配置。');
+            assumptions.push("A scheduled-trigger suggestion was recorded; configure it in the trigger or role binding after saving.");
         }
         return {
             graph,
@@ -1972,7 +1994,8 @@
         if (wf) fillWorkflowForm(wf);
     };
 
-    window.openWorkflowMetaModal = function () {
+    window.openWorkflowMetaModal = function (options) {
+        workflowMetaSavePending = !!(options && options.saveOnApply);
         const nameEl = document.getElementById('workflow-name');
         const idEl = document.getElementById('workflow-id');
         if (currentWorkflowId) {
@@ -1988,12 +2011,13 @@
     };
 
     window.closeWorkflowMetaModal = function () {
+        workflowMetaSavePending = false;
         if (typeof closeAppModal === 'function') {
             closeAppModal('workflow-meta-modal');
         }
     };
 
-    window.applyWorkflowMetaModal = function () {
+    window.applyWorkflowMetaModal = async function () {
         const meta = readWorkflowMetaFromForm();
         if (!meta.id || !meta.name) {
             if (typeof showNotification === 'function') {
@@ -2003,7 +2027,9 @@
         }
         updateWorkflowCanvasTitle();
         renderWorkflowList();
+        const shouldSave = workflowMetaSavePending;
         closeWorkflowMetaModal();
+        if (shouldSave) await saveWorkflowDraft();
     };
 
     window.editWorkflowFromList = function (id) {
@@ -2211,7 +2237,7 @@
             if (typeof showNotification === 'function') {
                 showNotification(_t('workflows.idNameRequired'), 'error');
             }
-            openWorkflowMetaModal();
+            openWorkflowMetaModal({ saveOnApply: true });
             return;
         }
         const graph = elementsToGraph();
@@ -2481,6 +2507,13 @@
         select.innerHTML = '<option value="">' + esc(_t('roleModal.noWorkflowBind')) + '</option>' + workflows.map(wf => (
             `<option value="${esc(wf.id)}">${esc(wf.name || wf.id)}${wf.enabled ? '' : esc(_t('roleModal.workflowDisabledSuffix'))}</option>`
         )).join('');
+        if (current && !workflows.some(wf => wf.id === current)) {
+            // Keep an invalid binding visible instead of silently clearing it.
+            const option = document.createElement('option');
+            option.value = current;
+            option.textContent = `${current} (${_t('roleModal.workflowMissing')})`;
+            select.appendChild(option);
+        }
         select.value = current || '';
         if (typeof window.refreshRoleModalSelects === 'function') {
             window.refreshRoleModalSelects();
@@ -2612,7 +2645,7 @@
             WFPKG_WORKFLOW_NOT_FOUND: 'workflowNotFound'
         };
         const key = errorKeys[code];
-        if (key) return workflowPackageText('workflows.package.errors.' + key, '操作未完成，请稍后重试。');
+        if (key) return workflowPackageText('workflows.package.errors.' + key, "The operation was not completed. Try again later.");
         return (error && error.message) || workflowPackageText('workflows.package.errors.generic', 'The operation was not completed. Try again later.');
     }
 
@@ -2634,15 +2667,15 @@
         const conflict = inspection.conflict || {};
         const conflictCopy = workflowPackageConflictCopy(conflict);
         const rows = [
-            [workflowPackageText('workflows.package.summary.workflowName', '工作流名称'), workflow.name || workflowPackageText('workflows.package.summary.unnamedWorkflow', '未命名工作流')],
+            [workflowPackageText('workflows.package.summary.workflowName', "Workflow name"), workflow.name || workflowPackageText('workflows.package.summary.unnamedWorkflow', "Untitled workflow")],
             [workflowPackageText('workflows.package.summary.sourceId', 'Source workflow ID'), workflow.source_id || '—'],
             [workflowPackageText('workflows.package.summary.sourceRevision', 'Source revision'), workflow.source_revision || '—'],
-            [workflowPackageText('workflows.package.summary.graphSize', '图规模'), workflowPackageText('workflows.package.summary.graphSizeValue', `${workflow.node_count || 0} 个节点 · ${workflow.edge_count || 0} 条连线`, { nodes: workflow.node_count || 0, edges: workflow.edge_count || 0 })],
+            [workflowPackageText('workflows.package.summary.graphSize', "Graph size"), workflowPackageText('workflows.package.summary.graphSizeValue', `${workflow.node_count || 0} nodes · ${workflow.edge_count || 0} lines`, { nodes: workflow.node_count || 0, edges: workflow.edge_count || 0 })],
             [workflowPackageText('workflows.package.summary.contentHash', 'Content hash'), workflow.content_hash || '—'],
             [workflowPackageText('workflows.package.summary.expiresAt', 'Preflight expires'), inspection.expires_at || '—']
         ];
         if (!target) return;
-        target.innerHTML = `<div class="workflow-package-summary-heading"><span>${esc(workflowPackageText('workflows.package.summary.title', '预检结果'))}</span><b>${esc(workflowPackageText('workflows.package.summary.passed', '校验通过'))}</b></div><div class="workflow-package-status is-${conflictCopy.type}"><span class="workflow-package-status-icon" aria-hidden="true"></span><span>${esc(conflictCopy.message)}</span></div><div class="workflow-package-summary-grid">` + rows.map(function (row) {
+        target.innerHTML = `<div class="workflow-package-summary-heading"><span>${esc(workflowPackageText('workflows.package.summary.title', "Preflight result"))}</span><b>${esc(workflowPackageText('workflows.package.summary.passed', "Checks passed"))}</b></div><div class="workflow-package-status is-${conflictCopy.type}"><span class="workflow-package-status-icon" aria-hidden="true"></span><span>${esc(conflictCopy.message)}</span></div><div class="workflow-package-summary-grid">` + rows.map(function (row) {
             return `<div class="workflow-package-summary-row"><span>${esc(row[0])}</span><code title="${esc(row[1])}">${esc(row[1])}</code></div>`;
         }).join('') + '</div>';
     }
@@ -2673,18 +2706,18 @@
         let html = '';
         if (message) html += `<div class="workflow-package-status${type ? ' is-' + esc(type) : ''}"><span class="workflow-package-status-icon" aria-hidden="true"></span><span>${esc(message)}</span></div>`;
         if (conflictState === 'none') {
-            html += `<div class="workflow-package-resolution-hero is-success"><span class="workflow-package-resolution-icon" aria-hidden="true">✓</span><div><strong>${esc(workflowPackageText('workflows.package.resolution.createTitle', '可以安全创建'))}</strong><small>${esc(workflowPackageText('workflows.package.resolution.createHint', '导入后会创建一个新的本地工作流。'))}</small></div></div>`;
+            html += `<div class="workflow-package-resolution-hero is-success"><span class="workflow-package-resolution-icon" aria-hidden="true">✓</span><div><strong>${esc(workflowPackageText('workflows.package.resolution.createTitle', "Safe to create"))}</strong><small>${esc(workflowPackageText('workflows.package.resolution.createHint', "Import will create a new local workflow."))}</small></div></div>`;
         } else if (conflictState === 'identical') {
-            html += `<div class="workflow-package-resolution-hero is-success"><span class="workflow-package-resolution-icon" aria-hidden="true">✓</span><div><strong>${esc(workflowPackageText('workflows.package.resolution.identicalTitle', '无需重复导入'))}</strong><small>${esc(workflowPackageText('workflows.package.resolution.identicalHint', '内容已经存在，无需重复导入。'))}</small></div></div>`;
+            html += `<div class="workflow-package-resolution-hero is-success"><span class="workflow-package-resolution-icon" aria-hidden="true">✓</span><div><strong>${esc(workflowPackageText('workflows.package.resolution.identicalTitle', "No duplicate needed"))}</strong><small>${esc(workflowPackageText('workflows.package.resolution.identicalHint', "The same content already exists. No duplicate import is needed."))}</small></div></div>`;
         } else {
-            html += workflowPackageResolutionCard('keep_existing', workflowPackageText('workflows.package.resolution.keepExisting', '保留本地版本'), workflowPackageText('workflows.package.resolution.keepExistingHint', '不修改当前本地工作流；导入记录会保留。'), action === 'keep_existing');
+            html += workflowPackageResolutionCard('keep_existing', workflowPackageText('workflows.package.resolution.keepExisting', "Keep local version"), workflowPackageText('workflows.package.resolution.keepExistingHint', "Do not change the current local workflow; the import record is retained."), action === 'keep_existing');
             if (!workflowPackageState.riskChoicesVisible) {
-                html += `<button type="button" class="workflow-package-reveal" onclick="revealWorkflowPackageRiskChoices()">${esc(workflowPackageText('workflows.package.resolution.revealRiskChoices', '更改处理方式'))}</button>`;
+                html += `<button type="button" class="workflow-package-reveal" onclick="revealWorkflowPackageRiskChoices()">${esc(workflowPackageText('workflows.package.resolution.revealRiskChoices', "Change resolution"))}</button>`;
             } else {
-                html += workflowPackageResolutionCard('overwrite', workflowPackageText('workflows.package.resolution.overwrite', '覆盖本地版本'), workflowPackageText('workflows.package.resolution.overwriteHint', '替换名称、描述、图定义和启用状态；需要再次确认。'), action === 'overwrite');
-                html += workflowPackageResolutionCard('rename', workflowPackageText('workflows.package.resolution.rename', '另存为新 ID'), workflowPackageText('workflows.package.resolution.renameHint', '保留当前本地工作流，并以新的 ID 创建副本。'), action === 'rename');
+                html += workflowPackageResolutionCard('overwrite', workflowPackageText('workflows.package.resolution.overwrite', "Overwrite local version"), workflowPackageText('workflows.package.resolution.overwriteHint', "Replace the name, description, graph, and enabled state; a second confirmation is required."), action === 'overwrite');
+                html += workflowPackageResolutionCard('rename', workflowPackageText('workflows.package.resolution.rename', "Save under a new ID"), workflowPackageText('workflows.package.resolution.renameHint', "Keep the current local workflow and create a copy under a new ID."), action === 'rename');
                 if (action === 'rename') {
-                    html += `<label class="workflow-package-rename-field">${esc(workflowPackageText('workflows.package.resolution.newWorkflowId', '新的工作流 ID'))}<input id="workflow-package-new-id" class="form-input" type="text" value="${esc(workflowPackageState.newWorkflowId)}" placeholder="${esc(workflowPackageText('workflows.package.resolution.newWorkflowIdPlaceholder', '例如：web-scan-basic-copy'))}" oninput="updateWorkflowPackageRenameId()" autocomplete="off"></label>`;
+                    html += `<label class="workflow-package-rename-field">${esc(workflowPackageText('workflows.package.resolution.newWorkflowId', "New workflow ID"))}<input id="workflow-package-new-id" class="form-input" type="text" value="${esc(workflowPackageState.newWorkflowId)}" placeholder="${esc(workflowPackageText('workflows.package.resolution.newWorkflowIdPlaceholder', "For example: web-scan-basic-copy"))}" oninput="updateWorkflowPackageRenameId()" autocomplete="off"></label>`;
                 }
             }
         }
@@ -2692,9 +2725,12 @@
         if (submit) {
             const renameIncomplete = action === 'rename' && !workflowPackageState.newWorkflowId.trim();
             submit.disabled = !action || renameIncomplete;
-            if (action === 'overwrite') submit.textContent = workflowPackageText('workflows.package.resolution.continueOverwrite', 'Continue to overwrite confirmation');
-            else if (action === 'rename') submit.textContent = workflowPackageText('workflows.package.resolution.confirmRename', 'Confirm save as new ID');
-            else submit.textContent = action === 'create' ? workflowPackageText('workflows.package.resolution.confirmCreate', '确认创建') : workflowPackageText('workflows.package.resolution.confirmComplete', '确认完成');
+            if (action === 'overwrite') submit.textContent = workflowPackageText('workflows.package.resolution.continueOverwrite', "Continue to overwrite confirmation");
+            else if (action === 'rename') submit.textContent = workflowPackageText('workflows.package.resolution.confirmRename', "Confirm save as new ID");
+            else if (action === 'create') submit.textContent = workflowPackageText('workflows.package.resolution.confirmCreate', "Confirm create");
+            else submit.textContent = conflictState === 'identical'
+                ? workflowPackageText('workflows.package.resolution.confirmSkip', "Confirm skip import")
+                : workflowPackageText('workflows.package.resolution.confirmKeep', "Confirm keep local version");
         }
         workflowPackageSetStep('import');
     }
@@ -2744,13 +2780,17 @@
         };
         const resultKey = resultKeys[result];
         const message = resultKey
-            ? workflowPackageText('workflows.package.result.' + resultKey, '导入已完成。')
+            ? workflowPackageText('workflows.package.result.' + resultKey, "Import completed.")
             : workflowPackageText('workflows.package.result.complete', 'Import completed.');
         renderWorkflowPackageResolution(message, result === 'kept_existing' || result === 'skipped_identical' ? '' : 'success');
         const submit = workflowPackageSubmitBtn();
         if (submit) {
             submit.disabled = true;
-            submit.textContent = workflowPackageText('workflows.package.result.completedAction', 'Import completed');
+            submit.textContent = result === 'skipped_identical'
+                ? workflowPackageText('workflows.package.result.skippedAction', "Import skipped")
+                : result === 'kept_existing'
+                    ? workflowPackageText('workflows.package.result.keptAction', "Local version kept")
+                    : workflowPackageText('workflows.package.result.completedAction', "Import completed");
         }
     }
 

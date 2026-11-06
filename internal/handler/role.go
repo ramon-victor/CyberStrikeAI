@@ -10,6 +10,7 @@ import (
 
 	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/config"
+	"cyberstrike-ai/internal/database"
 
 	"gopkg.in/yaml.v3"
 
@@ -23,7 +24,10 @@ type RoleHandler struct {
 	configPath string
 	logger     *zap.Logger
 	audit      *audit.Service
+	db         *database.DB
 }
+
+func (h *RoleHandler) SetDB(db *database.DB) { h.db = db }
 
 // SetAudit wires platform audit logging.
 func (h *RoleHandler) SetAudit(s *audit.Service) {
@@ -105,6 +109,16 @@ func (h *RoleHandler) UpdateRole(c *gin.Context) {
 	// 确保角色名称与请求中的name一致
 	if req.Name == "" {
 		req.Name = roleName
+	}
+	if err := h.validateRole(req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Name != roleName {
+		if _, exists := h.config.Roles[req.Name]; exists {
+			c.JSON(http.StatusConflict, gin.H{"error": "Role already exists"})
+			return
+		}
 	}
 
 	// 初始化Roles map
@@ -198,8 +212,8 @@ func (h *RoleHandler) CreateRole(c *gin.Context) {
 		return
 	}
 
-	if req.Name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Role name cannot be empty"})
+	if err := h.validateRole(req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -299,9 +313,9 @@ func (h *RoleHandler) DeleteRole(c *gin.Context) {
 		}
 	}
 
-	h.logger.Info("删除角色", zap.String("roleName", roleName))
+	h.logger.Info("Delete role", zap.String("roleName", roleName))
 	if h.audit != nil {
-		h.audit.RecordOK(c, "role", "delete", "删除角色", "role", roleName, nil)
+		h.audit.RecordOK(c, "role", "delete", "Delete role", "role", roleName, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Role deleted",
@@ -341,7 +355,7 @@ func (h *RoleHandler) saveConfig() error {
 			// 将角色配置序列化为YAML
 			roleData, err := yaml.Marshal(&role)
 			if err != nil {
-				h.logger.Error("序列化角色配置失败", zap.String("role", roleName), zap.Error(err))
+				h.logger.Error("Failed to serialize role configuration", zap.String("role", roleName), zap.Error(err))
 				continue
 			}
 
@@ -357,11 +371,11 @@ func (h *RoleHandler) saveConfig() error {
 
 			// 写入文件
 			if err := os.WriteFile(roleFile, roleData, 0644); err != nil {
-				h.logger.Error("保存角色配置文件失败", zap.String("role", roleName), zap.String("file", roleFile), zap.Error(err))
+				h.logger.Error("Failed to save role profile", zap.String("role", roleName), zap.String("file", roleFile), zap.Error(err))
 				continue
 			}
 
-			h.logger.Info("角色配置Saved到文件", zap.String("role", roleName), zap.String("file", roleFile))
+			h.logger.Info("Role configuration saved to file", zap.String("role", roleName), zap.String("file", roleFile))
 		}
 	}
 

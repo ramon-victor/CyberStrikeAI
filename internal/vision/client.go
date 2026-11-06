@@ -157,7 +157,7 @@ User question: ` + q + extra
 
 func looksLikeCaptchaQuestion(q string) bool {
 	s := strings.ToLower(q)
-	for _, kw := range []string{"验证码", "captcha", "verification code", "verify code", "vcode", "图形码"} {
+	for _, kw := range []string{"Verification code", "captcha", "verification code", "verify code", "vcode", "graphics code"} {
 		if strings.Contains(s, kw) {
 			return true
 		}

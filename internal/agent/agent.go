@@ -122,6 +122,11 @@ type ChatMessage struct {
 	// ModelFacingTrace is runtime-only metadata: true means Content was already the exact
 	// payload seen at the model boundary and must be restored byte-for-byte.
 	ModelFacingTrace bool `json:"-"`
+	// Internal provenance is restored from trusted trace metadata, never from
+	// message text. Keep it out of provider request JSON.
+	SummarizationKind         string   `json:"-"`
+	GeneratedContextKind      string   `json:"-"`
+	OriginalUserIntentEntries []string `json:"-"`
 }
 
 // MarshalJSON 自定义JSON序列化，将tool_calls中的arguments转换为JSON字符串
@@ -293,7 +298,7 @@ func (a *Agent) EinoSingleAgentSystemInstruction() string {
 				path = filepath.Join(base, path)
 			}
 			if b, err := os.ReadFile(path); err != nil {
-				a.logger.Warn("读取单代理 system_prompt_path 失败，使用内置提示", zap.String("path", path), zap.Error(err))
+				a.logger.Warn("Failed to read single-agent system_prompt_path; using built-in prompt", zap.String("path", path), zap.Error(err))
 			} else if s := strings.TrimSpace(string(b)); s != "" {
 				systemPrompt = s
 			}
@@ -351,7 +356,7 @@ func (a *Agent) getAvailableTools(roleTools []string) []Tool {
 		externalTools, err := a.externalMCPMgr.GetAllTools(ctx)
 		extMap := make(map[string]string)
 		if err != nil {
-			a.logger.Warn("获取外部MCP工具失败", zap.Error(err))
+			a.logger.Warn("Failed to obtain external MCP tool", zap.Error(err))
 		} else {
 			// 获取外部MCP配置，用于检查工具启用状态
 			externalMCPConfigs := a.externalMCPMgr.GetConfigs()
@@ -428,7 +433,7 @@ func (a *Agent) getAvailableTools(roleTools []string) []Tool {
 		a.mu.Unlock()
 	}
 
-	a.logger.Debug("获取可用工具列表",
+	a.logger.Debug("Get a list of available tools",
 		zap.Int("internalTools", len(mcpTools)),
 		zap.Int("totalTools", len(tools)),
 	)
@@ -526,7 +531,7 @@ func buildToolFailureMessage(toolName, detail string, err error) string {
 // executeToolViaMCP 通过MCP执行工具
 // 即使工具执行失败，也返回结果而不是错误，让AI能够处理错误情况
 func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map[string]interface{}) (*ToolExecutionResult, error) {
-	a.logger.Info("通过MCP执行工具",
+	a.logger.Info("Execute tools via MCP",
 		zap.String("tool", toolName),
 		zap.Any("args", args),
 	)
@@ -536,11 +541,11 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 		conversationID := agentConversationIDFromContext(ctx)
 		if conversationID != "" {
 			args["conversation_id"] = conversationID
-			a.logger.Debug("自动添加conversation_id到record_vulnerability工具",
+			a.logger.Debug("Automatically adding conversation_id to record_vulnerability",
 				zap.String("conversation_id", conversationID),
 			)
 		} else {
-			a.logger.Warn("record_vulnerability工具调用时conversation_id为空")
+			a.logger.Warn("conversation_id is empty in record_vulnerability call")
 		}
 	}
 
@@ -569,7 +574,7 @@ func (a *Agent) executeToolViaMCP(ctx context.Context, toolName string, args map
 
 	if isExternalTool && a.externalMCPMgr != nil {
 		// 使用原始工具名称调用外部MCP工具
-		a.logger.Debug("调用外部MCP工具",
+		a.logger.Debug("Call external MCP tools",
 			zap.String("openAIName", toolName),
 			zap.String("originalName", originalToolName),
 		)
@@ -623,7 +628,7 @@ func (a *Agent) UpdateConfig(cfg *config.OpenAIConfig) {
 	defer a.mu.Unlock()
 	a.config = cfg
 
-	a.logger.Info("Agent配置已更新",
+	a.logger.Info("Agent configuration has been updated",
 		zap.String("base_url", cfg.BaseURL),
 		zap.String("model", cfg.Model),
 	)
@@ -635,7 +640,7 @@ func (a *Agent) UpdateMaxIterations(maxIterations int) {
 	defer a.mu.Unlock()
 	if maxIterations > 0 {
 		a.maxIterations = maxIterations
-		a.logger.Info("Agent最大迭代次数已更新", zap.Int("max_iterations", maxIterations))
+		a.logger.Info("The maximum number of Agent iterations has been updated", zap.Int("max_iterations", maxIterations))
 	}
 }
 
@@ -648,7 +653,7 @@ func (a *Agent) UpdateToolDescriptionMode(mode string) {
 		mode = "short"
 	}
 	a.toolDescriptionMode = mode
-	a.logger.Debug("Agent工具描述模式已更新", zap.String("tool_description_mode", mode))
+	a.logger.Debug("Agent tool description schema has been updated", zap.String("tool_description_mode", mode))
 }
 
 // RepairOrphanToolMessages 清理失去配对的tool消息和未完成的tool_calls，避免OpenAI报错
@@ -729,7 +734,7 @@ func (a *Agent) repairOrphanToolMessages(messages *[]ChatMessage) bool {
 				// 更新消息的ToolCalls
 				if len(validToolCalls) != originalCount {
 					cleaned[i].ToolCalls = validToolCalls
-					a.logger.Info("移除了未完成的tool_calls，避免重新执行",
+					a.logger.Info("Removed incomplete tool_calls to prevent re-execution",
 						zap.Int("removed_count", originalCount-len(validToolCalls)),
 					)
 				}
@@ -739,7 +744,7 @@ func (a *Agent) repairOrphanToolMessages(messages *[]ChatMessage) bool {
 	}
 
 	if removed {
-		a.logger.Warn("修复了对话历史中的tool消息和tool_calls",
+		a.logger.Warn("Repaired tool messages and tool_calls in conversation history",
 			zap.Int("original_messages", len(msgs)),
 			zap.Int("cleaned_messages", len(cleaned)),
 		)

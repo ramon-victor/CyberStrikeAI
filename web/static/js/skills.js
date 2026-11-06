@@ -7,6 +7,7 @@ let currentEditingSkillName = null;
 let skillModalAddMode = true;
 let skillActivePath = 'SKILL.md';
 let skillFileDirty = false;
+let skillDescriptionDirty = false;
 let skillPackageFiles = [];
 let skillModalControlsWired = false;
 let isSavingSkill = false; // 防止重复提交
@@ -83,7 +84,7 @@ function getSkillsPageSize() {
             }
         }
     } catch (e) {
-        console.warn('无法从localStorage读取分页设置:', e);
+        console.warn("Unable to read paging settings from localStorage:", e);
     }
     return 20; // 默认20
 }
@@ -129,7 +130,7 @@ async function loadSkills(page = 1, pageSize = null) {
         renderSkillsPagination();
         updateSkillsManagementStats();
     } catch (error) {
-        console.error('加载skills列表失败:', error);
+        console.error("Failed to load skills list:", error);
         showNotification(_t('skills.loadListFailed') + ': ' + error.message, 'error');
         const skillsListEl = document.getElementById('skills-list');
         if (skillsListEl) {
@@ -230,6 +231,7 @@ function renderSkillsPagination() {
     // 即使只有一页也显示分页信息（参考MCP样式）
     if (total === 0) {
         paginationContainer.innerHTML = '';
+        if (typeof initPaginationSelects === 'function') initPaginationSelects(paginationContainer);
         return;
     }
     
@@ -276,6 +278,7 @@ function renderSkillsPagination() {
     paginationHTML += '</div>';
     
     paginationContainer.innerHTML = paginationHTML;
+    if (typeof initPaginationSelects === 'function') initPaginationSelects(paginationContainer);
     
     // 确保分页组件与列表内容区域对齐（不包括滚动条）
     function alignPaginationWidth() {
@@ -334,7 +337,7 @@ async function changeSkillsPageSize() {
     try {
         localStorage.setItem('skillsPageSize', newPageSize.toString());
     } catch (e) {
-        console.warn('无法保存分页设置到localStorage:', e);
+        console.warn("Unable to save paging settings to localStorage:", e);
     }
     
     // 更新分页状态
@@ -418,7 +421,7 @@ async function searchSkills() {
             // 更新统计信息（显示搜索结果数量）
             updateSkillsManagementStats();
         } catch (error) {
-            console.error('搜索skills失败:', error);
+            console.error("Searching for skills failed:", error);
             showNotification(_t('skills.searchFailed') + ': ' + error.message, 'error');
         }
     } else {
@@ -454,6 +457,8 @@ function wireSkillModalOnce() {
     skillModalControlsWired = true;
     const addTa = document.getElementById('skill-content-add');
     const edTa = document.getElementById('skill-content');
+    const descriptionInput = document.getElementById('skill-description');
+    if (descriptionInput) descriptionInput.addEventListener('input', () => { skillDescriptionDirty = true; });
     if (addTa) addTa.addEventListener('input', () => { if (skillModalAddMode) skillFileDirty = true; });
     if (edTa) edTa.addEventListener('input', () => { if (!skillModalAddMode) skillFileDirty = true; });
     const nb = document.getElementById('skill-new-file-btn');
@@ -483,6 +488,8 @@ function showAddSkillModal() {
     if (!modal) return;
 
     skillModalAddMode = true;
+    skillDescriptionDirty = false;
+    document.getElementById('skill-description').disabled = false;
     skillFileDirty = false;
     skillActivePath = 'SKILL.md';
     skillPackageFiles = [];
@@ -544,12 +551,18 @@ async function selectSkillPackageFile(skillId, path, opts) {
     const freshContent = opts && Object.prototype.hasOwnProperty.call(opts, 'freshContent')
         ? opts.freshContent
         : null;
+    if (path !== 'SKILL.md' && skillDescriptionDirty) {
+        showNotification(_t('skillModal.saveDescriptionFirst'), 'error');
+        return;
+    }
     if (!force && skillFileDirty) {
         if (!confirm(_t('skillModal.unsavedSwitch'))) {
             return;
         }
     }
     skillActivePath = path;
+    const descriptionInput = document.getElementById('skill-description');
+    if (descriptionInput) descriptionInput.disabled = path !== 'SKILL.md';
     const label = document.getElementById('skill-active-path');
     if (label) label.textContent = path;
     const hint = document.getElementById('skill-body-hint-edit');
@@ -591,6 +604,8 @@ async function editSkill(skillId) {
     const modal = document.getElementById('skill-modal');
     if (!modal) return;
     skillModalAddMode = false;
+    skillDescriptionDirty = false;
+    document.getElementById('skill-description').disabled = false;
     skillFileDirty = false;
     skillActivePath = 'SKILL.md';
     const pkg = document.getElementById('skill-package-editor');
@@ -632,7 +647,7 @@ async function editSkill(skillId) {
         });
     } catch (error) {
         closeSkillModal();
-        console.error('加载skill详情失败:', error);
+        console.error("Failed to load skill details:", error);
         showNotification(_t('skills.loadDetailFailed') + ': ' + error.message, 'error');
     }
 }
@@ -718,7 +733,7 @@ async function viewSkill(skillId) {
             }
         });
     } catch (error) {
-        console.error('查看skill失败:', error);
+        console.error("View skill failure:", error);
         showNotification(_t('skills.viewFailed') + ': ' + error.message, 'error');
     }
 }
@@ -739,6 +754,8 @@ function closeSkillModal() {
     currentEditingSkillName = null;
     skillModalAddMode = true;
     skillFileDirty = false;
+    skillDescriptionDirty = false;
+    document.getElementById('skill-description').disabled = false;
     skillPackageFiles = [];
     skillActivePath = 'SKILL.md';
 }
@@ -833,6 +850,7 @@ async function saveSkill() {
         }
 
         skillFileDirty = false;
+        if (path === 'SKILL.md') skillDescriptionDirty = false;
         showNotification(_t('skills.saveSuccess'), 'success');
         const filesRes = await apiFetch(`/api/skills/${encodeURIComponent(currentEditingSkillName)}/files`);
         if (filesRes.ok) {
@@ -842,7 +860,7 @@ async function saveSkill() {
         }
         await loadSkills(skillsPagination.currentPage, skillsPagination.pageSize);
     } catch (error) {
-        console.error('保存skill失败:', error);
+        console.error("Failed to save skill:", error);
         showNotification(_t('skills.saveFailed') + ': ' + error.message, 'error');
     } finally {
         isSavingSkill = false;
@@ -864,7 +882,7 @@ async function deleteSkill(skillName) {
             boundRoles = checkData.bound_roles || [];
         }
     } catch (error) {
-        console.warn('检查skill绑定失败:', error);
+        console.warn("Failed to check skill binding:", error);
         // 如果检查失败，继续执行删除流程
     }
 
@@ -904,7 +922,7 @@ async function deleteSkill(skillName) {
         const pageToLoad = currentPage > totalPages && totalPages > 0 ? totalPages : currentPage;
         await loadSkills(pageToLoad, skillsPagination.pageSize);
     } catch (error) {
-        console.error('删除skill失败:', error);
+        console.error("Failed to delete skill:", error);
         showNotification(_t('skills.deleteFailed') + ': ' + error.message, 'error');
     }
 }
@@ -931,7 +949,7 @@ async function loadSkillsMonitor() {
 
         renderSkillsMonitor();
     } catch (error) {
-        console.error('加载skills监控数据失败:', error);
+        console.error("Failed to load skills monitoring data:", error);
         showNotification(_t('skills.loadStatsFailed') + ': ' + error.message, 'error');
         const statsEl = document.getElementById('skills-stats');
         if (statsEl) {
@@ -1067,7 +1085,7 @@ async function clearSkillsStats() {
         // 重新加载统计数据
         await loadSkillsMonitor();
     } catch (error) {
-        console.error('清空统计数据失败:', error);
+        console.error("Failed to clear statistics:", error);
         showNotification(_t('skills.clearStatsFailed') + ': ' + error.message, 'error');
     }
 }

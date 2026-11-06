@@ -58,10 +58,10 @@ func TestRobotUsersAreResourceIsolated(t *testing.T) {
 	if got := h.cmdList("wecom", "bob"); strings.Contains(got, conversationID) {
 		t.Fatalf("bob listed alice conversation: %s", got)
 	}
-	if got := h.cmdSwitch("wecom", "bob", conversationID); !strings.Contains(got, "不存在") && !strings.Contains(got, "无权访问") {
+	if got := h.cmdSwitch("wecom", "bob", conversationID); !strings.Contains(got, "does not exist") && !strings.Contains(got, "access") {
 		t.Fatalf("bob switched to alice conversation: %s", got)
 	}
-	if got := h.cmdDelete("wecom", "bob", conversationID); !strings.Contains(got, "无权访问") {
+	if got := h.cmdDelete("wecom", "bob", conversationID); !strings.Contains(got, "access") {
 		t.Fatalf("bob deleted alice conversation: %s", got)
 	}
 	if _, err := db.GetConversation(conversationID); err != nil {
@@ -69,7 +69,7 @@ func TestRobotUsersAreResourceIsolated(t *testing.T) {
 	}
 
 	createReply := h.cmdNewProject("wecom", "alice", "alice project")
-	if !strings.Contains(createReply, "已创建项目") {
+	if !strings.Contains(createReply, "Project created") {
 		t.Fatalf("create project reply: %s", createReply)
 	}
 	if got := h.cmdProjects("wecom", "bob"); strings.Contains(got, "alice project") {
@@ -122,7 +122,7 @@ func TestRobotServiceAccountRequiresExactSenderAllowlist(t *testing.T) {
 	if got := h.HandleMessage("lark", "t:tenant|u:allowed", "whoami"); !strings.Contains(got, "Robot Service") || !strings.Contains(got, serviceUser.ID) || !strings.Contains(got, "service_account") {
 		t.Fatalf("service-account identity output is incomplete: %s", got)
 	}
-	if got := h.HandleMessage("lark", "t:tenant|u:denied", "whoami"); !strings.Contains(got, "鉴权状态：拒绝") || strings.Contains(got, serviceUser.ID) {
+	if got := h.HandleMessage("lark", "t:tenant|u:denied", "whoami"); !strings.Contains(got, "Access denied") || strings.Contains(got, serviceUser.ID) {
 		t.Fatalf("denied identity output leaked or omitted status: %s", got)
 	}
 
@@ -132,7 +132,7 @@ func TestRobotServiceAccountRequiresExactSenderAllowlist(t *testing.T) {
 		AllowedExternalUsers: []string{"t:tenant|u:owner"},
 	}
 	adminHandler := NewRobotHandler(adminCfg, db, nil, zap.NewNop())
-	if got := adminHandler.HandleMessage("lark", "t:tenant|u:owner", "身份"); !strings.Contains(got, "admin") || !strings.Contains(got, "鉴权状态：已授权") {
+	if got := adminHandler.HandleMessage("lark", "t:tenant|u:owner", "身份"); !strings.Contains(got, "admin") || !strings.Contains(got, "Authentication status: Authorized") {
 		t.Fatalf("allowlisted admin service account was denied: %s", got)
 	}
 }

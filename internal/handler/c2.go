@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -125,7 +126,7 @@ func (h *C2Handler) CreateListener(c *gin.Context) {
 	listener.EncryptionKey = ""
 	listener.ImplantToken = ""
 	if h.audit != nil {
-		h.audit.RecordOK(c, "c2", "listener_create", "创建 C2 监听器", "c2_listener", listener.ID, map[string]interface{}{
+		h.audit.RecordOK(c, "c2", "listener_create", "C2 listener created", "c2_listener", listener.ID, map[string]interface{}{
 			"name": listener.Name, "bind": listener.BindHost, "port": listener.BindPort,
 		})
 	}
@@ -173,6 +174,15 @@ func (h *C2Handler) UpdateListener(c *gin.Context) {
 		Config       *c2.ListenerConfig `json:"config,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "listener name is required"})
+		return
+	}
+	if err := c2.SafeBindPort(req.BindPort); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -237,7 +247,7 @@ func (h *C2Handler) DeleteListener(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "c2", "listener_delete", "删除 C2 监听器", "c2_listener", id, nil)
+		h.audit.RecordOK(c, "c2", "listener_delete", "C2 listener deleted", "c2_listener", id, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
@@ -257,7 +267,7 @@ func (h *C2Handler) StartListener(c *gin.Context) {
 	listener.EncryptionKey = ""
 	listener.ImplantToken = ""
 	if h.audit != nil {
-		h.audit.RecordOK(c, "c2", "listener_start", "启动 C2 监听器", "c2_listener", id, nil)
+		h.audit.RecordOK(c, "c2", "listener_start", "C2 listener started", "c2_listener", id, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"listener": listener})
 }
@@ -274,7 +284,7 @@ func (h *C2Handler) StopListener(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "c2", "listener_stop", "停止 C2 监听器", "c2_listener", id, nil)
+		h.audit.RecordOK(c, "c2", "listener_stop", "C2 listener stopped", "c2_listener", id, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"stopped": true})
 }
@@ -342,7 +352,7 @@ func (h *C2Handler) DeleteSession(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "c2", "session_delete", "删除 C2 会话", "c2_session", id, nil)
+		h.audit.RecordOK(c, "c2", "session_delete", "C2 session deleted", "c2_session", id, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
 }
@@ -370,7 +380,7 @@ func (h *C2Handler) DeleteSessions(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "c2", "session_delete", "批量删除 C2 会话", "c2_session", "", map[string]interface{}{
+		h.audit.RecordOK(c, "c2", "session_delete", "Delete C2 sessions in bulk", "c2_session", "", map[string]interface{}{
 			"count": n, "ids": req.IDs,
 		})
 	}
@@ -448,7 +458,7 @@ func (h *C2Handler) SetSessionNote(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "c2", "session_note", "更新 C2 会话备注", "c2_session", id, map[string]interface{}{
+		h.audit.RecordOK(c, "c2", "session_note", "Update C2 session notes", "c2_session", id, map[string]interface{}{
 			"note_len": len(note),
 		})
 	}
@@ -561,7 +571,7 @@ func (h *C2Handler) DeleteTasks(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "c2", "task_delete", "批量删除 C2 任务", "c2_task", "", map[string]interface{}{
+		h.audit.RecordOK(c, "c2", "task_delete", "C2 tasks deleted (batch)", "c2_task", "", map[string]interface{}{
 			"count": n, "ids": req.IDs,
 		})
 	}
@@ -600,13 +610,13 @@ func (h *C2Handler) CreateTask(c *gin.Context) {
 		req.SessionID = strings.TrimSpace(c.Param("id"))
 	}
 	if !h.c2ResourceAllowed(c, "c2_session", req.SessionID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 	if conversationID := strings.TrimSpace(req.ConversationID); conversationID != "" {
 		session, ok := security.CurrentSession(c)
 		if !ok || !h.mgr().DB().UserCanAccessResource(session.UserID, session.Scope, "conversation", conversationID) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权关联目标对话"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "No permission to associate target conversation"})
 			return
 		}
 		req.ConversationID = conversationID
@@ -631,7 +641,7 @@ func (h *C2Handler) CreateTask(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "c2", "task_create", "创建 C2 任务", "c2_task", task.ID, map[string]interface{}{
+		h.audit.RecordOK(c, "c2", "task_create", "C2 task created", "c2_task", task.ID, map[string]interface{}{
 			"session_id": req.SessionID, "task_type": req.TaskType,
 		})
 	}
@@ -641,6 +651,10 @@ func (h *C2Handler) CreateTask(c *gin.Context) {
 // CancelTask 取消任务
 func (h *C2Handler) CancelTask(c *gin.Context) {
 	id := c.Param("id")
+	if !h.c2ResourceAllowed(c, "c2_task", id) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
+		return
+	}
 	if err := h.mgr().CancelTask(id); err != nil {
 		code := http.StatusInternalServerError
 		if e, ok := err.(*c2.CommonError); ok {
@@ -650,7 +664,7 @@ func (h *C2Handler) CancelTask(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "c2", "task_cancel", "取消 C2 任务", "c2_task", id, nil)
+		h.audit.RecordOK(c, "c2", "task_cancel", "C2 task cancelled", "c2_task", id, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"cancelled": true})
 }
@@ -658,6 +672,10 @@ func (h *C2Handler) CancelTask(c *gin.Context) {
 // WaitTask 等待任务完成
 func (h *C2Handler) WaitTask(c *gin.Context) {
 	id := c.Param("id")
+	if !h.c2ResourceAllowed(c, "c2_task", id) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
+		return
+	}
 	timeout := 60 * time.Second
 	if t := c.Query("timeout"); t != "" {
 		if n, err := strconv.Atoi(t); err == nil && n > 0 {
@@ -711,7 +729,7 @@ func (h *C2Handler) PayloadOneliner(c *gin.Context) {
 		return
 	}
 	if !h.c2ResourceAllowed(c, "c2_listener", req.ListenerID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 
@@ -725,17 +743,21 @@ func (h *C2Handler) PayloadOneliner(c *gin.Context) {
 			names[i] = string(k)
 		}
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error":            fmt.Sprintf("监听器类型 %s 不支持 %s 类型的 oneliner，请选择兼容的类型", listener.Type, req.Kind),
+			"error":            fmt.Sprintf("Listener type %s does not support oneliner type %s; select a compatible type", listener.Type, req.Kind),
 			"compatible_kinds": names,
 		})
 		return
 	}
 
+	scheme := "http"
+	if listener.Type == "https_beacon" {
+		scheme = "https"
+	}
 	input := c2.OnelinerInput{
 		Kind:         kind,
 		Host:         host,
 		Port:         listener.BindPort,
-		HTTPBaseURL:  fmt.Sprintf("http://%s:%d", host, listener.BindPort),
+		HTTPBaseURL:  fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(host, strconv.Itoa(listener.BindPort))),
 		ImplantToken: listener.ImplantToken,
 	}
 
@@ -778,7 +800,7 @@ func (h *C2Handler) PayloadBuild(c *gin.Context) {
 		return
 	}
 	if !h.c2ResourceAllowed(c, "c2_listener", req.ListenerID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 
@@ -820,7 +842,7 @@ func (h *C2Handler) PayloadDownload(c *gin.Context) {
 	}
 	session, ok := security.CurrentSession(c)
 	if !ok || !h.mgr().DB().UserCanAccessC2Payload(session.UserID, session.Scope, filename) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 
@@ -1013,6 +1035,10 @@ func (h *C2Handler) CreateProfile(c *gin.Context) {
 		return
 	}
 
+	if req.JitterMinMS < 0 || req.JitterMaxMS < req.JitterMinMS {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Jitter must satisfy 0 <= min <= max"})
+		return
+	}
 	req.ID = "p_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:14]
 	req.CreatedAt = time.Now()
 
@@ -1042,6 +1068,10 @@ func (h *C2Handler) UpdateProfile(c *gin.Context) {
 		return
 	}
 
+	if req.JitterMinMS < 0 || req.JitterMaxMS < req.JitterMinMS {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Jitter must satisfy 0 <= min <= max"})
+		return
+	}
 	profile.Name = req.Name
 	profile.UserAgent = req.UserAgent
 	profile.URIs = req.URIs
@@ -1062,7 +1092,12 @@ func (h *C2Handler) UpdateProfile(c *gin.Context) {
 func (h *C2Handler) DeleteProfile(c *gin.Context) {
 	id := c.Param("id")
 	if err := h.mgr().DB().DeleteC2Profile(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "profile not found"})
+			return
+		}
+		h.logger.Error("Deletion of C2 Profile failed", zap.Error(err), zap.String("id", id))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete profile"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": true})
@@ -1081,7 +1116,7 @@ func (h *C2Handler) UploadFileForImplant(c *gin.Context) {
 		return
 	}
 	if !h.c2ResourceAllowed(c, "c2_session", sessionID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 
@@ -1139,7 +1174,7 @@ func (h *C2Handler) ListFiles(c *gin.Context) {
 		return
 	}
 	if !h.c2ResourceAllowed(c, "c2_session", sessionID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 	files, err := h.mgr().DB().ListC2FilesBySession(sessionID)
@@ -1163,7 +1198,7 @@ func (h *C2Handler) DownloadResultFile(c *gin.Context) {
 		return
 	}
 	if !h.c2ResourceAllowed(c, "c2_task", taskID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 	if task.ResultBlobPath == "" {

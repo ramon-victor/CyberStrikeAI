@@ -77,11 +77,17 @@ if (typeof window !== 'undefined') {
 
 // 当前界面语言对应的 BCP 47 标签（与时间格式化一致）
 function getCurrentTimeLocale() {
+    if (typeof window.uiLocale === 'function') return window.uiLocale();
     if (typeof window.__locale === 'string' && window.__locale.length) {
-        return window.__locale.startsWith('zh') ? 'zh-CN' : 'en-US';
+        if (window.__locale.startsWith('zh')) return 'zh-CN';
+        if (window.__locale.startsWith('ru')) return 'ru-RU';
+        return 'en-US';
     }
     if (typeof i18next !== 'undefined' && i18next.language) {
-        return (i18next.language || '').startsWith('zh') ? 'zh-CN' : 'en-US';
+        const lang = String(i18next.language || '');
+        if (lang.startsWith('zh')) return 'zh-CN';
+        if (lang.startsWith('ru')) return 'ru-RU';
+        return 'en-US';
     }
     return 'zh-CN';
 }
@@ -90,7 +96,7 @@ function getCurrentTimeLocale() {
 function getTimeFormatOptions() {
     const loc = getCurrentTimeLocale();
     const base = { hour: '2-digit', minute: '2-digit', second: '2-digit' };
-    if (loc === 'zh-CN') {
+    if (loc === 'zh-CN' || loc === 'ru-RU') {
         base.hour12 = false;
     }
     return base;
@@ -181,7 +187,7 @@ function einoMainStreamPlanningTitle(responseData) {
         if (a === 'planner') key = 'chat.planExecuteStreamPlanner';
         else if (a === 'executor') key = 'chat.planExecuteStreamExecutor';
         else if (a === 'replanner' || a === 'execute_replan' || a === 'plan_execute_replan') key = 'chat.planExecuteStreamReplanning';
-        const label = typeof window.t === 'function' ? window.t(key) : '输出';
+        const label = typeof window.t === 'function' ? window.t(key) : "Output";
         return prefix + '📝 ' + label;
     }
     // eino_single / deep / supervisor：主通道是模型流式输出，不是「规划」；模型偶发复述工具 stdout 时，旧文案易被误认为工具结果标题。
@@ -225,34 +231,34 @@ function hasFinalizationContract(data) {
 }
 
 function finalizationCheckTitle(data) {
-    return isFinalizedResponseData(data) ? '最终回复检查通过' : '最终回复检查未通过';
+    return isFinalizedResponseData(data) ? "Final reply check passed" : "Final reply check failed";
 }
 
 function finalizationReasonLabel(reason, status) {
     const key = String(reason || status || '').trim();
     const labels = {
-        pending_tool_executions: '等待工具执行完成',
-        missing_execution_evidence: '缺少完成态证据',
-        awaiting_hitl: '等待人工确认',
-        empty_response: '未捕获到有效回复',
-        missing_finalization_contract: '缺少最终化证明',
-        in_progress: '仍在验证',
-        blocked: '检查未通过',
-        failed: '任务失败',
-        cancelled: '任务已取消',
-        verified: '已验证'
+        pending_tool_executions: "Wait for tool execution to complete",
+        missing_execution_evidence: "Missing evidence of completion",
+        awaiting_hitl: "Waiting for manual confirmation",
+        empty_response: "No valid reply captured",
+        missing_finalization_contract: "Lack of final proof",
+        in_progress: "Still verifying",
+        blocked: "Check failed",
+        failed: "Task failed",
+        cancelled: "Task cancelled",
+        verified: "Verified"
     };
-    return labels[key] || key || '检查未通过';
+    return labels[key] || key || "Check failed";
 }
 
 function finalizationMissingCheckLabel(check) {
     const s = String(check || '').trim();
     if (!s) return '';
-    if (s.indexOf('tool execution still queued or running') !== -1) return '仍有工具执行未结束';
-    if (s.indexOf('execution evidence is required but no completed tool execution was recorded') !== -1) return '本轮要求执行证据，但没有 completed 工具记录';
-    if (s.indexOf('workflow is awaiting HITL approval') !== -1) return '工作流正在等待人工确认';
-    if (s.indexOf('assistant final text is empty') !== -1) return '未捕获到有效最终文本';
-    if (s.indexOf('agent run status is ') === 0) return '任务状态仍为 ' + s.replace('agent run status is ', '');
+    if (s.indexOf('tool execution still queued or running') !== -1) return "There are still tools that have not been executed yet";
+    if (s.indexOf('execution evidence is required but no completed tool execution was recorded') !== -1) return "This round requires execution evidence, but there is no completed tool record";
+    if (s.indexOf('workflow is awaiting HITL approval') !== -1) return "Workflow is waiting for human confirmation";
+    if (s.indexOf('assistant final text is empty') !== -1) return "Valid final text not captured";
+    if (s.indexOf('agent run status is ') === 0) return "The task status remains " + s.replace('agent run status is ', '');
     return s;
 }
 
@@ -260,7 +266,7 @@ function compactStringList(values, limit) {
     const arr = Array.isArray(values) ? values.filter(Boolean).map(String) : [];
     const max = limit || 3;
     if (arr.length <= max) return arr;
-    return arr.slice(0, max).concat('另 ' + (arr.length - max) + ' 项');
+    return arr.slice(0, max).concat("Other " + (arr.length - max) + " item");
 }
 
 function finalizationNoticeMarkdown(responseData, eventMessage) {
@@ -268,10 +274,10 @@ function finalizationNoticeMarkdown(responseData, eventMessage) {
     const reason = hasContract
         ? finalizationReasonLabel(responseData && responseData.completionReason, responseData && responseData.status)
         : finalizationReasonLabel('missing_finalization_contract');
-    const lines = ['**仍在验证，暂不生成最终结论**', '', '状态：' + reason];
+    const lines = ["**Still verifying, no final conclusion yet**", '', "state:" + reason];
     const pending = compactStringList(responseData && responseData.pendingExecutionIds, 3);
     if (pending.length) {
-        lines.push('待完成工具：`' + pending.join('`, `') + '`');
+        lines.push("Tools to be completed: `" + pending.join('`, `') + '`');
     }
     const rawMissingChecks = responseData && responseData.missingChecks;
     const missingChecks = Array.isArray(rawMissingChecks)
@@ -279,10 +285,10 @@ function finalizationNoticeMarkdown(responseData, eventMessage) {
         : (rawMissingChecks ? [rawMissingChecks] : []);
     const missing = compactStringList(missingChecks.map(finalizationMissingCheckLabel).filter(Boolean), 3);
     if (missing.length) {
-        lines.push('待完成检查：' + missing.join('；'));
+        lines.push("Checks to be completed:" + missing.join('；'));
     }
     if (!hasContract && eventMessage != null && String(eventMessage).trim() !== '') {
-        lines.push('', '候选输出已移入过程详情，避免误判为最终结论。');
+        lines.push('', "Candidate outputs have been moved into process details to avoid misjudgment as final conclusions.");
     }
     return lines.join('\n');
 }
@@ -383,7 +389,7 @@ function translateProgressMessage(message, data) {
         }
         return window.t('progress.einoAgent', { name: disp });
     }
-    const callingToolPrefixCn = '正在调用工具: ';
+    const callingToolPrefixCn = "Calling tool: ";
     const callingToolPrefixEn = 'Calling tool: ';
     if (trim.indexOf(callingToolPrefixCn) === 0) {
         const name = trim.slice(callingToolPrefixCn.length);
@@ -417,6 +423,13 @@ function getToolCallMapping(progressId, toolCallId) {
     if (scoped) return scoped;
     // 兼容历史遗留：若 map 中还有旧格式 key（仅 toolCallId），兜底读取。
     return toolCallStatusMap.get(String(toolCallId)) || null;
+}
+
+function progressDoneOutcome(data) {
+    const status = String(data && (data.status || data.workflowStatus) || '').toLowerCase();
+    if (status === 'cancelled' || status === 'canceled') return { key: 'chat.taskCancelled', fallback: "Task cancelled", icon: '⛔', toolStatus: 'cancelled' };
+    if (['failed', 'timeout', 'cleanup_failed', 'cleanup_unconfirmed'].includes(status)) return { key: status === 'timeout' ? 'tasks.statusTimeout' : 'tasks.statusFailed', fallback: status === 'timeout' ? "Task timeout" : "Task execution failed", icon: '❌', toolStatus: 'failed' };
+    return { key: 'chat.penetrationTestComplete', fallback: "Penetration test complete", icon: '✅', toolStatus: 'failed' };
 }
 
 function finalizeOutstandingToolCallsForProgress(progressId, finalStatus) {
@@ -1013,7 +1026,7 @@ async function processSseDataLinesYielding(lines, onEvent, options) {
             try {
                 onEvent(JSON.parse(line.slice(6)));
             } catch (e) {
-                console.error('解析事件数据失败:', e, line);
+                console.error("Failed to parse event data:", e, line);
             }
         }
         if ((i + 1) % yieldEvery === 0 && i + 1 < lines.length) {
@@ -1418,7 +1431,7 @@ async function submitUserInterruptContinue() {
         }
         loadActiveTasks();
     } catch (error) {
-        console.error('中断并继续失败:', error);
+        console.error("Break and continue fails:", error);
         alert((typeof window.t === 'function' ? window.t('tasks.cancelTaskFailed') : 'Cancel task failed') + ': ' + error.message);
     } finally {
         if (stopBtn) {
@@ -1445,7 +1458,7 @@ async function submitUserInterruptHardCancel() {
         await requestCancel(conversationId);
         loadActiveTasks();
     } catch (error) {
-        console.error('取消任务失败:', error);
+        console.error("Failed to cancel task:", error);
         alert((typeof window.t === 'function' ? window.t('tasks.cancelTaskFailed') : 'Cancel task failed') + ': ' + error.message);
     }
 }
@@ -1481,7 +1494,7 @@ async function performHardCancelProgressTask(progressId, conversationId = '') {
         await requestCancel(targetConversationId);
         loadActiveTasks();
     } catch (error) {
-        console.error('取消任务失败:', error);
+        console.error("Failed to cancel task:", error);
         alert((typeof window.t === 'function' ? window.t('tasks.cancelTaskFailed') : 'Cancel task failed') + ': ' + error.message);
         if (stopBtn) {
             stopBtn.disabled = false;
@@ -1979,7 +1992,7 @@ function processDetailsContinuousLabel(kind) {
         return typeof window.t === 'function' ? window.t('chat.loadingLaterDetails') : 'Loading newer entries…';
     }
     if (kind === 'retry') {
-        return typeof window.t === 'function' ? window.t('common.retry') : '加载失败，点击重试';
+        return typeof window.t === 'function' ? window.t('common.retry') : "Loading failed, click to try again";
     }
     return '';
 }
@@ -2501,7 +2514,7 @@ function triggerLazyProcessDetailsLoad(assistantMessageId, backendMessageId, det
         initialStart: !openAtLatest
     })
         .catch((e) => {
-            console.error('加载过程详情失败:', e);
+            console.error("Failed to load process details:", e);
             const tl = detailsContainer.querySelector('.progress-timeline');
             if (tl) {
                 tl.innerHTML = '<div class="progress-timeline-empty">' + ((typeof window.t === 'function') ? window.t('chat.noProcessDetail') : 'No process details (execution may be too fast or no detailed events)') + '</div>';
@@ -2731,7 +2744,7 @@ function formatEinoRunRetryMessage(message, data) {
     if (Number.isFinite(attempt) && attempt > 0 && Number.isFinite(maxAttempts) && maxAttempts > 0) {
         const retryPlan = typeof window.t === 'function'
             ? window.t('chat.einoRunRetryPlan', { attempt: attempt, maxAttempts: maxAttempts, backoffSec: Number.isFinite(backoffSec) && backoffSec > 0 ? backoffSec : '-' })
-            : ('重试进度：第 ' + attempt + '/' + maxAttempts + ' 次，等待 ' + (Number.isFinite(backoffSec) && backoffSec > 0 ? backoffSec : '-') + ' 秒');
+            : ("Retry progress: No. " + attempt + '/' + maxAttempts + " times, wait " + (Number.isFinite(backoffSec) && backoffSec > 0 ? backoffSec : '-') + " Second");
         if (!base || base.indexOf(String(attempt) + '/' + String(maxAttempts)) === -1) {
             lines.push(retryPlan);
         }
@@ -2758,14 +2771,14 @@ function formatEinoRunRetryKind(kind) {
     const key = String(kind || '').trim();
     if (!key) return '';
     const labels = {
-        rate_limit: '限流 / 请求过多',
-        retryable_http: '可重试 HTTP 错误',
-        upstream_server: '上游服务错误',
-        http_error: 'HTTP 错误',
-        upstream_busy: '上游繁忙',
-        network: '网络连接异常',
-        stream: '流式读取异常',
-        transient: '临时异常'
+        rate_limit: "Rate limited / too many requests",
+        retryable_http: "Retryable HTTP error",
+        upstream_server: "Upstream server error",
+        http_error: "HTTP error",
+        upstream_busy: "Upstream busy",
+        network: "Network connection issue",
+        stream: "Streaming read issue",
+        transient: "Transient issue"
     };
     if (typeof window.t === 'function') {
         const translated = window.t('chat.einoRunRetryKind_' + key);
@@ -2876,6 +2889,9 @@ function formatEinoUsageSummaryMessage(data) {
     ];
     if (Number(d.cachedTokens || 0) > 0) {
         rows.push([label('chat.einoUsageCachedTokens', 'Cached tokens'), d.cachedTokens]);
+    }
+    if (Number(d.cacheWriteTokens || 0) > 0) {
+        rows.push([label('chat.einoUsageCacheWriteTokens', "Cache write tokens"), d.cacheWriteTokens]);
     }
     if (Number(d.reasoningTokens || 0) > 0) {
         rows.push([label('chat.einoUsageReasoningTokens', 'Reasoning tokens'), d.reasoningTokens]);
@@ -3052,20 +3068,20 @@ function handleStreamEvent(event, progressElement, progressId,
                 const phase = translatePlanExecuteAgentName(d.einoAgent != null ? d.einoAgent : '');
                 iterTitle = typeof window.t === 'function'
                     ? window.t('chat.einoPlanExecuteRound', { n: n, phase: phase })
-                    : ('Plan-Execute · 第 ' + n + ' 轮 · ' + phase);
+                    : ("Plan-Execute · No. " + n + " wheel · " + phase);
             } else if (d.einoScope === 'main') {
                 iterTitle = typeof window.t === 'function'
                     ? window.t('chat.einoOrchestratorRound', { n: n })
-                    : ('主代理 · 第 ' + n + ' 轮');
+                    : ("Main Agent·No. " + n + " wheel");
             } else if (d.einoScope === 'sub') {
                 const ag = d.einoAgent != null ? String(d.einoAgent).trim() : '';
                 iterTitle = typeof window.t === 'function'
                     ? window.t('chat.einoSubAgentStep', { n: n, agent: ag })
-                    : ('子代理 · ' + ag + ' · 第 ' + n + ' 步');
+                    : ("Subagent · " + ag + " · No. " + n + " step");
             } else {
                 iterTitle = typeof window.t === 'function'
                     ? window.t('chat.iterationRound', { n: n })
-                    : ('第 ' + n + ' 轮迭代');
+                    : ("No. " + n + " Round iteration");
             }
             addTimelineItem(timeline, 'iteration', {
                 title: iterTitle,
@@ -3080,7 +3096,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const d = event.data || {};
             const name = d.workflowName || d.workflowId || '';
             addTimelineItem(timeline, 'workflow_start', {
-                title: '🧭 工作流开始' + (name ? (' · ' + name) : ''),
+                title: "🧭 Workflow starts" + (name ? (' · ' + name) : ''),
                 message: event.message || '',
                 data: d
             });
@@ -3091,7 +3107,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const d = event.data || {};
             const name = d.workflowName || d.workflowId || '';
             addTimelineItem(timeline, 'workflow_done', {
-                title: '✅ 工作流完成' + (name ? (' · ' + name) : ''),
+                title: "✅ Workflow completed" + (name ? (' · ' + name) : ''),
                 message: event.message || '',
                 data: d
             });
@@ -3106,7 +3122,7 @@ function handleStreamEvent(event, progressElement, progressId,
                 clearTimelineStreamStates(progressId);
             }
             addTimelineItem(timeline, 'workflow_node_start', {
-                title: '▶ 节点开始' + (label ? (' · ' + label) : ''),
+                title: "▶ Node starts" + (label ? (' · ' + label) : ''),
                 message: event.message || '',
                 data: d
             });
@@ -3121,10 +3137,10 @@ function handleStreamEvent(event, progressElement, progressId,
             let title;
             if (nodeType === 'condition') {
                 const matched = d.matched === true || d.matched === 'true' || (d.output && (d.output.matched === true || d.output.matched === 'true'));
-                title = (matched ? '✅' : '🔀') + ' 条件判断' + (label ? (' · ' + label) : '') + ' → ' + (matched ? '是' : '否');
+                title = (matched ? '✅' : '🔀') + " Conditional judgment" + (label ? (' · ' + label) : '') + ' → ' + (matched ? "Yes" : "No");
             } else {
                 const icon = status === 'failed' ? '❌' : (status === 'skipped' ? '⏭️' : '✅');
-                title = icon + ' 节点完成' + (label ? (' · ' + label) : '') + (status ? ('（' + status + '）') : '');
+                title = icon + " Node completed" + (label ? (' · ' + label) : '') + (status ? ('（' + status + '）') : '');
             }
             addTimelineItem(timeline, 'workflow_node_result', {
                 title: title,
@@ -3141,7 +3157,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const target = d.targetLabel || d.targetId || '';
             const taken = event.type === 'workflow_branch_taken';
             addTimelineItem(timeline, event.type, {
-                title: (taken ? '➡️' : '⏭️') + (taken ? ' 执行分支' : ' 跳过分支') + (branch ? (' · ' + branch) : '') + (target ? (' → ' + target) : ''),
+                title: (taken ? '➡️' : '⏭️') + (taken ? " execution branch" : " skip branch") + (branch ? (' · ' + branch) : '') + (target ? (' → ' + target) : ''),
                 message: event.message || '',
                 data: d
             });
@@ -3152,7 +3168,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const d = event.data || {};
             const tool = d.tool || d.toolName || '';
             addTimelineItem(timeline, 'workflow_tool_start', {
-                title: '🔧 工具节点' + (tool ? (' · ' + tool) : ''),
+                title: "🔧 Tool node" + (tool ? (' · ' + tool) : ''),
                 message: event.message || '',
                 data: d
             });
@@ -3163,7 +3179,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const d = event.data || {};
             const label = d.label || d.nodeId || '';
             addTimelineItem(timeline, 'workflow_agent_output', {
-                title: '🤖 Agent 输出' + (label ? (' · ' + label) : ''),
+                title: "🤖 Agent output" + (label ? (' · ' + label) : ''),
                 message: event.message || '',
                 data: d
             });
@@ -3271,7 +3287,7 @@ function handleStreamEvent(event, progressElement, progressId,
             }
             const labelBase = typeof window.t === 'function'
                 ? window.t(timelineType === 'reasoning_chain' ? 'chat.reasoningChain' : 'chat.aiThinking')
-                : (timelineType === 'reasoning_chain' ? '推理过程' : 'AI思考');
+                : (timelineType === 'reasoning_chain' ? "Reasoning process" : "AI thinking");
             const emoji = timelineType === 'reasoning_chain' ? '🔗' : '🤔';
             const title = timelineAgentBracketPrefix(d) + emoji + ' ' + labelBase;
             const itemId = addTimelineItem(timeline, timelineType, {
@@ -3330,7 +3346,7 @@ function handleStreamEvent(event, progressElement, progressId,
 
             const labelBase = typeof window.t === 'function'
                 ? window.t(timelineType === 'reasoning_chain' ? 'chat.reasoningChain' : 'chat.aiThinking')
-                : (timelineType === 'reasoning_chain' ? '推理过程' : 'AI思考');
+                : (timelineType === 'reasoning_chain' ? "Reasoning process" : "AI thinking");
             const emoji = timelineType === 'reasoning_chain' ? '🔗' : '🤔';
             addTimelineItem(timeline, timelineType, {
                 title: timelineAgentBracketPrefix(event.data) + emoji + ' ' + labelBase,
@@ -3358,7 +3374,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const finalizationCheckPassed = isFinalizedResponseData(finalizationCheckData);
             addTimelineItem(timeline, 'finalization_check', {
                 title: finalizationCheckTitle(finalizationCheckData),
-                message: finalizationCheckPassed ? (event.message || '最终回复检查通过。') : finalizationNoticeMarkdown(finalizationCheckData, event.message),
+                message: finalizationCheckPassed ? (event.message || "Final reply check passed.") : finalizationNoticeMarkdown(finalizationCheckData, event.message),
                 data: event.data,
                 expanded: !finalizationCheckPassed
             });
@@ -3496,12 +3512,12 @@ function handleStreamEvent(event, progressElement, progressId,
             const agent = d.einoAgent ? String(d.einoAgent) : '';
             const title = typeof window.t === 'function'
                 ? window.t('chat.einoStreamErrorTitle', { agent: agent || '-' })
-                : (agent ? ('⚠️ Eino 流式中断（' + agent + '）') : '⚠️ Eino 流式中断');
+                : (agent ? ("⚠️ Eino streaming interrupted (" + agent + '）') : "⚠️ Eino streaming interrupted");
             addTimelineItem(timeline, 'warning', {
                 title: title,
                 message: event.message || (typeof window.t === 'function'
                     ? window.t('chat.einoStreamErrorMessage')
-                    : '流式读取异常，系统将按策略重试或结束。'),
+                    : "Streaming read failed; the system will retry or terminate according to policy."),
                 data: d
             });
             break;
@@ -3516,7 +3532,7 @@ function handleStreamEvent(event, progressElement, progressId,
                 title: title,
                 message: event.message || (typeof window.t === 'function'
                     ? window.t('chat.einoEmptyResponseContinueMessage')
-                    : '会话已结束但未捕获到助手正文，正在基于轨迹自动续跑…'),
+                    : "Session ended without captured assistant text; resuming from trace…"),
                 data: d
             });
             break;
@@ -3569,7 +3585,7 @@ function handleStreamEvent(event, progressElement, progressId,
                 title: typeof window.t === 'function' ? window.t('chat.iterationLimitReachedTitle') : '⛔ Iteration limit reached',
                 message: event.message || (typeof window.t === 'function'
                     ? window.t('chat.iterationLimitReachedMessage')
-                    : '已达到最大迭代次数，任务已停止继续自动迭代。'),
+                    : "Maximum iteration count reached; automatic iteration has stopped."),
                 data: event.data
             });
             finalizeOutstandingToolCallsForProgress(progressId, 'failed');
@@ -3584,7 +3600,7 @@ function handleStreamEvent(event, progressElement, progressId,
                 title: typeof window.t === 'function' ? window.t('chat.einoPendingOrphanedTitle') : '🧹 Tool call reconciliation',
                 message: event.message || (typeof window.t === 'function'
                     ? window.t('chat.einoPendingOrphanedMessage', { count: countText })
-                    : ('检测到 ' + countText + ' 个未闭合工具调用，已自动标记为失败并收尾。')),
+                    : ("detected " + countText + " unclosed tool calls, which have been automatically marked as failed and closed.")),
                 data: d
             });
             finalizeOutstandingToolCallsForProgress(progressId, 'failed');
@@ -3651,7 +3667,7 @@ function handleStreamEvent(event, progressElement, progressId,
                 ? (typeof window.t === 'function' ? window.t('chat.toolExecBlocked', { name: escapeHtml(resultToolName) }) : 'Tool ' + escapeHtml(resultToolName) + ' blocked')
                 : backgroundRunning
                 ? (getBackgroundRunningToolLabel() + ': ' + escapeHtml(resultToolName))
-                : (success ? (typeof window.t === 'function' ? window.t('chat.toolExecComplete', { name: escapeHtml(resultToolName) }) : '工具 ' + escapeHtml(resultToolName) + ' 执行完成') : (typeof window.t === 'function' ? window.t('chat.toolExecFailed', { name: escapeHtml(resultToolName) }) : '工具 ' + escapeHtml(resultToolName) + ' 执行失败'));
+                : (success ? (typeof window.t === 'function' ? window.t('chat.toolExecComplete', { name: escapeHtml(resultToolName) }) : "tool " + escapeHtml(resultToolName) + " Execution completed") : (typeof window.t === 'function' ? window.t('chat.toolExecFailed', { name: escapeHtml(resultToolName) }) : "tool " + escapeHtml(resultToolName) + " Execution failed"));
 
             if (resultToolCallId) {
                 const key = toolResultStreamKey(progressId, resultToolCallId);
@@ -3861,7 +3877,7 @@ function handleStreamEvent(event, progressElement, progressId,
             // 立即刷新任务状态
             loadActiveTasks();
             // Close any remaining running tool calls for this progress.
-            finalizeOutstandingToolCallsForProgress(progressId, 'failed');
+            finalizeOutstandingToolCallsForProgress(progressId, 'cancelled');
             break;
 
         case 'response_start': {
@@ -4050,7 +4066,7 @@ function handleStreamEvent(event, progressElement, progressId,
                 });
             } else if (timeline && !responseFinalized && !responseHasFinalizationContract && resolvedResponseText && String(resolvedResponseText).trim()) {
                 addTimelineItem(timeline, 'finalization_check', {
-                    title: '候选输出缺少最终化证明',
+                    title: "Candidate output lacks finalization proof",
                     message: resolvedResponseText,
                     data: Object.assign({}, responseData, { missingFinalizationContract: true }),
                     expanded: true
@@ -4156,10 +4172,10 @@ function handleStreamEvent(event, progressElement, progressId,
             if (event.data && event.data.workflowStatus === 'awaiting_hitl') {
                 const waitingTitle = document.querySelector(`#${progressId} .progress-stage`);
                 if (waitingTitle) {
-                    waitingTitle.textContent = '⏸️ ' + (typeof window.t === 'function' ? window.t('chat.workflowAwaitingApproval') : '工作流等待审批');
+                    waitingTitle.textContent = '⏸️ ' + (typeof window.t === 'function' ? window.t('chat.workflowAwaitingApproval') : "Workflow awaiting approval");
                 }
                 if (progressTaskState.has(progressId)) {
-                    finalizeProgressTask(progressId, typeof window.t === 'function' ? window.t('chat.workflowAwaitingApproval') : '等待审批');
+                    finalizeProgressTask(progressId, typeof window.t === 'function' ? window.t('chat.workflowAwaitingApproval') : "Waiting for approval");
                 }
                 break;
             }
@@ -4182,7 +4198,8 @@ function handleStreamEvent(event, progressElement, progressId,
             // 完成，更新进度标题（如果进度消息还存在）
             const doneTitle = document.querySelector(`#${progressId} .progress-stage`);
             if (doneTitle) {
-                doneTitle.textContent = '✅ ' + (typeof window.t === 'function' ? window.t('chat.penetrationTestComplete') : 'Penetration test complete');
+                const outcome = progressDoneOutcome(event.data);
+                doneTitle.textContent = outcome.icon + ' ' + (typeof window.t === 'function' ? window.t(outcome.key) : outcome.fallback);
             }
             // 更新对话ID
             if (event.data && event.data.conversationId) {
@@ -4193,7 +4210,9 @@ function handleStreamEvent(event, progressElement, progressId,
                 updateProgressConversation(progressId, event.data.conversationId);
             }
             if (progressTaskState.has(progressId)) {
-                finalizeProgressTask(progressId, typeof window.t === 'function' ? window.t('tasks.statusCompleted') : 'Completed');
+                const outcome = progressDoneOutcome(event.data);
+                const labelKey = outcome.icon === '✅' ? 'tasks.statusCompleted' : outcome.key;
+                finalizeProgressTask(progressId, typeof window.t === 'function' ? window.t(labelKey) : outcome.fallback);
             }
             
             // 检查时间线中是否有错误项
@@ -4202,7 +4221,7 @@ function handleStreamEvent(event, progressElement, progressId,
             // 立即刷新任务状态（确保任务状态同步）
             loadActiveTasks();
             // Close any remaining running tool calls for this progress (best-effort).
-            finalizeOutstandingToolCallsForProgress(progressId, 'failed');
+            finalizeOutstandingToolCallsForProgress(progressId, progressDoneOutcome(event.data).toolStatus);
             
             // 延迟再次刷新任务状态（确保后端已完成状态更新）
             setTimeout(() => {
@@ -4489,7 +4508,7 @@ function renderInlineHitlApproval(itemId, data) {
     const allowEdit = mode === 'review_edit';
     const argsObj = payload.argumentsObj && typeof payload.argumentsObj === 'object' ? payload.argumentsObj : {};
     const argsJSON = JSON.stringify(argsObj, null, 2);
-    const modeLabel = mode === 'review_edit' ? '审查编辑' : '审批模式';
+    const modeLabel = mode === 'review_edit' ? "Review & Edit" : "Approval";
 
     const panel = document.createElement('div');
     panel.className = 'hitl-inline-approval';
@@ -4741,7 +4760,7 @@ function bindInlineHitlApproval(panel, data, opts) {
                 try {
                     editedArgs = JSON.parse(raw);
                 } catch (e) {
-                    statusEl.textContent = 'JSON 参数格式错误';
+                    statusEl.textContent = "Invalid JSON arguments";
                     setBusy(false);
                     return;
                 }
@@ -4757,16 +4776,16 @@ function bindInlineHitlApproval(panel, data, opts) {
                 const convFollow = data.conversationId || (typeof window.currentConversationId === 'string' ? window.currentConversationId : '');
                 const ok = await window.submitHitlDecisionWithPayload(data.interruptId, decision, comment, (decision === 'approve' && allowEdit) ? editedArgs : null, convFollow);
                 if (!ok) {
-                    statusEl.textContent = '提交失败，请重试';
+                    statusEl.textContent = "Submission failed, please try again";
                     setBusy(false);
                     return;
                 }
             } else {
-                statusEl.textContent = '审批函数未加载';
+                statusEl.textContent = "Approval function not loaded";
                 setBusy(false);
                 return;
             }
-            const msg = decision === 'approve' ? '已通过，等待执行继续...' : '已拒绝，反馈已交给模型继续迭代...';
+            const msg = decision === 'approve' ? "Passed, waiting for execution to continue..." : "Rejected, feedback has been given to the model to continue iteration...";
             const toolItem = panel.closest('.timeline-item-tool_call');
             if (toolItem && toolItem.id) {
                 const state = toolCallDetailStateByItemId.get(toolItem.id) || {};
@@ -4797,7 +4816,7 @@ function bindInlineHitlApproval(panel, data, opts) {
                 window.setProjectConversationApprovalStatus(data.conversationId || window.currentConversationId || '', false);
             }
         } catch (e) {
-            statusEl.textContent = '提交失败：' + (e && e.message ? e.message : 'unknown error');
+            statusEl.textContent = "Submit failed:" + (e && e.message ? e.message : 'unknown error');
             setBusy(false);
         }
     };
@@ -5089,24 +5108,24 @@ function renderInlineWorkflowHitlApproval(itemId, data) {
         <div class="hitl-inline-header">
             <div class="hitl-inline-title">
                 <span class="hitl-inline-icon" aria-hidden="true">!</span>
-                <span>工作流审批</span>
+                <span>Workflow Approval</span>
             </div>
             <div class="hitl-inline-badges">
                 <span class="hitl-tool-badge">${escapeHtml(label)}</span>
-                <span class="hitl-mode-tag hitl-mode-tag--approval">审批模式</span>
+                <span class="hitl-mode-tag hitl-mode-tag--approval">Approval mode</span>
             </div>
         </div>
         <div class="hitl-inline-body">
-            ${prompt ? `<div class="hitl-inline-note">${escapeHtml(prompt)}</div>` : '<div class="hitl-inline-note">工作流暂停，等待你确认是否继续。</div>'}
+            ${prompt ? `<div class="hitl-inline-note">${escapeHtml(prompt)}</div>` : "<div class=\"hitl-inline-note\"> workflow is paused, waiting for your confirmation to continue. </div>"}
             <label class="hitl-inline-field">
-                <span class="hitl-context-label">备注（可选）</span>
-                <input class="hitl-config-input workflow-hitl-inline-comment" type="text" placeholder="审批意见">
+                <span class="hitl-context-label"> Remarks (optional) </span>
+                <input class="hitl-config-input workflow-hitl-inline-comment" type="text" placeholder="Approval Comment">
             </label>
         </div>
         <div class="hitl-pending-actions hitl-inline-actions">
             <div class="hitl-input-help workflow-hitl-inline-status" aria-live="polite"></div>
-            <button class="btn-secondary workflow-hitl-inline-reject">拒绝</button>
-            <button class="btn-primary workflow-hitl-inline-approve">通过</button>
+            <button class="btn-secondary workflow-hitl-inline-reject"> rejects </button>
+            <button class="btn-primary workflow-hitl-inline-approve"> by </button>
         </div>
     `;
     contentEl.appendChild(panel);
@@ -5133,19 +5152,19 @@ function renderInlineWorkflowHitlApproval(itemId, data) {
             });
             const body = response && typeof response.json === 'function' ? await response.json() : null;
             if (!response || !response.ok) {
-                statusEl.textContent = (body && body.error) ? body.error : '提交失败，请重试';
+                statusEl.textContent = (body && body.error) ? body.error : "Submission failed, please try again";
                 setBusy(false);
                 return;
             }
             if (body && body.streamResuming) {
-                statusEl.textContent = approved ? '已通过，工作流继续执行中…' : '已拒绝';
+                statusEl.textContent = approved ? "Passed, workflow continues..." : "Rejected";
                 panel.classList.add('hitl-inline-done');
                 return;
             }
-            statusEl.textContent = approved ? '已通过，工作流继续执行' : '已拒绝';
+            statusEl.textContent = approved ? "Passed, workflow continues" : "Rejected";
             panel.classList.add('hitl-inline-done');
         } catch (e) {
-            statusEl.textContent = '提交失败：' + (e && e.message ? e.message : 'unknown error');
+            statusEl.textContent = "Submit failed:" + (e && e.message ? e.message : 'unknown error');
             setBusy(false);
         }
     };
@@ -5238,7 +5257,7 @@ async function restoreWorkflowHitlInlineForConversation(conversationId) {
                     }
                 }
             } catch (e) {
-                console.error('加载过程详情失败（工作流 HITL 恢复）:', e);
+                console.error("Failed to load process details (workflow HITL recovery):", e);
             } finally {
                 detailsContainer.dataset.loading = '0';
             }
@@ -5254,7 +5273,7 @@ async function restoreWorkflowHitlInlineForConversation(conversationId) {
                 const timeline = detailsContainer.querySelector('.progress-timeline');
                 if (timeline && typeof addTimelineItem === 'function') {
                     const itemId = addTimelineItem(timeline, 'workflow_hitl_waiting', {
-                        title: '🧑‍⚖️ 工作流等待审批',
+                        title: "🧑‍⚖️ Workflow awaiting approval",
                         message: hitlData.label || '',
                         data: hitlData
                     });
@@ -5280,7 +5299,7 @@ window.submitWorkflowHitlDecision = async function submitWorkflowHitlDecision(ru
     });
     const body = response && typeof response.json === 'function' ? await response.json() : null;
     if (!response || !response.ok) {
-        throw new Error((body && body.error) ? body.error : '提交失败');
+        throw new Error((body && body.error) ? body.error : "Submission failed");
     }
     return body;
 };
@@ -5428,7 +5447,7 @@ async function restoreHitlInlineForConversation(conversationId) {
                         }
                     }
                 } catch (e) {
-                    console.error('加载过程详情失败（HITL 恢复）:', e);
+                    console.error("Loading process details failed (HITL recovery):", e);
                 } finally {
                     detailsContainer.dataset.loading = '0';
                 }
@@ -5870,7 +5889,7 @@ function formatToolCallTimelineTitle(toolName, index, total) {
     if (typeof window.t === 'function') {
         return window.t('chat.callTool', { name: name, index: idx, total: tot });
     }
-    return '调用工具: ' + name + (tot ? ' (' + idx + '/' + tot + ')' : '');
+    return "Call tool: " + name + (tot ? ' (' + idx + '/' + tot + ')' : '');
 }
 
 function collectToolResultTextParts(value, parts, depth) {
@@ -6031,7 +6050,7 @@ function toolDetailToggleText(expanded) {
             ? window.t('chat.collapseToolDetail')
             : window.t('chat.viewToolDetail');
     }
-    return expanded ? '收起' : '查看详情';
+    return expanded ? "Show less" : "View details";
 }
 
 function updateToolDetailToggleLabel(item) {
@@ -6111,7 +6130,7 @@ async function renderToolCallDetailContent(item) {
             item.classList.remove('tool-call-detail-expanded');
             renderToolCallDetailContent(item);
         } catch (e) {
-            content.innerHTML = '<div class="progress-timeline-empty">' + escapeHtml(e && e.message ? e.message : '加载失败') + '</div>';
+            content.innerHTML = '<div class="progress-timeline-empty">' + escapeHtml(e && e.message ? e.message : "Load failed") + '</div>';
         }
         return;
     }
@@ -6127,7 +6146,7 @@ async function renderToolCallDetailContent(item) {
         if (state.hitlData && state.hitlData.interruptId) {
             pendingOpts = {
                 pending: true,
-                pendingText: state.hitlData.resolved ? '已通过，等待执行结果' : '等待审批，通过后执行'
+                pendingText: state.hitlData.resolved ? "Passed, waiting for execution results" : "Wait for approval and execute after approval"
             };
         }
         resultBlock = '<div class="tool-details tool-result-slot">' +
@@ -6137,7 +6156,7 @@ async function renderToolCallDetailContent(item) {
 
     const paramsLabel = typeof window.t === 'function' ? window.t('timeline.params') : 'Parameters:';
     const hitlEditedArgsLabel = state.argsEditedByHitl
-        ? '<span class="tool-args-hitl-edited">已按 HITL 改参执行</span>'
+        ? "<span class=\"tool-args-hitl-edited\"> has been pressed HITL to change parameters and execute </span>"
         : '';
     const argsBlock = state.hideArgs ? '' :
         '<div class="tool-arg-section">' +
@@ -6525,15 +6544,15 @@ function buildWorkflowConditionResultHtml(data) {
     const expr = (data && data.expression) || output.condition || '';
     const matched = (data && (data.matched === true || data.matched === 'true'))
         || output.matched === true || output.matched === 'true';
-    const branchText = matched ? '是（true）' : '否（false）';
+    const branchText = matched ? "Yes (true)" : "No (false)";
     const branchClass = matched ? 'is-true' : 'is-false';
     return `<div class="timeline-item-content workflow-condition-result">
         <div class="workflow-condition-row">
-            <span class="workflow-agent-io-label">表达式</span>
-            <code>${escapeHtml(String(expr || '（空）'))}</code>
+            <span class="workflow-agent-io-label"> expression </span>
+            <code>${escapeHtml(String(expr || "(null)"))}</code>
         </div>
         <div class="workflow-condition-row">
-            <span class="workflow-agent-io-label">结果</span>
+            <span class="workflow-agent-io-label"> result</span>
             <span class="workflow-condition-branch ${branchClass}">${escapeHtml(branchText)}</span>
         </div>
     </div>`;
@@ -6543,7 +6562,7 @@ function buildWorkflowBranchDetailHtml(data) {
     const cond = (data && data.edgeCondition) || '';
     if (!cond) return '';
     return `<div class="timeline-item-content workflow-branch-detail">
-        <span class="workflow-agent-io-label">连线条件</span>
+        <span class="workflow-agent-io-label"> connection conditions </span>
         <code>${escapeHtml(cond)}</code>
     </div>`;
 }
@@ -6559,16 +6578,16 @@ function formatLiveTimelinePrunedMarker(marker) {
     const translate = typeof window.t === 'function' ? window.t : null;
     const baseText = translate
         ? translate('chat.liveTimelinePruned', { count: count })
-        : ('已收起前 ' + count + ' 条实时过程详情，任务完成后可按页查看完整记录');
+        : ("Already closed " + count + " Real-time process details. After the task is completed, you can view the complete record by page.");
     if (minIteration <= 0 || maxIteration < minIteration) return baseText;
     if (minIteration === maxIteration) {
         return baseText + ' · ' + (translate
             ? translate('chat.liveTimelinePrunedSingleRound', { n: minIteration })
-            : ('主代理第 ' + minIteration + ' 轮'));
+            : ("Main agent " + minIteration + " wheel"));
     }
     return baseText + ' · ' + (translate
         ? translate('chat.liveTimelinePrunedRoundRange', { from: minIteration, to: maxIteration })
-        : ('主代理第 ' + minIteration + '–' + maxIteration + ' 轮'));
+        : ("Main agent " + minIteration + '–' + maxIteration + " wheel"));
 }
 
 function pruneLiveTimelineIfNeeded(timeline) {
@@ -6719,7 +6738,7 @@ function addTimelineItem(timeline, type, options) {
     }
     if (type === 'eino_usage_summary' && options.data) {
         const d = options.data;
-        ['modelCalls', 'promptTokens', 'completionTokens', 'totalTokens', 'cachedTokens', 'reasoningTokens'].forEach(function (key) {
+        ['modelCalls', 'promptTokens', 'completionTokens', 'totalTokens', 'cachedTokens', 'cacheWriteTokens', 'reasoningTokens'].forEach(function (key) {
             if (d[key] != null) {
                 item.dataset[key] = String(d[key]);
             }
@@ -6819,17 +6838,17 @@ function addTimelineItem(timeline, type, options) {
                 const summaryPreview = previewText.length > 80 ? (previewText.slice(0, 80) + '...') : previewText;
                 prefix = `<details class="workflow-agent-input">
                     <summary>
-                        <span class="workflow-agent-io-label">输入</span>
+                        <span class="workflow-agent-io-label"> input </span>
                         ${source ? `<code>${escapeHtml(source)}</code>` : ''}
                         ${summaryPreview ? `<span class="workflow-agent-input-summary">${escapeHtml(summaryPreview)}</span>` : ''}
                     </summary>
-                    ${previewText ? `<pre>${escapeHtml(previewText)}</pre>` : '<div class="workflow-agent-empty">暂无输入预览</div>'}
+                    ${previewText ? `<pre>${escapeHtml(previewText)}</pre>` : "<div class=\"workflow-agent-empty\"> No input preview </div>"}
                 </details>`;
             }
         }
         const body = type === 'workflow_agent_output'
             ? `<div class="workflow-agent-output">
-                <div class="workflow-agent-io-label">输出</div>
+                <div class="workflow-agent-io-label"> output </div>
                 <div class="workflow-agent-output-body">${formatTimelinePlainTextHtml(options.message)}</div>
             </div>`
             : formatTimelinePlainTextHtml(options.message);
@@ -7383,7 +7402,7 @@ async function refreshMonitorPanel(page = null) {
         const monitorResp = await apiFetch(url, { method: 'GET' });
         const result = await monitorResp.json().catch(() => ({}));
         if (!monitorResp.ok) {
-            throw new Error(result.error || '获取监控数据失败');
+            throw new Error(result.error || "Failed to obtain monitoring data");
         }
         if (mySeq !== monitorPanelFetchSeq) {
             return;
@@ -7398,13 +7417,13 @@ async function refreshMonitorPanel(page = null) {
         applyMonitorTimelinePayload(timeline, timelineError, range);
         initializeMonitorPageSize();
     } catch (error) {
-        console.error('刷新监控面板失败:', error);
+        console.error("Failed to refresh monitoring panel:", error);
         monitorState.timelineLoading = false;
         if (statsContainer) {
-            statsContainer.innerHTML = `<div class="monitor-error">${escapeHtml(typeof window.t === 'function' ? window.t('mcpMonitor.loadStatsError') : '无法加载统计信息')}：${escapeHtml(error.message)}</div>`;
+            statsContainer.innerHTML = `<div class="monitor-error">${escapeHtml(typeof window.t === 'function' ? window.t('mcpMonitor.loadStatsError') : "Failed to load statistics")}：${escapeHtml(error.message)}</div>`;
         }
         if (execContainer) {
-            execContainer.innerHTML = `<div class="monitor-error">${escapeHtml(typeof window.t === 'function' ? window.t('mcpMonitor.loadExecutionsError') : '无法加载执行记录')}：${escapeHtml(error.message)}</div>`;
+            execContainer.innerHTML = `<div class="monitor-error">${escapeHtml(typeof window.t === 'function' ? window.t('mcpMonitor.loadExecutionsError') : "Failed to load execution records")}：${escapeHtml(error.message)}</div>`;
         }
     }
 }
@@ -7616,7 +7635,7 @@ async function refreshMonitorPanelWithFilter(statusFilter = 'all', toolFilter = 
         const monitorResp = await apiFetch(url, { method: 'GET' });
         const result = await monitorResp.json().catch(() => ({}));
         if (!monitorResp.ok) {
-            throw new Error(result.error || '获取监控数据失败');
+            throw new Error(result.error || "Failed to obtain monitoring data");
         }
         if (mySeq !== monitorPanelFetchSeq) {
             return;
@@ -7631,13 +7650,13 @@ async function refreshMonitorPanelWithFilter(statusFilter = 'all', toolFilter = 
         applyMonitorTimelinePayload(timeline, timelineError, range);
         initializeMonitorPageSize();
     } catch (error) {
-        console.error('刷新监控面板失败:', error);
+        console.error("Failed to refresh monitoring panel:", error);
         monitorState.timelineLoading = false;
         if (statsContainer) {
-            statsContainer.innerHTML = `<div class="monitor-error">${escapeHtml(typeof window.t === 'function' ? window.t('mcpMonitor.loadStatsError') : '无法加载统计信息')}：${escapeHtml(error.message)}</div>`;
+            statsContainer.innerHTML = `<div class="monitor-error">${escapeHtml(typeof window.t === 'function' ? window.t('mcpMonitor.loadStatsError') : "Failed to load statistics")}：${escapeHtml(error.message)}</div>`;
         }
         if (execContainer) {
-            execContainer.innerHTML = `<div class="monitor-error">${escapeHtml(typeof window.t === 'function' ? window.t('mcpMonitor.loadExecutionsError') : '无法加载执行记录')}：${escapeHtml(error.message)}</div>`;
+            execContainer.innerHTML = `<div class="monitor-error">${escapeHtml(typeof window.t === 'function' ? window.t('mcpMonitor.loadExecutionsError') : "Failed to load execution records")}：${escapeHtml(error.message)}</div>`;
         }
     }
 }
@@ -7813,7 +7832,7 @@ function buildMcpTimelineSvg(points, rangeKey) {
     const maxVal = Math.max(1, ...points.map((p) => p.total || 0));
     const hasFailed = points.some((p) => (p.failed || 0) > 0);
     const hasBlocked = points.some((p) => (p.blocked || 0) > 0);
-    const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
+    const locale = (typeof window.uiLocale === 'function' ? window.uiLocale() : 'en-US');
     const barGap = points.length > 48 ? 1 : 2;
     const barW = Math.max(1.6, Math.min(8, (plotW / Math.max(1, points.length)) - barGap));
 
@@ -7966,7 +7985,7 @@ function bindMcpStatsTimelineEvents() {
         const failed = dot.getAttribute('data-failed') || '0';
         const blocked = dot.getAttribute('data-blocked') || '0';
         const tip = mcpMonitorT('timelineTooltip', { time, total, failed, blocked })
-            || monitorFallback(`${time}：${total} 次（失败 ${failed}，安全拦截 ${blocked}）`, `${time}: ${total} calls (${failed} failed, ${blocked} blocked)`);
+            || monitorFallback(`${time}：${total} times (failed ${failed}, security block ${blocked}）`, `${time}: ${total} calls (${failed} failed, ${blocked} blocked)`);
         mcpTimelineTooltipEl.textContent = tip;
         mcpTimelineTooltipEl.style.display = 'block';
         mcpTimelineTooltipEl.style.left = `${e.clientX}px`;
@@ -8004,7 +8023,7 @@ function syncMcpMonitorTimelineRangeUI(activeRange) {
 function renderMcpStatsScopeBadges(showTools, showTimeline) {
     const parts = [];
     if (showTools) {
-        const cumulative = mcpMonitorT('scopeCumulative') || '累计';
+        const cumulative = mcpMonitorT('scopeCumulative') || "All time";
         parts.push(`<span class="mcp-stats-scope-badge mcp-stats-scope-badge--cumulative">${escapeHtml(cumulative)}</span>`);
     }
     if (showTimeline) {
@@ -8031,17 +8050,17 @@ function buildTimelineSparseHint(points, timeline) {
     if (nonZeroRatio > 0.3 && !peakNearEnd) return '';
 
     const rangeKey = timeline.range || getMcpMonitorTimelineRange();
-    const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
+    const locale = (typeof window.uiLocale === 'function' ? window.uiLocale() : 'en-US');
     const peakTime = timeline.summary.peakAt
         ? formatMcpTimelineLabel(timeline.summary.peakAt, rangeKey, locale)
         : formatMcpTimelineLabel(points[peakIdx].t, rangeKey, locale);
     return mcpMonitorT('timelineSparseHint', { peak, peakTime })
-        || `该时段多数时间为 0，峰值 ${peak} 次出现在 ${peakTime}`;
+        || `Most of the time during this period is 0, and the peak ${peak} times appeared in ${peakTime}`;
 }
 
 function renderMcpTimelineActiveMoments(points, rangeKey) {
     if (!Array.isArray(points) || points.length === 0) return '';
-    const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
+    const locale = (typeof window.uiLocale === 'function' ? window.uiLocale() : 'en-US');
     const active = points
         .map((p, i) => ({ ...p, i }))
         .filter((p) => (p.total || 0) > 0)
@@ -8049,14 +8068,14 @@ function renderMcpTimelineActiveMoments(points, rangeKey) {
     const shown = active.slice(0, 4);
     const hiddenCount = Math.max(0, active.length - shown.length);
     if (!active.length) return '';
-    const label = mcpMonitorT('timelineActiveMoments') || monitorFallback('活跃时段', 'Active moments');
+    const label = mcpMonitorT('timelineActiveMoments') || monitorFallback("active period", 'Active moments');
     const moreLabel = mcpMonitorT('timelineMoreMoments', { n: hiddenCount }) || `+${hiddenCount}`;
     const chips = shown.map((p) => {
         const time = formatMcpTimelineLabel(p.t, rangeKey, locale);
         const failed = p.failed || 0;
-        const failedLabel = mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`;
+        const failedLabel = mcpMonitorT('failedCount', { n: failed }) || `Failed ${failed}`;
         const blocked = p.blocked || 0;
-        const blockedLabel = mcpMonitorT('blockedCount', { n: blocked }) || monitorFallback(`安全拦截 ${blocked}`, `Blocked ${blocked}`);
+        const blockedLabel = mcpMonitorT('blockedCount', { n: blocked }) || monitorFallback(`Security block ${blocked}`, `Blocked ${blocked}`);
         return `<span class="mcp-stats-timeline-moment" title="${escapeHtml(time)}">
             <span class="mcp-stats-timeline-moment__time">${escapeHtml(time)}</span>
             <span class="mcp-stats-timeline-moment__count">${p.total || 0}</span>
@@ -8065,7 +8084,7 @@ function renderMcpTimelineActiveMoments(points, rangeKey) {
         </span>`;
     }).join('');
     const moreChip = hiddenCount > 0
-        ? `<span class="mcp-stats-timeline-moment mcp-stats-timeline-moment--more" title="${escapeHtml(mcpMonitorT('timelineMoreMomentsTitle', { n: hiddenCount }) || `还有 ${hiddenCount} 个活跃时段`)}">${escapeHtml(moreLabel)}</span>`
+        ? `<span class="mcp-stats-timeline-moment mcp-stats-timeline-moment--more" title="${escapeHtml(mcpMonitorT('timelineMoreMomentsTitle', { n: hiddenCount }) || `besides ${hiddenCount} active periods`)}">${escapeHtml(moreLabel)}</span>`
         : '';
     return `<div class="mcp-stats-timeline-moments">
         <span class="mcp-stats-timeline-moments__label">${escapeHtml(label)}</span>
@@ -8103,9 +8122,9 @@ function renderMcpStatsTimelineRangeButtons() {
 const MCP_TIMELINE_EMPTY_ICON = '<svg class="mcp-stats-timeline-empty-state__icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>';
 
 function renderMcpStatsTimelineEmptyState(compact) {
-    const noData = mcpMonitorT('timelineNoData') || monitorFallback('该时段暂无调用', 'No calls in this period');
+    const noData = mcpMonitorT('timelineNoData') || monitorFallback("No calls in this period", 'No calls in this period');
     const emptyHint = mcpMonitorT('timelineEmptyHint')
-        || monitorFallback('切换时间范围查看其他时段，或在对话/任务中调用 MCP 工具', 'Switch the time range or invoke MCP tools in chat or tasks');
+        || monitorFallback("Switch the time range or invoke MCP tools in chat or tasks", 'Switch the time range or invoke MCP tools in chat or tasks');
     const compactClass = compact ? ' mcp-stats-timeline-empty-state--compact' : '';
     return `<div class="mcp-stats-timeline-empty-state${compactClass}">
         ${MCP_TIMELINE_EMPTY_ICON}
@@ -8116,14 +8135,14 @@ function renderMcpStatsTimelineEmptyState(compact) {
 
 function renderMcpStatsTimelineBody(timeline, timelineError, compactEmpty, loading) {
     if (loading) {
-        const loadingText = mcpMonitorT('timelineLoading') || monitorFallback('趋势加载中…', 'Loading trend…');
+        const loadingText = mcpMonitorT('timelineLoading') || monitorFallback("Loading trend…", 'Loading trend…');
         return `<div class="monitor-empty monitor-empty--inline">${escapeHtml(loadingText)}</div>`;
     }
 
-    const hint = mcpMonitorT('timelineHint') || monitorFallback('全部工具合计', 'All tools combined');
+    const hint = mcpMonitorT('timelineHint') || monitorFallback("Total of all tools", 'All tools combined');
 
     if (timelineError) {
-        const errText = mcpMonitorT('timelineLoadError') || monitorFallback('无法加载调用趋势', 'Failed to load call trend');
+        const errText = mcpMonitorT('timelineLoadError') || monitorFallback("Failed to load call trend", 'Failed to load call trend');
         return `<p class="mcp-stats-timeline-error">${escapeHtml(errText)}：${escapeHtml(timelineError)}</p>`;
     }
 
@@ -8131,7 +8150,7 @@ function renderMcpStatsTimelineBody(timeline, timelineError, compactEmpty, loadi
     const summaryTotal = timeline && timeline.summary ? (timeline.summary.totalCalls || 0) : 0;
     const peak = timeline && timeline.summary ? (timeline.summary.peak || 0) : 0;
     const summaryText = mcpMonitorT('timelineSummary', { total: summaryTotal, peak })
-        || `区间内 ${summaryTotal} 次 · 峰值 ${peak}`;
+        || `within the range ${summaryTotal} Times · Peak ${peak}`;
 
     if (points.length === 0 || summaryTotal === 0) {
         return renderMcpStatsTimelineEmptyState(!!compactEmpty);
@@ -8139,9 +8158,9 @@ function renderMcpStatsTimelineBody(timeline, timelineError, compactEmpty, loadi
 
     const rangeKey = timeline.range || getMcpMonitorTimelineRange();
     const chartSvg = buildMcpTimelineSvg(points, rangeKey);
-    const totalLegend = mcpMonitorT('timelineTotalLegend') || '总调用';
-    const failLegend = mcpMonitorT('timelineFailedLegend') || '失败';
-    const blockedLegend = mcpMonitorT('timelineBlockedLegend') || monitorFallback('安全拦截', 'Blocked');
+    const totalLegend = mcpMonitorT('timelineTotalLegend') || "Total Calls";
+    const failLegend = mcpMonitorT('timelineFailedLegend') || "Failed";
+    const blockedLegend = mcpMonitorT('timelineBlockedLegend') || monitorFallback("Blocked", 'Blocked');
     const hasFailed = points.some((p) => (p.failed || 0) > 0);
     const hasBlocked = points.some((p) => (p.blocked || 0) > 0);
     const sparseHint = buildTimelineSparseHint(points, timeline);
@@ -8163,9 +8182,9 @@ function renderMcpStatsTimelineBody(timeline, timelineError, compactEmpty, loadi
 }
 
 function renderMcpStatsCombinedSection(topTools, totals, activeToolFilter, timeline, timelineError, showTimeline) {
-    const statsTitle = mcpMonitorT('toolStatsTitle') || monitorFallback('工具统计', 'Tool statistics');
-    const timelineTitle = mcpMonitorT('timelineTitle') || monitorFallback('调用趋势', 'Call trend');
-    const statsHint = mcpMonitorT('toolStatsHint') || monitorFallback('点击色条或列表行筛选下方执行记录', 'Click a bar segment or row to filter records below');
+    const statsTitle = mcpMonitorT('toolStatsTitle') || monitorFallback("Tool statistics", 'Tool statistics');
+    const timelineTitle = mcpMonitorT('timelineTitle') || monitorFallback("Call trend", 'Call trend');
+    const statsHint = mcpMonitorT('toolStatsHint') || monitorFallback("Click the color bar or list row to filter the execution records below", 'Click a bar segment or row to filter records below');
     const hasTools = topTools.length > 0;
 
     if (!hasTools && !showTimeline) return '';
@@ -8173,8 +8192,8 @@ function renderMcpStatsCombinedSection(topTools, totals, activeToolFilter, timel
     const filterChipLabel = activeToolFilter ? formatMonitorToolName(activeToolFilter) : '';
     const filterChip = activeToolFilter
         ? `<span class="mcp-stats-filter-chip" title="${escapeHtml(mcpMonitorT('filterByToolTitle', { tool: filterChipLabel }) || filterChipLabel)}">
-            <span class="mcp-stats-filter-chip__label">${escapeHtml(mcpMonitorT('filterActive', { tool: filterChipLabel }) || `已筛选：${filterChipLabel}`)}</span>
-            <button type="button" class="mcp-stats-filter-chip__clear mcp-stats-clear-filter" aria-label="${escapeHtml(mcpMonitorT('clearToolFilter') || '清除工具筛选')}">×</button>
+            <span class="mcp-stats-filter-chip__label">${escapeHtml(mcpMonitorT('filterActive', { tool: filterChipLabel }) || `Filtered:${filterChipLabel}`)}</span>
+            <button type="button" class="mcp-stats-filter-chip__clear mcp-stats-clear-filter" aria-label="${escapeHtml(mcpMonitorT('clearToolFilter') || "Clear tool filter")}">×</button>
         </span>`
         : '';
 
@@ -8285,7 +8304,7 @@ function renderMcpStatsToolVolumeBar(total, success, failed, maxTotal) {
     const volumePct = maxTotal > 0 && total > 0 ? (total / maxTotal) * 100 : 0;
     const successPct = total > 0 ? (success / total) * 100 : 0;
     const failPct = total > 0 ? (failed / total) * 100 : 0;
-    const legend = mcpMonitorT('barVolumeLegend') || '条长表示相对调用量';
+    const legend = mcpMonitorT('barVolumeLegend') || "Bar length indicates relative call volume";
     const volumeTitle = `${total} / ${maxTotal}`;
     return `<div class="mcp-stats-tool-bar-track" title="${escapeHtml(legend)} · ${escapeHtml(volumeTitle)}">
         <div class="mcp-stats-tool-bar-fill" style="width:${volumePct.toFixed(2)}%">
@@ -8309,7 +8328,7 @@ const MCP_STATS_CHART_MIN_PCT = 5;
 function buildMcpStatsChartSegments(topTools, totals, options = {}) {
     const groupSmall = options.groupSmall !== false;
     const minPct = options.minPct ?? MCP_STATS_CHART_MIN_PCT;
-    const othersLabel = mcpMonitorT('distOthers') || '其他工具';
+    const othersLabel = mcpMonitorT('distOthers') || "Other tools";
     const topNTotal = topTools.reduce((s, t) => s + (t.totalCalls || 0), 0);
     const otherCalls = Math.max(0, totals.total - topNTotal);
 
@@ -8477,10 +8496,10 @@ function handleMonitorStatsToolFilter(toolName) {
 
 function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '', options = {}) {
     const embedded = !!options.embedded;
-    const distTitle = mcpMonitorT('distTitle') || '调用分布';
-    const distClickHint = mcpMonitorT('distClickHint') || '点击扇区筛选执行记录';
-    const distOthersTitle = mcpMonitorT('distOthersNoFilter') || '其他工具无法单独筛选';
-    const top6ShareLabel = mcpMonitorT('distTop6Share', { n: MCP_STATS_TOP_N }) || `Top ${MCP_STATS_TOP_N} 占全部调用`;
+    const distTitle = mcpMonitorT('distTitle') || "Call distribution";
+    const distClickHint = mcpMonitorT('distClickHint') || "Click on a sector to filter execution records";
+    const distOthersTitle = mcpMonitorT('distOthersNoFilter') || "Other tools cannot be filtered individually";
+    const top6ShareLabel = mcpMonitorT('distTop6Share', { n: MCP_STATS_TOP_N }) || `Top ${MCP_STATS_TOP_N} account for all calls`;
 
     const top6Total = topTools.reduce((s, t) => s + (t.totalCalls || 0), 0);
     const top6SharePct = totals.total > 0 ? ((top6Total / totals.total) * 100).toFixed(1) : '0.0';
@@ -8494,7 +8513,7 @@ function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '', opt
         const segAria = s.isOthers
             ? escapeHtml(s.name)
             : escapeHtml(mcpMonitorT('distSegmentAria', { name: s.name, pct: s.pct, calls: s.calls })
-                || `${s.name}，占 ${s.pct}%，${s.calls} 次`);
+                || `${s.name},occupy ${s.pct}%，${s.calls} Second-rate`);
         return `<path class="mcp-stats-dist-segment${isActive ? ' is-active' : ''}${s.isOthers ? ' is-others' : ''}"
             d="${pathD}"
             fill="${s.color}"
@@ -8517,7 +8536,7 @@ function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '', opt
             return `<li class="mcp-stats-dist-legend-item is-others" title="${escapeHtml(distOthersTitle)}" data-is-others="1">${inner}</li>`;
         }
         const rowAria = mcpMonitorT('toolRowAriaLabel', { name: s.name, total: s.calls, rate: s.pct })
-            || `${s.name}，${s.calls} 次调用，占 ${s.pct}%`;
+            || `${s.name}，${s.calls} calls, accounting for ${s.pct}%`;
         return `<li class="mcp-stats-dist-legend-item-wrap">
             <button type="button" class="mcp-stats-dist-legend-item${isActive ? ' is-active' : ''}"
                 data-tool-name="${escapeAttrLocal(s.name)}"
@@ -8529,9 +8548,9 @@ function renderMcpStatsInsightPanel(topTools, totals, activeToolFilter = '', opt
         </li>`;
     }).join('');
 
-    const centerLabel = embedded ? (mcpMonitorT('distTitle') || '占比') : `Top ${MCP_STATS_TOP_N}`;
+    const centerLabel = embedded ? (mcpMonitorT('distTitle') || "Share") : `Top ${MCP_STATS_TOP_N}`;
     const distHint = totals.total > 0
-        ? (mcpMonitorT('distTotalCalls', { n: totals.total }) || `共 ${totals.total} 次调用`)
+        ? (mcpMonitorT('distTotalCalls', { n: totals.total }) || `common ${totals.total} calls`)
         : '';
 
     const bodyClass = embedded ? 'mcp-stats-dist-body mcp-stats-dist-body--chart-only' : 'mcp-stats-dist-body mcp-stats-dist-body--side';
@@ -8591,15 +8610,15 @@ function renderMcpStatsStackedBar(success, failed) {
 function updateMonitorStatsSubtitle(lastFetchedAt, toolCount, retentionDays) {
     const subtitle = document.getElementById('monitor-stats-subtitle');
     if (!subtitle) return;
-    const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
+    const locale = (typeof window.uiLocale === 'function' ? window.uiLocale() : 'en-US');
     const timeText = lastFetchedAt
         ? (lastFetchedAt.toLocaleString ? lastFetchedAt.toLocaleString(locale) : String(lastFetchedAt))
         : '—';
     let text = mcpMonitorT('statsSubtitle', { time: timeText, count: toolCount })
-        || monitorFallback(`最后刷新 ${timeText} · 共 ${toolCount} 个工具`, `Refreshed ${timeText} · ${toolCount} tools`);
+        || monitorFallback(`last refresh ${timeText} · common ${toolCount} tools`, `Refreshed ${timeText} · ${toolCount} tools`);
     if (typeof retentionDays === 'number' && retentionDays > 0) {
         const hint = mcpMonitorT('retentionHint', { days: retentionDays })
-            || monitorFallback(`执行记录保留 ${retentionDays} 天，超期自动清理`, `Execution records are kept for ${retentionDays} days, then purged automatically.`);
+            || monitorFallback(`Enforce record retention ${retentionDays} days, automatic cleaning after expiration`, `Execution records are kept for ${retentionDays} days, then purged automatically.`);
         text += ' · ' + hint;
     }
     subtitle.textContent = text;
@@ -8694,14 +8713,14 @@ function bindMonitorStatsPanelEvents() {
 }
 
 function renderMcpStatsMetricsBar(totals, successRate, rateTone, rateSubText, lastCallText, hasCalls = true) {
-    const totalCallsLabel = mcpMonitorT('totalCalls') || monitorFallback('总调用次数', 'Total calls');
-    const successRateLabel = mcpMonitorT('successRate') || monitorFallback('成功率', 'Success rate');
-    const lastCallLabel = mcpMonitorT('lastCall') || monitorFallback('最近一次调用', 'Last call');
-    const successPill = mcpMonitorT('successCount', { n: totals.success }) || monitorFallback(`成功 ${totals.success}`, `Success ${totals.success}`);
-    const failedPill = mcpMonitorT('failedCount', { n: totals.failed }) || monitorFallback(`失败 ${totals.failed}`, `Failed ${totals.failed}`);
-    const blockedPill = mcpMonitorT('blockedCount', { n: totals.blocked }) || monitorFallback(`安全拦截 ${totals.blocked}`, `Blocked ${totals.blocked}`);
-    const neutralPill = mcpMonitorT('neutralCount', { n: totals.neutral }) || monitorFallback(`终止 ${totals.neutral}`, `Stopped ${totals.neutral}`);
-    const rateHint = mcpMonitorT('rateExcludesBlocked') || monitorFallback('成功率仅统计成功和失败的调用，不包含安全拦截和终止', 'Success rate includes only successful and failed calls; blocked and stopped calls are excluded');
+    const totalCallsLabel = mcpMonitorT('totalCalls') || monitorFallback("Total Call Count", 'Total calls');
+    const successRateLabel = mcpMonitorT('successRate') || monitorFallback("Success Rate", 'Success rate');
+    const lastCallLabel = mcpMonitorT('lastCall') || monitorFallback("Last call", 'Last call');
+    const successPill = mcpMonitorT('successCount', { n: totals.success }) || monitorFallback(`Success ${totals.success}`, `Success ${totals.success}`);
+    const failedPill = mcpMonitorT('failedCount', { n: totals.failed }) || monitorFallback(`Failed ${totals.failed}`, `Failed ${totals.failed}`);
+    const blockedPill = mcpMonitorT('blockedCount', { n: totals.blocked }) || monitorFallback(`Security block ${totals.blocked}`, `Blocked ${totals.blocked}`);
+    const neutralPill = mcpMonitorT('neutralCount', { n: totals.neutral }) || monitorFallback(`termination ${totals.neutral}`, `Stopped ${totals.neutral}`);
+    const rateHint = mcpMonitorT('rateExcludesBlocked') || monitorFallback("Success rate includes successful and failed calls, excluding blocked and stopped calls", 'Success rate includes only successful and failed calls; blocked and stopped calls are excluded');
     const rateValue = hasCalls ? `${successRate}%` : successRate;
     const blockedChip = totals.blocked > 0
         ? `<span class="mcp-stats-kpi__chip is-blocked">${escapeHtml(blockedPill)}</span>`
@@ -8744,11 +8763,11 @@ function renderMcpStatsMetricsBar(totals, successRate, rateTone, rateSubText, la
 }
 
 function renderMcpStatsToolTable(topTools, totals, activeToolFilter = '') {
-    const colTool = mcpMonitorT('columnTool') || '工具';
-    const colCalls = mcpMonitorT('columnCalls') || '调用';
-    const colShare = mcpMonitorT('columnShare') || '占比';
-    const colRate = mcpMonitorT('columnSuccessRate') || '成功率';
-    const unknownToolLabel = mcpMonitorT('unknownTool') || '未知工具';
+    const colTool = mcpMonitorT('columnTool') || "Tool";
+    const colCalls = mcpMonitorT('columnCalls') || "Calls";
+    const colShare = mcpMonitorT('columnShare') || "Share";
+    const colRate = mcpMonitorT('columnSuccessRate') || "Success Rate";
+    const unknownToolLabel = mcpMonitorT('unknownTool') || "Unknown tool";
 
     let rowsHtml = '';
     topTools.forEach((tool, index) => {
@@ -8767,10 +8786,10 @@ function renderMcpStatsToolTable(topTools, totals, activeToolFilter = '') {
         const isActive = activeToolFilter && monitorToolNamesEqual(activeToolFilter, rawName);
         const rateClass = effectiveTotal > 0 ? getMcpToolRateClass(toolRateNum) : 'is-muted';
         const rankClass = index === 0 ? ' rank-1' : index === 1 ? ' rank-2' : index === 2 ? ' rank-3' : '';
-        const blockedLabel = mcpMonitorT('blockedCount', { n: blocked }) || monitorFallback(`安全拦截 ${blocked}`, `Blocked ${blocked}`);
+        const blockedLabel = mcpMonitorT('blockedCount', { n: blocked }) || monitorFallback(`Security block ${blocked}`, `Blocked ${blocked}`);
         const rowAria = (effectiveTotal > 0
             ? (mcpMonitorT('toolRowAriaLabel', { name, total, rate: toolRate }) || `${name}, ${total} calls, success rate ${toolRate}%`)
-            : (mcpMonitorT('toolRowNoCompletedAriaLabel', { name, total }) || monitorFallback(`${name}，${total} 次调用，暂无完成结果，点击查看执行记录`, `${name}, ${total} calls, no completed outcomes, click to view records`)))
+            : (mcpMonitorT('toolRowNoCompletedAriaLabel', { name, total }) || monitorFallback(`${name}，${total} calls, no completion result yet, click to view the execution record`, `${name}, ${total} calls, no completed outcomes, click to view records`)))
             + (blocked > 0 ? ` · ${blockedLabel}` : '');
         rowsHtml += `
             <tr class="mcp-stats-tool-row${isActive ? ' is-active' : ''}"
@@ -8788,7 +8807,7 @@ function renderMcpStatsToolTable(topTools, totals, activeToolFilter = '') {
                 <td class="col-share">${sharePct}%</td>
                 <td class="col-rate">
                     <span class="mcp-stats-rate ${rateClass}">${rateText}</span>
-                    ${failed > 0 ? `<span class="mcp-stats-fail-note">${escapeHtml(mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`)}</span>` : ''}
+                    ${failed > 0 ? `<span class="mcp-stats-fail-note">${escapeHtml(mcpMonitorT('failedCount', { n: failed }) || `Failed ${failed}`)}</span>` : ''}
                     ${blocked > 0 ? `<span class="mcp-stats-blocked-note">${escapeHtml(blockedLabel)}</span>` : ''}
                 </td>
             </tr>`;
@@ -8815,9 +8834,9 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
     const topNTotal = topTools.reduce((s, t) => s + (t.totalCalls || 0), 0);
     const topNSharePct = totals.total > 0 ? ((topNTotal / totals.total) * 100).toFixed(1) : '0.0';
     const caption = mcpMonitorT('rankingSummary', { n: MCP_STATS_TOP_N, pct: topNSharePct, total: totals.total })
-        || `Top ${MCP_STATS_TOP_N} 占 ${topNSharePct}% · 共 ${totals.total} 次`;
-    const unknownToolLabel = mcpMonitorT('unknownTool') || '未知工具';
-    const distAria = mcpMonitorT('distTitle') || '调用分布';
+        || `Top ${MCP_STATS_TOP_N} occupy ${topNSharePct}% · common ${totals.total} Second-rate`;
+    const unknownToolLabel = mcpMonitorT('unknownTool') || "Unknown tool";
+    const distAria = mcpMonitorT('distTitle') || "Call distribution";
 
     const stackedHtml = segments.map((s) => {
         const isActive = !s.isOthers && activeToolFilter && monitorToolNamesEqual(activeToolFilter, s.name);
@@ -8828,7 +8847,7 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
                 style="flex:${s.pctNum} 1 0;background:${s.color}" title="${escapeHtml(title)}"></span>`;
         }
         const segAria = mcpMonitorT('distSegmentAria', { name: displayName, pct: s.pct, calls: s.calls })
-            || `${displayName}，占 ${s.pct}%，${s.calls} 次`;
+            || `${displayName},occupy ${s.pct}%，${s.calls} Second-rate`;
         return `<span class="mcp-stats-proportion-seg${isActive ? ' is-active' : ''}"
             data-tool-name="${escapeAttrLocal(s.name)}" data-pct="${s.pct}" data-calls="${s.calls}" data-is-others="0"
             role="button" tabindex="0" aria-label="${escapeAttrLocal(segAria)}"
@@ -8853,16 +8872,16 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
         const isActive = activeToolFilter && monitorToolNamesEqual(activeToolFilter, rawName);
         const rateClass = effectiveTotal > 0 ? getMcpToolRateClass(toolRateNum) : 'is-muted';
         const rankClass = index === 0 ? ' rank-1' : index === 1 ? ' rank-2' : index === 2 ? ' rank-3' : '';
-        const blockedLabel = mcpMonitorT('blockedCount', { n: blocked }) || monitorFallback(`安全拦截 ${blocked}`, `Blocked ${blocked}`);
+        const blockedLabel = mcpMonitorT('blockedCount', { n: blocked }) || monitorFallback(`Security block ${blocked}`, `Blocked ${blocked}`);
         const rowAria = (effectiveTotal > 0
             ? (mcpMonitorT('toolRowAriaLabel', { name, total, rate: toolRate }) || `${name}, ${total} calls, success rate ${toolRate}%`)
-            : (mcpMonitorT('toolRowNoCompletedAriaLabel', { name, total }) || monitorFallback(`${name}，${total} 次调用，暂无完成结果，点击查看执行记录`, `${name}, ${total} calls, no completed outcomes, click to view records`)))
+            : (mcpMonitorT('toolRowNoCompletedAriaLabel', { name, total }) || monitorFallback(`${name}，${total} calls, no completion result yet, click to view the execution record`, `${name}, ${total} calls, no completed outcomes, click to view records`)))
             + (blocked > 0 ? ` · ${blockedLabel}` : '');
         const failNote = failed > 0
-            ? `<span class="mcp-stats-tool-item__fail">${escapeHtml(mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`)}</span>`
+            ? `<span class="mcp-stats-tool-item__fail">${escapeHtml(mcpMonitorT('failedCount', { n: failed }) || `Failed ${failed}`)}</span>`
             : '';
-        const successLabel = mcpMonitorT('successCount', { n: success }) || `成功 ${success}`;
-        const failedLabel = mcpMonitorT('failedCount', { n: failed }) || `失败 ${failed}`;
+        const successLabel = mcpMonitorT('successCount', { n: success }) || `Success ${success}`;
+        const failedLabel = mcpMonitorT('failedCount', { n: failed }) || `Failed ${failed}`;
         return `<li class="mcp-stats-tool-item${isActive ? ' is-active' : ''}"
             data-tool-name="${escapeAttrLocal(rawName)}" tabindex="0" role="button"
             aria-label="${escapeAttrLocal(rowAria)}" aria-pressed="${isActive ? 'true' : 'false'}">
@@ -8874,7 +8893,7 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
             </div>
             <div class="mcp-stats-tool-item__middle">
                 <strong class="mcp-stats-tool-item__calls">${total}</strong>
-                <span class="mcp-stats-tool-item__calls-label">${escapeHtml(mcpMonitorT('columnCalls') || '调用')}</span>
+                <span class="mcp-stats-tool-item__calls-label">${escapeHtml(mcpMonitorT('columnCalls') || "Calls")}</span>
                 <span class="mcp-stats-tool-item__track" aria-hidden="true">
                     <span class="mcp-stats-tool-item__fill" style="width:${barPct}%;background:${color}"></span>
                 </span>
@@ -8889,11 +8908,11 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
     }).join('');
 
     return `
-            <div class="mcp-stats-tools-panel" role="region" aria-label="${escapeHtml(mcpMonitorT('toolStatsTitle') || monitorFallback('工具统计', 'Tool statistics'))}">
+            <div class="mcp-stats-tools-panel" role="region" aria-label="${escapeHtml(mcpMonitorT('toolStatsTitle') || monitorFallback("Tool statistics", 'Tool statistics'))}">
             <div class="mcp-stats-tools-panel__hero">
                 <div class="mcp-stats-proportion-bar" role="img" aria-label="${escapeHtml(distAria)}">${stackedHtml}</div>
                 <p class="mcp-stats-tools-panel__caption">
-                    <span class="mcp-stats-scope-badge mcp-stats-scope-badge--cumulative mcp-stats-scope-badge--inline">${escapeHtml(mcpMonitorT('scopeCumulative') || '累计')}</span>
+                    <span class="mcp-stats-scope-badge mcp-stats-scope-badge--cumulative mcp-stats-scope-badge--inline">${escapeHtml(mcpMonitorT('scopeCumulative') || "All time")}</span>
                     ${escapeHtml(caption)}
                 </p>
             </div>
@@ -8902,9 +8921,9 @@ function renderMcpStatsToolsPanel(topTools, totals, activeToolFilter = '') {
 }
 
 function renderMcpStatsChartAside(topTools, totals, activeToolFilter = '') {
-    const distTitle = mcpMonitorT('distTitle') || '调用分布';
-    const distClickHint = mcpMonitorT('distClickHint') || '点击扇区筛选';
-    const top6ShareLabel = mcpMonitorT('distTop6Share', { n: MCP_STATS_TOP_N }) || `Top ${MCP_STATS_TOP_N} 占全部调用`;
+    const distTitle = mcpMonitorT('distTitle') || "Call distribution";
+    const distClickHint = mcpMonitorT('distClickHint') || "Click on sectors to filter";
+    const top6ShareLabel = mcpMonitorT('distTop6Share', { n: MCP_STATS_TOP_N }) || `Top ${MCP_STATS_TOP_N} account for all calls`;
     const topNTotal = topTools.reduce((s, t) => s + (t.totalCalls || 0), 0);
     const top6SharePct = totals.total > 0 ? ((topNTotal / totals.total) * 100).toFixed(1) : '0.0';
     const centerLabel = `Top ${MCP_STATS_TOP_N}`;
@@ -8917,7 +8936,7 @@ function renderMcpStatsChartAside(topTools, totals, activeToolFilter = '') {
         const segAria = s.isOthers
             ? escapeHtml(s.name)
             : escapeHtml(mcpMonitorT('distSegmentAria', { name: s.name, pct: s.pct, calls: s.calls })
-                || `${s.name}，占 ${s.pct}%，${s.calls} 次`);
+                || `${s.name},occupy ${s.pct}%，${s.calls} Second-rate`);
         return `<path class="mcp-stats-dist-segment${isActive ? ' is-active' : ''}${s.isOthers ? ' is-others' : ''}"
             d="${pathD}" fill="${s.color}"
             data-tool-name="${s.isOthers ? '' : escapeHtml(s.name)}"
@@ -8977,7 +8996,7 @@ function renderMonitorStats(summary = null, topTools = [], lastFetchedAt = null)
     const hasSummaryData = toolCount > 0 || totals.total > 0;
 
     if (!hasSummaryData && !showTimeline) {
-        const noStats = mcpMonitorT('noStatsData') || monitorFallback('暂无统计数据', 'No statistical data');
+        const noStats = mcpMonitorT('noStatsData') || monitorFallback("No statistical data", 'No statistical data');
         container.innerHTML = '<div class="monitor-empty">' + escapeHtml(noStats) + '</div>';
         const subtitle = document.getElementById('monitor-stats-subtitle');
         if (subtitle) subtitle.hidden = true;
@@ -8988,9 +9007,9 @@ function renderMonitorStats(summary = null, topTools = [], lastFetchedAt = null)
     const hasCalls = effectiveTotal > 0;
     const successRateNum = hasCalls ? (totals.success / effectiveTotal) * 100 : 0;
     const successRate = hasCalls ? successRateNum.toFixed(1) : '-';
-    const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : 'en-US';
-    const noCallsYet = mcpMonitorT('noCallsYet') || monitorFallback('暂无调用', 'No calls yet');
-    const noCompletedYet = mcpMonitorT('noCompletedYet') || monitorFallback('暂无有效完成', 'No completed outcomes yet');
+    const locale = (typeof window.uiLocale === 'function' ? window.uiLocale() : 'en-US');
+    const noCallsYet = mcpMonitorT('noCallsYet') || monitorFallback("No calls yet", 'No calls yet');
+    const noCompletedYet = mcpMonitorT('noCompletedYet') || monitorFallback("No completed outcomes yet", 'No completed outcomes yet');
     const lastCallText = totals.lastCallTime
         ? (totals.lastCallTime.toLocaleString ? totals.lastCallTime.toLocaleString(locale) : String(totals.lastCallTime))
         : noCallsYet;
@@ -8998,9 +9017,9 @@ function renderMonitorStats(summary = null, topTools = [], lastFetchedAt = null)
     const rateTone = hasCalls ? getMcpStatsRateTone(successRateNum) : 'is-muted';
     let rateSubText = totals.total > 0 ? noCompletedYet : noCallsYet;
     if (hasCalls) {
-        rateSubText = mcpMonitorT('rateHealthy') || monitorFallback('运行平稳', 'Running smoothly');
-        if (successRateNum < 80) rateSubText = mcpMonitorT('rateCritical') || monitorFallback('失败率偏高', 'High failure rate');
-        else if (successRateNum < 95) rateSubText = mcpMonitorT('rateWarning') || monitorFallback('存在失败调用', 'Some failures detected');
+        rateSubText = mcpMonitorT('rateHealthy') || monitorFallback("Healthy", 'Running smoothly');
+        if (successRateNum < 80) rateSubText = mcpMonitorT('rateCritical') || monitorFallback("High failure rate", 'High failure rate');
+        else if (successRateNum < 95) rateSubText = mcpMonitorT('rateWarning') || monitorFallback("Some failures detected", 'Some failures detected');
     }
 
     const toolFilterEl = document.getElementById('monitor-tool-filter');
@@ -9082,7 +9101,7 @@ function renderMonitorExecutions(executions = [], statusFilter = 'all') {
         hard_timeout: 'statusHardTimeout',
         orphaned: 'statusOrphaned'
     };
-    const locale = (typeof window.__locale === 'string' && window.__locale.startsWith('zh')) ? 'zh-CN' : undefined;
+    const locale = (typeof window.uiLocale === 'function') ? window.uiLocale() : undefined;
     const rowEntries = executions
         .map(exec => {
             const status = getToolExecutionDisplayStatus(exec);
@@ -9304,6 +9323,7 @@ function renderMonitorPagination() {
     `;
     
     container.appendChild(pagination);
+    if (typeof initPaginationSelects === 'function') initPaginationSelects(pagination);
     
     // 初始化每页显示数量选择器
     initializeMonitorPageSize();
@@ -9340,7 +9360,7 @@ async function deleteExecution(executionId) {
         const execDeletedMsg = typeof window.t === 'function' ? window.t('mcpMonitor.execDeleted') : 'Execution record deleted';
         alert(execDeletedMsg);
     } catch (error) {
-        console.error('删除执行记录失败:', error);
+        console.error("Failed to delete execution record:", error);
         const deleteFailedMsg = typeof window.t === 'function' ? window.t('mcpMonitor.deleteExecFailed') : 'Failed to delete execution record';
         alert(deleteFailedMsg + ': ' + error.message);
     }
@@ -9375,7 +9395,7 @@ function updateBatchActionsState() {
         }
     }
     if (selectedCountSpan) {
-        selectedCountSpan.textContent = typeof window.t === 'function' ? window.t('mcp.selectedCount', { count: selectedCount }) : '已选择 ' + selectedCount + ' 项';
+        selectedCountSpan.textContent = typeof window.t === 'function' ? window.t('mcp.selectedCount', { count: selectedCount }) : "Selected " + selectedCount + " item";
     }
     
     // 更新全选复选框状态（仅反映当前页）
@@ -9480,7 +9500,7 @@ async function batchDeleteExecutions() {
         const batchSuccessMsg = typeof window.t === 'function' ? window.t('mcpMonitor.batchDeleteSuccess', { count: deletedCount }) : `Successfully deleted ${deletedCount} execution record(s)`;
         alert(batchSuccessMsg);
     } catch (error) {
-        console.error('批量删除执行记录失败:', error);
+        console.error("Batch deletion of execution records failed:", error);
         const batchFailedMsg = typeof window.t === 'function' ? window.t('mcp.batchDeleteFailed') : 'Batch delete failed';
         alert(batchFailedMsg + ': ' + error.message);
     }
@@ -9636,6 +9656,7 @@ function refreshProgressAndTimelineI18n() {
                 completionTokens: item.dataset.completionTokens,
                 totalTokens: item.dataset.totalTokens,
                 cachedTokens: item.dataset.cachedTokens,
+                cacheWriteTokens: item.dataset.cacheWriteTokens,
                 reasoningTokens: item.dataset.reasoningTokens
             };
             titleSpan.textContent = formatEinoUsageSummaryTitle(usageData);

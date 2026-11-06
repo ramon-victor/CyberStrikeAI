@@ -46,49 +46,49 @@
 
     const NODE_TYPE_STYLES = {
         target: {
-            typeLabel: '目标',
+            typeLabel: "Target",
             typeEn: 'TARGET',
             accent: { light: '#4F46E5', dark: '#818cf8' },
             bgEnd: { light: '#F5F3FF', dark: '#1e1b4b' },
             icon: 'target',
         },
         finding: {
-            typeLabel: '发现',
+            typeLabel: "Discover",
             typeEn: 'FINDING',
             accent: { light: '#E11D48', dark: '#fb7185' },
             bgEnd: { light: '#FFF1F2', dark: '#3f1219' },
             icon: 'finding',
         },
         exploit: {
-            typeLabel: '利用',
+            typeLabel: "use",
             typeEn: 'EXPLOIT',
             accent: { light: '#B45309', dark: '#fbbf24' },
             bgEnd: { light: '#FFFBEB', dark: '#3b2712' },
             icon: 'vulnerability',
         },
         vulnerability: {
-            typeLabel: '漏洞',
+            typeLabel: "Vulnerability",
             typeEn: 'VULN',
             accent: { light: '#9333EA', dark: '#c084fc' },
             bgEnd: { light: '#F5F3FF', dark: '#2e1065' },
             icon: 'vuln',
         },
         auth: {
-            typeLabel: '认证',
+            typeLabel: "Authentication",
             typeEn: 'AUTH',
             accent: { light: '#0D9488', dark: '#2dd4bf' },
             bgEnd: { light: '#F0FDFA', dark: '#0f2926' },
             icon: 'default',
         },
         infra: {
-            typeLabel: '基础设施',
+            typeLabel: "infrastructure",
             typeEn: 'INFRA',
             accent: { light: '#64748B', dark: '#94a3b8' },
             bgEnd: { light: '#F8FAFC', dark: '#1e293b' },
             icon: 'default',
         },
         chain: {
-            typeLabel: '攻击链',
+            typeLabel: "Attack chain",
             typeEn: 'CHAIN',
             accent: { light: '#7C3AED', dark: '#a78bfa' },
             bgEnd: { light: '#F5F3FF', dark: '#2e1065' },
@@ -102,21 +102,21 @@
             icon: 'vulnerability',
         },
         business: {
-            typeLabel: '业务',
+            typeLabel: "business",
             typeEn: 'BUSINESS',
             accent: { light: '#0369A1', dark: '#38bdf8' },
             bgEnd: { light: '#F0F9FF', dark: '#0c2540' },
             icon: 'default',
         },
         missing: {
-            typeLabel: '缺失',
+            typeLabel: "Missing",
             typeEn: 'MISSING',
             accent: { light: '#CBD5E1', dark: '#64748b' },
             bgEnd: { light: '#F1F5F9', dark: '#1e293b' },
             icon: 'default',
         },
         note: {
-            typeLabel: '备注',
+            typeLabel: "Comment",
             typeEn: 'NOTE',
             accent: { light: '#94A3B8', dark: '#94a3b8' },
             bgEnd: { light: '#F8FAFC', dark: '#1e293b' },
@@ -170,8 +170,8 @@
 
     function buildStatusBadge(confidence) {
         const conf = (confidence || '').toLowerCase();
-        if (conf === 'tentative') return '待确认';
-        if (conf === 'deprecated') return '已废弃';
+        if (conf === 'tentative') return "Tentative";
+        if (conf === 'deprecated') return "Deprecated";
         return '';
     }
 
@@ -550,7 +550,7 @@
     function render(container, graphData, options) {
         if (!container || typeof cytoscape === 'undefined') {
             if (container) {
-                container.innerHTML = '<div class="error-message">Cytoscape 未加载</div>';
+                container.innerHTML = "<div class=\"error-message\">Cytoscape not loaded</div>";
             }
             return null;
         }
@@ -563,7 +563,7 @@
         const edges = _graphData.edges || [];
         if (!nodes.length) {
             const title = (options && options.emptyTitle) || '';
-            const hint = (options && options.emptyText) || '暂无事实关系';
+            const hint = (options && options.emptyText) || "No factual relationship yet";
             const steps = (options && options.emptySteps) || [];
             const actionLabel = options && options.emptyActionLabel;
             const stepsHtml = steps.length

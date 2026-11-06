@@ -41,12 +41,12 @@ func NewEmbedder(ctx context.Context, cfg *config.KnowledgeConfig, openAIConfig 
 		rpm := cfg.Indexing.MaxRPM
 		rateLimiter = rate.NewLimiter(rate.Every(time.Minute/time.Duration(rpm)), rpm)
 		if logger != nil {
-			logger.Info("知识库索引速率限制已启用", zap.Int("maxRPM", rpm))
+			logger.Info("Knowledge Base Indexing Rate Limiting Enabled", zap.Int("maxRPM", rpm))
 		}
 	} else if cfg.Indexing.RateLimitDelayMs > 0 {
 		rateLimitDelay = time.Duration(cfg.Indexing.RateLimitDelayMs) * time.Millisecond
 		if logger != nil {
-			logger.Info("知识库索引固定延迟已启用", zap.Duration("delay", rateLimitDelay))
+			logger.Info("Knowledge Base Index Fixed Delay Enabled", zap.Duration("delay", rateLimitDelay))
 		}
 	}
 
@@ -125,7 +125,7 @@ func (e *Embedder) waitRateLimiter() {
 	if e.rateLimiter != nil {
 		ctx := context.Background()
 		if err := e.rateLimiter.Wait(ctx); err != nil && e.logger != nil {
-			e.logger.Warn("速率限制器等待失败", zap.Error(err))
+			e.logger.Warn("Rate limiter wait failed", zap.Error(err))
 		}
 	}
 	if e.rateLimitDelay > 0 {
@@ -159,7 +159,7 @@ func (e *Embedder) EmbedStrings(ctx context.Context, texts []string, opts ...emb
 		if attempt > 0 {
 			wait := e.retryDelay * time.Duration(attempt)
 			if e.logger != nil {
-				e.logger.Debug("嵌入重试前等待", zap.Int("attempt", attempt+1), zap.Duration("wait", wait))
+				e.logger.Debug("Wait before embedding retry", zap.Int("attempt", attempt+1), zap.Duration("wait", wait))
 			}
 			select {
 			case <-ctx.Done():
@@ -186,7 +186,7 @@ func (e *Embedder) EmbedStrings(ctx context.Context, texts []string, opts ...emb
 			return nil, err
 		}
 		if e.logger != nil {
-			e.logger.Debug("嵌入失败，将重试", zap.Int("attempt", attempt+1), zap.Error(err))
+			e.logger.Debug("Embedding failed, will try again", zap.Int("attempt", attempt+1), zap.Error(err))
 		}
 	}
 	return nil, fmt.Errorf("maximum retry count reached (%d): %v", e.maxRetries, lastErr)

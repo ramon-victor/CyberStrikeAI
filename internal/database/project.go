@@ -14,15 +14,17 @@ var factKeyPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]*$`)
 
 // ValidateFactKey 校验事实 key（项目内唯一标识）。
 func ValidateFactKey(key string) error {
-	key = strings.TrimSpace(key)
+	if key != strings.TrimSpace(key) {
+		return fmt.Errorf("fact_key does not allow leading and trailing blanks")
+	}
 	if key == "" {
-		return fmt.Errorf("fact_key 不能为空")
+		return fmt.Errorf("fact_key cannot be empty")
 	}
 	if len(key) > 128 {
-		return fmt.Errorf("fact_key 过长（最多 128 字符）")
+		return fmt.Errorf("fact_key must not exceed 128 characters")
 	}
 	if !factKeyPattern.MatchString(key) {
-		return fmt.Errorf("fact_key 格式无效，仅允许字母、数字及 . _ / -，且须以字母或数字开头（支持驼峰命名）")
+		return fmt.Errorf("Invalid fact_key: use letters, digits and . _ / -, starting with a letter or digit; camelCase is supported")
 	}
 	return nil
 }
@@ -58,11 +60,70 @@ type ProjectFact struct {
 
 // ProjectFactListFilter 事实列表筛选。
 type ProjectFactListFilter struct {
-	Category               string
-	Confidence             string
-	Search                 string
-	RelatedVulnerabilityID string
-	ExcludeDeprecated      bool // 为 true 时排除 confidence=deprecated
+	Category                   string
+	Confidence                 string
+	Search                     string
+	RelatedVulnerabilityID     string
+	ExcludeDeprecated          bool // 为 true 时排除 confidence=deprecated
+	RestrictContextCheckpoints bool // MCP defaults: hide other/unknown conversation checkpoints before pagination.
+	ContextConversationID      string
+	SourceConversationID       string // Optional provenance filter; it does not widen project or memory scope.
+}
+
+// ContextCheckpointKeyPrefix is reserved for system-generated working memory.
+const ContextCheckpointKeyPrefix = "note/context-"
+
+// IsContextCheckpointKey distinguishes working memory from ordinary shared facts.
+func IsContextCheckpointKey(key string) bool {
+	return strings.HasPrefix(strings.TrimSpace(key), ContextCheckpointKeyPrefix)
+}
+
+// Conversation scope affects only automatic working memory, never ordinary
+// project facts. Unknown origins require an explicit historical read.
+func ContextCheckpointVisible(f *ProjectFact, conversationID string, includeHistory bool) bool {
+	return f != nil && (!IsContextCheckpointKey(f.FactKey) || includeHistory ||
+		(strings.TrimSpace(conversationID) != "" && f.SourceConversationID == strings.TrimSpace(conversationID)))
+}
+
+// SaveContextCheckpoint tests project binding in the same SQLite write statement,
+// so a concurrent conversation rebind cannot slip between a read and an upsert.
+func (db *DB) SaveContextCheckpoint(f *ProjectFact) error {
+	if f == nil || !IsContextCheckpointKey(f.FactKey) || strings.TrimSpace(f.SourceConversationID) == "" {
+		return fmt.Errorf("invalid context checkpoint")
+	}
+	if err := ValidateFactKey(f.FactKey); err != nil {
+		return err
+	}
+	now := time.Now()
+	result, err := db.Exec(`INSERT INTO project_facts
+		(id, project_id, fact_key, category, summary, body, confidence, source_conversation_id, pinned, created_at, updated_at)
+		SELECT ?, ?, ?, 'note', ?, ?, 'tentative', ?, 0, ?, ?
+		WHERE EXISTS (SELECT 1 FROM conversations WHERE id = ? AND project_id = ?)
+		ON CONFLICT(project_id, fact_key) DO UPDATE SET
+		category = 'note', summary = excluded.summary, body = excluded.body,
+		confidence = 'tentative', source_conversation_id = excluded.source_conversation_id,
+		pinned = 0, updated_at = excluded.updated_at`,
+		uuid.New().String(), f.ProjectID, f.FactKey, f.Summary, f.Body, f.SourceConversationID,
+		now, now, f.SourceConversationID, f.ProjectID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return fmt.Errorf("checkpoint project does not match current conversation binding")
+	}
+	return nil
+}
+
+// Match strings.TrimSpace for legacy keys without migrating or rewriting them.
+const factKeyTrimCharacters = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+
+func contextCheckpointScopeSQL(conversationID string) (string, []interface{}) {
+	return " AND (substr(trim(fact_key, ?), 1, ?) != ? OR (source_conversation_id = ? AND ? != ''))",
+		[]interface{}{factKeyTrimCharacters, len(ContextCheckpointKeyPrefix), ContextCheckpointKeyPrefix, strings.TrimSpace(conversationID), strings.TrimSpace(conversationID)}
 }
 
 // CreateProject 创建项目。
@@ -85,7 +146,7 @@ func (db *DB) CreateProject(p *Project) (*Project, error) {
 		p.ID, p.Name, p.Description, p.ScopeJSON, p.Status, boolToInt(p.Pinned), p.CreatedAt, p.UpdatedAt,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("创建项目失败: %w", err)
+		return nil, fmt.Errorf("Failed to create project: %w", err)
 	}
 	return p, nil
 }
@@ -101,9 +162,9 @@ func (db *DB) GetProject(id string) (*Project, error) {
 	).Scan(&p.ID, &p.Name, &p.Description, &p.ScopeJSON, &p.Status, &pinned, &createdAt, &updatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("项目不存在")
+			return nil, fmt.Errorf("Project not found")
 		}
-		return nil, fmt.Errorf("获取项目失败: %w", err)
+		return nil, fmt.Errorf("Failed to obtain item: %w", err)
 	}
 	p.Pinned = pinned != 0
 	p.CreatedAt = parseDBTime(createdAt)
@@ -117,9 +178,9 @@ func (db *DB) GetProjectName(id string) (string, error) {
 	err := db.QueryRow(`SELECT name FROM projects WHERE id = ?`, id).Scan(&name)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return "", fmt.Errorf("项目不存在")
+			return "", fmt.Errorf("Project not found")
 		}
-		return "", fmt.Errorf("获取项目名称失败: %w", err)
+		return "", fmt.Errorf("Failed to get project name: %w", err)
 	}
 	return strings.TrimSpace(name), nil
 }
@@ -176,7 +237,7 @@ func (db *DB) CountProjects(status, search string) (int, error) {
 	query, args = appendProjectListFilters(query, args, status, search)
 	var count int
 	if err := db.QueryRow(query, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("统计项目失败: %w", err)
+		return 0, fmt.Errorf("Statistics project failed: %w", err)
 	}
 	return count, nil
 }
@@ -188,7 +249,7 @@ func (db *DB) CountProjectsForAccess(status, search, userID, scope string) (int,
 	query, args = appendProjectAccessFilter(query, args, userID, scope)
 	var count int
 	if err := db.QueryRow(query, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("统计项目失败: %w", err)
+		return 0, fmt.Errorf("Statistics project failed: %w", err)
 	}
 	return count, nil
 }
@@ -207,7 +268,7 @@ func (db *DB) ListProjects(status, search string, limit, offset int) ([]*Project
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("列出项目失败: %w", err)
+		return nil, fmt.Errorf("Failed to list items: %w", err)
 	}
 	defer rows.Close()
 
@@ -244,7 +305,7 @@ func (db *DB) ListProjectsForAccess(status, search string, limit, offset int, us
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("列出项目失败: %w", err)
+		return nil, fmt.Errorf("Failed to list items: %w", err)
 	}
 	defer rows.Close()
 	var out []*Project
@@ -271,7 +332,7 @@ func (db *DB) UpdateProject(p *Project) error {
 		p.Name, p.Description, p.ScopeJSON, p.Status, boolToInt(p.Pinned), p.UpdatedAt, p.ID,
 	)
 	if err != nil {
-		return fmt.Errorf("更新项目失败: %w", err)
+		return fmt.Errorf("Failed to update project: %w", err)
 	}
 	return nil
 }
@@ -279,20 +340,20 @@ func (db *DB) UpdateProject(p *Project) error {
 // DeleteProject 删除项目（级联删除事实；对话 project_id 置空由 FK 处理；其他资源 project_id 置空）。
 func (db *DB) DeleteProject(id string) error {
 	if _, err := db.Exec(`UPDATE vulnerabilities SET project_id = NULL WHERE project_id = ?`, id); err != nil {
-		return fmt.Errorf("解除漏洞项目关联失败: %w", err)
+		return fmt.Errorf("Failed to disassociate vulnerable items: %w", err)
 	}
 	if _, err := db.Exec(`UPDATE assets SET project_id = NULL WHERE project_id = ?`, id); err != nil {
-		return fmt.Errorf("解除资产项目关联失败: %w", err)
+		return fmt.Errorf("Failed to disassociate asset items: %w", err)
 	}
 	if _, err := db.Exec(`UPDATE webshell_connections SET project_id = NULL WHERE project_id = ?`, id); err != nil {
-		return fmt.Errorf("解除 WebShell 项目关联失败: %w", err)
+		return fmt.Errorf("Failed to unlink WebShell project: %w", err)
 	}
 	if _, err := db.Exec(`UPDATE c2_listeners SET project_id = NULL WHERE project_id = ?`, id); err != nil {
-		return fmt.Errorf("解除 C2 监听器项目关联失败: %w", err)
+		return fmt.Errorf("Failed to unlink C2 listener project: %w", err)
 	}
 	_, err := db.Exec(`DELETE FROM projects WHERE id = ?`, id)
 	if err != nil {
-		return fmt.Errorf("删除项目失败: %w", err)
+		return fmt.Errorf("Failed to delete item: %w", err)
 	}
 	db.removeProjectScopedDirs(id)
 	return nil
@@ -304,7 +365,7 @@ func (db *DB) GetConversationProjectID(conversationID string) (string, error) {
 	err := db.QueryRow(`SELECT project_id FROM conversations WHERE id = ?`, conversationID).Scan(&pid)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return "", fmt.Errorf("对话不存在")
+			return "", fmt.Errorf("Conversation not found")
 		}
 		return "", err
 	}
@@ -330,18 +391,23 @@ func (db *DB) SetConversationProjectID(conversationID, projectID string) error {
 	}
 	_, err := db.Exec(`UPDATE conversations SET project_id = ?, updated_at = ? WHERE id = ?`, val, time.Now(), conversationID)
 	if err != nil {
-		return fmt.Errorf("设置对话项目失败: %w", err)
+		return fmt.Errorf("Failed to set dialog item: %w", err)
 	}
 	return nil
 }
 
 // ListProjectFactsForIndex 列出用于黑板索引注入的事实（不含 deprecated，除非 includeDeprecated）。
-func (db *DB) ListProjectFactsForIndex(projectID string, includeDeprecated bool) ([]*ProjectFact, error) {
-	query := `SELECT id, project_id, fact_key, category, summary, COALESCE(body,''), confidence,
+func (db *DB) ListProjectFactsForIndex(projectID string, includeDeprecated bool, conversationIDs ...string) ([]*ProjectFact, error) {
+	query := `SELECT id, project_id, fact_key, category, summary, '', confidence,
 		COALESCE(source_conversation_id,''), COALESCE(source_message_id,''), pinned,
 		COALESCE(related_vulnerability_id,''), created_at, updated_at
 		FROM project_facts WHERE project_id = ?`
 	args := []interface{}{projectID}
+	if len(conversationIDs) > 0 {
+		clause, values := contextCheckpointScopeSQL(conversationIDs[0])
+		query += clause
+		args = append(args, values...)
+	}
 	if !includeDeprecated {
 		query += " AND confidence != 'deprecated'"
 	}
@@ -364,6 +430,15 @@ func (db *DB) ListProjectFacts(projectID string, filter ProjectFactListFilter, l
 		COALESCE(related_vulnerability_id,''), created_at, updated_at
 		FROM project_facts WHERE project_id = ?`
 	args := []interface{}{projectID}
+	if filter.RestrictContextCheckpoints {
+		clause, values := contextCheckpointScopeSQL(filter.ContextConversationID)
+		query += clause
+		args = append(args, values...)
+	}
+	if source := strings.TrimSpace(filter.SourceConversationID); source != "" {
+		query += " AND source_conversation_id = ?"
+		args = append(args, source)
+	}
 	if c := strings.TrimSpace(filter.Category); c != "" {
 		query += " AND category = ?"
 		args = append(args, c)
@@ -428,8 +503,16 @@ func mergeFactBodyOnUpdate(incoming, existing string) string {
 
 // UpsertProjectFact 创建或更新事实（按 project_id + fact_key）。
 func (db *DB) UpsertProjectFact(f *ProjectFact) (*ProjectFact, error) {
-	if err := ValidateFactKey(f.FactKey); err != nil {
-		return nil, err
+	keyErr := ValidateFactKey(f.FactKey)
+	if keyErr != nil && (f.ID == "" || ValidateFactKey(strings.TrimSpace(f.FactKey)) != nil) {
+		return nil, keyErr
+	}
+	existing, err := db.GetProjectFactByKey(f.ProjectID, f.FactKey)
+	// Older versions accepted and stored padded keys. Preserve their exact
+	// identity when editing a loaded record, without allowing new padded keys
+	// or silently renaming historical evidence and its relationship references.
+	if keyErr != nil && (err != nil || existing == nil || existing.ID != f.ID) {
+		return nil, keyErr
 	}
 	if strings.TrimSpace(f.Category) == "" {
 		f.Category = "note"
@@ -439,7 +522,6 @@ func (db *DB) UpsertProjectFact(f *ProjectFact) (*ProjectFact, error) {
 	}
 	now := time.Now()
 
-	existing, err := db.GetProjectFactByKey(f.ProjectID, f.FactKey)
 	if err == nil && existing != nil {
 		f.ID = existing.ID
 		f.CreatedAt = existing.CreatedAt
@@ -462,7 +544,7 @@ func (db *DB) UpsertProjectFact(f *ProjectFact) (*ProjectFact, error) {
 			nullIfEmpty(f.RelatedVulnerabilityID), f.UpdatedAt, f.ID,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("更新事实失败: %w", err)
+			return nil, fmt.Errorf("Failed to update facts: %w", err)
 		}
 		return f, nil
 	}
@@ -484,7 +566,7 @@ func (db *DB) UpsertProjectFact(f *ProjectFact) (*ProjectFact, error) {
 		f.CreatedAt, f.UpdatedAt,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("创建事实失败: %w", err)
+		return nil, fmt.Errorf("Failed to create fact: %w", err)
 	}
 	return f, nil
 }
@@ -500,7 +582,7 @@ func (db *DB) DeprecateProjectFact(projectID, factKey string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("事实不存在")
+		return fmt.Errorf("The fact does not exist")
 	}
 	return db.DeprecateProjectFactEdgesForKey(projectID, factKey)
 }
@@ -512,15 +594,15 @@ func (db *DB) RestoreProjectFact(projectID, factKey, confidence string) error {
 		confidence = "tentative"
 	}
 	if confidence != "confirmed" && confidence != "tentative" {
-		return fmt.Errorf("confidence 须为 confirmed 或 tentative")
+		return fmt.Errorf("confidence must be confirmed or tentative")
 	}
 
 	existing, err := db.GetProjectFactByKey(projectID, factKey)
 	if err != nil {
-		return fmt.Errorf("事实不存在")
+		return fmt.Errorf("The fact does not exist")
 	}
 	if strings.ToLower(strings.TrimSpace(existing.Confidence)) != "deprecated" {
-		return fmt.Errorf("事实未处于废弃状态")
+		return fmt.Errorf("Facts are not in obsolete status")
 	}
 
 	_, err = db.Exec(
@@ -566,7 +648,7 @@ func scanProjectFactRow(row *sql.Row) (*ProjectFact, error) {
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("事实不存在")
+			return nil, fmt.Errorf("The fact does not exist")
 		}
 		return nil, err
 	}

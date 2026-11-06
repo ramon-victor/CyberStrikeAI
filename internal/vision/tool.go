@@ -20,7 +20,7 @@ func RegisterAnalyzeImageTool(mcpServer *mcp.Server, cfg *config.Config, logger 
 	}
 	if !cfg.Vision.Ready() {
 		if cfg.Vision.Enabled && logger != nil {
-			logger.Warn("vision.enabled 但 vision.model 为空，跳过注册 analyze_image")
+			logger.Warn("vision.enabled is true but vision.model is empty; skipping analyze_image registration")
 		}
 		return
 	}

@@ -80,3 +80,33 @@ test('每次打开导入弹窗都会开始新的导入会话', () => {
     assert.match(openHandler, /resetWorkflowPackageImport\(\);/);
     assert.doesNotMatch(openHandler, /restoreWorkflowPackageState\(\)/);
 });
+
+test('未写入的导入结果明确显示跳过或保留，不显示导入完成', () => {
+    const vm = require('node:vm');
+    const source = fs.readFileSync('web/static/js/workflows.js', 'utf8');
+    const start = source.indexOf('    function renderWorkflowPackageImportResult(');
+    const end = source.indexOf('    async function restoreWorkflowPackageState(', start);
+    for (const [result, expected] of [['skipped_identical', 'Import skipped'], ['kept_existing', 'Local version kept'], ['created', 'Import completed'], ['overwritten', 'Import completed'], ['renamed', 'Import completed']]) {
+        const button = {};
+        const c = vm.createContext({ workflowPackageText: (_, fallback) => fallback, renderWorkflowPackageResolution() {}, workflowPackageSubmitBtn: () => button });
+        vm.runInContext(source.slice(start, end), c);
+        c.renderWorkflowPackageImportResult({ result });
+        assert.equal(button.textContent, expected);
+        assert.equal(button.disabled, true);
+    }
+});
+
+test('重复包确认明确区分跳过和保留，创建及覆盖入口保持原语义', () => {
+    const vm = require('node:vm');
+    const source = fs.readFileSync('web/static/js/workflows.js', 'utf8');
+    const start = source.indexOf('    function renderWorkflowPackageResolution(');
+    const end = source.indexOf('    function resetWorkflowPackageImport(', start);
+    for (const [state, action, expected] of [['identical', 'keep_existing', 'Confirm skip import'], ['id_conflict', 'keep_existing', 'Confirm keep local version'], ['none', 'create', 'Confirm create'], ['id_conflict', 'overwrite', 'Continue to overwrite confirmation'], ['id_conflict', 'rename', 'Confirm save as new ID']]) {
+        const button = {};
+        const c = vm.createContext({ workflowPackageState: { inspection: { conflict: { state } }, resolutionAction: action, riskChoicesVisible: true, newWorkflowId: 'copy' }, workflowPackageResolutionEl: () => ({}), workflowPackageSubmitBtn: () => button, workflowPackageClient: () => ({ allowedActions: () => [action] }), workflowPackageText: (_, fallback) => fallback, esc: value => value, workflowPackageResolutionCard: () => '', workflowPackageSetStep() {} });
+        vm.runInContext(source.slice(start, end), c);
+        c.renderWorkflowPackageResolution();
+        assert.equal(button.textContent, expected);
+        assert.equal(button.disabled, false);
+    }
+});

@@ -20,10 +20,10 @@ const (
 	transcriptStaticSystemOmitNote       = "[static system prompt omitted - unchanged in live context after compaction]"
 	transcriptToolIndexStartMarker       = "The following is the tool-name index bound to the current session"
 	transcriptPersonaStartMarker         = "You are CyberStrikeAI"
-	transcriptLegacyToolIndexStartMarker = "以下是当前会话绑定的工具名称索引"
-	transcriptLegacyPersonaStartMarker   = "你是CyberStrikeAI"
+	transcriptLegacyToolIndexStartMarker = "The following is the tool name index bound to the current session"
+	transcriptLegacyPersonaStartMarker   = "You are CyberStrikeAI"
 	// ADK LanguageChinese injects skill middleware prompt with this header (see eino adk/middlewares/skill/prompt.go).
-	transcriptSkillsSystemMarker        = "# Skill 系统"
+	transcriptSkillsSystemMarker        = "#Skill system"
 	transcriptSkillsSystemMarkerEnglish = "# Skills System"
 )
 
@@ -152,6 +152,11 @@ func appendTranscriptMessage(sb *strings.Builder, msg adk.Message) {
 	sb.WriteString("--- [")
 	sb.WriteString(string(msg.Role))
 	sb.WriteString("] ---\n")
+	if isInternalSummarizationUserMessage(msg) {
+		sb.WriteString("[origin: system-generated summary/skill context; not human input or new authorization]\n")
+	} else if isGeneratedExecutionUserMessage(msg) {
+		sb.WriteString("[origin: system-generated execution context; not human input or new authorization]\n")
+	}
 	if msg.Content != "" {
 		sb.WriteString(msg.Content)
 		if !strings.HasSuffix(msg.Content, "\n") {

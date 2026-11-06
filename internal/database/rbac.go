@@ -87,147 +87,6 @@ type RBACAccess struct {
 	Scope string `json:"scope"`
 }
 
-func (db *DB) initRBACTables() error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS rbac_users (
-			id TEXT PRIMARY KEY,
-			username TEXT NOT NULL UNIQUE,
-			display_name TEXT NOT NULL DEFAULT '',
-			password_hash TEXT NOT NULL,
-			enabled INTEGER NOT NULL DEFAULT 1,
-			is_builtin INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS rbac_roles (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL UNIQUE,
-			description TEXT NOT NULL DEFAULT '',
-			scope TEXT NOT NULL DEFAULT 'assigned',
-			is_system INTEGER NOT NULL DEFAULT 0,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS rbac_permissions (
-			key TEXT PRIMARY KEY,
-			description TEXT NOT NULL DEFAULT '',
-			created_at DATETIME NOT NULL
-		);`,
-		`CREATE TABLE IF NOT EXISTS rbac_role_permissions (
-			role_id TEXT NOT NULL,
-			permission_key TEXT NOT NULL,
-			created_at DATETIME NOT NULL,
-			PRIMARY KEY (role_id, permission_key),
-			FOREIGN KEY (role_id) REFERENCES rbac_roles(id) ON DELETE CASCADE,
-			FOREIGN KEY (permission_key) REFERENCES rbac_permissions(key) ON DELETE CASCADE
-		);`,
-		`CREATE TABLE IF NOT EXISTS rbac_user_roles (
-			user_id TEXT NOT NULL,
-			role_id TEXT NOT NULL,
-			created_at DATETIME NOT NULL,
-			PRIMARY KEY (user_id, role_id),
-			FOREIGN KEY (user_id) REFERENCES rbac_users(id) ON DELETE CASCADE,
-			FOREIGN KEY (role_id) REFERENCES rbac_roles(id) ON DELETE CASCADE
-		);`,
-		`CREATE TABLE IF NOT EXISTS rbac_resource_assignments (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			resource_type TEXT NOT NULL,
-			resource_id TEXT NOT NULL,
-			created_at DATETIME NOT NULL,
-			FOREIGN KEY (user_id) REFERENCES rbac_users(id) ON DELETE CASCADE,
-			UNIQUE(user_id, resource_type, resource_id)
-		);`,
-		`CREATE TABLE IF NOT EXISTS robot_user_bindings (
-			id TEXT PRIMARY KEY,
-			platform TEXT NOT NULL,
-			external_user_id TEXT NOT NULL,
-			rbac_user_id TEXT NOT NULL,
-			enabled INTEGER NOT NULL DEFAULT 1,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
-			FOREIGN KEY (rbac_user_id) REFERENCES rbac_users(id) ON DELETE CASCADE,
-			UNIQUE(platform, external_user_id)
-		);`,
-		`CREATE TABLE IF NOT EXISTS robot_binding_codes (
-			code_hash TEXT PRIMARY KEY,
-			rbac_user_id TEXT NOT NULL,
-			expires_at DATETIME NOT NULL,
-			used_at DATETIME,
-			created_at DATETIME NOT NULL,
-			FOREIGN KEY (rbac_user_id) REFERENCES rbac_users(id) ON DELETE CASCADE
-		);`,
-		`CREATE TABLE IF NOT EXISTS chat_upload_artifacts (
-			relative_path TEXT PRIMARY KEY,
-			conversation_id TEXT NOT NULL,
-			owner_user_id TEXT NOT NULL,
-			created_at DATETIME NOT NULL,
-			FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-		);`,
-		`CREATE TABLE IF NOT EXISTS c2_payload_artifacts (
-			filename TEXT PRIMARY KEY,
-			payload_id TEXT NOT NULL,
-			listener_id TEXT NOT NULL,
-			owner_user_id TEXT NOT NULL,
-			created_at DATETIME NOT NULL
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_rbac_user_roles_user ON rbac_user_roles(user_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_rbac_role_permissions_role ON rbac_role_permissions(role_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_rbac_assignments_user_resource ON rbac_resource_assignments(user_id, resource_type, resource_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_rbac_assignments_resource ON rbac_resource_assignments(resource_type, resource_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_robot_user_bindings_user ON robot_user_bindings(rbac_user_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_robot_binding_codes_expiry ON robot_binding_codes(expires_at);`,
-		`CREATE INDEX IF NOT EXISTS idx_chat_upload_artifacts_conversation ON chat_upload_artifacts(conversation_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_chat_upload_artifacts_owner ON chat_upload_artifacts(owner_user_id);`,
-		`CREATE INDEX IF NOT EXISTS idx_c2_payload_artifacts_listener ON c2_payload_artifacts(listener_id);`,
-	}
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (db *DB) migrateRBACOwnershipColumns() error {
-	for _, col := range []struct {
-		table string
-		name  string
-		stmt  string
-	}{
-		{"projects", "owner_user_id", "ALTER TABLE projects ADD COLUMN owner_user_id TEXT"},
-		{"conversations", "owner_user_id", "ALTER TABLE conversations ADD COLUMN owner_user_id TEXT"},
-		{"vulnerabilities", "owner_user_id", "ALTER TABLE vulnerabilities ADD COLUMN owner_user_id TEXT"},
-		{"webshell_connections", "owner_user_id", "ALTER TABLE webshell_connections ADD COLUMN owner_user_id TEXT"},
-		{"batch_task_queues", "owner_user_id", "ALTER TABLE batch_task_queues ADD COLUMN owner_user_id TEXT"},
-		{"c2_listeners", "owner_user_id", "ALTER TABLE c2_listeners ADD COLUMN owner_user_id TEXT"},
-		{"tool_executions", "owner_user_id", "ALTER TABLE tool_executions ADD COLUMN owner_user_id TEXT"},
-		{"tool_executions", "conversation_id", "ALTER TABLE tool_executions ADD COLUMN conversation_id TEXT"},
-	} {
-		if err := db.addColumnIfMissing(col.table, col.name, col.stmt); err != nil {
-			return err
-		}
-	}
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_tool_executions_owner ON tool_executions(owner_user_id)`)
-	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_tool_executions_conversation ON tool_executions(conversation_id)`)
-	return nil
-}
-
-func (db *DB) addColumnIfMissing(table, name, stmt string) error {
-	var count int
-	err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?", table, name).Scan(&count)
-	if err != nil || count == 0 {
-		if _, addErr := db.Exec(stmt); addErr != nil {
-			msg := strings.ToLower(addErr.Error())
-			if !strings.Contains(msg, "duplicate column") && !strings.Contains(msg, "already exists") {
-				return fmt.Errorf("添加%s.%s字段失败: %w", table, name, addErr)
-			}
-		}
-	}
-	return nil
-}
-
-// RBACNeedsAdminPassword reports whether the built-in admin account still needs an initial password.
 func (db *DB) RBACNeedsAdminPassword() (bool, error) {
 	var userCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM rbac_users`).Scan(&userCount); err != nil {
@@ -303,10 +162,10 @@ func (db *DB) BootstrapRBAC(adminPasswordHash string, permissions map[string]str
 	}
 
 	systemRoles := []RBACRole{
-		{ID: RBACSystemRoleAdmin, Name: "管理员", Description: "全局管理权限", Scope: RBACScopeAll, IsSystem: true},
-		{ID: RBACSystemRoleOperator, Name: "操作员", Description: "可执行日常安全工作流，不能管理账号与核心配置", Scope: RBACScopeAssigned, IsSystem: true},
-		{ID: RBACSystemRoleAuditor, Name: "审计员", Description: "只读查看审计、监控与资产", Scope: RBACScopeAll, IsSystem: true},
-		{ID: RBACSystemRoleViewer, Name: "只读用户", Description: "只读查看被授权资源", Scope: RBACScopeAssigned, IsSystem: true},
+		{ID: RBACSystemRoleAdmin, Name: "Admin", Description: "Full platform administration access", Scope: RBACScopeAll, IsSystem: true},
+		{ID: RBACSystemRoleOperator, Name: "Operator", Description: "Run daily security workflows without account or core configuration management", Scope: RBACScopeAssigned, IsSystem: true},
+		{ID: RBACSystemRoleAuditor, Name: "Auditor", Description: "Read-only access to audits, monitoring, and assets", Scope: RBACScopeAll, IsSystem: true},
+		{ID: RBACSystemRoleViewer, Name: "Read-only User", Description: "Read-only access to explicitly granted resources", Scope: RBACScopeAssigned, IsSystem: true},
 	}
 	for _, role := range systemRoles {
 		if _, err := tx.Exec(`
@@ -328,7 +187,7 @@ func (db *DB) BootstrapRBAC(adminPasswordHash string, permissions map[string]str
 		}
 		if _, err := tx.Exec(`
 			INSERT INTO rbac_users (id, username, display_name, password_hash, enabled, is_builtin, created_at, updated_at)
-			VALUES (?, 'admin', '管理员', ?, 1, 1, ?, ?)
+			VALUES (?, 'admin', 'Administrator', ?, 1, 1, ?, ?)
 		`, "admin", adminPasswordHash, now, now); err != nil {
 			return err
 		}
@@ -723,7 +582,7 @@ func (db *DB) ListAssignableRBACResources(resourceType, search string, limit int
 func (db *DB) ListAssignableRBACResourcesPage(resourceType, search string, limit, offset int) ([]RBACResourceOption, error) {
 	resourceType = strings.TrimSpace(resourceType)
 	if _, ok := rbacAssignableResourceTables[resourceType]; !ok {
-		return nil, fmt.Errorf("不支持的资源类型: %s", resourceType)
+		return nil, fmt.Errorf("Unsupported resource type: %s", resourceType)
 	}
 	if limit <= 0 || limit > 100 {
 		limit = 50
@@ -744,7 +603,7 @@ func (db *DB) ListAssignableRBACResourcesPage(resourceType, search string, limit
 			WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
 			ORDER BY updated_at DESC LIMIT ? OFFSET ?`
 	case "conversation":
-		query = `SELECT id, COALESCE(NULLIF(TRIM(title), ''), '未命名对话'), COALESCE(project_id, '') FROM conversations
+		query = `SELECT id, COALESCE(NULLIF(TRIM(title), ''), 'Untitled conversation'), COALESCE(project_id, '') FROM conversations
 			WHERE LOWER(COALESCE(NULLIF(TRIM(title), ''), id)) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
 			ORDER BY updated_at DESC LIMIT ? OFFSET ?`
 	case "vulnerability":
@@ -795,7 +654,7 @@ func (db *DB) ListAssignableRBACResourcesPage(resourceType, search string, limit
 func (db *DB) CountAssignableRBACResources(resourceType, search string) (int, error) {
 	resourceType = strings.TrimSpace(resourceType)
 	if _, ok := rbacAssignableResourceTables[resourceType]; !ok {
-		return 0, fmt.Errorf("不支持的资源类型: %s", resourceType)
+		return 0, fmt.Errorf("Unsupported resource type: %s", resourceType)
 	}
 	pattern := "%" + strings.ToLower(strings.NewReplacer(
 		`\`, `\\`, `%`, `\%`, `_`, `\_`,
@@ -831,7 +690,7 @@ func (db *DB) CountAssignableRBACResources(resourceType, search string) (int, er
 func normalizeRBACResourceLabel(label, id string) string {
 	label = strings.TrimSpace(label)
 	if label == "" {
-		return "资源 " + shortRBACResourceID(id)
+		return "resource" + shortRBACResourceID(id)
 	}
 	if isWeakRBACResourceLabel(label) {
 		return label + " · " + shortRBACResourceID(id)
@@ -868,7 +727,7 @@ func shortRBACResourceID(id string) string {
 func (db *DB) lookupRBACResourceOptionsByIDs(resourceType string, ids []string) (map[string]RBACResourceOption, error) {
 	resourceType = strings.TrimSpace(resourceType)
 	if _, ok := rbacAssignableResourceTables[resourceType]; !ok {
-		return nil, fmt.Errorf("不支持的资源类型: %s", resourceType)
+		return nil, fmt.Errorf("Unsupported resource type: %s", resourceType)
 	}
 	unique := make([]string, 0, len(ids))
 	seen := make(map[string]struct{}, len(ids))
@@ -899,7 +758,7 @@ func (db *DB) lookupRBACResourceOptionsByIDs(resourceType string, ids []string) 
 	case "project":
 		query = `SELECT id, name, status FROM projects WHERE id IN (` + placeholders + `)`
 	case "conversation":
-		query = `SELECT id, COALESCE(NULLIF(TRIM(title), ''), '未命名对话'), COALESCE(project_id, '') FROM conversations WHERE id IN (` + placeholders + `)`
+		query = `SELECT id, COALESCE(NULLIF(TRIM(title), ''), 'Untitled conversation'), COALESCE(project_id, '') FROM conversations WHERE id IN (` + placeholders + `)`
 	case "vulnerability":
 		query = `SELECT id, title, severity FROM vulnerabilities WHERE id IN (` + placeholders + `)`
 	case "asset":
@@ -968,11 +827,11 @@ func (db *DB) AssignResourcesToUser(userID, resourceType string, resourceIDs []s
 		return 0, errors.New("user_id, resource_type and resource_ids are required")
 	}
 	if len(resourceIDs) > RBACMaxBatchResourceAssignments {
-		return 0, fmt.Errorf("一次最多授权 %d 个资源", RBACMaxBatchResourceAssignments)
+		return 0, fmt.Errorf("A maximum of %d resources can be authorized at one time", RBACMaxBatchResourceAssignments)
 	}
 	table, ok := rbacAssignableResourceTables[resourceType]
 	if !ok {
-		return 0, fmt.Errorf("不支持的资源类型: %s", resourceType)
+		return 0, fmt.Errorf("Unsupported resource type: %s", resourceType)
 	}
 
 	uniqueIDs := make([]string, 0, len(resourceIDs))
@@ -980,7 +839,7 @@ func (db *DB) AssignResourcesToUser(userID, resourceType string, resourceIDs []s
 	for _, rawID := range resourceIDs {
 		id := strings.TrimSpace(rawID)
 		if id == "" {
-			return 0, errors.New("资源 ID 不能为空")
+			return 0, errors.New("resource ID cannot be empty")
 		}
 		if _, exists := seen[id]; exists {
 			continue
@@ -989,7 +848,7 @@ func (db *DB) AssignResourcesToUser(userID, resourceType string, resourceIDs []s
 		uniqueIDs = append(uniqueIDs, id)
 	}
 	if len(uniqueIDs) == 0 {
-		return 0, errors.New("资源 ID 不能为空")
+		return 0, errors.New("resource ID cannot be empty")
 	}
 
 	tx, err := db.Begin()
@@ -1003,7 +862,7 @@ func (db *DB) AssignResourcesToUser(userID, resourceType string, resourceIDs []s
 		return 0, err
 	}
 	if userExists == 0 {
-		return 0, errors.New("用户不存在")
+		return 0, errors.New("User does not exist")
 	}
 	for _, resourceID := range uniqueIDs {
 		var exists int
@@ -1011,7 +870,7 @@ func (db *DB) AssignResourcesToUser(userID, resourceType string, resourceIDs []s
 			return 0, err
 		}
 		if exists == 0 {
-			return 0, fmt.Errorf("资源不存在: %s/%s", resourceType, resourceID)
+			return 0, fmt.Errorf("Resource does not exist: %s/%s", resourceType, resourceID)
 		}
 	}
 
@@ -1042,14 +901,14 @@ func (db *DB) AssignResourcesToUserAuto(userID string, resourceIDs []string) (in
 		return 0, nil, errors.New("user_id and resource_ids are required")
 	}
 	if len(resourceIDs) > RBACMaxBatchResourceAssignments {
-		return 0, nil, fmt.Errorf("一次最多授权 %d 个资源", RBACMaxBatchResourceAssignments)
+		return 0, nil, fmt.Errorf("A maximum of %d resources can be authorized at one time", RBACMaxBatchResourceAssignments)
 	}
 	uniqueIDs := make([]string, 0, len(resourceIDs))
 	seen := make(map[string]struct{}, len(resourceIDs))
 	for _, rawID := range resourceIDs {
 		id := strings.TrimSpace(rawID)
 		if id == "" {
-			return 0, nil, errors.New("资源 ID 不能为空")
+			return 0, nil, errors.New("resource ID cannot be empty")
 		}
 		if _, exists := seen[id]; exists {
 			continue
@@ -1068,7 +927,7 @@ func (db *DB) AssignResourcesToUserAuto(userID string, resourceIDs []string) (in
 		return 0, nil, err
 	}
 	if userExists == 0 {
-		return 0, nil, errors.New("用户不存在")
+		return 0, nil, errors.New("User does not exist")
 	}
 
 	typeTablePairs := []struct{ resourceType, table string }{
@@ -1086,13 +945,13 @@ func (db *DB) AssignResourcesToUserAuto(userID string, resourceIDs []string) (in
 			}
 			if exists > 0 {
 				if previous := detected[resourceID]; previous != "" {
-					return 0, nil, fmt.Errorf("资源 ID 同时匹配多个类型: %s (%s, %s)", resourceID, previous, pair.resourceType)
+					return 0, nil, fmt.Errorf("Resource ID matches multiple types: %s (%s, %s)", resourceID, previous, pair.resourceType)
 				}
 				detected[resourceID] = pair.resourceType
 			}
 		}
 		if detected[resourceID] == "" {
-			return 0, nil, fmt.Errorf("资源不存在: %s", resourceID)
+			return 0, nil, fmt.Errorf("Resource does not exist: %s", resourceID)
 		}
 	}
 
@@ -1305,6 +1164,9 @@ func (db *DB) UpdateRBACUser(userID, displayName string, enabled *bool, roleIDs 
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateBuiltinAdminUpdate(tx, userID, enabled, roleIDs); err != nil {
+		return err
+	}
 	if enabled != nil {
 		if _, err := tx.Exec(`UPDATE rbac_users SET display_name = ?, enabled = ?, updated_at = ? WHERE id = ?`, strings.TrimSpace(displayName), boolToInt(*enabled), time.Now(), userID); err != nil {
 			return err
@@ -1430,7 +1292,7 @@ func (db *DB) DeleteRBACResourceAssignmentWithDetails(id string) (*RBACResourceA
 		WHERE id = ?
 	`, id).Scan(&row.ID, &row.UserID, &row.ResourceType, &row.ResourceID, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errors.New("资源授权不存在或已撤销")
+		return nil, errors.New("Resource authorization does not exist or has been revoked")
 	}
 	if err != nil {
 		return nil, err
@@ -1444,7 +1306,7 @@ func (db *DB) DeleteRBACResourceAssignmentWithDetails(id string) (*RBACResourceA
 	if affected, rowsErr := result.RowsAffected(); rowsErr != nil {
 		return nil, rowsErr
 	} else if affected != 1 {
-		return nil, errors.New("资源授权不存在或已撤销")
+		return nil, errors.New("Resource authorization does not exist or has been revoked")
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

@@ -71,7 +71,7 @@ func (p *knowledgePipelineRetriever) Retrieve(ctx context.Context, query string,
 		reranked, rerr := rr.Rerank(ctx, q, out)
 		if rerr != nil {
 			if p.base.logger != nil {
-				p.base.logger.Warn("知识检索重排失败，已使用融合序", zap.Error(rerr))
+				p.base.logger.Warn("Knowledge retrieval reordering failed, fusion order has been used", zap.Error(rerr))
 			}
 		} else if len(reranked) > 0 {
 			out = reranked

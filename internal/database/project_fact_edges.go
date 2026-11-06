@@ -79,10 +79,10 @@ type ProjectFactGraph struct {
 func ValidateProjectFactEdgeType(edgeType string) error {
 	edgeType = strings.TrimSpace(strings.ToLower(edgeType))
 	if edgeType == "" {
-		return fmt.Errorf("edge type 不能为空")
+		return fmt.Errorf("edge type cannot be empty")
 	}
 	if _, ok := ValidProjectFactEdgeTypes[edgeType]; !ok {
-		return fmt.Errorf("无效的 edge type: %s", edgeType)
+		return fmt.Errorf("Invalid edge type: %s", edgeType)
 	}
 	return nil
 }
@@ -152,13 +152,13 @@ func (db *DB) ListIncomingProjectFactEdges(projectID, targetFactKey string) ([]*
 func (db *DB) ReplaceOutgoingProjectFactEdges(projectID, sourceFactKey, sourceConversationID string, inputs []ProjectFactEdgeInput) error {
 	sourceFactKey = strings.TrimSpace(sourceFactKey)
 	if sourceFactKey == "" {
-		return fmt.Errorf("source_fact_key 不能为空")
+		return fmt.Errorf("source_fact_key is required")
 	}
 	if _, err := db.Exec(
 		`DELETE FROM project_fact_edges WHERE project_id = ? AND source_fact_key = ?`,
 		projectID, sourceFactKey,
 	); err != nil {
-		return fmt.Errorf("清除旧边失败: %w", err)
+		return fmt.Errorf("Failed to clear old edges: %w", err)
 	}
 	for _, in := range inputs {
 		target := strings.TrimSpace(in.To)
@@ -166,10 +166,10 @@ func (db *DB) ReplaceOutgoingProjectFactEdges(projectID, sourceFactKey, sourceCo
 			continue
 		}
 		if err := ValidateFactKey(target); err != nil {
-			return fmt.Errorf("target fact_key 无效 (%s): %w", target, err)
+			return fmt.Errorf("Invalid target fact_key (%s): %w", target, err)
 		}
 		if target == sourceFactKey {
-			return fmt.Errorf("边不能指向自身: %s", sourceFactKey)
+			return fmt.Errorf("The edge cannot point to itself: %s", sourceFactKey)
 		}
 		if err := ValidateProjectFactEdgeType(in.Type); err != nil {
 			return err
@@ -196,13 +196,13 @@ func (db *DB) ReplaceOutgoingProjectFactEdges(projectID, sourceFactKey, sourceCo
 func (db *DB) ReplaceIncomingProjectFactEdges(projectID, targetFactKey string, inputs []ProjectFactEdgeFromInput) error {
 	targetFactKey = strings.TrimSpace(targetFactKey)
 	if targetFactKey == "" {
-		return fmt.Errorf("target_fact_key 不能为空")
+		return fmt.Errorf("target_fact_key is required")
 	}
 	if _, err := db.Exec(
 		`DELETE FROM project_fact_edges WHERE project_id = ? AND target_fact_key = ?`,
 		projectID, targetFactKey,
 	); err != nil {
-		return fmt.Errorf("清除旧入边失败: %w", err)
+		return fmt.Errorf("Failed to clear old incoming edges: %w", err)
 	}
 	for _, in := range inputs {
 		source := strings.TrimSpace(in.From)
@@ -210,10 +210,10 @@ func (db *DB) ReplaceIncomingProjectFactEdges(projectID, targetFactKey string, i
 			continue
 		}
 		if err := ValidateFactKey(source); err != nil {
-			return fmt.Errorf("source fact_key 无效 (%s): %w", source, err)
+			return fmt.Errorf("Invalid source fact_key (%s): %w", source, err)
 		}
 		if source == targetFactKey {
-			return fmt.Errorf("边不能指向自身: %s", targetFactKey)
+			return fmt.Errorf("The edge cannot point to itself: %s", targetFactKey)
 		}
 		if err := ValidateProjectFactEdgeType(in.Type); err != nil {
 			return err
@@ -251,7 +251,7 @@ func (db *DB) GetProjectFactEdge(edgeID string) (*ProjectFactEdge, error) {
 	).Scan(&e.ID, &e.ProjectID, &e.SourceFactKey, &e.TargetFactKey, &e.EdgeType, &e.Confidence,
 		&e.SourceConversationID, &createdAt, &updatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("边不存在")
+		return nil, fmt.Errorf("Edge does not exist")
 	}
 	e.CreatedAt = parseDBTime(createdAt)
 	e.UpdatedAt = parseDBTime(updatedAt)
@@ -263,10 +263,10 @@ func (db *DB) AddProjectFactEdge(projectID string, in ProjectFactEdgeInput, sour
 	sourceFactKey = strings.TrimSpace(sourceFactKey)
 	target := strings.TrimSpace(in.To)
 	if sourceFactKey == "" || target == "" {
-		return nil, fmt.Errorf("source 与 target 必填")
+		return nil, fmt.Errorf("source and target are required")
 	}
 	if sourceFactKey == target {
-		return nil, fmt.Errorf("边不能指向自身")
+		return nil, fmt.Errorf("An edge cannot point to itself")
 	}
 	if err := ValidateProjectFactEdgeType(in.Type); err != nil {
 		return nil, err
@@ -297,7 +297,7 @@ func (db *DB) AddProjectFactEdge(projectID string, in ProjectFactEdgeInput, sour
 		nullIfEmpty(e.SourceConversationID), e.CreatedAt, e.UpdatedAt,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("添加边失败: %w", err)
+		return nil, fmt.Errorf("Failed to add edge: %w", err)
 	}
 	// 返回最新
 	rows, err := db.Query(
@@ -326,7 +326,7 @@ func (db *DB) DeleteProjectFactEdge(edgeID string) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("边不存在")
+		return fmt.Errorf("Edge does not exist")
 	}
 	return nil
 }
@@ -341,7 +341,7 @@ func (db *DB) insertProjectFactEdge(e *ProjectFactEdge) error {
 		nullIfEmpty(e.SourceConversationID), e.CreatedAt, e.UpdatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("写入边失败: %w", err)
+		return fmt.Errorf("Failed to write edge: %w", err)
 	}
 	return nil
 }

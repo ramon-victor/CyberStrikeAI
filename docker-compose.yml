@@ -4,8 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        APP_VERSION: v1.7.20
-    image: cyberstrikeai:v1.7.20
+        APP_VERSION: v1.7.24
+    image: cyberstrikeai:v1.7.24
     container_name: cyberstrikeai
     restart: unless-stopped
     ports:

@@ -509,6 +509,7 @@ function renderChatFilesPagination() {
     if (groupMode === 'folder' || chatFilesTotal <= 0) {
         pager.hidden = true;
         pager.innerHTML = '';
+        if (typeof initPaginationSelects === 'function') initPaginationSelects(pager);
         return;
     }
     const totalPages = chatFilesTotalPages();
@@ -519,10 +520,10 @@ function renderChatFilesPagination() {
     const end = Math.min(chatFilesTotal, chatFilesPage * chatFilesPageSize);
     const info = (typeof window.t === 'function')
         ? window.t('chatFilesPage.paginationInfo', { start: start, end: end, total: chatFilesTotal })
-        : ('显示 ' + start + '-' + end + ' / ' + chatFilesTotal);
+        : ("show " + start + '-' + end + ' / ' + chatFilesTotal);
     const pageText = (typeof window.t === 'function')
         ? window.t('chatFilesPage.paginationPage', { page: chatFilesPage, totalPages: totalPages })
-        : ('第 ' + chatFilesPage + ' / ' + totalPages + ' 页');
+        : ("No. " + chatFilesPage + ' / ' + totalPages + " Page");
     const pageSizeLabel = (typeof window.t === 'function') ? window.t('chatFilesPage.pageSize') : 'Per page';
     const prevLabel = (typeof window.t === 'function') ? window.t('chatFilesPage.prevPage') : 'Previous';
     const nextLabel = (typeof window.t === 'function') ? window.t('chatFilesPage.nextPage') : 'Next';
@@ -542,6 +543,7 @@ function renderChatFilesPagination() {
             <button type="button" class="btn-secondary" ${chatFilesPage >= totalPages ? 'disabled' : ''} onclick="changeChatFilesPage(${chatFilesPage + 1})">${escapeHtml(nextLabel)}</button>
         </div>`;
     pager.hidden = false;
+    if (typeof initPaginationSelects === 'function') initPaginationSelects(pager);
 }
 
 function changeChatFilesPage(page) {

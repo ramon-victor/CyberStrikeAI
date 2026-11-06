@@ -41,7 +41,9 @@ test('刷新恢复会话时先完成权威审批配置同步再允许发送', ()
     assert.match(chat, /await waitForHitlConfigReady\(hitlConversationAtSendStart\)/);
     assert.match(chat, /hitlConfigSyncConversationId = conversationId;[\s\S]{0,240}await hitlConfigSyncPromise;/);
     assert.match(chat, /await hitlConfigSyncPromise;[\s\S]{0,220}seq !== loadConversationRequestSeq/);
-    assert.match(fs.readFileSync('web/static/js/hitl.js', 'utf8'), /window\.csaiHitlDefaultReviewerReady = window\.csaiHitlDefaultConfigReady/);
+    const hitlPage = fs.readFileSync('web/static/js/hitl.js', 'utf8');
+    assert.match(hitlPage, /window\.csaiHitlDefaultConfigReady = initHitlDefaultReviewerFromServer\(\)/);
+    assert.match(hitlPage, /window\.csaiHitlDefaultReviewerReady = window\.csaiHitlDefaultConfigReady/);
 });
 
 test('同一会话的审批配置写入串行化以防止旧请求后到覆盖新选择', () => {
@@ -105,7 +107,7 @@ test('Agent 审查不进入人工审批弹窗、倒计时和项目计数', () =>
     const hitlPage = fs.readFileSync('web/static/js/hitl.js', 'utf8');
     assert.match(handler, /CreatePendingInterrupt\([\s\S]{0,260}reviewer string/);
     assert.match(handler, /reviewer != "audit_agent"[\s\S]{0,120}m\.pending\[id\] = p/);
-    assert.match(logsHandler, /ADD COLUMN reviewer TEXT NOT NULL DEFAULT 'human'/);
+    assert.match(fs.readFileSync('internal/database/schemas/application.sql', 'utf8'), /reviewer TEXT NOT NULL DEFAULT 'human'/);
     assert.match(logsHandler, /status = 'pending' AND COALESCE\(reviewer,'human'\) = 'human'/);
     assert.match(monitor, /function isAgentReviewedHitl\(data\)/);
     assert.match(monitor, /if \(!data\.resolved && !isAgentReviewedHitl\(data\)\)/);
@@ -291,10 +293,10 @@ test('多对话并发时释放隐藏主流且旧请求不能覆盖新对话状�
     assert.match(chat, /let loadConversationAbortController = null/);
     assert.match(chat, /cancelPendingConversationLoad\(\);[\s\S]{0,900}const conversationLoadController = new AbortController\(\)/);
     assert.match(chat, /signal: conversationLoadController\.signal/);
-    assert.match(template, /monitor\.js\?v=20260907-blocked-1/);
+    assert.match(template, /monitor\.js\?v=20261011-token-usage/);
     assert.match(template, /chat-scroll\.js\?v=20260815-1/);
-    assert.match(template, /chat\.js\?v=20260907-blocked-1/);
-    assert.match(template, /style\.css\?v=20260907-blocked-1/);
+    assert.match(template, /chat\.js\?v=[A-Za-z0-9._-]+/);
+    assert.match(template, /style\.css\?v=[A-Za-z0-9._-]+/);
 });
 
 test('彻底停止始终使用弹窗锁定的会话且状态刷新后仍会取消', () => {

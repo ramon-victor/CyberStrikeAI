@@ -471,9 +471,9 @@ func (h *SkillsHandler) DeleteSkill(c *gin.Context) {
 			len(affectedRoles), strings.Join(affectedRoles, ", "))
 	}
 
-	h.logger.Info("删除skill成功", zap.String("skill", skillName))
+	h.logger.Info("Deletion of skill successful", zap.String("skill", skillName))
 	if h.audit != nil {
-		h.audit.RecordOK(c, "skill", "delete", "删除 Skill", "skill", skillName, map[string]interface{}{
+		h.audit.RecordOK(c, "skill", "delete", "Skill deleted", "skill", skillName, map[string]interface{}{
 			"affected_roles": affectedRoles,
 		})
 	}
@@ -499,7 +499,7 @@ func (h *SkillsHandler) GetSkillStats(c *gin.Context) {
 	if h.db != nil {
 		dbStats, err := h.db.LoadSkillStats()
 		if err != nil {
-			h.logger.Warn("从数据库加载Skills统计信息失败", zap.Error(err))
+			h.logger.Warn("Loading Skills statistics from database failed", zap.Error(err))
 			skillStatsMap = make(map[string]*database.SkillStats)
 		} else {
 			skillStatsMap = dbStats
@@ -566,7 +566,7 @@ func (h *SkillsHandler) ClearSkillStats(c *gin.Context) {
 		return
 	}
 
-	h.logger.Info("已清空所有Skills统计信息")
+	h.logger.Info("All skill stats cleared")
 	c.JSON(http.StatusOK, gin.H{
 		"message": "All skill statistics have been cleared",
 	})
@@ -586,12 +586,12 @@ func (h *SkillsHandler) ClearSkillStatsByName(c *gin.Context) {
 	}
 
 	if err := h.db.ClearSkillStatsByName(skillName); err != nil {
-		h.logger.Error("清空指定skill统计信息失败", zap.String("skill", skillName), zap.Error(err))
+		h.logger.Error("Failed to clear specified skill statistics", zap.String("skill", skillName), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to clear stats: " + err.Error()})
 		return
 	}
 
-	h.logger.Info("已清空指定skill统计信息", zap.String("skill", skillName))
+	h.logger.Info("Specified skill stats cleared", zap.String("skill", skillName))
 	c.JSON(http.StatusOK, gin.H{
 		"message": fmt.Sprintf("Statistics for skill '%s' have been cleared", skillName),
 	})
@@ -636,7 +636,7 @@ func (h *SkillsHandler) saveRolesConfig() error {
 			// 将角色配置序列化为YAML
 			roleData, err := yaml.Marshal(&role)
 			if err != nil {
-				h.logger.Error("序列化角色配置失败", zap.String("role", roleName), zap.Error(err))
+				h.logger.Error("Failed to serialize role configuration", zap.String("role", roleName), zap.Error(err))
 				continue
 			}
 
@@ -651,11 +651,11 @@ func (h *SkillsHandler) saveRolesConfig() error {
 
 			// 写入文件
 			if err := os.WriteFile(roleFile, roleData, 0644); err != nil {
-				h.logger.Error("保存角色配置文件失败", zap.String("role", roleName), zap.String("file", roleFile), zap.Error(err))
+				h.logger.Error("Failed to save role profile", zap.String("role", roleName), zap.String("file", roleFile), zap.Error(err))
 				continue
 			}
 
-			h.logger.Info("角色配置Saved到文件", zap.String("role", roleName), zap.String("file", roleFile))
+			h.logger.Info("Role configuration saved to file", zap.String("role", roleName), zap.String("file", roleFile))
 		}
 	}
 

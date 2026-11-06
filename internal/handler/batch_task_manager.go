@@ -442,7 +442,7 @@ func (m *BatchTaskManager) ListQueues(limit, offset int, status, keyword string)
 }
 
 func (m *BatchTaskManager) ListQueuesForAccess(limit, offset int, status, keyword, userID, scope string) ([]*BatchTaskQueue, int, error) {
-	var queues []*BatchTaskQueue
+	queues := make([]*BatchTaskQueue, 0)
 	var total int
 
 	// 如果数据库可用，从数据库查询
@@ -757,6 +757,9 @@ func batchQueueConcurrencyFromRow(row *database.BatchTaskQueueRow) int {
 
 // UpdateQueueMetadata 更新队列标题、角色、代理模式和并发数（非 running 时可用）
 func (m *BatchTaskManager) UpdateQueueMetadata(queueID, title, role, agentMode string, concurrency *int, hitlPolicies ...string) error {
+	if concurrency != nil && (*concurrency < 1 || *concurrency > MaxBatchQueueConcurrency) {
+		return fmt.Errorf("The number of concurrencies must be 1–%d", MaxBatchQueueConcurrency)
+	}
 	if utf8.RuneCountInString(title) > MaxBatchQueueTitleLen {
 		return fmt.Errorf("title cannot exceed %d characters", MaxBatchQueueTitleLen)
 	}
@@ -952,7 +955,7 @@ func (m *BatchTaskManager) AddTaskToQueue(queueID, message string) (*BatchTask, 
 
 	queue, exists := m.queues[queueID]
 	if !exists {
-		return nil, fmt.Errorf("队列不存在")
+		return nil, fmt.Errorf("Queue not found")
 	}
 
 	if !queueAllowsTaskListMutationLocked(queue) {

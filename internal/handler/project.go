@@ -67,7 +67,7 @@ func (h *ProjectHandler) CreateProject(c *gin.Context) {
 	}
 	created, err := h.db.CreateProject(p)
 	if err != nil {
-		h.logger.Error("创建项目失败", zap.Error(err))
+		h.logger.Error("Failed to create project", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -90,7 +90,7 @@ func (h *ProjectHandler) GetDashboardSummary(c *gin.Context) {
 	session, _ := security.CurrentSession(c)
 	summary, err := h.db.GetProjectDashboardSummaryForAccess(limit, session.UserID, session.Scope)
 	if err != nil {
-		h.logger.Error("获取项目仪表盘摘要失败", zap.Error(err))
+		h.logger.Error("Failed to get project dashboard summary", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -138,7 +138,7 @@ func (h *ProjectHandler) ListProjects(c *gin.Context) {
 func (h *ProjectHandler) GetProjectStats(c *gin.Context) {
 	stats, err := project.GetProjectStats(h.db, c.Param("id"))
 	if err != nil {
-		if strings.Contains(err.Error(), "不存在") {
+		if strings.Contains(err.Error(), "不存在") || strings.Contains(strings.ToLower(err.Error()), "not found") || strings.Contains(strings.ToLower(err.Error()), "does not exist") {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
 			return
 		}
@@ -198,9 +198,12 @@ func (h *ProjectHandler) UpdateProject(c *gin.Context) {
 		return
 	}
 	if req.Name != nil {
-		if s := strings.TrimSpace(*req.Name); s != "" {
-			p.Name = s
+		s := strings.TrimSpace(*req.Name)
+		if s == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Project name cannot be empty"})
+			return
 		}
+		p.Name = s
 	}
 	if req.Description != nil {
 		p.Description = clampProjectDescription(*req.Description)
@@ -419,11 +422,18 @@ func (h *ProjectHandler) GetFactGraph(c *gin.Context) {
 	c.JSON(http.StatusOK, graph)
 }
 
+// note/context-* 由压缩流程独占写入；手工改写会让目标会话把它当成当前工作记录。
+const reservedContextCheckpointError = "note/context-* is reserved for system continuation records; use a separate fact_key for shared project facts"
+
 // CreateFact POST /api/projects/:id/facts
 func (h *ProjectHandler) CreateFact(c *gin.Context) {
 	var req upsertFactRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if database.IsContextCheckpointKey(req.FactKey) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": reservedContextCheckpointError})
 		return
 	}
 	projectID := c.Param("id")
@@ -460,6 +470,10 @@ func (h *ProjectHandler) UpdateFact(c *gin.Context) {
 		return
 	}
 	oldFactKey := existing.FactKey
+	if database.IsContextCheckpointKey(oldFactKey) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": reservedContextCheckpointError})
+		return
+	}
 	var req updateFactRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -467,6 +481,10 @@ func (h *ProjectHandler) UpdateFact(c *gin.Context) {
 	}
 	if req.FactKey != nil {
 		if k := strings.TrimSpace(*req.FactKey); k != "" {
+			if database.IsContextCheckpointKey(k) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": reservedContextCheckpointError})
+				return
+			}
 			existing.FactKey = k
 		}
 	}

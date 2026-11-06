@@ -11,7 +11,10 @@ import (
 // ShutdownTasks stops local work before shared MCP clients and databases close.
 func (h *AgentHandler) ShutdownTasks() {
 	if h != nil && h.tasks != nil {
+		h.asyncSubmitMu.Lock()
 		h.tasks.Shutdown()
+		h.asyncSubmitMu.Unlock()
+		h.asyncWorkers.Wait()
 		if h.logger != nil {
 			for _, task := range h.tasks.GetActiveTasks() {
 				h.logger.Warn("tasks still had unfinished cleanup at shutdown", zap.String("runId", task.RunID), zap.String("cleanupError", task.CleanupError))
@@ -30,6 +33,22 @@ func (h *AgentHandler) taskFinishingEventSender(send func(string, string, interf
 				}
 				send("error", taskCleanupMessage(err)+": "+err.Error(), map[string]interface{}{"errorType": taskCleanupStatus(err)})
 				data = map[string]interface{}{"conversationId": conversationID, "runId": runID, "status": taskCleanupStatus(err), "cleanupError": err.Error()}
+			} else {
+				payload := map[string]interface{}{}
+				if existing, ok := data.(map[string]interface{}); ok {
+					for key, value := range existing {
+						payload[key] = value
+					}
+				}
+				payload["conversationId"] = conversationID
+				payload["runId"] = runID
+				for _, task := range h.tasks.GetCompletedTasks() {
+					if task.RunID == runID && task.ConversationID == conversationID {
+						payload["status"] = task.Status
+						break
+					}
+				}
+				data = payload
 			}
 		}
 		send(eventType, message, data)

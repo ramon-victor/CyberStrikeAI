@@ -91,8 +91,11 @@ function auditResultLabel(result) {
 }
 
 function auditLocale() {
+    if (typeof window.uiLocale === 'function') return window.uiLocale();
     if (typeof window.__locale === 'string' && window.__locale.length) {
-        return window.__locale.startsWith('zh') ? 'zh-CN' : 'en-US';
+        if (window.__locale.startsWith('zh')) return 'zh-CN';
+        if (window.__locale.startsWith('ru')) return 'ru-RU';
+        return 'en-US';
     }
     return (typeof navigator !== 'undefined' && navigator.language) ? navigator.language : 'en-US';
 }
@@ -157,7 +160,7 @@ function updateAuditTimezoneHint() {
     }
     el.hidden = false;
     el.textContent = auditT('settingsAudit.filterTimeZone', { tz: tz },
-        '时区：' + tz + '（筛选按浏览器本地时间，API 使用 UTC）');
+        "Time zone:" + tz + "(Filter by browser local time, API uses UTC)");
 }
 
 function initAuditPageSizeFromStorage() {
@@ -274,7 +277,7 @@ async function loadAuditLogs(page) {
     auditLogsPage = page != null ? page : auditLogsPage;
     const listEl = document.getElementById('audit-log-list');
     if (listEl) {
-        listEl.innerHTML = '<div class="loading-spinner">' + (typeof escapeHtml === 'function' ? escapeHtml(auditT('settingsAudit.loading', null, '加载中...')) : '加载中...') + '</div>';
+        listEl.innerHTML = '<div class="loading-spinner">' + (typeof escapeHtml === 'function' ? escapeHtml(auditT('settingsAudit.loading', null, "Loading...")) : "Loading...") + '</div>';
     }
     try {
         const qs = buildAuditQueryParams(false);
@@ -372,12 +375,12 @@ function renderAuditLogsPagination() {
     const start = total === 0 ? 0 : (currentPage - 1) * pageSize + 1;
     const end = total === 0 ? 0 : Math.min(currentPage * pageSize, total);
     const infoText = auditT('mcpMonitor.paginationInfo', { start: start, end: end, total: total },
-        '显示 ' + start + '-' + end + ' / 共 ' + total + ' 条记录');
+        "show " + start + '-' + end + " / common " + total + " records");
     const perPageLabel = auditT('mcpMonitor.perPageLabel', null, 'Per page');
     const firstPageLabel = auditT('mcp.firstPage', null, 'First');
     const prevPageLabel = auditT('mcp.prevPage', null, 'Previous');
     const pageInfoText = auditT('mcp.pageInfo', { page: currentPage, total: totalPages },
-        '第 ' + currentPage + ' / ' + totalPages + ' 页');
+        "No. " + currentPage + ' / ' + totalPages + " Page");
     const nextPageLabel = auditT('mcp.nextPage', null, 'Next');
     const lastPageLabel = auditT('mcp.lastPage', null, 'Last');
     const disabledFirst = currentPage === 1 || total === 0;
@@ -399,6 +402,7 @@ function renderAuditLogsPagination() {
     html += '<button type="button" class="btn-secondary" onclick="goAuditLogsPage(' + totalPages + ')"' + (disabledLast ? ' disabled' : '') + '>' + esc(lastPageLabel) + '</button>';
     html += '</div></div>';
     container.innerHTML = html;
+    if (typeof initPaginationSelects === 'function') initPaginationSelects(container);
 }
 
 function goAuditLogsPage(p) {

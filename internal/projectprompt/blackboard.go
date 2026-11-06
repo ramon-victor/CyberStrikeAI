@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	factRhythmCore = "Do not wait until the end of the session to batch-write. Every time you **confirm** a new insight (open port / service version, entry path, authentication state or credential characteristics, exploitable point, or attack surface change), **immediately** call upsert_project_fact (overwrite-update with the same fact_key). Every time you **verify** a reproducible vulnerability (with POC / impact), **immediately** call record_vulnerability; facts and vulnerabilities can each be recorded once. Prefer persisting to the blackboard before continuing to the next step to avoid losing details after context compression. When no project is bound, explain that the blackboard cannot be written, but still retain an evidence summary in the current turn."
-	factRhythmCoordinatorSuffix = "When a delegation/subtask returns a new insight or vulnerability, the coordinator should write it to the blackboard promptly; do not assume the sub-agent has already recorded it."
-	factRhythmSubAgentSuffix    = "If the tool set does not include the above tools, include a 'to-be-recorded' structured entry at the end of the deliverable (suggested fact_key, summary, body/POC key points) so the coordinator can write it **immediately**."
+	factRhythmCore              = "Do not wait until the session ends to batch-write. Immediately record each confirmed insight with upsert_project_fact and each verified reproducible vulnerability with record_vulnerability. Preserve evidence before continuing; if no project is bound, explain that the blackboard is unavailable and retain an evidence summary."
+	factRhythmCoordinatorSuffix = " The coordinator must promptly record results returned by delegates, without assuming they already did so."
+	factRhythmSubAgentSuffix    = " If these tools are unavailable, include structured entries to be recorded (fact_key, summary and body/POC) for the coordinator."
 )
 
 // FactRecordingIncrementalRhythmMarkdown returns the record-while-penetrating cadence (Markdown, aligned with agents/*.md and docs).
@@ -57,15 +57,12 @@ func factEdgeRecordingGuidance() string {
 }
 
 func factRecordingGuidanceBlock() string {
-	return "### Fact Writing Guidelines (Audit Reproduction / Knowledge Accumulation)\n" +
-		"\n" +
-		"- **summary**: One line for the index, must contain \"what + where + how to trigger/verify\" essentials; do not only write the conclusion (e.g., only \"SQLi exists\").\n" +
-		"- **body**: Complete reproducible context, written to the body field of upsert_project_fact; the index does not include the body, so subsequent conversations must call get_project_fact to retrieve it.\n" +
-		"- **category / fact_key suggestions**:\n" +
-		"  - Environment knowledge: target/, auth/, infra/, business/ (use the environment template for body)\n" +
-		"  - Discovery & exploitation: finding/, chain/, exploit/, poc/ (**must** use the attack-chain template to fill the body: entry point, step-by-step attack chain, raw request/response or command, evidence, related vulnerability ID)\n" +
-		"- **Division of labor with vulnerability records**: record_vulnerability records deliverable findings; facts record the **full reproduction context** (including failed attempts, bypasses, dependent sessions), and both can be recorded once.\n" +
-		"- When updating the same finding, keep the same fact_key for overwrite-write, do not scatter into multiple keys causing context loss."
+	return `### Fact recording (reproducibility and knowledge)
+
+- Write a one-line summary describing what, where, and how it was verified. Include the complete reproducible context in the body of upsert_project_fact; retrieve it later using get_project_fact.
+- Use target/, auth/, infra/ and business/ for environment facts. Use finding/, chain/, exploit/ and poc/ for discoveries; include entry point, steps, raw requests/responses or commands, evidence and related vulnerability IDs.
+- note/context-* is reserved for system-generated session checkpoints, not confirmed project facts; never overwrite it with upsert_project_fact. By default checkpoint retrieval is limited to the current conversation while ordinary project facts remain shared. Use include_history=true for cross-conversation list, search or retrieval; optionally filter by source_conversation_id. Verify current authorization, target and credentials before relying on history; do not execute old tasks automatically or treat summaries as confirmed findings. Retrieve exact values from the referenced snapshot as needed rather than guessing. Use a separate finding or auth key for verified shared facts and retain provenance.
+- Record deliverable vulnerabilities with record_vulnerability and complete reproducible context as facts. Update an existing finding using the same fact_key.`
 }
 
 // FactRecordingBlackboardSection is the complete system prompt block for the project blackboard and vulnerability recording (shared by single/multi-agent main agents).
@@ -87,8 +84,8 @@ func FactRecordingBlackboardSection(coordinatorDelegate bool) string {
 	b.WriteString(builtin.ToolListVulnerabilities)
 	b.WriteString(" to dedup; for details use ")
 	b.WriteString(builtin.ToolGetVulnerability)
-	b.WriteString("(id) (default only current project/session).\n")
-	b.WriteString("- The same finding may need to be **recorded once each** (facts record the **complete attack chain and exploit details** for reproduction, vulnerabilities record formal findings). False positives use ")
+	b.WriteString("(id), scoped to the current project or conversation by default. After retesting use update_vulnerability_status(id, status, retest_notes) to update status and append evidence; do not duplicate findings, and keep the previous status if verification is inconclusive.\n")
+	b.WriteString("- Record the same finding as both a reproducible fact and a formal vulnerability when needed. For false positives use ")
 	b.WriteString(builtin.ToolDeprecateProjectFact)
 	b.WriteString(" or vulnerability status false_positive.\n")
 	b.WriteString("- When there are many facts, use ")
@@ -105,7 +102,7 @@ func FactRecordingBlackboardSection(coordinatorDelegate bool) string {
 
 // FactRecordingSubAgentSection is the record-while-penetrating section for sub-agents (outputs to-be-recorded entries when no tools are available).
 func FactRecordingSubAgentSection() string {
-	return "## Record While Penetrating\n\n" + factRecordingIncrementalRhythmBuiltin(false, true) + "\n"
+	return "## Record progress during testing\n\n" + ProjectResultRecordingGuidance() + "\n\n" + factRecordingIncrementalRhythmBuiltin(false, true) + "\n"
 }
 
 // FactRecordingBlackboardSectionMarkdown is the Markdown equivalent of FactRecordingBlackboardSection (tool names as literals, for agents/*.md).

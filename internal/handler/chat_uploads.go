@@ -434,19 +434,19 @@ func (h *ChatUploadsHandler) collectFiles(c *gin.Context, conversationFilter, pr
 	})
 	reductionFiles, err := h.collectReductionFiles(c, conversationFilter, projectFilter)
 	if err != nil {
-		h.logger.Warn("列举 reduction 产物失败", zap.Error(err))
+		h.logger.Warn("Failed to enumerate reduction products", zap.Error(err))
 	} else if len(reductionFiles) > 0 {
 		files = append(files, reductionFiles...)
 	}
 	workspaceFiles, err := h.collectWorkspaceFiles(c, conversationFilter, projectFilter)
 	if err != nil {
-		h.logger.Warn("列举 workspace 产物失败", zap.Error(err))
+		h.logger.Warn("Failed to list workspace products", zap.Error(err))
 	} else if len(workspaceFiles) > 0 {
 		files = append(files, workspaceFiles...)
 	}
 	artifactFiles, err := h.collectConversationArtifactFiles(c, conversationFilter, projectFilter)
 	if err != nil {
-		h.logger.Warn("列举 conversation_artifacts 产物失败", zap.Error(err))
+		h.logger.Warn("Failed to list conversation_artifacts files", zap.Error(err))
 	} else if len(artifactFiles) > 0 {
 		files = append(files, artifactFiles...)
 	}
@@ -846,7 +846,7 @@ func (h *ChatUploadsHandler) List(c *gin.Context) {
 	pageSize := parsePositiveIntQuery(c, "pageSize", 20, 200)
 	files, folders, err := h.collectFiles(c, conversationFilter, projectFilter)
 	if err != nil {
-		h.logger.Warn("列举对话附件失败", zap.Error(err))
+		h.logger.Warn("Failed to list conversation attachments", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -870,7 +870,7 @@ func (h *ChatUploadsHandler) Export(c *gin.Context) {
 	search := strings.TrimSpace(c.Query("search"))
 	files, _, err := h.collectFiles(c, conversationFilter, projectFilter)
 	if err != nil {
-		h.logger.Warn("导出对话附件失败", zap.Error(err))
+		h.logger.Warn("Failed to export conversation attachments", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -908,7 +908,7 @@ func (h *ChatUploadsHandler) Export(c *gin.Context) {
 	manifestBytes, _ := json.MarshalIndent(manifest, "", "  ")
 	mw, err := zw.Create("manifest.json")
 	if err != nil {
-		h.logger.Warn("写入附件导出清单失败", zap.Error(err))
+		h.logger.Warn("Failed to write attachment export list", zap.Error(err))
 		return
 	}
 	_, _ = mw.Write(manifestBytes)
@@ -953,7 +953,7 @@ func (h *ChatUploadsHandler) Export(c *gin.Context) {
 		used[zipName]++
 		fw, err := zw.Create(zipName)
 		if err != nil {
-			h.logger.Warn("创建附件导出项失败", zap.String("path", item.RelativePath), zap.Error(err))
+			h.logger.Warn("Failed to create attachment export item", zap.String("path", item.RelativePath), zap.Error(err))
 			continue
 		}
 		src, err := os.Open(abs)
@@ -963,12 +963,12 @@ func (h *ChatUploadsHandler) Export(c *gin.Context) {
 		_, copyErr := io.Copy(fw, src)
 		_ = src.Close()
 		if copyErr != nil {
-			h.logger.Warn("复制附件导出项失败", zap.String("path", item.RelativePath), zap.Error(copyErr))
+			h.logger.Warn("Failed to copy attachment export items", zap.String("path", item.RelativePath), zap.Error(copyErr))
 			return
 		}
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "file", "export", "导出对话附件", "chat_upload", filename, map[string]interface{}{
+		h.audit.RecordOK(c, "file", "export", "Export conversation attachments", "chat_upload", filename, map[string]interface{}{
 			"conversation_id": conversationFilter,
 			"project_id":      projectFilter,
 			"file_count":      len(files),
@@ -981,7 +981,7 @@ func (h *ChatUploadsHandler) Download(c *gin.Context) {
 	p := c.Query("path")
 	if strings.HasPrefix(strings.TrimSpace(p), reductionVirtualPrefix) {
 		if !h.reductionVirtualPathAllowed(c, p) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 			return
 		}
 		abs, err := h.resolveReductionVirtualPath(p)
@@ -1003,7 +1003,7 @@ func (h *ChatUploadsHandler) Download(c *gin.Context) {
 	}
 	if strings.HasPrefix(strings.TrimSpace(p), workspaceVirtualPrefix) {
 		if !h.workspaceVirtualPathAllowed(c, p) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 			return
 		}
 		abs, err := h.resolveWorkspaceVirtualPath(p)
@@ -1021,7 +1021,7 @@ func (h *ChatUploadsHandler) Download(c *gin.Context) {
 	}
 	if strings.HasPrefix(strings.TrimSpace(p), artifactVirtualPrefix) {
 		if !h.conversationArtifactVirtualPathAllowed(c, p) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 			return
 		}
 		abs, err := h.resolveConversationArtifactVirtualPath(p)
@@ -1042,7 +1042,7 @@ func (h *ChatUploadsHandler) Download(c *gin.Context) {
 		return
 	}
 	if !h.pathAllowed(c, p) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 	abs, err := h.resolveUnderChatUploads(p)
@@ -1071,56 +1071,56 @@ func (h *ChatUploadsHandler) ResolvePath(c *gin.Context) {
 	case strings.HasPrefix(p, reductionVirtualPrefix):
 		if strings.Trim(strings.TrimPrefix(p, reductionVirtualPrefix), "/") == "" {
 			if _, ok := security.CurrentSession(c); !ok {
-				c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+				c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 				return
 			}
 			abs, err = h.absReductionRoot()
 			break
 		}
 		if !h.reductionVirtualPathAllowed(c, p) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 			return
 		}
 		abs, err = h.resolveReductionVirtualPath(p)
 	case strings.HasPrefix(p, workspaceVirtualPrefix):
 		if strings.Trim(strings.TrimPrefix(p, workspaceVirtualPrefix), "/") == "" {
 			if _, ok := security.CurrentSession(c); !ok {
-				c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+				c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 				return
 			}
 			abs, err = h.absWorkspaceRoot()
 			break
 		}
 		if !h.workspaceVirtualPathAllowed(c, p) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 			return
 		}
 		abs, err = h.resolveWorkspaceVirtualPath(p)
 	case strings.HasPrefix(p, artifactVirtualPrefix):
 		if strings.Trim(strings.TrimPrefix(p, artifactVirtualPrefix), "/") == "" {
 			if _, ok := security.CurrentSession(c); !ok {
-				c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+				c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 				return
 			}
 			abs, err = h.absConversationArtifactsRoot()
 			break
 		}
 		if !h.conversationArtifactVirtualPathAllowed(c, p) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 			return
 		}
 		abs, err = h.resolveConversationArtifactVirtualPath(p)
 	default:
 		if p == "" || p == "." {
 			if _, ok := security.CurrentSession(c); !ok {
-				c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+				c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 				return
 			}
 			abs, err = h.absRoot()
 			break
 		}
 		if !h.pathAllowed(c, p) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 			return
 		}
 		abs, err = h.resolveUnderChatUploads(p)
@@ -1157,7 +1157,7 @@ func (h *ChatUploadsHandler) Delete(c *gin.Context) {
 		return
 	}
 	if !h.pathAllowed(c, body.Path) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 	abs, err := h.resolveUnderChatUploads(body.Path)
@@ -1191,7 +1191,7 @@ func (h *ChatUploadsHandler) Delete(c *gin.Context) {
 	}
 	_ = h.db.DeleteChatUploadArtifactPath(filepath.ToSlash(filepath.Clean(filepath.FromSlash(body.Path))))
 	if h.audit != nil {
-		h.audit.RecordOK(c, "file", "delete", "删除对话附件", "chat_upload", body.Path, nil)
+		h.audit.RecordOK(c, "file", "delete", "Chat attachment deleted", "chat_upload", body.Path, nil)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -1225,7 +1225,7 @@ func (h *ChatUploadsHandler) Mkdir(c *gin.Context) {
 		parent = ""
 	}
 	if !h.pathAllowed(c, parent) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 
@@ -1284,7 +1284,7 @@ func (h *ChatUploadsHandler) Rename(c *gin.Context) {
 		return
 	}
 	if !h.pathAllowed(c, body.Path) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 	newName := strings.TrimSpace(body.NewName)
@@ -1328,7 +1328,7 @@ type chatUploadContentBody struct {
 func (h *ChatUploadsHandler) GetContent(c *gin.Context) {
 	p := c.Query("path")
 	if !h.pathAllowed(c, p) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 	abs, err := h.resolveUnderChatUploads(p)
@@ -1365,7 +1365,7 @@ func (h *ChatUploadsHandler) PutContent(c *gin.Context) {
 		return
 	}
 	if !h.pathAllowed(c, body.Path) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 	if !utf8.ValidString(body.Content) {
@@ -1415,7 +1415,7 @@ func (h *ChatUploadsHandler) Upload(c *gin.Context) {
 	targetRel := strings.TrimSpace(c.PostForm("relativeDir"))
 	if targetRel != "" {
 		if !h.pathAllowed(c, targetRel) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 			return
 		}
 		absDir, err := h.resolveUnderChatUploads(targetRel)
@@ -1443,7 +1443,7 @@ func (h *ChatUploadsHandler) Upload(c *gin.Context) {
 		convID := strings.TrimSpace(c.PostForm("conversationId"))
 		dateStr := time.Now().Format("2006-01-02")
 		if !h.pathAllowed(c, filepath.ToSlash(filepath.Join(dateStr, convID))) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 			return
 		}
 		convDir := convID
@@ -1503,7 +1503,7 @@ func (h *ChatUploadsHandler) Upload(c *gin.Context) {
 		_ = h.db.UpsertChatUploadArtifact(filepath.ToSlash(rel), conversationID, session.UserID)
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "file", "upload", "上传对话附件", "chat_upload", filepath.ToSlash(rel), map[string]interface{}{
+		h.audit.RecordOK(c, "file", "upload", "Chat attachment uploaded", "chat_upload", filepath.ToSlash(rel), map[string]interface{}{
 			"name": unique,
 		})
 	}

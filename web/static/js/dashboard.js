@@ -162,7 +162,7 @@ async function refreshDashboard() {
             fetchJson(dashboardProjectScopedUrl('/api/c2/tasks?page=1&page_size=1')),
             fetchJson('/api/projects/dashboard-summary?fact_limit=10'),
             selectedSeverityStatus ? fetchJson('/api/vulnerabilities/stats?status=' + encodeURIComponent(selectedSeverityStatus)) : Promise.resolve(null),
-            fetchJson(dashboardProjectScopedUrl('/api/usage/tokens?days=7&limit=5'))
+            fetchJson(dashboardProjectScopedUrl('/api/usage/tokens?days=7&limit=20'))
         ]);
 
         // 如果在 await 期间 controller 已被 abort，说明又有新刷新启动了，丢弃本次结果
@@ -244,7 +244,7 @@ async function refreshDashboard() {
                 } else if (openHighCount > 0) {
                     subTextEl.textContent = dt('dashboard.openHighCountLabel', { count: openHighCount }, 'Open high ' + openHighCount);
                 } else {
-                    subTextEl.textContent = dt('dashboard.totalCount', { count: total }, '共 ' + total + ' 个');
+                    subTextEl.textContent = dt('dashboard.totalCount', { count: total }, "common " + total + " indivual");
                 }
             }
         } else {
@@ -275,7 +275,7 @@ async function refreshDashboard() {
             setEl('dashboard-batch-pending', String(pending));
             setEl('dashboard-batch-running', String(running));
             setEl('dashboard-batch-done', String(done));
-            setEl('dashboard-batch-total', total > 0 ? (typeof window.t === 'function' ? window.t('dashboard.totalCount', { count: total }) : `共 ${total} 个`) : (typeof window.t === 'function' ? window.t('dashboard.noTasks') : '暂无任务'));
+            setEl('dashboard-batch-total', total > 0 ? (typeof window.t === 'function' ? window.t('dashboard.totalCount', { count: total }) : `common ${total} indivual`) : (typeof window.t === 'function' ? window.t('dashboard.noTasks') : "No tasks"));
             
             // 更新进度条
             if (total > 0) {
@@ -311,7 +311,7 @@ async function refreshDashboard() {
             const effectiveToolCalls = totalSuccess + toolsFailedCount;
             setEl('dashboard-kpi-tools-calls', formatNumber(toolsTotalCalls));
             setKpiSubText('dashboard-kpi-tools-sub-text',
-                dt('dashboard.toolsCountLabel', { count: toolsCount }, toolsCount + ' 个工具'));
+                dt('dashboard.toolsCountLabel', { count: toolsCount }, toolsCount + " tools"));
             if (effectiveToolCalls > 0) {
                 toolsSuccessRate = (totalSuccess / effectiveToolCalls) * 100;
                 const rateStr = toolsSuccessRate.toFixed(1) + '%';
@@ -441,6 +441,7 @@ async function refreshDashboard() {
         setEl('dashboard-kpi-success-rate', '-');
         setEl('dashboard-kpi-tools-calls', '-');
         setEl('dashboard-kpi-token-usage', '-');
+        setKpiSubText('dashboard-kpi-token-sub-text', '-');
         setKpiSubText('dashboard-kpi-tasks-sub-text', '-');
         setKpiSubText('dashboard-kpi-vuln-sub-text', '-');
         setKpiSubText('dashboard-kpi-tools-sub-text', '-');
@@ -699,10 +700,10 @@ function setKpiRateBadge(id, rate, failedCount) {
         el.textContent = dt('dashboard.healthyStatus', null, 'Healthy');
         el.classList.add('is-success');
     } else if (rate >= 80) {
-        el.textContent = dt('dashboard.normalStatus', null, '基本正常') + (failedCount > 0 ? ' · ' + dt('dashboard.failedNCalls', { count: failedCount }, failedCount + ' 失败') : '');
+        el.textContent = dt('dashboard.normalStatus', null, "Mostly OK") + (failedCount > 0 ? ' · ' + dt('dashboard.failedNCalls', { count: failedCount }, failedCount + " fail") : '');
         el.classList.add('is-warning');
     } else {
-        el.textContent = dt('dashboard.degradedStatus', null, '需要关注') + (failedCount > 0 ? ' · ' + dt('dashboard.failedNCalls', { count: failedCount }, failedCount + ' 失败') : '');
+        el.textContent = dt('dashboard.degradedStatus', null, "Needs attention") + (failedCount > 0 ? ' · ' + dt('dashboard.failedNCalls', { count: failedCount }, failedCount + " fail") : '');
         el.classList.add('is-danger');
     }
 }
@@ -714,20 +715,18 @@ function renderDashboardTokenUsage(res) {
         setKpiSubText('dashboard-kpi-token-sub-text', '-');
         return;
     }
+    const cacheRate = tokenUsageCacheRate(summary);
     const total = Number(summary.totalTokens || 0);
-    const calls = Number(summary.modelCalls || 0);
-    const today = res && res.today ? Number(res.today.totalTokens || 0) : 0;
     if (!Number.isFinite(total) || total <= 0) {
         setEl('dashboard-kpi-token-usage', '0');
-        setKpiSubText('dashboard-kpi-token-sub-text', dt('dashboard.noTokenUsageYet', null, '暂无用量'));
+        setKpiSubText('dashboard-kpi-token-sub-text', dt('dashboard.noTokenUsageYet', null, "No usage yet"));
         return;
     }
     setEl('dashboard-kpi-token-usage', formatTokenUsageCompact(total));
     setKpiSubText('dashboard-kpi-token-sub-text',
         dt('dashboard.tokenUsageSub', {
-            today: formatTokenUsageCompact(today),
-            calls: Number.isFinite(calls) ? calls : 0
-        }, '近 7 天 ' + (Number.isFinite(calls) ? calls : 0) + ' 次调用 · 今日 ' + formatTokenUsageCompact(today)));
+            rate: cacheRate
+        }, "cache hit " + cacheRate));
 }
 
 function formatTokenUsageCompact(num) {
@@ -784,27 +783,27 @@ function renderDashboardAlertBanner(stats) {
 
     if (stats.criticalCount > 0) {
         reasons.push(dt('dashboard.alertCriticalReason', { count: stats.criticalCount },
-            '存在 ' + stats.criticalCount + ' 个待处理的严重漏洞，建议立即处置'));
+            "exist " + stats.criticalCount + " There are serious vulnerabilities that need to be dealt with. It is recommended to deal with them immediately."));
         reasonKeys.push('crit:' + stats.criticalCount);
         level = 'danger';
     }
     if (stats.hitlPending > 0) {
         // HITL 待审批是阻塞 Agent 流程的，独立成一条；不影响 level（除非已经是 info 升 warning）
         reasons.push(dt('dashboard.alertHitlReason', { count: stats.hitlPending },
-            '有 ' + stats.hitlPending + ' 个待审批的人机协同请求，Agent 正在等待你的决策'));
+            "have " + stats.hitlPending + " There are human-machine collaboration requests pending approval, and the Agent is waiting for your decision."));
         reasonKeys.push('hitl:' + stats.hitlPending);
         if (level === 'info') level = 'warning';
     }
     if (stats.successRate >= 0 && stats.successRate < 80 && stats.failedTools > 0) {
         reasons.push(dt('dashboard.alertFailedReason', { count: stats.failedTools },
-            '工具调用成功率偏低（' + stats.failedTools + ' 次失败），请检查 MCP 监控'));
+            "The tool calling success rate is low (" + stats.failedTools + " times failed), please check the MCP monitoring"));
         reasonKeys.push('rate:' + Math.round(stats.successRate) + ':' + stats.failedTools);
         if (level === 'info') level = 'warning';
     }
     if (stats.externalMcpDown > 0) {
         // External MCP 异常服务器数 > 0：影响工具可用性
         reasons.push(dt('dashboard.alertMcpDownReason', { count: stats.externalMcpDown },
-            'External MCP 服务器有 ' + stats.externalMcpDown + ' 个未运行，相关工具不可用'));
+            "External MCP server has " + stats.externalMcpDown + " Not running, related tools are unavailable"));
         reasonKeys.push('mcp:' + stats.externalMcpDown);
         if (level === 'info') level = 'warning';
     }
@@ -924,7 +923,7 @@ function renderExternalMcpHealth(stats) {
         } else if (down < enabled) {
             healthEl.classList.add('is-warning');
             healthEl.textContent = dt('dashboard.mcpPartialDown', { count: down },
-                down + ' 个未运行');
+                down + " not running");
         } else {
             healthEl.classList.add('is-danger');
             healthEl.textContent = dt('dashboard.mcpAllDown', null, 'All stopped');
@@ -1016,7 +1015,7 @@ function renderRecommendedActions(state) {
             level: 'urgent',
             icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><circle cx="12" cy="17" r="1" fill="currentColor" stroke="none"/></svg>',
             title: dt('dashboard.recoFixCritical', { count: state.openCriticalCount },
-                '修复 ' + state.openCriticalCount + ' 个待处理严重漏洞'),
+                "repair " + state.openCriticalCount + " pending critical vulnerabilities"),
             desc: dt('dashboard.recoFixCriticalDesc', null, 'Critical-level vulnerabilities should be addressed first'),
             page: 'vulnerabilities'
         });
@@ -1027,7 +1026,7 @@ function renderRecommendedActions(state) {
             level: 'urgent',
             icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
             title: dt('dashboard.recoApproveHitl', { count: state.hitlPending },
-                '审批 ' + state.hitlPending + ' 个 HITL 请求'),
+                "Approval " + state.hitlPending + " HITL requests"),
             desc: dt('dashboard.recoApproveHitlDesc', null, 'Agent needs your decision to proceed'),
             page: 'hitl'
         });
@@ -1038,7 +1037,7 @@ function renderRecommendedActions(state) {
             level: 'warning',
             icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
             title: dt('dashboard.recoRestartMcp', { count: state.externalMcpDown },
-                '检查 ' + state.externalMcpDown + ' 个未运行的 External MCP'),
+                "examine " + state.externalMcpDown + " External MCPs that are not running"),
             desc: dt('dashboard.recoRestartMcpDesc', null, 'Related tools are unavailable until MCP recovers'),
             page: 'mcp-management'
         });
@@ -1049,7 +1048,7 @@ function renderRecommendedActions(state) {
             level: 'warning',
             icon: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
             title: dt('dashboard.recoCheckMonitor', { count: state.failedTools },
-                '排查 ' + state.failedTools + ' 次工具调用失败'),
+                "troubleshooting " + state.failedTools + " Tool calls failed"),
             desc: dt('dashboard.recoCheckMonitorDesc', null, 'View failed request details in MCP monitor'),
             page: 'mcp-monitor'
         });
@@ -1189,7 +1188,7 @@ function stopDashboardAutoRefresh() {
 
 // 严重度配色及中文标签
 var SEVERITY_LABELS_FALLBACK = {
-    critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息'
+    critical: "Critical", high: "High", medium: "Medium", low: "Low", info: "Info"
 };
 
 function severityShortLabel(id) {
@@ -1942,11 +1941,11 @@ var severityDonutTooltipTimer = null;
 var severityDonutHoverClearTimer = null;
 
 var SEVERITY_DEFAULT_LABELS = {
-    critical: '严重',
-    high: '高危',
-    medium: '中危',
-    low: '低危',
-    info: '信息'
+    critical: "Critical",
+    high: "High",
+    medium: "Medium",
+    low: "Low",
+    info: "Info"
 };
 
 function severityLabel(id) {

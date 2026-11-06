@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/config"
@@ -52,6 +53,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" || utf8.RuneCountInString(req.Username) > 64 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Enter a username of at most 64 characters"})
 		return
 	}
 
@@ -175,14 +181,14 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	}
 	if err := h.manager.UpdateUserPassword(session.UserID, newPassword); err != nil {
 		if h.logger != nil {
-			h.logger.Error("更新用户密码失败", zap.Error(err))
+			h.logger.Error("Failed to update user password", zap.Error(err))
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user password"})
 		return
 	}
 
 	if h.logger != nil {
-		h.logger.Info("登录密码已更新，所有会话已失效")
+		h.logger.Info("The login password has been updated and all sessions have expired")
 	}
 
 	if h.audit != nil {

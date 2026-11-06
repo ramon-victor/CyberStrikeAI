@@ -128,14 +128,14 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	auditSvc.PurgeExpired()
 	audit.StartRetentionLoop(auditSvc, log.Logger)
 	if err := db.PurgeWorkflowPackageLifecycle(time.Now().UTC()); err != nil {
-		log.Logger.Warn("清理过期工作流包记录失败", zap.Error(err))
+		log.Logger.Warn("Failed to clear expired workflow package records", zap.Error(err))
 	}
 	go func() {
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
 			if err := db.PurgeWorkflowPackageLifecycle(time.Now().UTC()); err != nil {
-				log.Logger.Warn("清理过期工作流包记录失败", zap.Error(err))
+				log.Logger.Warn("Failed to clear expired workflow package records", zap.Error(err))
 			}
 		}
 	}()
@@ -145,7 +145,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	monitor.StartRetentionLoop(monitorRetention, log.Logger)
 
 	if err := handler.NewHITLManager(db, log.Logger).EnsureSchema(); err != nil {
-		log.Logger.Warn("初始化 HITL 表失败", zap.Error(err))
+		log.Logger.Warn("Failed to initialize HITL table", zap.Error(err))
 	}
 	hitlRetention := hitl.NewService(db, cfg, log.Logger)
 	hitlRetention.PurgeExpired()
@@ -214,7 +214,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	var knowledgeHandler *handler.KnowledgeHandler
 
 	var knowledgeDBConn *database.DB
-	log.Logger.Debug("检查知识库配置", zap.Bool("enabled", cfg.Knowledge.Enabled))
+	log.Logger.Debug("Check knowledge base configuration", zap.Bool("enabled", cfg.Knowledge.Enabled))
 	if cfg.Knowledge.Enabled {
 		// 确定知识库数据库路径
 		knowledgeDBPath := cfg.Database.KnowledgeDBPath
@@ -233,11 +233,11 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 				return nil, fmt.Errorf("knowledge database initialization failed: %w", err)
 			}
 			knowledgeDB = knowledgeDBConn.DB
-			log.Logger.Info("使用独立的知识库数据库", zap.String("path", knowledgeDBPath))
+			log.Logger.Info("Use a separate knowledge base database", zap.String("path", knowledgeDBPath))
 		} else {
 			// 向后兼容：使用会话数据库
 			knowledgeDB = db.DB
-			log.Logger.Info("使用会话数据库存储知识库数据（建议配置knowledge_db_path以分离数据）")
+			log.Logger.Info("Using conversation database for knowledge data; configure knowledge_db_path to separate storage")
 		}
 
 		// 创建知识库管理器
@@ -276,27 +276,27 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		// 创建知识库API处理器
 		knowledgeHandler = handler.NewKnowledgeHandler(knowledgeManager, knowledgeRetriever, knowledgeIndexer, db, log.Logger)
 		knowledgeHandler.SetAudit(auditSvc)
-		log.Logger.Info("知识库模块初始化完成", zap.Bool("handler_created", knowledgeHandler != nil))
+		log.Logger.Info("Knowledge base module initialization completed", zap.Bool("handler_created", knowledgeHandler != nil))
 
 		// 扫描知识库并建立索引（异步）
 		go func() {
 			itemsToIndex, err := knowledgeManager.ScanKnowledgeBase()
 			if err != nil {
-				log.Logger.Warn("扫描知识库失败", zap.Error(err))
+				log.Logger.Warn("Scanning knowledge base failed", zap.Error(err))
 				return
 			}
 
 			// 检查是否已有索引
 			hasIndex, err := knowledgeIndexer.HasIndex()
 			if err != nil {
-				log.Logger.Warn("检查索引状态失败", zap.Error(err))
+				log.Logger.Warn("Checking index status failed", zap.Error(err))
 				return
 			}
 
 			if hasIndex {
 				// 如果已有索引，只索引新添加或更新的项
 				if len(itemsToIndex) > 0 {
-					log.Logger.Info("检测到已有知识库索引，开始增量索引", zap.Int("count", len(itemsToIndex)))
+					log.Logger.Info("An existing knowledge base index is detected and incremental indexing is started.", zap.Int("count", len(itemsToIndex)))
 					ctx := context.Background()
 					consecutiveFailures := 0
 					var firstFailureItemID string
@@ -311,12 +311,12 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 							if consecutiveFailures == 1 {
 								firstFailureItemID = itemID
 								firstFailureError = err
-								log.Logger.Warn("索引知识项失败", zap.String("itemId", itemID), zap.Error(err))
+								log.Logger.Warn("Indexing knowledge items failed", zap.String("itemId", itemID), zap.Error(err))
 							}
 
 							// 如果连续失败2次，立即停止增量索引
 							if consecutiveFailures >= 2 {
-								log.Logger.Error("连续索引失败次数过多，立即停止增量索引",
+								log.Logger.Error("Too many consecutive indexing failures; stopping incremental indexing",
 									zap.Int("consecutiveFailures", consecutiveFailures),
 									zap.Int("totalItems", len(itemsToIndex)),
 									zap.String("firstFailureItemId", firstFailureItemID),
@@ -334,18 +334,18 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 							firstFailureError = nil
 						}
 					}
-					log.Logger.Info("增量索引完成", zap.Int("totalItems", len(itemsToIndex)), zap.Int("failedCount", failedCount))
+					log.Logger.Info("Incremental indexing completed", zap.Int("totalItems", len(itemsToIndex)), zap.Int("failedCount", failedCount))
 				} else {
-					log.Logger.Info("检测到已有知识库索引，没有需要索引的新项或更新项")
+					log.Logger.Info("Existing knowledge index found; no new or updated items require indexing")
 				}
 				return
 			}
 
 			// 冷启动：仅为尚无向量的知识项构建索引（与 IndexMissing 语义一致）
-			log.Logger.Info("未检测到知识库索引，开始自动构建索引")
+			log.Logger.Info("No knowledge base index detected, automatic index building started")
 			ctx := context.Background()
 			if err := knowledgeIndexer.IndexMissing(ctx); err != nil {
-				log.Logger.Warn("自动构建知识库索引失败", zap.Error(err))
+				log.Logger.Warn("Automatic building of knowledge base index failed", zap.Error(err))
 			}
 		}()
 	}
@@ -357,7 +357,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	}
 
 	skillsDir := skillpackage.SkillsRootFromConfig(cfg.SkillsDir, configPath)
-	log.Logger.Debug("Skills 目录（Eino ADK skill 中间件 + Web 管理 API）", zap.String("skillsDir", skillsDir))
+	log.Logger.Debug("Skills directory (Eino ADK skill middleware and web management API)", zap.String("skillsDir", skillsDir))
 	configDir := filepath.Dir(configPath)
 	plantaskRel := strings.TrimSpace(cfg.MultiAgent.EinoMiddleware.PlantaskRelDir)
 	if plantaskRel == "" {
@@ -421,11 +421,11 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		agentsDir = filepath.Join(configDir, agentsDir)
 	}
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
-		log.Logger.Warn("创建 agents 目录失败", zap.String("path", agentsDir), zap.Error(err))
+		log.Logger.Warn("Failed to create agents directory", zap.String("path", agentsDir), zap.Error(err))
 	}
 	markdownAgentsHandler := handler.NewMarkdownAgentsHandler(agentsDir)
 	markdownAgentsHandler.SetAudit(auditSvc)
-	log.Logger.Debug("多代理 Markdown 子 Agent 目录", zap.String("agentsDir", agentsDir))
+	log.Logger.Debug("Multi-agent Markdown sub-agent directory", zap.String("agentsDir", agentsDir))
 
 	// 创建处理器
 	agentHandler := handler.NewAgentHandler(agent, db, cfg, log.Logger)
@@ -446,6 +446,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	authHandler.SetAudit(auditSvc)
 	attackChainHandler := handler.NewAttackChainHandler(db, &cfg.OpenAI, log.Logger)
 	vulnerabilityHandler := handler.NewVulnerabilityHandler(db, log.Logger)
+	vulnerabilityHandler.SetTaskStateProvider(agentHandler)
 	assetHandler := handler.NewAssetHandler(db, log.Logger)
 	projectHandler := handler.NewProjectHandler(db, log.Logger)
 	rbacHandler := handler.NewRBACHandler(db, log.Logger)
@@ -471,6 +472,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	externalMCPHandler := handler.NewExternalMCPHandler(externalMCPMgr, cfg, configPath, log.Logger)
 	externalMCPHandler.SetAudit(auditSvc)
 	roleHandler := handler.NewRoleHandler(cfg, configPath, log.Logger)
+	roleHandler.SetDB(db)
 	roleHandler.SetAudit(auditSvc)
 	skillsHandler := handler.NewSkillsHandler(cfg, configPath, log.Logger)
 	skillsHandler.SetAudit(auditSvc)
@@ -578,7 +580,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			configHandler.SetKnowledgeToolRegistrar(registrar)
 			// 设置检索器更新器，以便在ApplyConfig时更新检索器配置
 			configHandler.SetRetrieverUpdater(app.knowledgeRetriever)
-			log.Logger.Info("动态初始化后已设置知识库工具注册器和检索器更新器")
+			log.Logger.Info("Registered knowledge tools and retriever updater after dynamic initialization")
 		}
 
 		return knowledgeHandler, nil
@@ -608,6 +610,15 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		}
 		return nil
 	})
+
+	// The one-click update acts on this installation's own tree, rooted where the live config
+	// file is. Its restart hook exits after a graceful shutdown, which is only "a restart" when
+	// something supervises the process - so the endpoint reports whether it is standing down or
+	// whether somebody has to start it again, instead of promising a boot that may not happen.
+	updateHandler := handler.NewUpdateHandler(configDir, log.Logger, auditSvc, func() {
+		app.Shutdown()
+		os.Exit(0)
+	}, configHandler.UpdateSource, configHandler.SetUpdateSource)
 
 	// 设置路由（使用 App 实例以便动态获取 handler）
 	setupRoutes(
@@ -641,6 +652,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		mcpServer,
 		authManager,
 		openAPIHandler,
+		updateHandler,
 	)
 
 	return app, nil
@@ -662,7 +674,7 @@ func (a *App) mcpHandlerWithAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get(cfg.AuthHeader)), []byte(cfg.AuthHeaderValue)) != 1 {
-		a.logger.Logger.Debug("MCP 鉴权失败：header 缺失或值不匹配", zap.String("header", cfg.AuthHeader))
+		a.logger.Logger.Debug("MCP authentication failed: header missing or value does not match", zap.String("header", cfg.AuthHeader))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"error":"unauthorized"}`))
@@ -688,7 +700,7 @@ func (a *App) RunWithContext(ctx context.Context) error {
 	var mcpServer *http.Server
 	if a.config.MCP.Enabled {
 		mcpAddr := fmt.Sprintf("%s:%d", a.config.MCP.Host, a.config.MCP.Port)
-		a.logger.Info("启动MCP服务器", zap.String("address", mcpAddr))
+		a.logger.Info("Start MCP server", zap.String("address", mcpAddr))
 
 		mux := http.NewServeMux()
 		mux.HandleFunc("/mcp", a.mcpHandlerWithAuth)
@@ -696,7 +708,7 @@ func (a *App) RunWithContext(ctx context.Context) error {
 		mcpServer = &http.Server{Addr: mcpAddr, Handler: mux}
 		go func() {
 			if err := mcpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				a.logger.Error("MCP服务器启动失败", zap.Error(err))
+				a.logger.Error("MCP server failed to start", zap.Error(err))
 			}
 		}()
 	}
@@ -718,20 +730,20 @@ func (a *App) RunWithContext(ctx context.Context) error {
 		}
 		switch tlsMode {
 		case mainTLSFromFiles:
-			a.logger.Debug("启动 HTTPS 主服务（已启用 HTTP/2 协商）",
+			a.logger.Debug("Starting HTTPS service with HTTP/2 negotiation",
 				zap.String("address", addr),
 				zap.String("cert", certFile),
 			)
 		case mainTLSInMemorySelfSigned:
-			a.logger.Debug("启动 HTTPS 主服务（内存自签证书，仅测试；已启用 HTTP/2 协商）",
+			a.logger.Debug("Starting HTTPS service with an in-memory self-signed certificate and HTTP/2 negotiation",
 				zap.String("address", addr),
 			)
 		}
 		if httpRedirect {
-			a.logger.Debug("已启用 HTTP→HTTPS 自动跳转（同端口嗅探分流）", zap.String("address", addr))
+			a.logger.Debug("Enabled automatic HTTP to HTTPS redirect on the shared port", zap.String("address", addr))
 		}
 	} else {
-		a.logger.Debug("启动 HTTP 主服务", zap.String("address", addr))
+		a.logger.Debug("Start the HTTP master service", zap.String("address", addr))
 	}
 
 	// 监听 context 取消，优雅关闭 HTTP 服务器
@@ -741,14 +753,14 @@ func (a *App) RunWithContext(ctx context.Context) error {
 		defer cancel()
 		if mainMux != nil {
 			if err := mainMux.Shutdown(shutdownCtx); err != nil {
-				a.logger.Error("HTTP/HTTPS 分流服务器关闭失败", zap.Error(err))
+				a.logger.Error("Failed to close HTTP/HTTPS multiplexing server", zap.Error(err))
 			}
 		} else if err := srv.Shutdown(shutdownCtx); err != nil {
-			a.logger.Error("HTTP服务器关闭失败", zap.Error(err))
+			a.logger.Error("HTTP server shutdown failed", zap.Error(err))
 		}
 		if mcpServer != nil {
 			if err := mcpServer.Shutdown(shutdownCtx); err != nil {
-				a.logger.Error("MCP服务器关闭失败", zap.Error(err))
+				a.logger.Error("MCP server shutdown failed", zap.Error(err))
 			}
 		}
 	}()
@@ -823,14 +835,14 @@ func (a *App) Shutdown() {
 	// 关闭知识库数据库连接（如果使用独立数据库）
 	if a.knowledgeDB != nil {
 		if err := a.knowledgeDB.Close(); err != nil {
-			a.logger.Logger.Warn("关闭知识库数据库连接失败", zap.Error(err))
+			a.logger.Logger.Warn("Failed to close knowledge base database connection", zap.Error(err))
 		}
 	}
 
 	// 关闭主数据库连接
 	if a.db != nil {
 		if err := a.db.Close(); err != nil {
-			a.logger.Logger.Warn("关闭主数据库连接失败", zap.Error(err))
+			a.logger.Logger.Warn("Failed to close primary database connection", zap.Error(err))
 		}
 	}
 }
@@ -946,6 +958,7 @@ func setupRoutes(
 	mcpServer *mcp.Server,
 	authManager *security.AuthManager,
 	openAPIHandler *handler.OpenAPIHandler,
+	updateHandler *handler.UpdateHandler,
 ) {
 	// API路由
 	api := router.Group("/api")
@@ -981,7 +994,7 @@ func setupRoutes(
 		if auditSvc != nil {
 			auditSvc.Record(c, audit.Entry{
 				Level: "warn", Category: "rbac", Action: "access_denied", Result: "failure",
-				Message: "RBAC 拒绝访问", ResourceType: "route", ResourceID: c.FullPath(),
+				Message: "RBAC access denied", ResourceType: "route", ResourceID: c.FullPath(),
 				Detail: map[string]interface{}{"reason": reason, "permission": permission, "method": c.Request.Method},
 			})
 		}
@@ -1013,6 +1026,10 @@ func setupRoutes(
 
 		// Eino ADK 单代理（ChatModelAgent + Runner；不依赖 multi_agent.enabled）
 		protected.POST("/eino-agent", agentHandler.EinoSingleAgentLoop)
+		protected.POST("/eino-agent/runs", agentHandler.SubmitSingleAgentRun)
+		protected.POST("/multi-agent/runs", agentHandler.SubmitMultiAgentRun)
+		protected.GET("/eino-agent/runs/:runId", agentHandler.GetAgentRun)
+		protected.GET("/multi-agent/runs/:runId", agentHandler.GetAgentRun)
 		protected.POST("/eino-agent/stream", agentHandler.EinoSingleAgentLoopStream)
 		protected.GET("/hitl/pending", agentHandler.ListHITLPending)
 		protected.GET("/hitl/logs", agentHandler.ListHITLLogs)
@@ -1122,6 +1139,16 @@ func setupRoutes(
 		protected.POST("/config/test-vision", configHandler.TestVision)
 		protected.POST("/config/list-models", configHandler.ListModels)
 
+		// 系统更新（保持本安装自身源码最新：查看、检查、应用、进度、回滚、接入、更新源）
+		protected.GET("/system/update", updateHandler.GetStatus)
+		protected.GET("/system/update/job", updateHandler.Job)
+		protected.POST("/system/update/check", updateHandler.Check)
+		protected.POST("/system/update/apply", updateHandler.Apply)
+		protected.POST("/system/update/restart", updateHandler.Restart)
+		protected.POST("/system/update/rollback", updateHandler.Rollback)
+		protected.POST("/system/update/adopt", updateHandler.Adopt)
+		protected.POST("/system/update/source", updateHandler.SaveSource)
+
 		// 系统设置 - 终端（执行命令，提高运维效率）
 		protected.POST("/terminal/run", terminalHandler.RunCommand)
 		protected.POST("/terminal/run/stream", terminalHandler.RunCommandStream)
@@ -1160,7 +1187,7 @@ func setupRoutes(
 					c.JSON(http.StatusOK, gin.H{
 						"categories": []string{},
 						"enabled":    false,
-						"message":    "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"message":    "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1171,7 +1198,7 @@ func setupRoutes(
 					c.JSON(http.StatusOK, gin.H{
 						"items":   []interface{}{},
 						"enabled": false,
-						"message": "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"message": "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1181,7 +1208,7 @@ func setupRoutes(
 				if app.knowledgeHandler == nil {
 					c.JSON(http.StatusOK, gin.H{
 						"enabled": false,
-						"message": "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"message": "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1191,7 +1218,7 @@ func setupRoutes(
 				if app.knowledgeHandler == nil {
 					c.JSON(http.StatusOK, gin.H{
 						"enabled": false,
-						"error":   "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"error":   "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1201,7 +1228,7 @@ func setupRoutes(
 				if app.knowledgeHandler == nil {
 					c.JSON(http.StatusOK, gin.H{
 						"enabled": false,
-						"error":   "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"error":   "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1211,7 +1238,7 @@ func setupRoutes(
 				if app.knowledgeHandler == nil {
 					c.JSON(http.StatusOK, gin.H{
 						"enabled": false,
-						"error":   "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"error":   "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1225,7 +1252,7 @@ func setupRoutes(
 						"indexed_items":    0,
 						"progress_percent": 0,
 						"is_complete":      false,
-						"message":          "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"message":          "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1235,7 +1262,7 @@ func setupRoutes(
 				if app.knowledgeHandler == nil {
 					c.JSON(http.StatusOK, gin.H{
 						"enabled": false,
-						"error":   "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"error":   "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1245,7 +1272,7 @@ func setupRoutes(
 				if app.knowledgeHandler == nil {
 					c.JSON(http.StatusOK, gin.H{
 						"enabled": false,
-						"error":   "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"error":   "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1256,7 +1283,7 @@ func setupRoutes(
 					c.JSON(http.StatusOK, gin.H{
 						"logs":    []interface{}{},
 						"enabled": false,
-						"message": "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"message": "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1266,7 +1293,7 @@ func setupRoutes(
 				if app.knowledgeHandler == nil {
 					c.JSON(http.StatusOK, gin.H{
 						"enabled": false,
-						"error":   "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"error":   "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1277,7 +1304,7 @@ func setupRoutes(
 					c.JSON(http.StatusOK, gin.H{
 						"results": []interface{}{},
 						"enabled": false,
-						"message": "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"message": "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1289,7 +1316,7 @@ func setupRoutes(
 						"enabled":          false,
 						"total_categories": 0,
 						"total_items":      0,
-						"message":          "知识库功能未启用，请前往系统设置启用知识检索功能",
+						"message":          "Knowledge retrieval is disabled; enable it in system settings",
 					})
 					return
 				}
@@ -1306,7 +1333,9 @@ func setupRoutes(
 		protected.GET("/vulnerability-alerts/subscription", vulnerabilityHandler.GetMyAlertSubscription)
 		protected.PUT("/vulnerability-alerts/subscription", vulnerabilityHandler.UpdateMyAlertSubscription)
 		protected.GET("/vulnerabilities/:id", vulnerabilityHandler.GetVulnerability)
+		protected.GET("/vulnerabilities/:id/download", vulnerabilityHandler.DownloadVulnerability)
 		protected.POST("/vulnerabilities", vulnerabilityHandler.CreateVulnerability)
+		protected.POST("/vulnerabilities/:id/retest", vulnerabilityHandler.CreateRetest)
 		protected.PUT("/vulnerabilities/:id", vulnerabilityHandler.UpdateVulnerability)
 		protected.DELETE("/vulnerabilities/:id", vulnerabilityHandler.DeleteVulnerability)
 
@@ -1349,7 +1378,7 @@ func setupRoutes(
 			if app.c2Manager == nil {
 				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 					"error":   "c2_disabled",
-					"message": "C2 功能已在系统设置中关闭",
+					"message": "C2 functionality has been turned off in system settings",
 					"enabled": false,
 				})
 				return
@@ -1468,7 +1497,7 @@ func setupRoutes(
 	router.GET("/", func(c *gin.Context) {
 		version := app.config.Version
 		if version == "" {
-			version = "v1.7.20"
+			version = "v1.7.24"
 		}
 		c.HTML(http.StatusOK, "index.html", gin.H{"Version": version})
 	})
@@ -1477,7 +1506,7 @@ func setupRoutes(
 // registerWebshellTools 注册 WebShell 相关 MCP 工具，供 AI 助手在指定连接上执行命令与文件操作
 func registerWebshellTools(mcpServer *mcp.Server, db *database.DB, webshellHandler *handler.WebShellHandler, logger *zap.Logger) {
 	if db == nil || webshellHandler == nil {
-		logger.Warn("跳过 WebShell 工具注册：db 或 webshellHandler 为空")
+		logger.Warn("Skipping WebShell tool registration: database or handler is nil")
 		return
 	}
 
@@ -1623,13 +1652,13 @@ func registerWebshellTools(mcpServer *mcp.Server, db *database.DB, webshellHandl
 	}
 	mcpServer.RegisterTool(writeTool, writeHandler)
 
-	logger.Debug("WebShell 工具注册成功")
+	logger.Debug("WebShell tool registration successful")
 }
 
 // registerWebshellManagementTools 注册 WebShell 连接管理 MCP 工具
 func registerWebshellManagementTools(mcpServer *mcp.Server, db *database.DB, webshellHandler *handler.WebShellHandler, logger *zap.Logger) {
 	if db == nil {
-		logger.Warn("跳过 WebShell 管理工具注册：db 为空")
+		logger.Warn("Skipping WebShell management tool registration: database is nil")
 		return
 	}
 	projectIDFromToolArgs := func(ctx context.Context, args map[string]interface{}) string {
@@ -2067,7 +2096,7 @@ func registerWebshellManagementTools(mcpServer *mcp.Server, db *database.DB, web
 	}
 	mcpServer.RegisterTool(testTool, testHandler)
 
-	logger.Debug("WebShell 管理工具注册成功")
+	logger.Debug("WebShell management tool registration successful")
 }
 
 // initializeKnowledge 初始化知识库组件（用于动态初始化）
@@ -2097,11 +2126,11 @@ func initializeKnowledge(
 			return nil, fmt.Errorf("knowledge database initialization failed: %w", err)
 		}
 		knowledgeDB = knowledgeDBConn.DB
-		logger.Info("使用独立的知识库数据库", zap.String("path", knowledgeDBPath))
+		logger.Info("Use a separate knowledge base database", zap.String("path", knowledgeDBPath))
 	} else {
 		// 向后兼容：使用会话数据库
 		knowledgeDB = db.DB
-		logger.Info("使用会话数据库存储知识库数据（建议配置knowledge_db_path以分离数据）")
+		logger.Info("Using conversation database for knowledge data; configure knowledge_db_path to separate storage")
 	}
 
 	// 创建知识库管理器
@@ -2142,7 +2171,7 @@ func initializeKnowledge(
 	if app != nil && app.auditSvc != nil {
 		knowledgeHandler.SetAudit(app.auditSvc)
 	}
-	logger.Info("知识库模块初始化完成", zap.Bool("handler_created", knowledgeHandler != nil))
+	logger.Info("Knowledge base module initialization completed", zap.Bool("handler_created", knowledgeHandler != nil))
 
 	// 设置知识库管理器到AgentHandler以便记录检索日志
 	agentHandler.SetKnowledgeManager(knowledgeManager)
@@ -2157,28 +2186,28 @@ func initializeKnowledge(
 		if knowledgeDBPath != "" {
 			app.knowledgeDB = knowledgeDBConn
 		}
-		logger.Info("App 中的知识库组件已更新")
+		logger.Info("The knowledge base component in the app has been updated")
 	}
 
 	// 扫描知识库并建立索引（异步）
 	go func() {
 		itemsToIndex, err := knowledgeManager.ScanKnowledgeBase()
 		if err != nil {
-			logger.Warn("扫描知识库失败", zap.Error(err))
+			logger.Warn("Scanning knowledge base failed", zap.Error(err))
 			return
 		}
 
 		// 检查是否已有索引
 		hasIndex, err := knowledgeIndexer.HasIndex()
 		if err != nil {
-			logger.Warn("检查索引状态失败", zap.Error(err))
+			logger.Warn("Checking index status failed", zap.Error(err))
 			return
 		}
 
 		if hasIndex {
 			// 如果已有索引，只索引新添加或更新的项
 			if len(itemsToIndex) > 0 {
-				logger.Info("检测到已有知识库索引，开始增量索引", zap.Int("count", len(itemsToIndex)))
+				logger.Info("An existing knowledge base index is detected and incremental indexing is started.", zap.Int("count", len(itemsToIndex)))
 				ctx := context.Background()
 				consecutiveFailures := 0
 				var firstFailureItemID string
@@ -2193,12 +2222,12 @@ func initializeKnowledge(
 						if consecutiveFailures == 1 {
 							firstFailureItemID = itemID
 							firstFailureError = err
-							logger.Warn("索引知识项失败", zap.String("itemId", itemID), zap.Error(err))
+							logger.Warn("Indexing knowledge items failed", zap.String("itemId", itemID), zap.Error(err))
 						}
 
 						// 如果连续失败2次，立即停止增量索引
 						if consecutiveFailures >= 2 {
-							logger.Error("连续索引失败次数过多，立即停止增量索引",
+							logger.Error("Too many consecutive indexing failures; stopping incremental indexing",
 								zap.Int("consecutiveFailures", consecutiveFailures),
 								zap.Int("totalItems", len(itemsToIndex)),
 								zap.String("firstFailureItemId", firstFailureItemID),
@@ -2216,18 +2245,18 @@ func initializeKnowledge(
 						firstFailureError = nil
 					}
 				}
-				logger.Info("增量索引完成", zap.Int("totalItems", len(itemsToIndex)), zap.Int("failedCount", failedCount))
+				logger.Info("Incremental indexing completed", zap.Int("totalItems", len(itemsToIndex)), zap.Int("failedCount", failedCount))
 			} else {
-				logger.Info("检测到已有知识库索引，没有需要索引的新项或更新项")
+				logger.Info("Existing knowledge index found; no new or updated items require indexing")
 			}
 			return
 		}
 
 		// 冷启动：仅为尚无向量的知识项构建索引（与 IndexMissing 语义一致）
-		logger.Info("未检测到知识库索引，开始自动构建索引")
+		logger.Info("No knowledge base index detected, automatic index building started")
 		ctx := context.Background()
 		if err := knowledgeIndexer.IndexMissing(ctx); err != nil {
-			logger.Warn("自动构建知识库索引失败", zap.Error(err))
+			logger.Warn("Automatic building of knowledge base index failed", zap.Error(err))
 		}
 	}()
 

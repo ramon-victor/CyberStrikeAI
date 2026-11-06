@@ -664,7 +664,7 @@ Invocation constraint: call this task-management tool only when the user explici
 		return batchMCPJSONResult(queue)
 	})
 
-	logger.Debug("批量任务 MCP 工具已注册", zap.Int("count", 12))
+	logger.Debug("Batch task MCP tool has been registered", zap.Int("count", 12))
 }
 
 // --- batch_task_list 精简结构（避免把每条子任务的 result 等大段文本塞进列表上下文） ---

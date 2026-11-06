@@ -337,6 +337,7 @@ func (m *ExternalMCPManager) startClient(name string, autoReconnect bool) error 
 			if !autoReconnect {
 				m.mu.Lock()
 				serverCfg.ExternalMCPEnable = true
+				serverCfg.Disabled = false
 				m.configs[name] = serverCfg
 				m.mu.Unlock()
 			}
@@ -362,6 +363,7 @@ func (m *ExternalMCPManager) startClient(name string, autoReconnect bool) error 
 	// 更新配置为启用
 	m.mu.Lock()
 	serverCfg.ExternalMCPEnable = true
+	serverCfg.Disabled = false
 	m.configs[name] = serverCfg
 	// 清除之前的错误信息（重新启动时）
 	delete(m.errors, name)
@@ -384,7 +386,7 @@ func (m *ExternalMCPManager) startClient(name string, autoReconnect bool) error 
 	// 在后台异步进行实际连接
 	go func(reconnect bool) {
 		if err := m.doConnect(name, serverCfg, client); err != nil {
-			m.logger.Error("连接外部MCP客户端失败",
+			m.logger.Error("Failed to connect to external MCP client",
 				zap.String("name", name),
 				zap.Bool("auto_reconnect", reconnect),
 				zap.Error(err),
@@ -443,6 +445,7 @@ func (m *ExternalMCPManager) StopClient(name string) error {
 
 	// 更新配置为禁用
 	serverCfg.ExternalMCPEnable = false
+	serverCfg.Disabled = true
 	m.configs[name] = serverCfg
 
 	m.clearReconnectState(name)
@@ -522,7 +525,7 @@ func (m *ExternalMCPManager) getToolsForClient(name string, client ExternalMCPCl
 
 	// error 状态：不使用缓存，直接返回错误
 	if status == "error" {
-		m.logger.Debug("跳过连接失败的外部MCP（不使用缓存）",
+		m.logger.Debug("Skipping disconnected external MCP server without cached tools",
 			zap.String("name", name),
 			zap.String("status", status),
 		)
@@ -540,18 +543,18 @@ func (m *ExternalMCPManager) getToolsForClient(name string, client ExternalMCPCl
 		}
 		tools, err := m.listToolsDeduped(ctx, name, client)
 		if err != nil {
-			return m.getCachedTools(name, "连接正常但获取失败", err)
+			return m.getCachedTools(name, "The connection is normal but the acquisition failed", err)
 		}
 		return tools, nil
 	}
 
 	// 未连接：根据状态决定是否使用缓存
 	if status == "disconnected" || status == "connecting" {
-		return m.getCachedTools(name, fmt.Sprintf("客户端临时断开（状态: %s）", status), nil)
+		return m.getCachedTools(name, fmt.Sprintf("The client is temporarily disconnected (status: %s)", status), nil)
 	}
 
 	// 其他未知状态，不使用缓存
-	m.logger.Debug("跳过外部MCP（未知状态）",
+	m.logger.Debug("Skip external MCP (unknown status)",
 		zap.String("name", name),
 		zap.String("status", status),
 	)
@@ -561,7 +564,7 @@ func (m *ExternalMCPManager) getToolsForClient(name string, client ExternalMCPCl
 // getCachedTools 获取缓存的工具列表（含空列表缓存）
 func (m *ExternalMCPManager) getCachedTools(name, reason string, originalErr error) ([]Tool, error) {
 	if tools, ok := m.getAnyCachedTools(name); ok {
-		m.logger.Debug("使用缓存的工具列表",
+		m.logger.Debug("Use cached tool list",
 			zap.String("name", name),
 			zap.String("reason", reason),
 			zap.Int("count", len(tools)),
@@ -679,12 +682,12 @@ func (m *ExternalMCPManager) updateToolCache(name string, tools []Tool) {
 	m.toolCountsMu.Unlock()
 
 	if len(stored) == 0 {
-		m.logger.Warn("外部MCP返回空工具列表",
+		m.logger.Warn("External MCP returns empty tool list",
 			zap.String("name", name),
-			zap.String("hint", "服务可能暂时不可用，工具列表为空"),
+			zap.String("hint", "The service may be temporarily unavailable and the tool list is empty"),
 		)
 	} else {
-		m.logger.Debug("工具列表缓存已更新",
+		m.logger.Debug("Tool list cache updated",
 			zap.String("name", name),
 			zap.Int("count", len(stored)),
 		)
@@ -944,7 +947,7 @@ func (m *ExternalMCPManager) recordExternalMCPResult(mcpName string, failed bool
 	rt.consecutiveFailures++
 	if rt.consecutiveFailures >= m.resilience.CircuitFailureThreshold {
 		rt.circuitOpenUntil = time.Now().Add(m.resilience.CircuitCooldown)
-		m.logger.Warn("外部MCP服务触发熔断",
+		m.logger.Warn("External MCP service triggers circuit breaker",
 			zap.String("name", mcpName),
 			zap.Int("consecutiveFailures", rt.consecutiveFailures),
 			zap.Duration("cooldown", m.resilience.CircuitCooldown),
@@ -1151,7 +1154,7 @@ func (m *ExternalMCPManager) updateStats(toolName string, status string) {
 			successCalls = 1
 		}
 		if err := m.storage.UpdateToolStats(toolName, totalCalls, successCalls, failedCalls, &now); err != nil {
-			m.logger.Warn("保存统计信息到数据库失败", zap.Error(err))
+			m.logger.Warn("Failed to save statistics to database", zap.Error(err))
 		}
 		return
 	}
@@ -1223,7 +1226,7 @@ func (m *ExternalMCPManager) GetToolStats() map[string]*ToolStats {
 				}
 			}
 		} else {
-			m.logger.Warn("从数据库加载统计信息失败", zap.Error(err))
+			m.logger.Warn("Loading statistics from database failed", zap.Error(err))
 		}
 	}
 
@@ -1346,7 +1349,7 @@ func (m *ExternalMCPManager) refreshToolCounts() {
 
 			if err != nil {
 				if !isConnectionDeadError(err) {
-					m.logger.Warn("获取外部MCP工具数量失败，请检查连接或服务端 tools/list",
+					m.logger.Warn("Failed to count external MCP tools; check connection or server tools/list",
 						zap.String("name", n),
 						zap.Error(err),
 					)
@@ -1402,7 +1405,7 @@ func (m *ExternalMCPManager) refreshToolCache(name string, client ExternalMCPCli
 		return
 	}
 	if client.GetStatus() == "error" {
-		m.logger.Debug("跳过刷新工具列表缓存（连接失败）",
+		m.logger.Debug("Skip refreshing tool list cache (connection failed)",
 			zap.String("name", name),
 		)
 		return
@@ -1411,7 +1414,7 @@ func (m *ExternalMCPManager) refreshToolCache(name string, client ExternalMCPCli
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if _, err := m.listToolsDeduped(ctx, name, client); err != nil {
-		m.logger.Debug("刷新工具列表缓存失败",
+		m.logger.Debug("Failed to refresh tool list cache",
 			zap.String("name", name),
 			zap.Error(err),
 		)
@@ -1489,7 +1492,7 @@ func (m *ExternalMCPManager) doConnect(name string, serverCfg config.ExternalMCP
 		return err
 	}
 
-	m.logger.Info("外部MCP客户端已连接",
+	m.logger.Info("External MCP client connected",
 		zap.String("name", name),
 	)
 
@@ -1523,7 +1526,7 @@ func (m *ExternalMCPManager) connectClient(name string, serverCfg config.Externa
 	defer cancel()
 
 	if err := client.Initialize(ctx); err != nil {
-		m.logger.Error("初始化外部MCP客户端失败",
+		m.logger.Error("Failed to initialize external MCP client",
 			zap.String("name", name),
 			zap.Error(err),
 		)
@@ -1535,7 +1538,7 @@ func (m *ExternalMCPManager) connectClient(name string, serverCfg config.Externa
 	m.clients[name] = client
 	m.mu.Unlock()
 
-	m.logger.Info("外部MCP客户端已连接",
+	m.logger.Info("External MCP client connected",
 		zap.String("name", name),
 	)
 
@@ -1591,7 +1594,7 @@ func (m *ExternalMCPManager) StartAllEnabled() {
 						// 使用 Warn 级别，提示用户这是正常的，可以通过手动启动或等待服务启动后自动连接
 						fields := []zap.Field{
 							zap.String("name", n),
-							zap.String("message", "目标服务可能尚未启动，这是正常的。服务启动后可通过界面手动连接，或等待自动重试"),
+							zap.String("message", "The target service may not be running yet. Connect manually through the interface or wait for automatic retry."),
 							zap.Error(err),
 						}
 
@@ -1603,10 +1606,10 @@ func (m *ExternalMCPManager) StartAllEnabled() {
 							fields = append(fields, zap.String("command", c.Command))
 						}
 
-						m.logger.Warn("外部MCP服务暂未就绪", fields...)
+						m.logger.Warn("The external MCP service is not ready yet", fields...)
 					} else {
 						// 其他错误，使用 Error 级别
-						m.logger.Error("启动外部MCP客户端失败",
+						m.logger.Error("Failed to start external MCP client",
 							zap.String("name", n),
 							zap.Error(err),
 						)
@@ -1620,7 +1623,7 @@ func (m *ExternalMCPManager) StartAllEnabled() {
 // StopAll 停止所有客户端
 func (m *ExternalMCPManager) StopAll() {
 	if m.executionService != nil {
-		m.executionService.CancelAll("外部 MCP 管理器正在停止")
+		m.executionService.CancelAll("External MCP manager is stopping")
 	}
 	clients := make(map[string]ExternalMCPClient)
 	m.mu.Lock()

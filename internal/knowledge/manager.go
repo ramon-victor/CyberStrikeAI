@@ -74,7 +74,7 @@ func (m *Manager) ScanKnowledgeBase() ([]string, error) {
 		// 读取文件内容
 		content, err := os.ReadFile(path)
 		if err != nil {
-			m.logger.Warn("读取知识库文件失败", zap.String("path", path), zap.Error(err))
+			m.logger.Warn("Failed to read knowledge base file", zap.String("path", path), zap.Error(err))
 			return nil // 继续处理其他文件
 		}
 
@@ -98,7 +98,7 @@ func (m *Manager) ScanKnowledgeBase() ([]string, error) {
 			if err != nil {
 				return fmt.Errorf("failed to insert knowledge item: %w", err)
 			}
-			m.logger.Info("添加知识项", zap.String("id", id), zap.String("title", title), zap.String("category", category))
+			m.logger.Info("Add knowledge items", zap.String("id", id), zap.String("title", title), zap.String("category", category))
 			// 新添加的项需要索引
 			itemsToIndex = append(itemsToIndex, id)
 		} else if err == nil {
@@ -113,11 +113,11 @@ func (m *Manager) ScanKnowledgeBase() ([]string, error) {
 				if err != nil {
 					return fmt.Errorf("failed to update knowledge item: %w", err)
 				}
-				m.logger.Info("更新知识项", zap.String("id", existingID), zap.String("title", title))
+				m.logger.Info("Update knowledge item", zap.String("id", existingID), zap.String("title", title))
 				// 内容已更新的项需要重新索引
 				itemsToIndex = append(itemsToIndex, existingID)
 			} else {
-				m.logger.Debug("知识项未变化，跳过", zap.String("id", existingID), zap.String("title", title))
+				m.logger.Debug("The knowledge item has not changed and is skipped.", zap.String("id", existingID), zap.String("title", title))
 			}
 		} else {
 			return fmt.Errorf("failed to query knowledge item: %w", err)
@@ -661,7 +661,7 @@ func (m *Manager) UpdateItem(id, category, title, content string) (*KnowledgeIte
 			// 只有当目录不是知识库根目录时才删除（避免删除根目录）
 			if oldDir != m.basePath {
 				if err := os.Remove(oldDir); err != nil {
-					m.logger.Warn("删除空目录失败", zap.String("dir", oldDir), zap.Error(err))
+					m.logger.Warn("Failed to delete empty directory", zap.String("dir", oldDir), zap.Error(err))
 				}
 			}
 		}
@@ -684,7 +684,7 @@ func (m *Manager) UpdateItem(id, category, title, content string) (*KnowledgeIte
 	// 删除旧的向量嵌入（需要重新索引）
 	_, err = m.db.Exec("DELETE FROM knowledge_embeddings WHERE item_id = ?", id)
 	if err != nil {
-		m.logger.Warn("删除旧向量嵌入失败", zap.Error(err))
+		m.logger.Warn("Removing old vector embedding failed", zap.Error(err))
 	}
 
 	return m.GetItem(id)
@@ -701,7 +701,7 @@ func (m *Manager) DeleteItem(id string) error {
 
 	// 删除文件
 	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-		m.logger.Warn("删除文件失败", zap.String("path", filePath), zap.Error(err))
+		m.logger.Warn("Failed to delete file", zap.String("path", filePath), zap.Error(err))
 	}
 
 	// 删除数据库记录（级联删除向量）
@@ -716,7 +716,7 @@ func (m *Manager) DeleteItem(id string) error {
 		// 只有当目录不是知识库根目录时才删除（避免删除根目录）
 		if dir != m.basePath {
 			if err := os.Remove(dir); err != nil {
-				m.logger.Warn("删除空目录失败", zap.String("dir", dir), zap.Error(err))
+				m.logger.Warn("Failed to delete empty directory", zap.String("dir", dir), zap.Error(err))
 			}
 		}
 	}
@@ -846,7 +846,7 @@ func (m *Manager) GetRetrievalLogs(conversationID, messageID string, limit int) 
 
 		// 如果所有格式都失败，记录警告但继续处理
 		if log.CreatedAt.IsZero() {
-			m.logger.Warn("解析检索日志时间失败",
+			m.logger.Warn("Failed to parse retrieval log time",
 				zap.String("timeStr", createdAt),
 				zap.Error(err),
 			)

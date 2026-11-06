@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -49,6 +51,14 @@ type Config struct {
 	MultiAgent  MultiAgentConfig      `yaml:"multi_agent,omitempty" json:"multi_agent,omitempty"`
 	Project     ProjectConfig         `yaml:"project,omitempty" json:"project,omitempty"`
 	Vision      VisionConfig          `yaml:"vision,omitempty" json:"vision,omitempty"`
+	Update      UpdateConfig          `yaml:"update,omitempty" json:"update,omitempty"`
+}
+
+// UpdateConfig 一键更新的更新源（可选）：一个仓库地址，更新跟随该仓库的默认分支。
+// 留空即官方仓库（internal/update.DefaultRepoURL），跟随镜像或自己的二开只需改这一处。
+type UpdateConfig struct {
+	// Repo 更新源仓库地址（https/http/ssh/git/file:// 或本机绝对路径）；留空 = 官方仓库。
+	Repo string `yaml:"repo,omitempty" json:"repo,omitempty"`
 }
 
 type EnsureLocalConfigResult struct {
@@ -68,6 +78,7 @@ const (
 
 // ProjectConfig 项目黑板（跨对话共享事实）配置。
 type ProjectConfig struct {
+	ContextCheckpoints      *bool  `yaml:"context_checkpoints,omitempty" json:"context_checkpoints,omitempty"`
 	Enabled                 bool   `yaml:"enabled" json:"enabled"`
 	DefaultProjectID        string `yaml:"default_project_id,omitempty" json:"default_project_id,omitempty"` // 机器人/批量等无显式项目时绑定的默认项目
 	FactIndexMaxRunes       int    `yaml:"fact_index_max_runes,omitempty" json:"fact_index_max_runes,omitempty"`
@@ -76,10 +87,15 @@ type ProjectConfig struct {
 	DefaultInjectDeprecated bool   `yaml:"default_inject_deprecated,omitempty" json:"default_inject_deprecated,omitempty"`
 }
 
+// ContextCheckpointsEnabled persists generated continuation notes on compaction.
+func (c ProjectConfig) ContextCheckpointsEnabled() bool {
+	return c.ContextCheckpoints == nil || *c.ContextCheckpoints
+}
+
 // FactIndexMaxRunesEffective 自动注入黑板索引的最大 rune 数。
 func (c ProjectConfig) FactIndexMaxRunesEffective() int {
 	if c.FactIndexMaxRunes <= 0 {
-		return 3500
+		return 12000
 	}
 	return c.FactIndexMaxRunes
 }
@@ -650,7 +666,7 @@ func ValidateWecomConfig(w RobotWecomConfig) error {
 		return nil
 	}
 	if strings.TrimSpace(w.Token) == "" {
-		return fmt.Errorf("robots.wecom.enabled 为 true 时必须配置 robots.wecom.token")
+		return fmt.Errorf("robots.wecom.token is required when robots.wecom.enabled is true")
 	}
 	return nil
 }
@@ -739,25 +755,25 @@ func ValidateRobotAuthorization(c RobotAuthorizationConfig, path string) error {
 	case RobotAuthModeServiceAccount:
 		serviceUserID := strings.TrimSpace(c.ServiceUserID)
 		if serviceUserID == "" {
-			return fmt.Errorf("%s.auth.service_user_id 不能为空", path)
+			return fmt.Errorf("%s.auth.service_user_id is required", path)
 		}
 		if len(c.AllowedExternalUsers) == 0 {
-			return fmt.Errorf("%s.auth.allowed_external_users 至少配置一个真实发送者", path)
+			return fmt.Errorf("%s.auth.allowed_external_users must contain at least one actual sender", path)
 		}
 		seen := map[string]bool{}
 		for _, userID := range c.AllowedExternalUsers {
 			userID = strings.TrimSpace(userID)
 			if userID == "" || userID == "*" {
-				return fmt.Errorf("%s.auth.allowed_external_users 不允许空值或通配符", path)
+				return fmt.Errorf("%s.auth.allowed_external_users must not contain empty values or wildcards", path)
 			}
 			if seen[userID] {
-				return fmt.Errorf("%s.auth.allowed_external_users 包含重复用户", path)
+				return fmt.Errorf("%s.auth.allowed_external_users contains duplicate users", path)
 			}
 			seen[userID] = true
 		}
 		return nil
 	default:
-		return fmt.Errorf("%s.auth.mode 仅支持 user_binding 或 service_account", path)
+		return fmt.Errorf("%s.auth.mode must be user_binding or service_account", path)
 	}
 }
 
@@ -831,6 +847,9 @@ type OpenAIConfig struct {
 	Model               string `yaml:"model" json:"model"`
 	MaxTotalTokens      int    `yaml:"max_total_tokens,omitempty" json:"max_total_tokens,omitempty"`
 	MaxCompletionTokens int    `yaml:"max_completion_tokens,omitempty" json:"max_completion_tokens,omitempty"`
+	// Headers 追加或覆盖发给模型网关的 HTTP 请求头，值支持 ${ENV_VAR} 展开。
+	// 用于兼容要求私有鉴权头、版本头或组织头的第三方 OpenAI 兼容供应商。
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 	// Reasoning 控制 Eino ChatModel 的 thinking / reasoning_effort / output_config 等（Eino 单/多代理路径生效）。
 	Reasoning OpenAIReasoningConfig `yaml:"reasoning,omitempty" json:"reasoning,omitempty"`
 }
@@ -850,6 +869,7 @@ type AIChannelConfig struct {
 	Model               string                `yaml:"model" json:"model"`
 	MaxTotalTokens      int                   `yaml:"max_total_tokens,omitempty" json:"max_total_tokens,omitempty"`
 	MaxCompletionTokens int                   `yaml:"max_completion_tokens,omitempty" json:"max_completion_tokens,omitempty"`
+	Headers             map[string]string     `yaml:"headers,omitempty" json:"headers,omitempty"`
 	Reasoning           OpenAIReasoningConfig `yaml:"reasoning,omitempty" json:"reasoning,omitempty"`
 }
 
@@ -865,6 +885,7 @@ func (c AIChannelConfig) ToOpenAIConfig() OpenAIConfig {
 		Model:               c.Model,
 		MaxTotalTokens:      c.MaxTotalTokens,
 		MaxCompletionTokens: c.MaxCompletionTokens,
+		Headers:             ExpandHeaderMap(c.Headers),
 		Reasoning:           c.Reasoning,
 	}
 }
@@ -881,6 +902,7 @@ func AIChannelFromOpenAI(id, name string, oa OpenAIConfig) AIChannelConfig {
 		Model:               oa.Model,
 		MaxTotalTokens:      oa.MaxTotalTokens,
 		MaxCompletionTokens: oa.MaxCompletionTokens,
+		Headers:             ExpandHeaderMap(oa.Headers),
 		Reasoning:           oa.Reasoning,
 	}
 }
@@ -1024,16 +1046,16 @@ func (c *Config) NormalizeAIProviderProfiles() {
 // OpenAIReasoningConfig 全局默认与网关 profile（对话页可通过 ChatRequest.reasoning 覆盖，受 AllowClientReasoning 约束）。
 type OpenAIReasoningConfig struct {
 	// Mode: auto（默认）| on | off | default（与 auto 相同）。
-	// off 在 OpenAI/Claude profile 下省略推理字段；DeepSeek profile 下发送 thinking.type=disabled（其默认开启思考）。
+	// off 对已知支持 none 的官方 OpenAI 模型发送 reasoning_effort=none；DeepSeek profile 发送 thinking.type=disabled；其他服务保持省略推理字段。
 	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
-	// Effort: low | medium | high | max | xhigh；max/xhigh 为不同网关最高档命名，原样下发、不互转。空表示不单独指定强度。
+	// Effort: low | medium | high | max | xhigh；已知支持 none 的官方 OpenAI 模型另接受 none（等同关闭）。空表示不单独指定强度。
 	Effort string `yaml:"effort,omitempty" json:"effort,omitempty"`
 	// AllowClientReasoning 为 false 时忽略请求体 reasoning；nil 或未设置等同于 true。
 	AllowClientReasoning *bool `yaml:"allow_client_reasoning,omitempty" json:"allow_client_reasoning,omitempty"`
 	// Profile: auto | deepseek_compat | openai_compat | output_config_effort
 	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
 	// ExtraRequestFields 合并进 Chat Completions 根 JSON（管理员用；与自动字段同名时后者覆盖）。
-	// Mode=off 时会移除其中的推理控制字段，但保留其他扩展字段；DeepSeek profile 随后补充显式关闭开关。
+	// Mode=off 时移除其中的推理控制字段，保留其他扩展字段，再按提供商与已知模型能力补充显式关闭参数。
 	ExtraRequestFields map[string]interface{} `yaml:"extra_request_fields,omitempty" json:"extra_request_fields,omitempty"`
 }
 
@@ -1096,13 +1118,14 @@ type DatabaseConfig struct {
 }
 
 type AgentConfig struct {
-	MaxIterations                      int `yaml:"max_iterations" json:"max_iterations"`
-	ToolTimeoutMinutes                 int `yaml:"tool_timeout_minutes" json:"tool_timeout_minutes"`                                     // 单次工具执行最大时长（分钟），超时自动终止，防止长时间挂起；0 表示不限制（不推荐）
-	ToolWaitTimeoutSeconds             int `yaml:"tool_wait_timeout_seconds" json:"tool_wait_timeout_seconds"`                           // 工具本轮等待秒数；到时返回 execution_id，worker 继续后台执行；0 表示等到完成
-	ExternalMCPMaxConcurrentPerServer  int `yaml:"external_mcp_max_concurrent_per_server" json:"external_mcp_max_concurrent_per_server"` // 单个外部 MCP server 同时运行的工具数；0 表示默认 2
-	ExternalMCPMaxConcurrentTotal      int `yaml:"external_mcp_max_concurrent_total" json:"external_mcp_max_concurrent_total"`           // 所有外部 MCP 工具全局并发；0 表示默认 16
-	ExternalMCPCircuitFailureThreshold int `yaml:"external_mcp_circuit_failure_threshold" json:"external_mcp_circuit_failure_threshold"` // 单个 MCP server 连续失败多少次后打开熔断；0 表示默认 3；负数关闭
-	ExternalMCPCircuitCooldownSeconds  int `yaml:"external_mcp_circuit_cooldown_seconds" json:"external_mcp_circuit_cooldown_seconds"`   // 熔断后冷却秒数；0 表示默认 60
+	TaskTimeoutMinutes                 *int `yaml:"task_timeout_minutes,omitempty" json:"task_timeout_minutes,omitempty"` // nil=600 minutes; 0=unlimited
+	MaxIterations                      int  `yaml:"max_iterations" json:"max_iterations"`
+	ToolTimeoutMinutes                 int  `yaml:"tool_timeout_minutes" json:"tool_timeout_minutes"`                                     // 单次工具执行最大时长（分钟），超时自动终止，防止长时间挂起；0 表示不限制（不推荐）
+	ToolWaitTimeoutSeconds             int  `yaml:"tool_wait_timeout_seconds" json:"tool_wait_timeout_seconds"`                           // 工具本轮等待秒数；到时返回 execution_id，worker 继续后台执行；0 表示等到完成
+	ExternalMCPMaxConcurrentPerServer  int  `yaml:"external_mcp_max_concurrent_per_server" json:"external_mcp_max_concurrent_per_server"` // 单个外部 MCP server 同时运行的工具数；0 表示默认 2
+	ExternalMCPMaxConcurrentTotal      int  `yaml:"external_mcp_max_concurrent_total" json:"external_mcp_max_concurrent_total"`           // 所有外部 MCP 工具全局并发；0 表示默认 16
+	ExternalMCPCircuitFailureThreshold int  `yaml:"external_mcp_circuit_failure_threshold" json:"external_mcp_circuit_failure_threshold"` // 单个 MCP server 连续失败多少次后打开熔断；0 表示默认 3；负数关闭
+	ExternalMCPCircuitCooldownSeconds  int  `yaml:"external_mcp_circuit_cooldown_seconds" json:"external_mcp_circuit_cooldown_seconds"`   // 熔断后冷却秒数；0 表示默认 60
 	// ShellNoOutputTimeoutSeconds execute/exec 无任何 stdout/stderr 时的空闲终止秒数（通用防挂死，不维护命令黑名单）；0=默认 300（5 分钟）；-1=关闭。
 	ShellNoOutputTimeoutSeconds int `yaml:"shell_no_output_timeout_seconds" json:"shell_no_output_timeout_seconds"`
 	// WorkspaceRootDir 会话工作目录根路径（curl/wget 下载、read_file/glob/grep 本地分析）；空=tmp/workspace，其下按 projects/{id} 或 conversations/{id} 隔离。
@@ -1214,6 +1237,13 @@ func (h HitlConfig) TypeSafeConfigEffective() (baseURL, apiKey, model string) {
 func (h HitlConfig) AuditModelEffective(main OpenAIConfig) OpenAIConfig {
 	out := main
 	am := h.AuditModel
+	out.Headers = auditModelHeaders(main, am)
+	if strings.TrimSpace(am.Provider) != "" || strings.TrimSpace(am.BaseURL) != "" || strings.TrimSpace(am.Model) != "" {
+		out.Reasoning.Profile = ""
+	}
+	if strings.TrimSpace(am.Reasoning.Profile) != "" {
+		out.Reasoning.Profile = am.Reasoning.Profile
+	}
 	if strings.TrimSpace(am.Provider) != "" {
 		out.Provider = strings.TrimSpace(am.Provider)
 	}
@@ -1235,66 +1265,11 @@ func (h HitlConfig) AuditModelEffective(main OpenAIConfig) OpenAIConfig {
 	return out
 }
 
-const hitlAuditAgentPromptBase = `你是 CyberStrikeAI 人机协同审计 Agent。审查 Agent 即将执行的工具调用是否会对系统造成实质性损害。
+const hitlAuditAgentPromptBase = "You are the CyberStrikeAI human-in-the-loop audit agent. Review whether the proposed tool call would cause material damage to systems.\n\nYou receive JSON including hitlMode, toolName, arguments/argumentsObj, userMessage, thinking, reasoningChain and planning.\n\nRule priority:\n- Rules that must reject\n- Rules that must approve\n- Default-approve rule\n\nRule-matching requirements:\n- If both reject and approve rules are matched, you must reject.\n- Every decision must cite one rule number; never output \"matched rule: none\".\n- When no explicit reject or approve rule is matched but no clearly destructive behavior is found, match D1: default approve.\n- Never judge a script harmless merely because it \"runs locally\", \"sets a timeout\", or \"has test in the filename\"; you must inspect the actual command, code, or request parameters.\n- If the script's actual content is not visible, state it as \"the current arguments show no clearly high-risk operation\"; do not assert \"no persistent impact\".\n\nDecision policy (approve by default):\n- The vast majority of penetration-testing operations (including all kinds of attack payloads) should be approved\n- Before ruling, determine: 1. What is this request trying to do (understand the request content)? 2. What consequences would this request cause?\n- Only when it would clearly and directly disrupt the normal operation of the target business system, or cause real user data loss / irreversible tampering → reject\n- Insufficient information, somewhat broad arguments, or purely probing intent → approve\n- When unsure → approve (better to let a recoverable test pass than to mistakenly block a legitimate attack)\n\nHigh-risk cases that must be rejected (non-exhaustive):\n- Modifying/resetting any user or administrator password, forcing real users offline\n- Modifying server or service configuration (system configuration, web/database parameters, firewall, startup items, scheduled tasks)\n- Modifying/creating/deleting users, roles, or permissions (tampering with the account system)\n- Deleting or mass-destroying data/files (DROP/TRUNCATE/DELETE on whole tables, rm of important files, wiping databases)\n- Stopping, disabling, or restarting business services (systemctl stop, killing critical processes, shutdown, reboot)\n- Large-scale load testing or high concurrency causing DoS\n\nThe following cases must be approved (even if they look \"aggressive\" or include write operations):\n- Vulnerability probing and exploitation payloads of all kinds (SQL injection including read/write variants, command injection, deserialization, file inclusion, path traversal, SSRF, SSTI, XXE, etc.)\n- File upload testing, including uploading webshells and writing webshell files\n- Command execution probing, reverse shells, dnslog / data exfiltration probing\n- Database command execution, file writing, scheduled-task writing, in-memory webshell injection, and other getshell exploits\n- Password brute-forcing at normal rates (not DoS-level)\n- Information gathering, port/directory scanning, enumeration, crawling\n- Read, query, and probing operations (including sensitive files)\n- Harmless post-compromise reconnaissance commands (whoami/id/uname/ls/cat, etc.)\n- Requests with broad arguments but no clear destructive intent\n\nDecision principles:\n- \"Writing\" is not by itself a reason to block — penetration testing relies heavily on write operations (injection, upload, brute-forcing, getshell)\n- What matters is whether it disrupts business availability / critical data integrity\n- Reject only when a case in the reject list above is clearly matched"
 
-你会收到 JSON，包含 hitlMode、toolName、arguments/argumentsObj、userMessage、thinking、reasoningChain、planning 等字段。
+const hitlAuditAgentPromptApprovalOutput = "\nOutput exactly one JSON line without Markdown fences:\n{\"decision\":\"approve\"|\"reject\",\"comment\":\"Actual operation: ...; consequences on success: ...; matched rule: ...\"}"
 
-Rule priority:
-- Rules that must reject
-- Rules that must approve
-- Default-approve rule
-
-Rule-matching requirements:
-- If both reject and approve rules are matched, you must reject.
-- Every decision must cite one rule number; never output "matched rule: none".
-- When no explicit reject or approve rule is matched but no clearly destructive behavior is found, match D1: default approve.
-- Never judge a script harmless merely because it "runs locally", "sets a timeout", or "has test in the filename"; you must inspect the actual command, code, or request parameters.
-- If the script's actual content is not visible, state it as "the current arguments show no clearly high-risk operation"; do not assert "no persistent impact".
-
-裁决基调（默认放行）：
-- The vast majority of penetration-testing operations (including all kinds of attack payloads) should be approved
-- Before ruling, determine: 1. What is this request trying to do (understand the request content)? 2. What consequences would this request cause?
-- Only when it would clearly and directly disrupt the normal operation of the target business system, or cause real user data loss / irreversible tampering → reject
-- Insufficient information, somewhat broad arguments, or purely probing intent → approve
-- When unsure → approve (better to let a recoverable test pass than to mistakenly block a legitimate attack)
-
-必须 reject 的高危情形（示例，非穷举）：
-- Modifying/resetting any user or administrator password, forcing real users offline
-- Modifying server or service configuration (system configuration, web/database parameters, firewall, startup items, scheduled tasks)
-- Modifying/creating/deleting users, roles, or permissions (tampering with the account system)
-- Deleting or mass-destroying data/files (DROP/TRUNCATE/DELETE on whole tables, rm of important files, wiping databases)
-- Stopping, disabling, or restarting business services (systemctl stop, killing critical processes, shutdown, reboot)
-- Large-scale load testing or high concurrency causing DoS
-
-The following cases must be approved (even if they look "aggressive" or include write operations):
-- Vulnerability probing and exploitation payloads of all kinds (SQL injection including read/write variants, command injection, deserialization, file inclusion, path traversal, SSRF, SSTI, XXE, etc.)
-- File upload testing, including uploading webshells and writing webshell files
-- Command execution probing, reverse shells, dnslog / data exfiltration probing
-- Database command execution, file writing, scheduled-task writing, in-memory webshell injection, and other getshell exploits
-- Password brute-forcing at normal rates (not DoS-level)
-- Information gathering, port/directory scanning, enumeration, crawling
-- Read, query, and probing operations (including sensitive files)
-- Harmless post-compromise reconnaissance commands (whoami/id/uname/ls/cat, etc.)
-- Requests with broad arguments but no clear destructive intent
-
-Decision principles:
-- "Writing" is not by itself a reason to block — penetration testing relies heavily on write operations (injection, upload, brute-forcing, getshell)
-- What matters is whether it disrupts business availability / critical data integrity
-- Reject only when a case in the reject list above is clearly matched`
-
-const hitlAuditAgentPromptApprovalOutput = `
-仅输出一行 JSON，不要 markdown 代码块：
-{"decision":"approve"|"reject","comment":"Actual operation: ...; consequences on success: ...; matched rule: ..."}`
-
-const hitlAuditAgentPromptReviewEditOutput = `
-仅输出一行 JSON，不要 markdown 代码块：
-{"decision":"approve"|"reject","comment":"Actual operation: ...; consequences on success: ...; matched rule: ...","editedArguments":{...}}
-
-editedArguments 规则（仅 approve 且需要改参时填写，否则省略该字段）：
-- 提供完整替换后的工具参数对象，键名与 argumentsObj 一致
-- 只做最小必要修改以收窄范围、消除风险（如限制 path、去掉危险 flag）
-- 禁止扩大攻击面：不得扩大目标范围、提升权限或引入破坏性参数
-- 无法安全改参时应 reject，不要勉强 approve`
+const hitlAuditAgentPromptReviewEditOutput = "\nOutput exactly one JSON line without Markdown fences:\n{\"decision\":\"approve\"|\"reject\",\"comment\":\"Actual operation: ...; consequences on success: ...; matched rule: ...\",\"editedArguments\":{...}}\n\nOnly include editedArguments when approving with necessary argument changes:\n- Provide the complete replacement tool argument object using the argumentsObj keys.\n- Make only the minimum changes needed to narrow scope or remove risk, such as restricting a path or removing a dangerous flag.\n- Do not expand targets, privileges or destructive parameters.\n- Reject if arguments cannot be changed safely."
 
 // DefaultHitlAuditAgentPrompt 内置审批模式审计 Agent 提示词。
 func DefaultHitlAuditAgentPrompt() string {
@@ -1623,12 +1598,15 @@ type ParameterConfig struct {
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("读取配置文件失败: %w", err)
+		return nil, fmt.Errorf("Failed to read configuration file: %w", err)
 	}
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("解析配置文件失败: %w", err)
+		return nil, fmt.Errorf("Failed to parse configuration file: %w", err)
+	}
+	if err := cfg.Agent.validateTaskTimeout(); err != nil {
+		return nil, err
 	}
 	if cfg.ToolGuard != nil {
 		if err := validateToolGuardYAML(data); err != nil {
@@ -1656,7 +1634,7 @@ func Load(path string) (*Config, error) {
 		toolsDir := ResolveToolsDir(cfg.Security.ToolsDir, path)
 		merged, err := MergeToolsFromDir(toolsDir, inlineTools)
 		if err != nil {
-			return nil, fmt.Errorf("从工具目录加载工具配置失败: %w", err)
+			return nil, fmt.Errorf("Failed to load tool configuration from tool directory: %w", err)
 		}
 		cfg.Security.Tools = merged
 	}
@@ -1691,7 +1669,7 @@ func Load(path string) (*Config, error) {
 
 		roles, err := LoadRolesFromDir(rolesDir)
 		if err != nil {
-			return nil, fmt.Errorf("从角色目录加载角色配置失败: %w", err)
+			return nil, fmt.Errorf("Failed to load role configuration from role directory: %w", err)
 		}
 
 		cfg.Roles = roles
@@ -1714,9 +1692,230 @@ func Load(path string) (*Config, error) {
 
 func validateOpenAIOutputLimits(openAI OpenAIConfig) error {
 	if openAI.MaxCompletionTokens < 0 {
-		return fmt.Errorf("openai.max_completion_tokens 必须为正数")
+		return fmt.Errorf("openai.max_completion_tokens must be positive")
 	}
 	return nil
+}
+
+// LoadUpdateRepo 只读 update 段的 repo 字段，不加载也不校验文件其余部分：命令行一键更新
+// 必须与页面用同一个更新源，而配置里其它段落坏掉不该拦住"把源码更新好"这条修复路径。
+// 文件不存在不是错误（未配置 = 官方仓库）；YAML 解析失败则报错，不去猜更新源。
+func LoadUpdateRepo(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("Failed to read configuration file: %w", err)
+	}
+	var thin struct {
+		Update struct {
+			Repo string `yaml:"repo"`
+		} `yaml:"update"`
+	}
+	if err := yaml.Unmarshal(data, &thin); err != nil {
+		return "", fmt.Errorf("Failed to parse configuration file: %w", err)
+	}
+	return strings.TrimSpace(thin.Update.Repo), nil
+}
+
+// FileVersion 读一个配置文件形态 YAML 的顶层 version 字段。仓库里的 config.example.yaml
+// 载着这份代码对应的发布版本（上游随 release 提交一起改），一键更新用它把"当前跑的是什么
+// 版本"同步进运维者的 config.yaml。文件或字段不存在 = 未知，不是错误。
+func FileVersion(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("Failed to read configuration file: %w", err)
+	}
+	version, err := parseTopVersion(data)
+	if err != nil {
+		return "", fmt.Errorf("Failed to parse configuration file: %w", err)
+	}
+	return version, nil
+}
+
+// parseTopVersion 从配置文本里取顶层 version。走 YAML 解析，version / "version" / 'version'
+// 三种写法一视同仁——读取认得的写法，写入也必须认得，否则就会在合法的引号键配置上追加出
+// 第二个 version 键（见 WriteVersion）。
+func parseTopVersion(data []byte) (string, error) {
+	var thin struct {
+		Version string `yaml:"version"`
+	}
+	if err := yaml.Unmarshal(data, &thin); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(thin.Version), nil
+}
+
+// versionValuePattern 约束能写进配置的版本号：它来自仓库里的文件，但落到的是运维者的
+// 配置上，带引号或换行的值会把 YAML 写坏。
+var versionValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+
+// topVersionKey 判断一行是不是顶层的 version 键，三种 YAML 都认的写法都在内：version:、
+// "version":、'version':。缩进的同名键属于别的段落，不动。
+func topVersionKey(line string) bool {
+	for _, key := range []string{"version", `"version"`, "'version'"} {
+		if strings.HasPrefix(line, key) {
+			return strings.HasPrefix(strings.TrimSpace(line[len(key):]), ":")
+		}
+	}
+	return false
+}
+
+func yamlDocumentStart(line string) bool {
+	line = strings.TrimPrefix(strings.TrimSuffix(line, "\r"), "\uFEFF")
+	if !strings.HasPrefix(line, "---") {
+		return false
+	}
+	rest := line[len("---"):]
+	if strings.Trim(rest, " \t") == "" {
+		return true
+	}
+	return len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t') && strings.HasPrefix(strings.TrimLeft(rest, " \t"), "#")
+}
+
+// WriteVersion 就地替换配置文件的顶层 version 字段，保留其它每一行的原样（tarball 升级
+// 路径一直这么做）；没有这个字段就插到文件开头（若文件以 YAML 文档标记开头，则插在标记后）。
+// 返回是否真的改了。写盘走临时文件 + 原子 rename——这是运维者的活配置，不能留半截。替换后先把新文本解析回验一遍：行级替换够不着的
+// 写法（JSON 单行、多行标量……）解析失败或读不回目标值就拒绝写、原文件不动。版本号停在旧值
+// 只是页头显示问题，写坏配置是起不来。
+func WriteVersion(path, version string) (bool, error) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return false, nil
+	}
+	if len(version) > 64 || !versionValuePattern.MatchString(version) {
+		return false, fmt.Errorf("Illegal version number: %q", version)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false, err
+	}
+	path = resolved
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	lines := strings.Split(string(data), "\n")
+	replaced := false
+	for i, line := range lines {
+		if topVersionKey(line) {
+			lines[i] = `version: "` + version + `"`
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		versionLine := `version: "` + version + `"`
+		insertAt := 0
+		for i, line := range lines {
+			if yamlDocumentStart(line) {
+				insertAt = i + 1
+				break
+			}
+			trimmed := strings.TrimSpace(strings.TrimPrefix(line, "\uFEFF"))
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(line, "%") {
+				break
+			}
+		}
+		lines = append(lines[:insertAt], append([]string{versionLine}, lines[insertAt:]...)...)
+	}
+	out := strings.Join(lines, "\n")
+	if out == string(data) {
+		return false, nil
+	}
+	if got, err := parseTopVersion([]byte(out)); err != nil || got != version {
+		return false, fmt.Errorf("Cannot replace version in place (configuration failed to parse or read back as %q); original file unchanged", got)
+	}
+	// Reading back version alone is insufficient: inserting before an inline
+	// document marker can create a new first document and hide every setting.
+	var originalSettings, nextSettings map[string]interface{}
+	if err := yaml.Unmarshal(data, &originalSettings); err != nil {
+		return false, err
+	}
+	if err := yaml.Unmarshal([]byte(out), &nextSettings); err != nil {
+		return false, err
+	}
+	delete(originalSettings, "version")
+	delete(nextSettings, "version")
+	if len(originalSettings) != len(nextSettings) || (len(originalSettings) > 0 && !reflect.DeepEqual(originalSettings, nextSettings)) {
+		return false, fmt.Errorf("Writing the version would change other configuration; original file unchanged")
+	}
+	if err := writeVersionFile(path, []byte(out), info.Mode().Perm()); err != nil {
+		return false, err
+	}
+	return true, nil
+
+}
+
+// RemoveVersion undoes a version field added by an update to an unversioned
+// configuration. All other settings and the file's permissions stay intact.
+func RemoveVersion(path string) (bool, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false, err
+	}
+	path = resolved
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		if !topVersionKey(line) {
+			continue
+		}
+		out := strings.Join(append(lines[:i], lines[i+1:]...), "\n")
+		var before, after map[string]interface{}
+		if err := yaml.Unmarshal(data, &before); err != nil {
+			return false, err
+		}
+		if err := yaml.Unmarshal([]byte(out), &after); err != nil {
+			return false, err
+		}
+		delete(before, "version")
+		if _, present := after["version"]; present || len(before) != len(after) || (len(before) > 0 && !reflect.DeepEqual(before, after)) {
+			return false, fmt.Errorf("The version number cannot be safely removed and the original configuration has not been changed.")
+		}
+		if err := writeVersionFile(path, []byte(out), info.Mode().Perm()); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func writeVersionFile(path string, data []byte, mode os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".version-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if err := f.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 func EnsureLocalConfig(path string) (EnsureLocalConfigResult, error) {
@@ -1728,7 +1927,7 @@ func EnsureLocalConfig(path string) (EnsureLocalConfigResult, error) {
 	if _, err := os.Stat(path); err == nil {
 		return EnsureLocalConfigResult{}, nil
 	} else if !os.IsNotExist(err) {
-		return EnsureLocalConfigResult{}, fmt.Errorf("检查配置文件失败: %w", err)
+		return EnsureLocalConfigResult{}, fmt.Errorf("Failed to check configuration file: %w", err)
 	}
 
 	examplePath := filepath.Join(filepath.Dir(path), "config.example.yaml")
@@ -1738,28 +1937,28 @@ func EnsureLocalConfig(path string) (EnsureLocalConfigResult, error) {
 				if _, altErr := os.Stat(alt); altErr == nil {
 					examplePath = alt
 				} else {
-					return EnsureLocalConfigResult{}, fmt.Errorf("配置文件 %s 不存在，且未找到模板 %s", path, examplePath)
+					return EnsureLocalConfigResult{}, fmt.Errorf("Configuration file %s and template %s were not found", path, examplePath)
 				}
 			} else {
-				return EnsureLocalConfigResult{}, fmt.Errorf("配置文件 %s 不存在，且未找到模板 %s", path, examplePath)
+				return EnsureLocalConfigResult{}, fmt.Errorf("Configuration file %s and template %s were not found", path, examplePath)
 			}
 		} else {
-			return EnsureLocalConfigResult{}, fmt.Errorf("检查配置模板失败: %w", err)
+			return EnsureLocalConfigResult{}, fmt.Errorf("Failed to check configuration template: %w", err)
 		}
 	}
 
 	data, err := os.ReadFile(examplePath)
 	if err != nil {
-		return EnsureLocalConfigResult{}, fmt.Errorf("读取配置模板失败: %w", err)
+		return EnsureLocalConfigResult{}, fmt.Errorf("Failed to read configuration template: %w", err)
 	}
 
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0700); err != nil {
-			return EnsureLocalConfigResult{}, fmt.Errorf("创建配置目录失败: %w", err)
+			return EnsureLocalConfigResult{}, fmt.Errorf("Failed to create configuration directory: %w", err)
 		}
 	}
 	if err := os.WriteFile(path, data, fs.FileMode(0600)); err != nil {
-		return EnsureLocalConfigResult{}, fmt.Errorf("创建配置文件失败: %w", err)
+		return EnsureLocalConfigResult{}, fmt.Errorf("Failed to create configuration file: %w", err)
 	}
 
 	return EnsureLocalConfigResult{
@@ -1846,7 +2045,7 @@ func EnsureMCPAuth(path string, cfg *Config) error {
 	}
 	token, err := generateRandomToken()
 	if err != nil {
-		return fmt.Errorf("生成 MCP 鉴权密钥失败: %w", err)
+		return fmt.Errorf("Failed to generate MCP authentication key: %w", err)
 	}
 	cfg.MCP.AuthHeaderValue = token
 	if strings.TrimSpace(cfg.MCP.AuthHeader) == "" {
@@ -1884,9 +2083,9 @@ func PrintMCPConfigJSON(mcp MCPConfig) {
 		},
 	}
 	b, _ := json.MarshalIndent(out, "", "  ")
-	fmt.Println("[CyberStrikeAI] MCP 配置（可复制到 Cursor / Claude Code 使用）：")
-	fmt.Println("  Cursor: 放入 ~/.cursor/mcp.json 的 mcpServers，或项目 .cursor/mcp.json")
-	fmt.Println("  Claude Code: 放入 .mcp.json 或 ~/.claude.json 的 mcpServers")
+	fmt.Println("[CyberStrikeAI] MCP configuration for Cursor / Claude Code:")
+	fmt.Println("  Cursor: add under mcpServers in ~/.cursor/mcp.json or project .cursor/mcp.json")
+	fmt.Println("  Claude Code: add under mcpServers in .mcp.json or ~/.claude.json")
 	fmt.Println("----------------------------------------------------------------")
 	fmt.Println(string(b))
 	fmt.Println("----------------------------------------------------------------")
@@ -1945,7 +2144,7 @@ func MergeToolsFromDir(toolsDir string, inlineTools []ToolConfig) ([]ToolConfig,
 func loadInlineSecurityToolsFromYAML(configPath string) ([]ToolConfig, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("读取配置文件失败: %w", err)
+		return nil, fmt.Errorf("Failed to read configuration file: %w", err)
 	}
 	var partial struct {
 		Security struct {
@@ -1953,7 +2152,7 @@ func loadInlineSecurityToolsFromYAML(configPath string) ([]ToolConfig, error) {
 		} `yaml:"security"`
 	}
 	if err := yaml.Unmarshal(data, &partial); err != nil {
-		return nil, fmt.Errorf("解析配置文件失败: %w", err)
+		return nil, fmt.Errorf("Failed to parse configuration file: %w", err)
 	}
 	if partial.Security.Tools == nil {
 		return []ToolConfig{}, nil
@@ -1973,7 +2172,7 @@ func ReloadSecurityToolsFromDir(cfg *Config, configPath string) error {
 	toolsDir := ResolveToolsDir(cfg.Security.ToolsDir, configPath)
 	merged, err := MergeToolsFromDir(toolsDir, inlineTools)
 	if err != nil {
-		return fmt.Errorf("从工具目录加载工具配置失败: %w", err)
+		return fmt.Errorf("Failed to load tool configuration from tool directory: %w", err)
 	}
 	cfg.Security.Tools = merged
 	return nil
@@ -1991,7 +2190,7 @@ func LoadToolsFromDir(dir string) ([]ToolConfig, error) {
 	// 读取目录中的所有 .yaml 和 .yml 文件
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("读取工具目录失败: %w", err)
+		return nil, fmt.Errorf("Failed to read tool directory: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -2008,7 +2207,7 @@ func LoadToolsFromDir(dir string) ([]ToolConfig, error) {
 		tool, err := LoadToolFromFile(filePath)
 		if err != nil {
 			// 记录错误但继续加载其他文件
-			fmt.Printf("警告: 加载工具配置文件 %s 失败: %v\n", filePath, err)
+			fmt.Printf("Warning: failed to load tool configuration %s: %v\n", filePath, err)
 			continue
 		}
 
@@ -2022,20 +2221,20 @@ func LoadToolsFromDir(dir string) ([]ToolConfig, error) {
 func LoadToolFromFile(path string) (*ToolConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("读取文件失败: %w", err)
+		return nil, fmt.Errorf("Failed to read file: %w", err)
 	}
 
 	var tool ToolConfig
 	if err := yaml.Unmarshal(data, &tool); err != nil {
-		return nil, fmt.Errorf("解析工具配置失败: %w", err)
+		return nil, fmt.Errorf("Analysis tool configuration failed: %w", err)
 	}
 
 	// 验证必需字段
 	if tool.Name == "" {
-		return nil, fmt.Errorf("工具名称不能为空")
+		return nil, fmt.Errorf("Tool name cannot be empty")
 	}
 	if tool.Command == "" {
-		return nil, fmt.Errorf("工具命令不能为空")
+		return nil, fmt.Errorf("Tool command cannot be empty")
 	}
 
 	return &tool, nil
@@ -2053,7 +2252,7 @@ func LoadRolesFromDir(dir string) (map[string]RoleConfig, error) {
 	// 读取目录中的所有 .yaml 和 .yml 文件
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("读取角色目录失败: %w", err)
+		return nil, fmt.Errorf("Failed to read role directory: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -2070,7 +2269,7 @@ func LoadRolesFromDir(dir string) (map[string]RoleConfig, error) {
 		role, err := LoadRoleFromFile(filePath)
 		if err != nil {
 			// 记录错误但继续加载其他文件
-			fmt.Printf("警告: 加载角色配置文件 %s 失败: %v\n", filePath, err)
+			fmt.Printf("Warning: failed to load role configuration %s: %v\n", filePath, err)
 			continue
 		}
 
@@ -2092,12 +2291,12 @@ func LoadRolesFromDir(dir string) (map[string]RoleConfig, error) {
 func LoadRoleFromFile(path string) (*RoleConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("读取文件失败: %w", err)
+		return nil, fmt.Errorf("Failed to read file: %w", err)
 	}
 
 	var role RoleConfig
 	if err := yaml.Unmarshal(data, &role); err != nil {
-		return nil, fmt.Errorf("解析角色配置失败: %w", err)
+		return nil, fmt.Errorf("Failed to parse role configuration: %w", err)
 	}
 
 	// 处理 icon 字段：如果包含 Unicode 转义格式（\U0001F3C6），转换为实际的 Unicode 字符

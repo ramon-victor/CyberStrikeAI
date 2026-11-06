@@ -79,26 +79,58 @@ const ASSET_IMPORT_MAX_ROWS = 100000;
 const ASSET_IMPORT_MAX_BYTES = 100 * 1024 * 1024;
 const ASSET_IMPORT_COLUMNS = ['target', 'project', 'tags', 'host', 'ip', 'domain', 'port', 'protocol', 'title', 'server', 'country', 'province', 'city', 'responsible_person', 'department', 'business_system', 'environment', 'criticality', 'status'];
 const ASSET_IMPORT_HEADER_ALIASES = {
-    target: ['target', 'asset', 'assetaddress', '目标', '资产', '资产地址'],
-    project: ['project', 'projectname', 'projectid', '项目', '项目名称', '项目id', '所属项目'],
-    tags: ['tags', 'tag', '标签'],
-    host: ['host', 'url', '完整url', '主机'],
-    ip: ['ip', 'ipaddress', 'ip地址'],
-    domain: ['domain', '域名'],
-    port: ['port', '端口'],
-    protocol: ['protocol', 'scheme', '协议'],
-    title: ['title', 'pagetitle', '标题', '页面标题'],
-    server: ['server', 'service', 'product', '服务', '产品', '服务指纹'],
-    country: ['country', 'countryregion', '国家', '国家地区'],
-    province: ['province', 'state', '省份', '州'],
-    city: ['city', '城市'],
-    responsible_person: ['responsibleperson', 'owner', '负责人', '责任人'],
-    department: ['department', '部门'],
-    business_system: ['businesssystem', 'system', '业务系统', '系统'],
-    environment: ['environment', 'env', '环境'],
-    criticality: ['criticality', 'importance', '重要性', '重要等级'],
-    status: ['status', '状态']
+    target: ['target', 'asset', 'assetaddress', "Target", "Asset", "Asset address"],
+    project: ['project', 'projectname', 'projectid', "Project", "Project name", "project id", "Project"],
+    tags: ['tags', 'tag', "Tags"],
+    host: ['host', 'url', "full url", "Host"],
+    ip: ['ip', 'ipaddress', "IP address"],
+    domain: ['domain', "Domain"],
+    port: ['port', "Port"],
+    protocol: ['protocol', 'scheme', "Protocol"],
+    title: ['title', 'pagetitle', "Title", "Page title"],
+    server: ['server', 'service', 'product', "Service", "product", "Server fingerprint"],
+    country: ['country', 'countryregion', "nation", "country region"],
+    province: ['province', 'state', "province", "state"],
+    city: ['city', "City"],
+    responsible_person: ['responsibleperson', 'owner', "Owner", "Responsible person"],
+    department: ['department', "Department"],
+    business_system: ['businesssystem', 'system', "Business system", "System"],
+    environment: ['environment', 'env', "Environment"],
+    criticality: ['criticality', 'importance', "Criticality", "importance level"],
+    status: ['status', "State"]
 };
+
+const ASSET_EXPORT_LABELS = {
+    target: 'target', host: 'hostUrl', ip: 'exportIP', domain: 'domain', port: 'port', protocol: 'protocol',
+    title: 'pageTitle', server: 'server', project: 'project', responsible_person: 'responsiblePerson',
+    department: 'department', business_system: 'businessSystem', environment: 'environment', criticality: 'criticality',
+    country: 'country', province: 'province', city: 'city', source: 'source', status: 'status', tags: 'tagsLabel',
+    risk_level: 'riskLevel', vulnerability_count: 'exportVulnerabilityCount', first_seen_at: 'firstSeen',
+    last_seen_at: 'lastSeen', last_scan_at: 'lastScan'
+};
+
+function assetExportHeader(key) {
+    return assetT('assets.' + ASSET_EXPORT_LABELS[key], key);
+}
+
+function assetLocalizedEnumMap(values, prefix) {
+    const result = { ...values };
+    for (const code of new Set(Object.values(values))) {
+        if (!code) continue;
+        const key = prefix + code[0].toUpperCase() + code.slice(1);
+        result[assetT('assets.' + key, code).toLowerCase()] = code;
+    }
+    return result;
+}
+
+function assetExportValue(key, value) {
+    if (['environment', 'criticality', 'status'].includes(key) && value) {
+        const codes = { environment: ['production', 'staging', 'testing', 'development', 'other'], criticality: ['critical', 'high', 'medium', 'low'], status: ['active', 'inactive'] };
+        if (codes[key].includes(value)) return assetT('assets.' + key + value[0].toUpperCase() + value.slice(1), value);
+    }
+    if (key === 'risk_level' && ['critical', 'high', 'medium', 'low', 'info', 'normal', 'unassessed'].includes(value)) return assetRiskPresentation(value).label;
+    return value;
+}
 
 function normalizeAssetImportHeader(value) {
     return String(value == null ? '' : value).replace(/^\uFEFF/, '').trim().toLowerCase().replace(/[\s_\-/.（）()]+/g, '');
@@ -106,7 +138,7 @@ function normalizeAssetImportHeader(value) {
 
 function assetImportColumnForHeader(value) {
     const normalized = normalizeAssetImportHeader(value);
-    return ASSET_IMPORT_COLUMNS.find(column => ASSET_IMPORT_HEADER_ALIASES[column].includes(normalized)) || '';
+    return ASSET_IMPORT_COLUMNS.find(column => (ASSET_IMPORT_HEADER_ALIASES[column].includes(normalized) || normalizeAssetImportHeader(assetExportHeader(column)) === normalized)) || '';
 }
 
 function assetImportTemplateHeaders() {
@@ -243,7 +275,7 @@ async function handleAssetImportFile(file) {
         const matrix = sheet ? XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false, blankrows: false }) : [];
         parseAssetImportMatrix(matrix, file.name);
     } catch (error) {
-        console.error('解析资产导入文件失败:', error);
+        console.error("Failed to parse asset import file:", error);
         setAssetImportError(error?.message || assetT('assets.fileParseFailed', 'Could not parse the file; make sure it is valid and not corrupted'));
     } finally {
         setAssetImportBusy(false);
@@ -300,16 +332,16 @@ function assetImportRecord(values, rowNumber) {
     const domain = rawDomain ? assetEditorNormalizeDomain(rawDomain) : '';
     if (rawDomain && !domain) return fail(assetT('assets.domainInvalid', 'Invalid domain'));
     const protocol = (values.protocol || parsed.protocol || '').toLowerCase();
-    if (protocol && !/^[a-z][a-z0-9+.-]{0,31}$/.test(protocol)) return fail(assetT('assets.protocolInvalid', 'Invalid protocol'));
-    const statuses = { active: 'active', inactive: 'inactive', '活跃': 'active', '停用': 'inactive' };
+    if (protocol && !/^[a-z][a-z0-9+.-]{0,31}$/.test(protocol)) return fail(assetT('assets.protocolInvalid', "Invalid protocol"));
+    const statuses = assetLocalizedEnumMap({ active: 'active', inactive: 'inactive', '活跃': 'active', '停用': 'inactive' }, 'status');
     const status = statuses[String(values.status || 'active').toLowerCase()];
-    if (!status) return fail(assetT('assets.importStatusInvalid', 'Status must be active or inactive'));
-    const environments = { '': '', production: 'production', staging: 'staging', testing: 'testing', development: 'development', other: 'other', '生产': 'production', '预发布': 'staging', '测试': 'testing', '开发': 'development', '其他': 'other' };
+    if (!status) return fail(assetT('assets.importStatusInvalid', "Status must be active or inactive"));
+    const environments = assetLocalizedEnumMap({ '': '', production: 'production', staging: 'staging', testing: 'testing', development: 'development', other: 'other', '生产': 'production', '预发布': 'staging', '测试': 'testing', '开发': 'development', '其他': 'other' }, 'environment');
     const environment = environments[String(values.environment || '').toLowerCase()];
-    if (environment == null) return fail('环境值无效');
-    const criticalities = { '': '', critical: 'critical', high: 'high', medium: 'medium', low: 'low', '核心': 'critical', '重要': 'high', '一般': 'medium', '低': 'low' };
+    if (environment == null) return fail("Invalid environment value");
+    const criticalities = assetLocalizedEnumMap({ '': '', critical: 'critical', high: 'high', medium: 'medium', low: 'low', '核心': 'critical', '重要': 'high', '一般': 'medium', '低': 'low' }, 'criticality');
     const criticality = criticalities[String(values.criticality || '').toLowerCase()];
-    if (criticality == null) return fail('重要性值无效');
+    if (criticality == null) return fail("Importance value is invalid");
     let projectId = '';
     let projectName = '';
     if (values.project) {
@@ -348,7 +380,7 @@ function renderAssetImportPreview() {
         const target = row.values.target || row.values.host || row.values.domain || row.values.ip || '-';
         const result = row.error
             ? `<span class="asset-import-result asset-import-result--error">${escapeHtml(row.error)}</span>`
-            : `<span class="asset-import-result asset-import-result--ok">${escapeHtml(assetT('assets.validationPassed', '通过'))}</span>`;
+            : `<span class="asset-import-result asset-import-result--ok">${escapeHtml(assetT('assets.validationPassed', "Approve"))}</span>`;
         return `<tr class="${row.error ? 'has-error' : ''}"><td>${row.rowNumber}</td><td title="${escapeHtml(target)}">${escapeHtml(target)}</td><td>${escapeHtml(row.projectName || row.values.project || '-')}</td><td>${escapeHtml(asset.status || row.values.status || '-')}</td><td>${result}</td></tr>`;
     }).join('');
     const note = document.getElementById('asset-import-preview-note');
@@ -417,7 +449,7 @@ async function loadAssetOverview() {
         renderAssetCoverage(stats.coverage || {}, Number(stats.total || 0));
         renderAssetProtocolChart(stats.protocols || [], Number(stats.total || 0));
     } catch (error) {
-        console.error('加载资产概览失败:', error);
+        console.error("Failed to load asset overview:", error);
         if (typeof showInlineToast === 'function') showInlineToast(assetT('assets.loadFailed', 'Failed to load assets') + ': ' + error.message);
     }
 }
@@ -631,20 +663,20 @@ function renderAssetSavedViews(selectedName) {
     const select = document.getElementById('asset-saved-view-select');
     if (!select) return;
     const views = readAssetSavedViews();
-    select.innerHTML = `<option value="">${escapeHtml(assetT('assets.savedViews', '保存的筛选视图'))}</option>` + views.map(view => `<option value="${escapeHtml(view.name)}">${escapeHtml(view.name)}</option>`).join('');
+    select.innerHTML = `<option value="">${escapeHtml(assetT('assets.savedViews', "Saved filter views"))}</option>` + views.map(view => `<option value="${escapeHtml(view.name)}">${escapeHtml(view.name)}</option>`).join('');
     select.value = selectedName || '';
     syncAssetSelect(select);
 }
 
 function saveCurrentAssetView() {
-    const name = prompt('请输入筛选视图名称');
+    const name = prompt("Please enter a filter view name");
     if (!name || !name.trim()) return;
     const cleanName = name.trim().slice(0, 60);
     const views = readAssetSavedViews().filter(view => view.name !== cleanName);
     views.push({ name: cleanName, values: assetFilterValues() });
-    try { localStorage.setItem(ASSET_SAVED_VIEWS_KEY, JSON.stringify(views)); } catch (error) { return alert('保存筛选视图失败'); }
+    try { localStorage.setItem(ASSET_SAVED_VIEWS_KEY, JSON.stringify(views)); } catch (error) { return alert("Failed to save filtered view"); }
     renderAssetSavedViews(cleanName);
-    if (typeof showInlineToast === 'function') showInlineToast('筛选视图已保存');
+    if (typeof showInlineToast === 'function') showInlineToast("Filter view saved");
 }
 
 function applyAssetSavedView(name) {
@@ -666,7 +698,7 @@ function applyAssetSavedView(name) {
 function deleteCurrentAssetView() {
     const select = document.getElementById('asset-saved-view-select');
     const name = select?.value || '';
-    if (!name || !confirm(`删除筛选视图“${name}”吗？`)) return;
+    if (!name || !confirm(`Remove filter view"${name}"?"`)) return;
     const views = readAssetSavedViews().filter(view => view.name !== name);
     try { localStorage.setItem(ASSET_SAVED_VIEWS_KEY, JSON.stringify(views)); } catch (error) { return; }
     renderAssetSavedViews();
@@ -703,7 +735,7 @@ async function loadAssets(page) {
         const meta = document.getElementById('asset-list-meta');
         if (meta) meta.textContent = assetT('assets.totalMeta', `{{count}} assets`, { count: data.total || 0 });
     } catch (error) {
-        console.error('加载资产失败:', error);
+        console.error("Failed to load assets:", error);
         assetPageState.items = [];
         assetPageState.total = 0;
         assetPageState.totalPages = 1;
@@ -734,7 +766,7 @@ function assetOwnershipMarkup(asset) {
     const owner = String(asset.responsible_person || '').trim();
     const department = String(asset.department || '').trim();
     if (!owner && !department) {
-        return `<span class="asset-ownership-empty">${escapeHtml(assetT('assets.unassigned', '未分配'))}</span>`;
+        return `<span class="asset-ownership-empty">${escapeHtml(assetT('assets.unassigned', "Unassigned"))}</span>`;
     }
     const ownerLabel = assetT('assets.responsiblePerson', 'Owner');
     const departmentLabel = assetT('assets.department', 'Department');
@@ -775,17 +807,17 @@ function renderAssetRows() {
         const lastScan = asset.last_scan_at ? new Date(asset.last_scan_at).toLocaleString() : '-';
         const vulnerabilityCount = Number(asset.vulnerability_count || 0);
         const risk = assetRiskPresentation(asset.risk_level);
-        const statusLabel = asset.status === 'inactive' ? assetT('assets.statusInactive', '停用') : assetT('assets.statusActive', '活跃');
+        const statusLabel = asset.status === 'inactive' ? assetT('assets.statusInactive', "Inactive") : assetT('assets.statusActive', "Active");
         return `<tr>
-            <td class="asset-check-cell"><input type="checkbox" class="theme-checkbox" ${assetPageState.selected.has(asset.id) ? 'checked' : ''} onchange="toggleAssetSelection(${index},this.checked)" aria-label="${escapeHtml(assetT('assets.selectAsset', '选择资产'))}"></td>
+            <td class="asset-check-cell"><input type="checkbox" class="theme-checkbox" ${assetPageState.selected.has(asset.id) ? 'checked' : ''} onchange="toggleAssetSelection(${index},this.checked)" aria-label="${escapeHtml(assetT('assets.selectAsset', "Select asset"))}"></td>
             <td><button class="asset-target-link" title="${escapeHtml(targetHint)}" onclick="openAssetDetail(${index})">${escapeHtml(assetTargetLabel(asset))}</button></td>
             <td><span class="asset-service" title="${escapeHtml(service)}">${escapeHtml(service)}</span></td>
-            <td>${asset.project_name ? `<span class="asset-project-badge">${escapeHtml(asset.project_name)}</span>` : '<span class="muted">-</span>'}</td>
+            <td>${asset.project_name ? `<span class="asset-project-badge" title="${escapeHtml(asset.project_name)}">${escapeHtml(asset.project_name)}</span>` : '<span class="muted">-</span>'}</td>
             <td>${assetOwnershipMarkup(asset)}</td>
             <td>${escapeHtml(lastScan)}</td><td>${vulnerabilityCount > 0 ? `<button class="asset-vulnerability-link" onclick="openAssetVulnerabilities(${index})">${vulnerabilityCount}</button>` : '<span class="muted">0</span>'}</td>
             <td><span class="asset-risk asset-risk--${risk.level}">${escapeHtml(risk.label)}</span></td>
             <td><span class="asset-status asset-status--${escapeHtml(asset.status || 'active')}">${escapeHtml(statusLabel)}</span></td>
-            <td class="asset-row-actions"><button class="btn-link" onclick="openAssetScanModal('chat',${index})">${escapeHtml(assetT('assets.sendToChatShort', '扫描'))}</button><button class="btn-link" data-require-permission="asset:write" onclick="openAssetEditor(${index})">${escapeHtml(assetT('common.edit', '编辑'))}</button><button class="btn-link asset-delete" data-require-permission="asset:delete" onclick="deleteAsset(${index})">${escapeHtml(assetT('common.delete', '删除'))}</button></td>
+            <td class="asset-row-actions"><button class="btn-link" onclick="openAssetScanModal('chat',${index})">${escapeHtml(assetT('assets.sendToChatShort', "Scan"))}</button><button class="btn-link" data-require-permission="asset:write" onclick="openAssetEditor(${index})">${escapeHtml(assetT('common.edit', "Edit"))}</button><button class="btn-link asset-delete" data-require-permission="asset:delete" onclick="deleteAsset(${index})">${escapeHtml(assetT('common.delete', "Delete"))}</button></td>
         </tr>`;
     }).join('');
     if (typeof applyRBACToUI === 'function') applyRBACToUI(body);
@@ -871,7 +903,7 @@ async function selectAllMatchingAssets() {
         renderAssetRows();
         updateAssetSelectionUI();
     } catch (error) {
-        alert('选择全部结果失败: ' + error.message);
+        alert("Selecting all results failed: " + error.message);
     } finally {
         if (button) button.disabled = false;
     }
@@ -936,12 +968,12 @@ async function submitAssetProjectBinding() {
 
 function openAssetBulkEdit() {
     const count = assetPageState.selected.size;
-    if (!count) return alert('请先选择资产');
+    if (!count) return alert("Select assets first");
     ['asset-bulk-status', 'asset-bulk-responsible', 'asset-bulk-department', 'asset-bulk-business', 'asset-bulk-environment', 'asset-bulk-criticality', 'asset-bulk-add-tags', 'asset-bulk-remove-tags'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.value = '';
     });
-    document.getElementById('asset-bulk-edit-subtitle').textContent = `将修改 ${count} 个资产；空白字段保持原值`;
+    document.getElementById('asset-bulk-edit-subtitle').textContent = `will be modified ${count} assets; blank fields retain their original values`;
     ['asset-bulk-status', 'asset-bulk-environment', 'asset-bulk-criticality'].forEach(syncAssetSelect);
     if (typeof openAppModal === 'function') openAppModal('asset-bulk-edit-modal');
     else document.getElementById('asset-bulk-edit-modal').style.display = 'flex';
@@ -969,7 +1001,7 @@ async function submitAssetBulkEdit() {
         const value = document.getElementById(id)?.value.trim() || '';
         if (value) body[key] = value;
     });
-    if (Object.keys(body).length === 3 && body.add_tags.length === 0 && body.remove_tags.length === 0) return alert('请至少填写一项修改');
+    if (Object.keys(body).length === 3 && body.add_tags.length === 0 && body.remove_tags.length === 0) return alert("Please fill in at least one modification");
     const button = document.getElementById('asset-bulk-edit-submit');
     if (button) button.disabled = true;
     try {
@@ -978,9 +1010,9 @@ async function submitAssetBulkEdit() {
         closeAssetBulkEdit();
         clearAssetSelection();
         await loadAssets(assetPageState.page);
-        if (typeof showInlineToast === 'function') showInlineToast(`已更新 ${ids.length} 个资产`);
+        if (typeof showInlineToast === 'function') showInlineToast(`updated ${ids.length} assets`);
     } catch (error) {
-        alert('批量编辑失败: ' + error.message);
+        alert("Batch editing failed: " + error.message);
     } finally {
         if (button) button.disabled = false;
     }
@@ -1013,17 +1045,17 @@ function downloadAssetBlob(blob, filename) {
 
 function exportSelectedAssets(format) {
     const rows = assetExportRows(Array.from(assetPageState.selected.values()));
-    if (!rows.length) return alert('请先选择资产');
+    if (!rows.length) return alert("Select assets first");
     const stamp = new Date().toISOString().slice(0, 10);
     if (format === 'csv') {
         const headers = Object.keys(rows[0]);
-        const csv = '\uFEFF' + [headers.join(','), ...rows.map(row => headers.map(key => assetCsvCell(row[key])).join(','))].join('\r\n');
+        const csv = '\uFEFF' + [headers.map(key => assetCsvCell(assetExportHeader(key))).join(','), ...rows.map(row => headers.map(key => assetCsvCell(assetExportValue(key, row[key]))).join(','))].join('\r\n');
         downloadAssetBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `assets-${stamp}.csv`);
         return;
     }
-    if (!window.XLSX) return alert('表格组件加载失败，请刷新后重试');
+    if (!window.XLSX) return alert("The spreadsheet component failed to load; refresh and try again");
     const workbook = XLSX.utils.book_new();
-    const sheet = XLSX.utils.json_to_sheet(rows);
+    const sheet = XLSX.utils.aoa_to_sheet([Object.keys(rows[0]).map(assetExportHeader), ...rows.map(row => Object.keys(row).map(key => assetExportValue(key, row[key])))]);
     sheet['!autofilter'] = { ref: sheet['!ref'] };
     sheet['!cols'] = Object.keys(rows[0]).map(key => ({ wch: ['target', 'host', 'title'].includes(key) ? 30 : 16 }));
     XLSX.utils.book_append_sheet(workbook, sheet, 'Assets');
@@ -1032,23 +1064,23 @@ function exportSelectedAssets(format) {
 
 async function deleteSelectedAssets() {
     const ids = Array.from(assetPageState.selected.keys());
-    if (!ids.length || !confirm(`确定永久删除选中的 ${ids.length} 个资产吗？`)) return;
+    if (!ids.length || !confirm(`Confirm to permanently delete the selected ${ids.length} An asset?`)) return;
     try {
         const response = await apiFetch('/api/assets/batch-delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ asset_ids: ids }) });
         if (!response.ok) throw new Error(await assetEditorResponseError(response));
         clearAssetSelection();
         await loadAssets(1);
-        if (typeof showInlineToast === 'function') showInlineToast(`已删除 ${ids.length} 个资产`);
+        if (typeof showInlineToast === 'function') showInlineToast(`Deleted ${ids.length} assets`);
     } catch (error) {
-        alert('批量删除失败: ' + error.message);
+        alert("Batch deletion failed: " + error.message);
     }
 }
 
 async function mergeSelectedAssets() {
     const assets = Array.from(assetPageState.selected.values());
-    if (assets.length < 2) return alert('请至少选择两个重复资产');
+    if (assets.length < 2) return alert("Select at least two duplicate assets");
     const primary = assets[0];
-    if (!confirm(`将保留“${assetTargetLabel(primary)}”作为主资产，并合并其余 ${assets.length - 1} 个资产。继续吗？`)) return;
+    if (!confirm(`will remain "${assetTargetLabel(primary)}” as the main asset and merge the rest ${assets.length - 1} an asset. Continue?`)) return;
     try {
         const response = await apiFetch('/api/assets/merge', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1057,9 +1089,9 @@ async function mergeSelectedAssets() {
         if (!response.ok) throw new Error(await assetEditorResponseError(response));
         clearAssetSelection();
         await loadAssets(1);
-        if (typeof showInlineToast === 'function') showInlineToast(`已合并 ${assets.length} 个重复资产`);
+        if (typeof showInlineToast === 'function') showInlineToast(`Merged ${assets.length} duplicate assets`);
     } catch (error) {
-        alert('合并资产失败: ' + error.message);
+        alert("Merging assets failed: " + error.message);
     }
 }
 
@@ -1078,14 +1110,14 @@ function openAssetScanModal(mode, index) {
     assetPageState.scanMode = mode === 'task' ? 'task' : 'chat';
     assetPageState.scanAssets = assets;
     const taskMode = assetPageState.scanMode === 'task';
-    document.getElementById('asset-scan-title').textContent = taskMode ? assetT('assets.createScanTask', '创建扫描任务') : assetT('assets.sendToChat', '发送到对话');
+    document.getElementById('asset-scan-title').textContent = taskMode ? assetT('assets.createScanTask', "Create scan tasks") : assetT('assets.sendToChat', "Send to chat");
     document.getElementById('asset-scan-subtitle').textContent = assetT('assets.scanAssetCount', `{{count}} assets`, { count: assets.length });
     document.getElementById('asset-scan-targets').innerHTML = assets.slice(0, 12).map(asset => `<span class="asset-scan-target-chip">${escapeHtml(assetTargetLabel(asset))}</span>`).join('') + (assets.length > 12 ? `<span class="muted">+${assets.length - 12}</span>` : '');
     document.getElementById('asset-scan-prompt').value = assetScanPromptDefault();
     document.getElementById('asset-scan-hint').textContent = assetT('assets.promptHint', 'Use {{asset_id}}, {{target}}, {{host}}, {{ip}}, {{domain}}, or {{port}} placeholders. Task mode creates one task per asset.', { asset_id: '{{asset_id}}', target: '{{target}}', host: '{{host}}', ip: '{{ip}}', domain: '{{domain}}', port: '{{port}}' });
     const executeWrap = document.getElementById('asset-scan-execute-wrap');
     executeWrap.hidden = !taskMode;
-    document.getElementById('asset-scan-submit').textContent = taskMode ? assetT('assets.confirmCreate', '创建任务') : assetT('assets.confirmSend', '确认发送');
+    document.getElementById('asset-scan-submit').textContent = taskMode ? assetT('assets.confirmCreate', "Create tasks") : assetT('assets.confirmSend', "Send");
     if (typeof openAppModal === 'function') openAppModal('asset-scan-modal');
     else document.getElementById('asset-scan-modal').style.display = 'flex';
 }
@@ -1099,7 +1131,10 @@ function renderAssetScanPrompt(template, asset) {
     const values = {
         asset_id: asset.id || '', target: assetTargetLabel(asset), host: asset.host || '', ip: asset.ip || '', domain: asset.domain || '', port: asset.port || ''
     };
-    return Object.keys(values).reduce((text, key) => text.replaceAll(`{{${key}}}`, String(values[key])), template);
+    const prompt = Object.keys(values).reduce((text, key) => text.replaceAll(`{{${key}}}`, String(values[key])), template);
+    if (!asset.id || prompt.includes('complete_asset_scan')) return prompt;
+    const completion = assetT('assets.scanCompletionInstruction', "Stop probing once the task above is satisfied and report the available evidence. Call complete_asset_scan(id={{asset_id}}) to record this asset scan time and related results. This record update does not expand the requested probing scope.", { asset_id: String(asset.id) });
+    return `${prompt}\n\n${completion}`;
 }
 
 function commonAssetProjectId(assets) {
@@ -1131,7 +1166,7 @@ async function submitAssetScan() {
         clearAssetSelection();
         await loadAssets(assetPageState.page);
     } catch (error) {
-        console.error('提交资产扫描失败:', error);
+        console.error("Submission for asset scan failed:", error);
         alert(assetT('assets.scanSubmitFailed', 'Failed to submit scan') + ': ' + error.message);
     } finally {
         button.disabled = false;
@@ -1230,7 +1265,7 @@ async function ensureAssetProjects(force) {
         assetPageState.projectsLoaded = true;
         populateAssetProjectSelects();
     } catch (error) {
-        console.warn('加载资产项目选项失败:', error);
+        console.warn("Failed to load asset project options:", error);
         assetPageState.projectsLoaded = true;
     }
 }
@@ -1244,14 +1279,14 @@ function populateAssetProjectSelects() {
         const el = document.getElementById(id);
         if (!el) return;
         const current = el.value;
-        el.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>` + assetPageState.projects.map(project => `<option value="${assetEscapeAttr(project.id)}">${escapeHtml(project.name)}${project.status === 'archived' ? ' · ' + escapeHtml(assetT('assets.archived', '已归档')) : ''}</option>`).join('');
+        el.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>` + assetPageState.projects.map(project => `<option value="${assetEscapeAttr(project.id)}">${escapeHtml(project.name)}${project.status === 'archived' ? ' · ' + escapeHtml(assetT('assets.archived', "Archived")) : ''}</option>`).join('');
         el.value = current;
         syncAssetSelect(el);
     });
     const batch = document.getElementById('asset-batch-project');
     if (batch) {
         const current = batch.value;
-        batch.innerHTML = `<option value="" disabled hidden>${escapeHtml(assetT('assets.chooseProject', '请选择项目'))}</option>` + assetPageState.projects.map(project => `<option value="${assetEscapeAttr(project.id)}">${escapeHtml(project.name)}${project.status === 'archived' ? ' · ' + escapeHtml(assetT('assets.archived', '已归档')) : ''}</option>`).join('');
+        batch.innerHTML = `<option value="" disabled hidden>${escapeHtml(assetT('assets.chooseProject', "Choose a project"))}</option>` + assetPageState.projects.map(project => `<option value="${assetEscapeAttr(project.id)}">${escapeHtml(project.name)}${project.status === 'archived' ? ' · ' + escapeHtml(assetT('assets.archived', "Archived")) : ''}</option>`).join('');
         batch.value = current;
         syncAssetSelect(batch);
     }
@@ -1294,9 +1329,9 @@ async function openAssetEditor(indexOrAsset) {
     document.getElementById('asset-edit-target').value = assetEditorTargetFromAsset(asset);
     assetPageState.editorParsedTarget = document.getElementById('asset-edit-target').value.trim();
     clearAssetEditorErrors();
-    document.getElementById('asset-editor-title').textContent = asset ? assetT('assets.editAssetTitle', '编辑资产') : assetT('assets.addAssetTitle', '新增资产');
+    document.getElementById('asset-editor-title').textContent = asset ? assetT('assets.editAssetTitle', "Edit asset") : assetT('assets.addAssetTitle', "Added assets");
     const submit = document.getElementById('asset-editor-submit');
-    submit.textContent = asset ? assetT('common.save', '保存') : assetT('assets.addAssetAction', '添加资产');
+    submit.textContent = asset ? assetT('common.save', "Save") : assetT('assets.addAssetAction', "Add asset");
     ensureAssetEditorInteractions();
     assetPageState.editorDirty = false;
     assetPageState.editorBusy = false;
@@ -1625,7 +1660,7 @@ function fofaResultToAsset(row, fields) {
     return {
         host: firstValue(['host', 'hostname']), ip, port: Number.isFinite(port) ? port : 0, domain,
         protocol: /^[a-z][a-z0-9+.-]{0,31}$/.test(rawProtocol) ? rawProtocol : '', title: firstValue(['title', 'service.http.title']), server: firstValue(['server', 'product']),
-        country: firstValue(['country', 'location.country_cn', 'location.country_name']), province: firstValue(['province', 'location.province_cn']), city: firstValue(['city', 'location.city_cn', 'location.city']),
+        country: firstValue(['country', 'location.country_cn', 'location.country_name']), province: firstValue(['region', 'province', 'location.province_cn']), city: firstValue(['city', 'location.city_cn', 'location.city']),
         source: (window.infoCollectState?.currentPayload?.provider || 'fofa'), status: 'active'
     };
 }
@@ -1684,7 +1719,7 @@ function assetDetailBadge(label, value, modifier) {
 function assetDetailOverview(asset) {
     const service = [asset.protocol, asset.port ? ':' + asset.port : ''].join('');
     const location = [asset.country, asset.province, asset.city].filter(Boolean).join(' / ');
-    const statusLabel = asset.status === 'inactive' ? assetT('assets.statusInactive', '停用') : assetT('assets.statusActive', '活跃');
+    const statusLabel = asset.status === 'inactive' ? assetT('assets.statusInactive', "Inactive") : assetT('assets.statusActive', "Active");
     const risk = assetRiskPresentation(asset.risk_level);
     return `<section class="asset-detail-overview">
         <div class="asset-detail-overview-main">
@@ -1693,7 +1728,7 @@ function assetDetailOverview(asset) {
         </div>
         <div class="asset-detail-overview-badges">
             ${assetDetailBadge(assetT('assets.status', 'Status'), statusLabel, asset.status === 'inactive' ? 'neutral' : 'success')}
-            ${assetDetailBadge(assetT('assets.risk', '风险'), risk.label, risk.level)}
+            ${assetDetailBadge(assetT('assets.risk', "Risk"), risk.label, risk.level)}
             ${assetDetailBadge(assetT('assets.source', 'Source'), asset.source || '', 'source')}
             ${assetDetailBadge(assetT('assets.location', 'Location'), location, 'location')}
         </div>
@@ -1714,7 +1749,7 @@ function openAssetDetailRecord(asset) {
     const tags = (asset.tags || []).map(tag => `<span class="asset-tag">${escapeHtml(tag)}</span>`).join('');
     const values = [
         assetDetailItem(assetT('assets.project', 'Project'), escapeHtml(asset.project_name || '')),
-        assetDetailItem(assetT('assets.status', '状态'), escapeHtml(asset.status === 'inactive' ? assetT('assets.statusInactive', '停用') : assetT('assets.statusActive', '活跃'))),
+        assetDetailItem(assetT('assets.status', "State"), escapeHtml(asset.status === 'inactive' ? assetT('assets.statusInactive', "Inactive") : assetT('assets.statusActive', "Active"))),
         assetDetailItem('Host', escapeHtml(asset.host || '')),
         assetDetailItem('IP', escapeHtml(asset.ip || '')),
         assetDetailItem(assetT('assets.domain', 'Domain'), escapeHtml(asset.domain || '')),

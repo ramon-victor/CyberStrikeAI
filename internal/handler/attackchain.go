@@ -71,8 +71,8 @@ func (h *AttackChainHandler) GetAttackChain(c *gin.Context) {
 	// 先尝试从数据库加载（如果已生成过）
 	openAIConfig := h.getOpenAIConfig()
 	builder := attackchain.NewBuilder(h.db, openAIConfig, h.logger)
-	chain, err := builder.LoadChainFromDatabase(conversationID)
-	if err == nil && len(chain.Nodes) > 0 {
+	chain, err := builder.LoadCachedChainIfPresent(conversationID)
+	if err == nil && chain != nil {
 		// 如果已存在，直接返回
 		h.logger.Info("Returning existing attack chain", zap.String("conversationId", conversationID))
 		c.JSON(http.StatusOK, chain)
@@ -94,9 +94,9 @@ func (h *AttackChainHandler) GetAttackChain(c *gin.Context) {
 	defer lock.Unlock()
 
 	// 再次检查是否已生成（可能在等待锁的过程中已经生成完成）
-	chain, err = builder.LoadChainFromDatabase(conversationID)
-	if err == nil && len(chain.Nodes) > 0 {
-		h.logger.Info("Returning existing attack chain(generated during lock wait)", zap.String("conversationId", conversationID))
+	chain, err = builder.LoadCachedChainIfPresent(conversationID)
+	if err == nil && chain != nil {
+		h.logger.Info("Returning existing attack chain generated while waiting for the lock", zap.String("conversationId", conversationID))
 		c.JSON(http.StatusOK, chain)
 		return
 	}
@@ -136,11 +136,6 @@ func (h *AttackChainHandler) RegenerateAttackChain(c *gin.Context) {
 		return
 	}
 
-	// 删除旧的攻击链
-	if err := h.db.DeleteAttackChain(conversationID); err != nil {
-		h.logger.Warn("Failed to delete old attack chain", zap.Error(err))
-	}
-
 	// 使用锁机制防止并发生成
 	lockInterface, _ := h.generatingLocks.LoadOrStore(conversationID, &sync.Mutex{})
 	lock := lockInterface.(*sync.Mutex)
@@ -152,6 +147,11 @@ func (h *AttackChainHandler) RegenerateAttackChain(c *gin.Context) {
 		return
 	}
 	defer lock.Unlock()
+
+	// 只有持锁的生成请求可以删除旧图；返回 409 的请求不得修改缓存。
+	if err := h.db.DeleteAttackChain(conversationID); err != nil {
+		h.logger.Warn("Failed to delete old attack chain", zap.Error(err))
+	}
 
 	// 生成新的攻击链
 	h.logger.Info("Regenerating attack chain", zap.String("conversationId", conversationID))

@@ -24,58 +24,7 @@ import (
 
 // einoSummarizeUserInstruction: when compressing history, preserve the key information from penetration testing and user constraints.
 // Aligned with Eino best practices (no tools, <analysis>+<summary>, <all_user_messages>); sections are tailored to security testing.
-const einoSummarizeUserInstruction = `Key: Respond in plain text only. Do not call any tools (read_file, exec, grep, glob, write, edit, etc.).
-The conversation above already contains the full context to be compressed; do not ask the user to paste history, do not output placeholder/meta replies like "please provide the conversation history to be compressed".
-Tool calls will be rejected and will waste the one summary chance.
-
-Your task: Compress the conversation history while keeping all key security testing information complete, so that subsequent agents can seamlessly continue the same authorized testing task.
-
-Compression principles:
-- Must preserve: confirmed vulnerabilities and attack paths, core findings from tool outputs, credentials and authentication details, architecture and weaknesses, current progress, failed attempts and dead ends, strategy decisions
-- Preserve precise technical details (URLs, paths, parameters, payloads, version numbers; error messages can be summarized but key points must not be lost)
-- Summarize verbose scan outputs into conclusions; merge repeated findings
-- Already-enumerated assets must preserve an inheritable summary: main domain, brief list of key subdomains/hosts (or count + representative samples), high-value targets, key identified services/ports
-
-Output format (strictly follow, only one reply round):
-1. First output the <analysis> block: review the conversation in chronological order and check whether the following sections are covered; the analysis is for self-check only, keep it concise (suggested ≤ 400 words)
-2. Then output the <summary> block: write the inheritable compression report by the following sections (write "none" where there is no information, do not leave empty template placeholders)
-
-<summary>
-## 1. Authorization Scope and Constraints
-- Target / scope / prohibited items (domains, paths, IPs, environment)
-- Credentials / authentication info (accounts, tokens, cookies; preserve sensitive values verbatim)
-- User-specified methods, tools, priorities, and todos
-- Negative constraints (what not to test, what techniques not to use)
-
-## 2. Assets and Service Enumeration Summary
-- Main domain / core assets, brief list of key subdomains or hosts (or count + representative samples)
-- High-value targets, key identified services/ports
-- Asset status (alive / attackable / ruled out / pending verification)
-
-## 3. Architecture and Known Weaknesses
-- Tech stack / deployment topology / trust boundaries
-- List of identified weaknesses
-
-## 4. Confirmed Vulnerabilities and Attack Paths
-- Vulnerability name / CVE, URL / path, parameters / payload, PoC key points, impact level
-- Attack chain / exploitation path (step-by-step)
-
-## 5. Tool Core Findings and Scan Conclusions
-- Each tool's conclusion (summarize core output, not verbose logs)
-- Merge repeated findings
-
-## 6. All User Messages
-<all_user_messages>
-- [List the key points of each non-tool user message; preserve sensitive constraints and original wording as much as possible]
-</all_user_messages>
-
-## 7. Current Progress, Strategy Decisions, and Next Steps
-- Current position (completed / in progress / blocked)
-- Failed attempts and dead ends (method, phenomenon / error summary, conclusion)
-- Strategy decisions and concrete next-step operations (must be consistent with the most recent user request and unfinished tasks)
-</summary>
-
-Reminder: Do not call any tools; you must directly output <analysis> and <summary> based on the existing conversation above, and do not output any body text outside of the analysis.`
+const einoSummarizeUserInstruction = "Key: Respond in plain text only. Do not call any tools (read_file, exec, grep, glob, write, edit, etc.).\nThe conversation above already contains the full context to be compressed; do not ask the user to paste history, do not output placeholder/meta replies like \"please provide the conversation history to be compressed\".\nTool calls will be rejected and will waste the one summary chance.\n\nYour task: Compress the conversation history while keeping all key security testing information complete, so that subsequent agents can seamlessly continue the same authorized testing task.\n\nCompression principles:\n- Must preserve: confirmed vulnerabilities and attack paths, core findings from tool outputs, credentials and authentication details, architecture and weaknesses, current progress, failed attempts and dead ends, strategy decisions\n- Preserve precise technical details (URLs, paths, parameters, payloads, version numbers; error messages can be summarized but key points must not be lost)\n- Summarize verbose scan outputs into conclusions; merge repeated findings\n- Already-enumerated assets must preserve an inheritable summary: main domain, brief list of key subdomains/hosts (or count + representative samples), high-value targets, key identified services/ports\n\nOutput format (strictly follow, only one reply round):\n1. First output the <analysis> block: review the conversation in chronological order and check whether the following sections are covered; the analysis is for self-check only, keep it concise (suggested ≤ 400 words)\n2. Then output the <summary> block: write the inheritable compression report by the following sections (write \"none\" where there is no information, do not leave empty template placeholders)\n\n<summary>\n## 1. Authorization Scope and Constraints\n- Target / scope / prohibited items (domains, paths, IPs, environment)\n- Credentials / authentication info (accounts, tokens, cookies; preserve sensitive values verbatim)\n- User-specified methods, tools, priorities, and todos\n- Negative constraints (what not to test, what techniques not to use)\n\n## 2. Assets and Service Enumeration Summary\n- Main domain / core assets, brief list of key subdomains or hosts (or count + representative samples)\n- High-value targets, key identified services/ports\n- Asset status (alive / attackable / ruled out / pending verification)\n\n## 3. Architecture and Known Weaknesses\n- Tech stack / deployment topology / trust boundaries\n- List of identified weaknesses\n\n## 4. Confirmed Vulnerabilities and Attack Paths\n- Vulnerability name / CVE, URL / path, parameters / payload, PoC key points, impact level\n- Attack chain / exploitation path (step-by-step)\n\n## 5. Tool Core Findings and Scan Conclusions\n- Each tool's conclusion (summarize core output, not verbose logs)\n- Merge repeated findings\n\n## 6. All User Messages\n<all_user_messages>\n- [List the key points of each non-tool user message; preserve sensitive constraints and original wording as much as possible]\n</all_user_messages>\n\n## 7. Current progress, strategy and next steps\n- Current position: completed, in progress or blocked\n- Failed attempts and dead ends: method, observed result/error and conclusion\n- Strategy and concrete next actions consistent with the latest request and unfinished work\n\n## 8. Original evidence retrieval clues (appendix)\n- Append brief retrieval clues for tool results, key findings and progress; do not resummarize user input or rewrite earlier sections\n- For acquired credentials, important requests, errors and other evidence, identify source target, tool/operation and searchable keywords for retrieving exact values from snapshots\n- Record existing evidence only; do not guess, repeat long logs or full credential values. Write none when unavailable\n- Do not invent filenames, line numbers or old snapshot paths; the system appends the actual saved snapshot retrieval location\n</summary>\n\nReminder: Do not call any tools; you must directly output <analysis> and <summary> based on the existing conversation above, and do not output any body text outside of the analysis."
 
 // newEinoSummarizationMiddleware 使用 Eino ADK Summarization 中间件（见 https://www.cloudwego.io/zh/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_summarization/）。
 // 触发阈值：估算 token 超过 openai.max_total_tokens * summarization_trigger_ratio（默认 0.8）时摘要。
@@ -88,9 +37,10 @@ func newEinoSummarizationMiddleware(
 	db *database.DB,
 	projectID string,
 	logger *zap.Logger,
+	memoryScopes ...string,
 ) (adk.ChatModelAgentMiddleware, error) {
 	if summaryModel == nil || appCfg == nil {
-		return nil, fmt.Errorf("multiagent: summarization 需要 model 与配置")
+		return nil, fmt.Errorf("multiagent: summarization requires a model and configuration")
 	}
 	maxTotal := appCfg.OpenAI.MaxTotalTokens
 	if maxTotal <= 0 {
@@ -144,12 +94,16 @@ func newEinoSummarizationMiddleware(
 	if summaryInputMax < 4096 {
 		summaryInputMax = 4096
 	}
+	memoryScope := summarizationMemoryScope(memoryScopes)
 	transcriptPath := ""
 	if conv := strings.TrimSpace(conversationID); conv != "" {
-		baseRoot := filepath.Join(os.TempDir(), "cyberstrike-summarization")
+		baseRoot := filepath.Join(os.TempDir(), "cyberstrike-summarization", sanitizeEinoPathSegment(conv), "summarization")
 		if dbPath := strings.TrimSpace(appCfg.Database.Path); dbPath != "" {
 			// Persist with the same lifecycle as local conversation storage.
 			baseRoot = filepath.Join(filepath.Dir(dbPath), "conversation_artifacts", sanitizeEinoPathSegment(conv), "summarization")
+		}
+		if memoryScope != "main" {
+			baseRoot = filepath.Join(baseRoot, "scopes", summarizationScopeID(memoryScope))
 		}
 		base := baseRoot
 		if abs, err := filepath.Abs(base); err == nil {
@@ -172,7 +126,7 @@ func newEinoSummarizationMiddleware(
 		GenModelInput: func(ctx context.Context, sysInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error) {
 			if transcriptPath != "" && len(originalMsgs) > 0 {
 				if werr := writeSummarizationTranscript(transcriptPath, originalMsgs); werr != nil && logger != nil {
-					logger.Warn("eino summarization transcript preflight 写入失败",
+					logger.Warn("eino summarization transcript preflight write failed",
 						zap.String("path", transcriptPath), zap.Error(werr))
 				}
 			}
@@ -215,7 +169,9 @@ func newEinoSummarizationMiddleware(
 		TokenCounter:       tokenCounter,
 		UserInstruction:    einoSummarizeUserInstruction,
 		EmitInternalEvents: emitInternalEvents,
-		TranscriptFilePath: transcriptPath,
+		// Publish the immutable snapshot only after the host successfully writes it
+		// in Finalize; the framework otherwise advertises even a failed/stale alias.
+		TranscriptFilePath: "",
 		Retry: &summarization.RetryConfig{
 			MaxRetries: &retryMax,
 			ShouldRetry: func(_ context.Context, _ adk.Message, err error) bool {
@@ -240,15 +196,14 @@ func newEinoSummarizationMiddleware(
 		},
 		Finalize: func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
 			compactionMessages := stripOriginalUserIntentLedgerFromMessages(originalMessages)
-			defaultFinalized, derr := summarization.DefaultFinalize(ctx, compactionMessages, summary)
+			defaultFinalized, derr := summarization.DefaultFinalize(ctx, summarizationDefaultFinalizeInput(compactionMessages, originalMessages), summary)
 			if derr != nil {
 				return nil, derr
 			}
 			if len(defaultFinalized) == 0 {
 				return nil, fmt.Errorf("summarization default finalize returned no messages")
 			}
-			summary = appendTranscriptPathToSummarizationMessage(defaultFinalized[len(defaultFinalized)-1], transcriptPath)
-			summary = stripAnalysisFromSummarizationMessage(summary)
+			summary = finalizeSummarizationMemory(defaultFinalized[len(defaultFinalized)-1], originalMessages, transcriptPath, db, projectID, conversationID, memoryScope, appCfg.Project, logger)
 			userLedger := buildOriginalUserIntentLedgerMessage(originalMessages, userLedgerMaxRunes, userLedgerEntryMaxRunes)
 			out, ferr := summarizeFinalizeWithRecentAssistantToolTrail(ctx, compactionMessages, summary, tokenCounter, recentTrailMax)
 			if ferr != nil {
@@ -256,14 +211,14 @@ func newEinoSummarizationMiddleware(
 			}
 			out = mergeMessageIntoLeadingSystem(out, userLedger)
 			if appCfg != nil {
-				out = refreshFactIndexInMessages(out, db, projectID, appCfg.Project, logger)
+				out = refreshFactIndexInMessages(out, db, projectID, appCfg.Project, logger, conversationID)
 			}
 			return out, nil
 		},
 		Callback: func(ctx context.Context, before, after adk.ChatModelAgentState) error {
 			if transcriptPath != "" && len(before.Messages) > 0 {
 				if werr := writeSummarizationTranscript(transcriptPath, before.Messages); werr != nil && logger != nil {
-					logger.Warn("eino summarization transcript 写入失败",
+					logger.Warn("eino summarization transcript write failed",
 						zap.String("path", transcriptPath),
 						zap.Error(werr),
 					)
@@ -272,7 +227,7 @@ func newEinoSummarizationMiddleware(
 			if logger != nil {
 				beforeTokens, _ := tokenCounter(ctx, &summarization.TokenCounterInput{Messages: before.Messages})
 				afterTokens, _ := tokenCounter(ctx, &summarization.TokenCounterInput{Messages: after.Messages})
-				logger.Info("eino summarization 已压缩上下文",
+				logger.Info("eino summarization compacted context",
 					zap.Int("messages_before", len(before.Messages)),
 					zap.Int("messages_after", len(after.Messages)),
 					zap.Int("tokens_before_estimated", beforeTokens),
@@ -461,7 +416,7 @@ func buildPlaintextSummarizationInput(
 }
 
 // refreshFactIndexInMessages 在 summarization 压缩后，用 DB 最新索引替换 system 中已有的项目黑板索引段。
-func refreshFactIndexInMessages(msgs []adk.Message, db *database.DB, projectID string, cfg config.ProjectConfig, logger *zap.Logger) []adk.Message {
+func refreshFactIndexInMessages(msgs []adk.Message, db *database.DB, projectID string, cfg config.ProjectConfig, logger *zap.Logger, conversationIDs ...string) []adk.Message {
 	if db == nil || !cfg.Enabled {
 		return msgs
 	}
@@ -469,18 +424,16 @@ func refreshFactIndexInMessages(msgs []adk.Message, db *database.DB, projectID s
 	if projectID == "" {
 		return msgs
 	}
-	freshIndex, err := project.BuildFactIndexBlock(db, projectID, cfg)
+	freshIndex, err := project.BuildFactIndexBlock(db, projectID, cfg, conversationIDs...)
 	if err != nil {
 		if logger != nil {
-			logger.Warn("summarization: 刷新项目黑板索引失败", zap.String("projectId", projectID), zap.Error(err))
+			logger.Warn("summarization: failed to refresh project blackboard index", zap.String("projectId", projectID), zap.Error(err))
 		}
 		return msgs
 	}
 	freshIndex = strings.TrimSpace(freshIndex)
-	if freshIndex == "" {
-		return msgs
-	}
-
+	// A successful empty build means the old block must be removed. Errors
+	// above retain the previous index instead of silently discarding context.
 	changed := false
 	out := make([]adk.Message, len(msgs))
 	for i, msg := range msgs {
@@ -488,7 +441,13 @@ func refreshFactIndexInMessages(msgs []adk.Message, db *database.DB, projectID s
 			out[i] = msg
 			continue
 		}
-		newContent, ok := project.ReplaceFactIndexSection(msg.Content, freshIndex)
+		var newContent string
+		var ok bool
+		if freshIndex == "" {
+			newContent, ok = project.RemoveFactIndexSection(msg.Content)
+		} else {
+			newContent, ok = project.ReplaceFactIndexSection(msg.Content, freshIndex)
+		}
 		if !ok {
 			out[i] = msg
 			continue
@@ -499,7 +458,7 @@ func refreshFactIndexInMessages(msgs []adk.Message, db *database.DB, projectID s
 		changed = true
 	}
 	if changed && logger != nil {
-		logger.Info("summarization: 已刷新项目黑板索引", zap.String("projectId", projectID))
+		logger.Info("summarization: refreshed project blackboard index", zap.String("projectId", projectID))
 	}
 	return out
 }
@@ -679,14 +638,8 @@ func writeSummarizationTranscript(path string, msgs []adk.Message) error {
 	if path == "" {
 		return nil
 	}
-	body := formatSummarizationTranscript(msgs)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir transcript dir: %w", err)
-	}
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		return fmt.Errorf("write transcript: %w", err)
-	}
-	return nil
+	_, err := writeSummarizationTranscriptSnapshot(path, msgs)
+	return err
 }
 
 func einoSummarizationTokenCounter(openAIModel string) summarization.TokenCounterFunc {

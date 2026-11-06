@@ -103,7 +103,7 @@ func (h *WechatRobotHandler) HandleWechatQRCode(c *gin.Context) {
 
 	qr, err := client.GetBotQRCode(ctx, botType, localTokens)
 	if err != nil {
-		h.logger.Warn("获取微信二维码失败", zap.Error(err))
+		h.logger.Warn("Failed to obtain WeChat QR code", zap.Error(err))
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to obtain QR code: " + err.Error()})
 		return
 	}
@@ -129,7 +129,7 @@ func (h *WechatRobotHandler) HandleWechatQRCode(c *gin.Context) {
 		"message":         "scan the QR code with WeChat and confirm the binding",
 	}
 	if dataURL, err := ilink.QRCodeDataURL(qr.QRCodeImgContent, 256); err != nil {
-		h.logger.Warn("生成二维码图片失败", zap.Error(err))
+		h.logger.Warn("Failed to generate QR code image", zap.Error(err))
 	} else {
 		resp["qrcode_image_data_url"] = dataURL
 	}
@@ -176,7 +176,7 @@ func (h *WechatRobotHandler) HandleWechatQRCodeStatus(c *gin.Context) {
 
 	st, err := client.GetQRCodeStatus(ctx, sess.QRCode, vc)
 	if err != nil {
-		h.logger.Warn("轮询微信二维码状态失败", zap.Error(err))
+		h.logger.Warn("Failed to poll WeChat QR code status", zap.Error(err))
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
@@ -234,7 +234,7 @@ func (h *WechatRobotHandler) HandleWechatQRCodeStatus(c *gin.Context) {
 		}
 		if h.configSaver != nil {
 			if err := h.configSaver.ApplyWechatRobotBinding(wc); err != nil {
-				h.logger.Warn("保存微信机器人配置失败", zap.Error(err))
+				h.logger.Warn("Failed to save WeChat robot configuration", zap.Error(err))
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save configuration: " + err.Error()})
 				return
 			}

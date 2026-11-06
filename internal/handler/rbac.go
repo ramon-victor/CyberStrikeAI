@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/authctx"
@@ -20,6 +21,7 @@ type RBACHandler struct {
 	logger *zap.Logger
 	audit  *audit.Service
 	auth   *security.AuthManager
+	roleMu sync.Mutex // Serialize role snapshots, mutations, and revocation.
 }
 
 func NewRBACHandler(db *database.DB, logger *zap.Logger) *RBACHandler {
@@ -140,6 +142,8 @@ func (h *RBACHandler) CreateRole(c *gin.Context) {
 }
 
 func (h *RBACHandler) UpdateRole(c *gin.Context) {
+	h.roleMu.Lock()
+	defer h.roleMu.Unlock()
 	id := strings.TrimSpace(c.Param("id"))
 	existing, err := h.db.GetRBACRoleByID(id)
 	if err != nil {
@@ -159,6 +163,11 @@ func (h *RBACHandler) UpdateRole(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	previousPermissions, err := h.db.ListRBACRolePermissionKeys(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	role, err := h.db.UpsertRBACRole(id, req.Name, req.Description, req.Scope, req.Permissions)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -170,13 +179,15 @@ func (h *RBACHandler) UpdateRole(c *gin.Context) {
 	if h.audit != nil {
 		h.audit.RecordOK(c, "rbac", "update_role", "Update platform role", "role", id, nil)
 	}
-	if h.auth != nil {
-		h.auth.RevokeAllSessions()
+	if h.auth != nil && (existing.Scope != role.Scope || !sameRolePermissions(previousPermissions, req.Permissions)) {
+		h.auth.RevokeRoleSessions(id)
 	}
 	c.JSON(http.StatusOK, gin.H{"role": role})
 }
 
 func (h *RBACHandler) DeleteRole(c *gin.Context) {
+	h.roleMu.Lock()
+	defer h.roleMu.Unlock()
 	id := strings.TrimSpace(c.Param("id"))
 	if err := h.db.DeleteRBACRole(id); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -186,9 +197,32 @@ func (h *RBACHandler) DeleteRole(c *gin.Context) {
 		h.audit.RecordOK(c, "rbac", "delete_role", "Delete platform role", "role", id, nil)
 	}
 	if h.auth != nil {
-		h.auth.RevokeAllSessions()
+		h.auth.RevokeRoleSessions(id)
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// Permission order, duplicate keys, and whitespace do not change authorization.
+func sameRolePermissions(a, b []string) bool {
+	normalize := func(keys []string) map[string]bool {
+		set := make(map[string]bool, len(keys))
+		for _, key := range keys {
+			if key = strings.TrimSpace(key); key != "" {
+				set[key] = true
+			}
+		}
+		return set
+	}
+	left, right := normalize(a), normalize(b)
+	if len(left) != len(right) {
+		return false
+	}
+	for key := range left {
+		if !right[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *RBACHandler) ListUsers(c *gin.Context) {
@@ -247,7 +281,7 @@ func (h *RBACHandler) CreateUser(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "rbac", "create_user", "创建平台用户", "user", user.ID, map[string]interface{}{"username": user.Username})
+		h.audit.RecordOK(c, "rbac", "create_user", "Create platform user", "user", user.ID, map[string]interface{}{"username": user.Username})
 	}
 	c.JSON(http.StatusOK, gin.H{"user": user})
 }
@@ -295,7 +329,7 @@ func (h *RBACHandler) UpdateUser(c *gin.Context) {
 		}
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "rbac", "update_user", "更新平台用户", "user", id, nil)
+		h.audit.RecordOK(c, "rbac", "update_user", "Update platform user", "user", id, nil)
 	}
 	if h.auth != nil {
 		h.auth.RevokeUserSessions(id)
@@ -311,7 +345,7 @@ func (h *RBACHandler) DeleteUser(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "rbac", "delete_user", "删除平台用户", "user", id, nil)
+		h.audit.RecordOK(c, "rbac", "delete_user", "Delete platform user", "user", id, nil)
 	}
 	if h.auth != nil {
 		h.auth.RevokeUserSessions(id)
@@ -359,7 +393,7 @@ func (h *RBACHandler) AssignResource(c *gin.Context) {
 			if detectedTypes != nil {
 				resourceType = detectedTypes[strings.TrimSpace(resourceID)]
 			}
-			h.audit.RecordOK(c, "rbac", "assign_resource", "授权资源访问", resourceType, strings.TrimSpace(resourceID), map[string]interface{}{"user_id": req.UserID})
+			h.audit.RecordOK(c, "rbac", "assign_resource", "Grant resource access", resourceType, strings.TrimSpace(resourceID), map[string]interface{}{"user_id": req.UserID})
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -420,7 +454,7 @@ func (h *RBACHandler) DeleteResourceAssignment(c *gin.Context) {
 		return
 	}
 	if h.audit != nil {
-		h.audit.RecordOK(c, "rbac", "delete_resource_assignment", "撤销资源授权", assignment.ResourceType, assignment.ResourceID, map[string]interface{}{
+		h.audit.RecordOK(c, "rbac", "delete_resource_assignment", "Revoke resource grant", assignment.ResourceType, assignment.ResourceID, map[string]interface{}{
 			"user_id":       assignment.UserID,
 			"assignment_id": assignment.ID,
 		})

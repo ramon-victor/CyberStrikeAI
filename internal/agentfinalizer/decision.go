@@ -182,7 +182,7 @@ func ResponsePayload(d Decision, extra map[string]interface{}) map[string]interf
 }
 
 func isEmptyCandidate(s string) bool {
-	s = strings.TrimSpace(s)
+	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "" {
 		return true
 	}

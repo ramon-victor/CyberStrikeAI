@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"cyberstrike-ai/internal/agent"
+
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/prebuilt/planexecute"
 	"github.com/cloudwego/eino/components/model"
@@ -19,7 +21,7 @@ func newPlanExecuteAgenticExecutor(
 	modelFailoverCfg *adk.ModelFailoverConfig[*schema.AgenticMessage],
 ) (adk.Agent, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("plan_execute: ExecutorConfig 为空")
+		return nil, fmt.Errorf("plan_execute: ExecutorConfig is empty")
 	}
 	if agenticModel == nil {
 		return nil, fmt.Errorf("plan_execute: executor AgenticModel is nil")
@@ -92,10 +94,14 @@ func planExecuteDefaultGenExecutorInput(ctx context.Context, in *planexecute.Exe
 	if err != nil {
 		return nil, err
 	}
-	return planexecute.ExecutorPrompt.Format(ctx, map[string]any{
+	msgs, err := planexecute.ExecutorPrompt.Format(ctx, map[string]any{
 		"input":          planExecuteFormatInput(in.UserInput),
 		"plan":           string(planContent),
 		"executed_steps": planExecuteFormatExecutedSteps(in.ExecutedSteps, nil, nil),
 		"step":           in.Plan.FirstStep(),
 	})
+	if err != nil {
+		return nil, err
+	}
+	return withPlanExecuteInputProvenance(msgs, in.UserInput, nil, nil, agent.PlanExecuteExecutorContext), nil
 }

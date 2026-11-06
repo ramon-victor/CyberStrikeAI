@@ -2,7 +2,7 @@
 
 FROM golang:1.25-bookworm AS app-builder
 
-ARG APP_VERSION=v1.7.20
+ARG APP_VERSION=v1.7.24
 
 WORKDIR /src
 
@@ -15,7 +15,7 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o /out/cyberstrike-ai ./cmd/server/main.go
+RUN go build -o /out/cyberstrike-ai ./cmd/server
 
 FROM golang:1.25-bookworm AS tools-builder
 
@@ -70,7 +70,7 @@ RUN npm install -g @stoplight/spectral-cli tslib \
 
 FROM debian:bookworm-slim AS runtime
 
-ARG APP_VERSION=v1.7.20
+ARG APP_VERSION=v1.7.24
 
 ENV APP_HOME=/app \
     CYBERSTRIKE_APP_VERSION=${APP_VERSION} \

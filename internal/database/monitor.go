@@ -106,7 +106,7 @@ func (db *DB) UpdateToolExecutionResult(id string, result *mcp.ToolResult) error
 	}
 	_, err = db.Exec(`UPDATE tool_executions SET result = ? WHERE id = ?`, string(resultBytes), id)
 	if err != nil {
-		db.logger.Warn("更新工具执行结果失败", zap.Error(err), zap.String("executionId", id))
+		db.logger.Warn("Update tool execution result failed", zap.Error(err), zap.String("executionId", id))
 	}
 	return err
 }
@@ -370,7 +370,7 @@ func (db *DB) LoadToolStatsSummary(topN int) (*ToolStatsSummaryResult, error) {
 			&stat.BlockedCalls,
 			&lastCallTime,
 		); err != nil {
-			db.logger.Warn("加载 Top 工具统计失败", zap.Error(err))
+			db.logger.Warn("Failed to load Top tool statistics", zap.Error(err))
 			continue
 		}
 		if lastCallTime.Valid {
@@ -480,7 +480,7 @@ func (db *DB) LoadToolExecutionListPageForAccess(offset, limit int, status, tool
 			&exec.OwnerUserID,
 			&exec.ConversationID,
 		); err != nil {
-			db.logger.Warn("加载执行记录列表失败", zap.Error(err))
+			db.logger.Warn("Failed to load execution record list", zap.Error(err))
 			continue
 		}
 		if endTime.Valid {
@@ -622,7 +622,7 @@ func (db *DB) UserCanAccessToolExecution(userID, scope, executionID string) bool
 func (db *DB) CancelOrphanedRunningToolExecutions(endTime time.Time, errMsg string) (int64, error) {
 	errMsg = strings.TrimSpace(errMsg)
 	if errMsg == "" {
-		errMsg = "执行已中断（服务重启或会话结束）"
+		errMsg = "Execution interrupted (service restart or session ended)"
 	}
 	query := `
 		UPDATE tool_executions
@@ -644,7 +644,7 @@ func (db *DB) CancelOrphanedRunningToolExecutions(endTime time.Time, errMsg stri
 func (db *DB) FinalizeStaleRunningToolExecutions(endTime time.Time, minAge time.Duration, activeIDs map[string]struct{}, errMsg string) (int64, error) {
 	errMsg = strings.TrimSpace(errMsg)
 	if errMsg == "" {
-		errMsg = "执行已中断（会话已结束）"
+		errMsg = "Execution interrupted (session ended)"
 	}
 	if minAge < 0 {
 		minAge = 0
@@ -667,7 +667,7 @@ func (db *DB) FinalizeStaleRunningToolExecutions(endTime time.Time, minAge time.
 	for rows.Next() {
 		var row staleRow
 		if err := rows.Scan(&row.id, &row.startTime); err != nil {
-			db.logger.Warn("读取 stale running 执行记录失败", zap.Error(err))
+			db.logger.Warn("Failed to read stale running execution records", zap.Error(err))
 			continue
 		}
 		if activeIDs != nil {
@@ -696,7 +696,7 @@ func (db *DB) FinalizeStaleRunningToolExecutions(endTime time.Time, minAge time.
 			WHERE id = ? AND status = 'running'
 		`, errMsg, endTime, durationMs, row.id)
 		if err != nil {
-			db.logger.Warn("更新 stale running 执行记录失败", zap.Error(err), zap.String("executionId", row.id))
+			db.logger.Warn("Failed to update stale running execution records", zap.Error(err), zap.String("executionId", row.id))
 			continue
 		}
 		n, _ := res.RowsAffected()
@@ -854,7 +854,7 @@ func (db *DB) PurgeToolExecutionsBefore(cutoff time.Time) (int64, error) {
 		var toolName, status string
 		var count int
 		if err := rows.Scan(&toolName, &status, &count); err != nil {
-			db.logger.Warn("读取待清理执行记录统计失败", zap.Error(err))
+			db.logger.Warn("Failed to read statistics of execution records to be cleaned", zap.Error(err))
 			continue
 		}
 		toolName = strings.TrimSpace(toolName)
@@ -889,7 +889,7 @@ func (db *DB) PurgeToolExecutionsBefore(cutoff time.Time) (int64, error) {
 
 	for toolName, delta := range deltas {
 		if err := db.DecreaseToolStats(toolName, delta.totalCalls, delta.successCalls, delta.failedCalls); err != nil {
-			db.logger.Warn("清理过期执行记录后更新统计失败",
+			db.logger.Warn("Failed to update statistics after clearing expired execution records",
 				zap.Error(err),
 				zap.String("toolName", toolName),
 			)
@@ -1060,12 +1060,12 @@ func (db *DB) LoadCallsTimeline(since time.Time, dailyBuckets bool) ([]CallsTime
 		var bucketStr string
 		var total, failed, blocked int
 		if err := rows.Scan(&bucketStr, &total, &failed, &blocked); err != nil {
-			db.logger.Warn("加载调用趋势失败", zap.Error(err))
+			db.logger.Warn("Failed to load call trend", zap.Error(err))
 			continue
 		}
 		bucketTime, err := parseCallsTimelineBucket(bucketStr, dailyBuckets)
 		if err != nil {
-			db.logger.Warn("解析调用趋势时间桶失败", zap.Error(err), zap.String("bucket", bucketStr))
+			db.logger.Warn("Failed to parse and call trend time bucket", zap.Error(err), zap.String("bucket", bucketStr))
 			continue
 		}
 		buckets = append(buckets, CallsTimelineBucket{

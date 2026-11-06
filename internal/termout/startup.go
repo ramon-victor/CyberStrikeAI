@@ -22,7 +22,7 @@ type StartupWebUIOptions struct {
 func PrintConfigCreated() {
 	s := New(os.Stdout)
 	s.Println("")
-	s.Println(s.Green("✔ ") + s.Bold("已创建 config.yaml") + s.Dim("（来自 config.example.yaml）"))
+	s.Println(s.Green("✔ ") + s.Bold("config.yaml created") + s.Dim("(from config.example.yaml)"))
 	s.BlankLine()
 }
 

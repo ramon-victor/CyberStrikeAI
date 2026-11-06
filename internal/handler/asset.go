@@ -124,7 +124,7 @@ func (h *AssetHandler) Import(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		h.logger.Error("导入资产失败", zap.Error(err))
+		h.logger.Error("Failed to import assets", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -147,7 +147,7 @@ func (h *AssetHandler) List(c *gin.Context) {
 	}
 	assets, total, err := h.db.ListAssets(pageSize, (page-1)*pageSize, filter, assetAccess(c))
 	if err != nil {
-		h.logger.Error("加载资产失败", zap.Error(err))
+		h.logger.Error("Failed to load assets", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -233,7 +233,7 @@ func (h *AssetHandler) Selection(c *gin.Context) {
 type assetQueryError struct{ field, value string }
 
 func (e *assetQueryError) Error() string {
-	return e.field + " 参数无效: " + e.value
+	return e.field + " Invalid parameter: " + e.value
 }
 
 func parseAssetQueryTime(field, value string) (*time.Time, error) {
@@ -308,7 +308,7 @@ func (h *AssetHandler) RecordScans(c *gin.Context) {
 	}
 	for _, scan := range req.Scans {
 		if err := h.db.MarkAssetScanned(scan.AssetID, scan.ConversationID, scan.QueueID, scan.TaskID, access); err != nil {
-			h.logger.Error("记录资产扫描失败", zap.String("asset_id", scan.AssetID), zap.Error(err))
+			h.logger.Error("Log asset scan failure", zap.String("asset_id", scan.AssetID), zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -377,7 +377,7 @@ func (h *AssetHandler) BulkUpdate(c *gin.Context) {
 		return
 	}
 	if len(req.AssetIDs) == 0 || len(req.AssetIDs) > maxAssetOperationBatch {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "asset_ids 数量必须在 1-10000 之间"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "asset_ids must contain 1 to 10000 entries"})
 		return
 	}
 	updated, err := h.db.UpdateAssetsBulk(req.AssetIDs, database.AssetBulkPatch{
@@ -399,7 +399,7 @@ func (h *AssetHandler) BatchDelete(c *gin.Context) {
 		return
 	}
 	if len(req.AssetIDs) == 0 || len(req.AssetIDs) > maxAssetOperationBatch {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "asset_ids 数量必须在 1-10000 之间"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "asset_ids must contain 1 to 10000 entries"})
 		return
 	}
 	deleted, err := h.db.DeleteAssets(req.AssetIDs, assetAccess(c))

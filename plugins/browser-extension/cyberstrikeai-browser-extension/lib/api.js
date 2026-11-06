@@ -39,11 +39,15 @@ async function apiFetch(baseUrl, path, options = {}) {
   return json;
 }
 
-async function loginAndValidate(baseUrl, password, signal) {
+async function loginAndValidate(baseUrl, username, password, signal) {
+  username = username.trim();
+  if (!username || [...username].length > 64) {
+    throw new Error('Username is required and must not exceed 64 characters');
+  }
   const login = await apiFetch(baseUrl, '/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify({ username, password }),
     signal,
   });
   const token = login && login.token;
@@ -91,7 +95,7 @@ async function fetchRoles(baseUrl, token, signal) {
     if (!r.name) continue;
     // Server default role is named "默认"; map to empty id + English label (UI is EN).
     // Skip it here and prepend a single Default entry below — avoids Default + 默认.
-    if (r.name === '默认') continue;
+    if (r.name === '默认' || String(r.name).toLowerCase() === 'default') continue;
     out.push({ id: r.name, label: r.name });
   }
   out.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));

@@ -241,13 +241,13 @@ func (h *MonitorHandler) loadExecutionListWithPagination(page, pageSize int, sta
 	offset := (page - 1) * pageSize
 	executions, err := h.db.LoadToolExecutionListPageForAccess(offset, pageSize, status, toolName, access)
 	if err != nil {
-		h.logger.Warn("从数据库加载执行记录列表失败，回退到内存数据", zap.Error(err))
+		h.logger.Warn("Failed to load execution records from database; falling back to memory", zap.Error(err))
 		return h.loadExecutionListWithPaginationFromMemory(page, pageSize, status, toolName, access)
 	}
 
 	total, err := h.db.CountToolExecutionsForAccess(status, toolName, access)
 	if err != nil {
-		h.logger.Warn("获取执行记录总数失败", zap.Error(err))
+		h.logger.Warn("Failed to obtain the total number of execution records", zap.Error(err))
 		total = offset + len(executions)
 		if len(executions) == pageSize {
 			total = offset + len(executions) + 1
@@ -436,7 +436,7 @@ func (h *MonitorHandler) loadStatsSummary(topN int) (*MonitorStatsSummary, []*mc
 		if err == nil {
 			return dbStatsSummaryToMonitor(result), result.TopTools
 		}
-		h.logger.Warn("从数据库加载统计汇总失败，回退到内存数据", zap.Error(err))
+		h.logger.Warn("Failed to load statistics from database; falling back to memory", zap.Error(err))
 	}
 
 	stats := h.loadStatsMap()
@@ -551,7 +551,7 @@ func (h *MonitorHandler) loadStatsMap() map[string]*mcp.ToolStats {
 func (h *MonitorHandler) GetExecution(c *gin.Context) {
 	id := c.Param("id")
 	if !h.monitorExecutionAllowed(c, id) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 
@@ -595,7 +595,7 @@ func (h *MonitorHandler) CancelExecution(c *gin.Context) {
 		return
 	}
 	if !h.monitorExecutionAllowed(c, id) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 	note := ""
@@ -604,7 +604,7 @@ func (h *MonitorHandler) CancelExecution(c *gin.Context) {
 		Note string `json:"note"`
 	}
 	if err := dec.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体须为 JSON，例如 {\"note\":\"说明\"}，可为空对象"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Body must be JSON, for example {\"note\":\"explanation\"}; an empty object is allowed"})
 		return
 	}
 	note = strings.TrimSpace(body.Note)
@@ -612,7 +612,7 @@ func (h *MonitorHandler) CancelExecution(c *gin.Context) {
 	convID := h.conversationIDForRunningExecution(id)
 	if convID != "" && h.agentHandler != nil {
 		if ok, payload := h.agentHandler.cancelToolContinueAfter(convID, id, note); ok {
-			h.logger.Info("MCP 监控页终止工具（与对话中断并继续一致）",
+			h.logger.Info("Cancel tool from MCP monitor, as with interrupt and continue in a conversation",
 				zap.String("executionId", id),
 				zap.String("conversationId", convID),
 				zap.Bool("hasNote", note != ""),
@@ -810,7 +810,7 @@ func (h *MonitorHandler) loadCallsTimeline(cfg callsTimelineConfig) []CallsTimel
 	if h.db != nil {
 		dbBuckets, err := h.db.LoadCallsTimeline(since, cfg.dailyBuckets)
 		if err != nil {
-			h.logger.Warn("从数据库加载调用趋势失败，回退到内存数据", zap.Error(err))
+			h.logger.Warn("Failed to load call trends from database; falling back to memory", zap.Error(err))
 		} else {
 			for _, b := range dbBuckets {
 				key := truncateToBucket(b.BucketTime, cfg.bucketSize, cfg.dailyBuckets)
@@ -869,7 +869,7 @@ func (h *MonitorHandler) DeleteExecution(c *gin.Context) {
 		return
 	}
 	if !h.monitorExecutionAllowed(c, id) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资源"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not have permission to access this resource"})
 		return
 	}
 
@@ -942,7 +942,7 @@ func (h *MonitorHandler) DeleteExecutions(c *gin.Context) {
 	}
 	for _, id := range request.IDs {
 		if !h.monitorExecutionAllowed(c, id) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问一个或多个执行记录"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "Not authorized to access one or more execution records"})
 			return
 		}
 	}

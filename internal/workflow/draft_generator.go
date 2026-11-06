@@ -143,7 +143,7 @@ func GenerateDraftFromNaturalLanguage(ctx context.Context, req DraftRequest) (*D
 		expr := `{{previous.output}} != ""`
 		label := "Trigger condition met?"
 		if highRisk {
-			expr = `{{previous.output}} contains "高危"`
+			expr = "{{previous.output}} contains \"high risk\""
 			label = "High-risk response required?"
 		}
 		condition := builder.add("condition", label, map[string]any{"expression": expr, "join_strategy": "all_merge"}, 0)

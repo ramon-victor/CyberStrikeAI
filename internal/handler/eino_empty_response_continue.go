@@ -19,7 +19,7 @@ func (h *AgentHandler) rebindEinoRunningTask(parent context.Context, conversatio
 	}
 	baseCtx, cancelWithCause := context.WithCancelCause(detachedAgentContext(parent))
 	h.tasks.BindTaskCancel(conversationID, cancelWithCause)
-	taskCtx, newTimeoutCancel := context.WithTimeout(baseCtx, 600*time.Minute)
+	taskCtx, newTimeoutCancel := h.newTaskContext(baseCtx)
 	h.tasks.UpdateTaskStatus(conversationID, "running")
 	return baseCtx, cancelWithCause, taskCtx, newTimeoutCancel
 }
@@ -51,7 +51,7 @@ func (h *AgentHandler) tryContinueOnEinoEmptyResponse(
 	h.persistEinoAgentTraceForResume(conversationID, result)
 
 	backoff := multiagent.EmptyResponseContinueBackoff(*attempt-1, mw)
-	waitMsg := fmt.Sprintf("会话已结束但未捕获到助手正文，%d 秒后第 %d/%d 次自动续跑…",
+	waitMsg := fmt.Sprintf("Session ended without assistant text; automatically resuming in %d seconds (attempt %d/%d)...",
 		int(backoff.Seconds()), *attempt, maxAttempts)
 	if progressCallback != nil {
 		progressCallback("eino_empty_response_continue", waitMsg, map[string]interface{}{
@@ -70,7 +70,7 @@ func (h *AgentHandler) tryContinueOnEinoEmptyResponse(
 
 	h.applyEinoTraceResumeSegment(conversationID, result, curHistory, curFinalMessage, "")
 	if progressCallback != nil {
-		progressCallback("eino_empty_response_continue", "已恢复上下文，正在续跑…", map[string]interface{}{
+		progressCallback("eino_empty_response_continue", "Context has been restored, continuing...", map[string]interface{}{
 			"conversationId":   conversationID,
 			"source":           "eino",
 			"attempt":          *attempt,

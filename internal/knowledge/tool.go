@@ -35,7 +35,7 @@ func RegisterKnowledgeTool(
 	listRiskTypesHandler := func(ctx context.Context, args map[string]interface{}) (*mcp.ToolResult, error) {
 		categories, err := manager.GetCategories()
 		if err != nil {
-			logger.Error("获取风险类型列表失败", zap.Error(err))
+			logger.Error("Failed to get list of risk types", zap.Error(err))
 			return &mcp.ToolResult{
 				Content: []mcp.Content{
 					{
@@ -63,7 +63,7 @@ func RegisterKnowledgeTool(
 		for i, category := range categories {
 			resultText.WriteString(fmt.Sprintf("%d. %s\n", i+1, category))
 		}
-		resultText.WriteString("\nHint: when calling " + builtin.ToolSearchKnowledgeBase + ", use one of these values as risk_type to narrow the search and improve retrieval efficiency.")
+		resultText.WriteString("\nHint: when calling " + builtin.ToolSearchKnowledgeBase + " , use one of these values as risk_type to narrow the search and improve retrieval efficiency.")
 
 		return &mcp.ToolResult{
 			Content: []mcp.Content{
@@ -76,7 +76,7 @@ func RegisterKnowledgeTool(
 	}
 
 	mcpServer.RegisterTool(listRiskTypesTool, listRiskTypesHandler)
-	logger.Debug("风险类型列表工具已注册", zap.String("toolName", listRiskTypesTool.Name))
+	logger.Debug("Risk Type List Tool Registered", zap.String("toolName", listRiskTypesTool.Name))
 
 	// 注册第二个工具：搜索知识库（保持原有功能）
 	searchTool := mcp.Tool{
@@ -118,7 +118,7 @@ func RegisterKnowledgeTool(
 			riskType = rt
 		}
 
-		logger.Info("执行知识库检索",
+		logger.Info("Perform a knowledge base search",
 			zap.String("query", query),
 			zap.String("riskType", riskType),
 		)
@@ -132,7 +132,7 @@ func RegisterKnowledgeTool(
 
 		results, err := retriever.Search(ctx, searchReq)
 		if err != nil {
-			logger.Error("知识库检索失败", zap.Error(err))
+			logger.Error("Knowledge base search failed", zap.Error(err))
 			return &mcp.ToolResult{
 				Content: []mcp.Content{
 					{
@@ -271,7 +271,7 @@ func RegisterKnowledgeTool(
 	}
 
 	mcpServer.RegisterTool(searchTool, searchHandler)
-	logger.Debug("知识检索工具已注册", zap.String("toolName", searchTool.Name))
+	logger.Debug("Knowledge retrieval tool has been registered", zap.String("toolName", searchTool.Name))
 }
 
 // contains 检查切片是否包含元素

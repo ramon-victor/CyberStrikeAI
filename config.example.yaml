@@ -9,8 +9,9 @@
 # System settings
 # ============================================
 
-# Version shown in the frontend (optional; uses the default version when empty)
-version: "v1.7.20"
+# Frontend version. One-click updates synchronize this value into config.yaml
+# so the page header and static resource cache version follow the installed source.
+version: "v1.7.24"
 # Server settings
 server:
   host: 0.0.0.0 # Bind address; 0.0.0.0 listens on all network interfaces
@@ -107,7 +108,19 @@ ai:
       model: qwen3-max
       max_total_tokens: 120000
       max_completion_tokens: 32768
-      # Model reasoning for the Eino path: DeepSeek/OpenAI use thinking / reasoning_effort; Claude 4.6+ uses adaptive + output_config.effort (sent only when effort is explicitly configured); 3.7 uses enabled+budget_tokens:10000 (documentation example); effort is not mapped, so use extra_request_fields for a custom budget
+      # headers: optional overrides for model gateway HTTP headers; values support ${ENV_VAR} and ${ENV_VAR:-default}.
+      # For providers requiring private authentication, API version or organization headers.
+      # Overrides matching built-in headers such as Authorization and User-Agent; empty values are ignored.
+      # headers:
+      #   X-Api-Key: ${OPENCODE_API_KEY}
+      #   x-opencode-session: "%session_id%" # Replaced with the current conversation ID
+      #   X-Client-Name: cyberstrike-ai
+      #   HTTP-Referer: https://example.com
+      # Custom headers permit same-origin redirects only; cross-host, port or scheme redirects are rejected.
+      # HITL inherits main-channel headers only when provider/base_url/api_key are not explicitly configured.
+      # Configure independent audit headers under hitl.audit_model.headers.
+      # Empty headers mean unconfigured; all custom header values are masked in settings responses.
+      # Eino reasoning: DeepSeek/OpenAI use thinking/reasoning_effort; Claude 4.6+ uses adaptive/output_config.effort when specified; 3.7 uses enabled with budget_tokens:10000. Use extra_request_fields for custom budgets.
       reasoning:
         mode: on # auto | on | off; off: OpenAI/Claude do not attach reasoning fields, and DeepSeek sends thinking.type=disabled (thinking is enabled by default there)
         effort: high # low | medium | high | max | xhigh (highest tier: OpenAI commonly uses xhigh, some gateways use max, passed through as-is); empty means unspecified
@@ -156,16 +169,18 @@ shodan:
 # Agent settings
 # When the maximum iteration count is reached, the AI automatically summarizes the test results
 agent:
-  max_iterations: 12000 # Global maximum iteration count (shared by single-agent / Deep / Supervisor / Plan-Execute main executor / sub-agents; max_iterations>0 in agents/*.md can override it individually)
-  tool_timeout_minutes: 60 # Maximum duration of one tool execution (minutes); terminate automatically on timeout; 0 means unlimited (not recommended, as it can easily hang for a long time)
-  tool_wait_timeout_seconds: 300 # Maximum wait for a tool in this round (seconds); at the limit it returns execution_id while the worker keeps running in the background; use wait_tool_execution to keep waiting; 0 = wait until complete
-  external_mcp_max_concurrent_per_server: 5 # Number of tools running concurrently on a single external MCP server; 0 = default 2; negative = unlimited
-  external_mcp_max_concurrent_total: 16 # Global concurrency limit for all external MCP tools; 0 = default 16; negative = unlimited
-  external_mcp_circuit_failure_threshold: 15 # Consecutive failures on one external MCP server before opening the circuit; 0 = default 3; negative = disable the circuit breaker
-  external_mcp_circuit_cooldown_seconds: 60 # Circuit-breaker cooldown in seconds; 0 = default 60
-  shell_no_output_timeout_seconds: 1200 # Terminate execute/exec after this many seconds without new output; general hang protection; 0 = default 300; -1 = disabled
-  workspace_root_dir: "" # Session workspace root directory (curl/wget downloads, local read_file/glob/grep analysis); empty = tmp/workspace, isolated below it by projects/{id} or conversations/{id}; do not use the system /tmp
-  # system_prompt_path: prompts/single-agent.md # Optional: single-agent system prompt file (relative to the directory containing this config); replaces the built-in prompt when non-empty and readable
+  # Restart after changing this setting. It applies to new tasks; 1440 = 24 hours. Individual tool timeouts remain independent.
+  task_timeout_minutes: 600 # Task timeout in minutes: omitted=600, 0=unlimited; negative values are invalid. Continuation starts a new deadline.
+  max_iterations: 12000 # Global iteration limit for main and subagents; agents/*.md can override with max_iterations>0.
+  tool_timeout_minutes: 60 # Maximum tool duration in minutes; 0 means unlimited and can leave tools running indefinitely.
+  tool_wait_timeout_seconds: 300 # Wait limit in seconds; returns execution_id while work continues. Use wait_tool_execution to keep waiting; 0 waits until completion.
+  external_mcp_max_concurrent_per_server: 5 # External MCP concurrency per server: 0=default 2; negative=unlimited.
+  external_mcp_max_concurrent_total: 16 # Global external MCP concurrency: 0=default 16; negative=unlimited.
+  external_mcp_circuit_failure_threshold: 15 # Consecutive failures before circuit opens: 0=default 3; negative=disabled.
+  external_mcp_circuit_cooldown_seconds: 60 # Circuit-breaker cooldown in seconds; 0=default 60.
+  shell_no_output_timeout_seconds: 1200 # Terminate execute/exec after this many seconds without output; 0=default 300, -1=disabled.
+  workspace_root_dir: "" # Workspace root; empty=tmp/workspace, partitioned by project or conversation. Do not use system /tmp.
+  # system_prompt_path: prompts/single-agent.md # Optional readable file replacing the built-in single-agent prompt, relative to this configuration.
 
   system_prompt_path: ""
 # Tool call blocking (tool_guard): takes effect immediately after being edited and saved under "Security Protection -> Tool Call Blocking"; independent of the HITL approval whitelist.
@@ -196,11 +211,13 @@ hitl:
   audit_backend: openai
   # Dedicated model for the audit agent. With the openai backend, empty fields reuse the main model; with the typesafe backend, api_key is required and never inherits the main model key.
   audit_model:
-    provider: "" # openai / claude; only effective for the openai backend; empty follows openai.provider
-    base_url: "" # openai backend: empty follows the main model; typesafe backend: empty uses https://api.typesafe.ai
-    api_key: "" # openai backend: empty follows the main model; typesafe backend: enter your TypeSafe API key
-    model: "" # openai backend: a smaller model is recommended; typesafe backend: empty uses jev-latest
-  # Retention days for decided audit logs (same as MCP monitoring; defaults to 90 when omitted; 0 means no automatic cleanup)
+    provider: "" # openai / claude; applies only to the openai backend, empty follows openai.provider.
+    base_url: "" # For openai, empty follows the main model. For typesafe, empty uses https://api.typesafe.ai.
+    api_key: "" # For openai, empty follows the main model. For typesafe, provide the TypeSafe API Key.
+    model: "" # Use a small model for openai; typesafe defaults to jev-latest.
+    reasoning:
+      profile: "" # auto / deepseek_compat / openai_compat; controls audit-request thinking fields only.
+  # Retention days for decided audit records; default 90, 0 disables cleanup.
   retention_days: 90
   # Add/remove entries to match the real tool names in your environment (consistent with the sidebar, case-insensitive); change to [] if global approval bypass is not needed
   tool_whitelist: [read_file, ls, list_dir, glob, grep, tool_search, upsert_project_fact, get_project_fact, list_project_facts, search_project_facts, list_vulnerabilities, get_vulnerability, get_asset, query_assets, list_knowledge_risk_types, get_tool_execution, wait_tool_execution, batch_task_list, batch_task_get, manage_webshell_list, c2_event, c2_file]
@@ -582,9 +599,20 @@ roles_dir: roles # Role configuration file directory (relative to the directory 
 # ============================================
 project:
   enabled: true
-  # default_project_id: "" # Optional: default project ID when bots/batch tasks create a conversation
+  # Automatically save continuation summaries as tentative notes per conversation/agent; confirmed facts remain separate.
+  context_checkpoints: true
+  # default_project_id: "" # Optional default project for robot and batch conversations.
+  # Continuation content shares the fact-index budget; workspace inventory has a separate 4000-character cap.
   fact_index_max_runes: 65000
   # Fact relationship overview section budget (reserved from the total index budget)
   fact_index_path_max_runes: 10000
   fact_summary_max_runes: 24000
   default_inject_deprecated: false
+
+# ============================================
+# One-click update (optional)
+# ============================================
+# Updates follow the default branch of the configured repository. When unset,
+# the default is this fork. Configure a mirror or another fork if needed.
+# update:
+#   repo: https://github.com/ramon-victor/CyberStrikeAI.git

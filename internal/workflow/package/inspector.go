@@ -214,10 +214,10 @@ func parseChecksums(raw []byte) (map[string]string, error) {
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		parts := strings.SplitN(strings.TrimSpace(line), "  ", 2)
 		if len(parts) != 2 || !validHash("sha256:"+parts[0]) || !safeArchivePath(parts[1]) {
-			return nil, packageError("WFPKG_CHECKSUM_MISMATCH", "工作流包校验和格式无效")
+			return nil, packageError("WFPKG_CHECKSUM_MISMATCH", "Workflow package checksum format is invalid")
 		}
 		if _, exists := entries[parts[1]]; exists {
-			return nil, packageError("WFPKG_CHECKSUM_MISMATCH", "工作流包校验和重复")
+			return nil, packageError("WFPKG_CHECKSUM_MISMATCH", "Workflow package checksum duplication")
 		}
 		entries[parts[1]] = "sha256:" + parts[0]
 	}

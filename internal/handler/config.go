@@ -98,6 +98,7 @@ type ConfigHandler struct {
 	logger                     *zap.Logger
 	mu                         sync.RWMutex
 	toolGuard                  *toolguard.Manager
+	toolGuardRevision          string                  // protected by mu; advanced only after a successful save
 	lastEmbeddingConfig        *config.EmbeddingConfig // 上一次的嵌入模型配置（用于检测变更）
 }
 
@@ -254,7 +255,7 @@ func (h *ConfigHandler) ApplyWechatRobotBinding(wc config.RobotWechatConfig) err
 	if h.robotRestarter != nil {
 		h.robotRestarter.RestartRobotConnections()
 	}
-	h.logger.Info("微信机器人绑定已保存",
+	h.logger.Info("WeChat robot binding has been saved",
 		zap.String("ilink_bot_id", wc.ILinkBotID),
 		zap.Bool("enabled", wc.Enabled),
 	)
@@ -372,7 +373,7 @@ func (h *ConfigHandler) GetConfig(c *gin.Context) {
 		),
 	}
 
-	c.JSON(http.StatusOK, GetConfigResponse{
+	response, err := maskedConfigResponse(GetConfigResponse{
 		AI:         h.config.AI,
 		OpenAI:     h.config.OpenAI,
 		Vision:     h.config.Vision,
@@ -389,6 +390,11 @@ func (h *ConfigHandler) GetConfig(c *gin.Context) {
 		Robots:     h.config.Robots,
 		MultiAgent: multiPub,
 	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Configuration serialization failed"})
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // GetToolsResponse 获取工具列表响应（分页）
@@ -796,12 +802,16 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if err := restoreConfigRequestSecrets(&req, h.config); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	// 更新OpenAI配置
 	if req.AI != nil {
 		h.config.AI = *req.AI
 		h.config.ApplyDefaultAIChannel()
-		h.logger.Info("更新 AI 通道配置",
+		h.logger.Info("Update AI channel configuration",
 			zap.String("default_channel", h.config.AI.DefaultChannel),
 			zap.Int("channels", len(h.config.AI.Channels)),
 		)
@@ -812,7 +822,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 		if def := config.NormalizeAIChannelID(h.config.AI.DefaultChannel); def != "" {
 			h.config.AI.Channels[def] = config.AIChannelFromOpenAI(def, "Default", h.config.OpenAI)
 		}
-		h.logger.Info("更新OpenAI配置",
+		h.logger.Info("Update OpenAI configuration",
 			zap.String("base_url", h.config.OpenAI.BaseURL),
 			zap.String("model", h.config.OpenAI.Model),
 		)
@@ -820,7 +830,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 
 	if req.Vision != nil {
 		h.config.Vision = *req.Vision
-		h.logger.Info("更新 Vision 配置",
+		h.logger.Info("Update Vision configuration",
 			zap.Bool("enabled", h.config.Vision.Enabled),
 			zap.String("model", h.config.Vision.Model),
 		)
@@ -829,25 +839,25 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 	// 更新FOFA配置
 	if req.FOFA != nil {
 		h.config.FOFA = *req.FOFA
-		h.logger.Info("更新FOFA配置", zap.String("base_url", h.config.FOFA.BaseURL))
+		h.logger.Info("Update FOFA configuration", zap.String("base_url", h.config.FOFA.BaseURL))
 	}
 	if req.ZoomEye != nil {
 		h.config.ZoomEye = *req.ZoomEye
-		h.logger.Info("更新ZoomEye配置", zap.String("base_url", h.config.ZoomEye.BaseURL))
+		h.logger.Info("Update ZoomEye configuration", zap.String("base_url", h.config.ZoomEye.BaseURL))
 	}
 	if req.Quake != nil {
 		h.config.Quake = *req.Quake
-		h.logger.Info("更新Quake配置", zap.String("base_url", h.config.Quake.BaseURL))
+		h.logger.Info("Update Quake configuration", zap.String("base_url", h.config.Quake.BaseURL))
 	}
 	if req.Shodan != nil {
 		h.config.Shodan = *req.Shodan
-		h.logger.Info("更新Shodan配置", zap.String("base_url", h.config.Shodan.BaseURL))
+		h.logger.Info("Update Shodan configuration", zap.String("base_url", h.config.Shodan.BaseURL))
 	}
 
 	// 更新MCP配置
 	if req.MCP != nil {
 		h.config.MCP = *req.MCP
-		h.logger.Info("更新MCP配置",
+		h.logger.Info("Update MCP configuration",
 			zap.Bool("enabled", h.config.MCP.Enabled),
 			zap.String("host", h.config.MCP.Host),
 			zap.Int("port", h.config.MCP.Port),
@@ -857,7 +867,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 	// 更新Agent配置（按字段合并，避免部分 JSON 把未出现的字段写成 0）
 	if req.Agent != nil {
 		applyAgentConfigUpdate(&h.config.Agent, req.Agent)
-		h.logger.Info("更新Agent配置",
+		h.logger.Info("Update Agent configuration",
 			zap.Int("max_iterations", h.config.Agent.MaxIterations),
 			zap.Int("tool_timeout_minutes", h.config.Agent.ToolTimeoutMinutes),
 			zap.Int("tool_wait_timeout_seconds", h.config.Agent.ToolWaitTimeoutSeconds),
@@ -913,7 +923,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 			}
 			h.config.Hitl.RetentionDays = &v
 		}
-		h.logger.Info("更新HITL配置",
+		h.logger.Info("Update HITL configuration",
 			zap.String("audit_backend", h.config.Hitl.AuditBackend),
 			zap.String("default_reviewer", h.config.Hitl.DefaultReviewer),
 			zap.Int("tool_whitelist", len(h.config.Hitl.ToolWhitelist)),
@@ -993,7 +1003,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 			}
 		}
 		h.config.Knowledge = *req.Knowledge
-		h.logger.Info("更新Knowledge配置",
+		h.logger.Info("Update Knowledge configuration",
 			zap.Bool("enabled", h.config.Knowledge.Enabled),
 			zap.String("base_path", h.config.Knowledge.BasePath),
 			zap.String("embedding_model", h.config.Knowledge.Embedding.Model),
@@ -1017,7 +1027,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 			return
 		}
 		h.config.Robots = *req.Robots
-		h.logger.Info("更新机器人配置",
+		h.logger.Info("Update robot configuration",
 			zap.Bool("wechat_enabled", h.config.Robots.Wechat.Enabled),
 			zap.Bool("wecom_enabled", h.config.Robots.Wecom.Enabled),
 			zap.Bool("dingtalk_enabled", h.config.Robots.Dingtalk.Enabled),
@@ -1032,7 +1042,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 	if req.C2 != nil {
 		v := req.C2.Enabled
 		h.config.C2.Enabled = &v
-		h.logger.Info("更新C2配置", zap.Bool("enabled", v))
+		h.logger.Info("Update C2 configuration", zap.Bool("enabled", v))
 	}
 
 	// 多代理标量（sub_agents 等仍由 config.yaml 维护）
@@ -1109,7 +1119,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 		if req.MultiAgent.ToolSearchAlwaysVisibleTools != nil {
 			h.config.MultiAgent.EinoMiddleware.ToolSearchAlwaysVisibleTools = dedupeToolNameList(*req.MultiAgent.ToolSearchAlwaysVisibleTools)
 		}
-		h.logger.Info("更新多代理配置",
+		h.logger.Info("Update multi-agent configuration",
 			zap.Bool("enabled", h.config.MultiAgent.Enabled),
 			zap.String("robot_default_agent_mode", config.NormalizeRobotAgentMode(h.config.MultiAgent)),
 			zap.Bool("batch_use_multi_agent", h.config.MultiAgent.BatchUseMultiAgent),
@@ -1152,7 +1162,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 		for i := range h.config.Security.Tools {
 			if enabled, ok := internalToolMap[h.config.Security.Tools[i].Name]; ok {
 				h.config.Security.Tools[i].Enabled = enabled
-				h.logger.Info("更新工具启用状态",
+				h.logger.Info("Update tool enablement status",
 					zap.String("tool", h.config.Security.Tools[i].Name),
 					zap.Bool("enabled", enabled),
 				)
@@ -1168,7 +1178,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 				}
 				cfg, exists := h.config.ExternalMCP.Servers[mcpName]
 				if !exists {
-					h.logger.Warn("外部MCP配置不存在", zap.String("mcp", mcpName))
+					h.logger.Warn("External MCP configuration does not exist", zap.String("mcp", mcpName))
 					continue
 				}
 
@@ -1180,7 +1190,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 				// 更新每个工具的启用状态
 				for toolName, enabled := range toolStates {
 					cfg.ToolEnabled[toolName] = enabled
-					h.logger.Info("更新外部工具启用状态",
+					h.logger.Info("Update external tool enablement status",
 						zap.String("mcp", mcpName),
 						zap.String("tool", toolName),
 						zap.Bool("enabled", enabled),
@@ -1200,7 +1210,7 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 				// 如果MCP之前已启用，保持启用状态（允许部分工具禁用）
 				if !cfg.ExternalMCPEnable && hasEnabledTool {
 					cfg.ExternalMCPEnable = true
-					h.logger.Info("自动启用外部MCP（因为有工具启用）", zap.String("mcp", mcpName))
+					h.logger.Info("Automatically enable external MCP (because there is a tool to enable it)", zap.String("mcp", mcpName))
 				}
 
 				h.config.ExternalMCP.Servers[mcpName] = cfg
@@ -1220,12 +1230,12 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 					if !exists || !client.IsConnected() {
 						go func(name string) {
 							if err := h.externalMCPMgr.StartClient(name); err != nil {
-								h.logger.Warn("启动外部MCP失败",
+								h.logger.Warn("Failed to start external MCP",
 									zap.String("mcp", name),
 									zap.Error(err),
 								)
 							} else {
-								h.logger.Info("启动外部MCP",
+								h.logger.Info("Start external MCP",
 									zap.String("mcp", name),
 								)
 							}
@@ -1240,23 +1250,26 @@ func (h *ConfigHandler) UpdateConfig(c *gin.Context) {
 
 	// 保存配置到文件
 	if err := h.saveConfig(); err != nil {
-		h.logger.Error("保存配置失败", zap.Error(err))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存配置失败: " + err.Error()})
+		h.logger.Error("Failed to save configuration", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save configuration: " + err.Error()})
 		return
 	}
 
 	if h.audit != nil {
-		h.audit.RecordOK(c, "config", "update", "更新内存配置", "config", "", nil)
+		h.audit.RecordOK(c, "config", "update", "In-memory configuration updated", "config", "", nil)
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "配置已更新"})
+	c.JSON(http.StatusOK, gin.H{"message": "Configuration has been updated"})
 }
 
 // TestOpenAIRequest 测试OpenAI连接请求
 type TestOpenAIRequest struct {
-	Provider string `json:"provider"`
-	BaseURL  string `json:"base_url"`
-	APIKey   string `json:"api_key"`
-	Model    string `json:"model"`
+	CredentialScope string            `json:"credential_scope,omitempty"`
+	ChannelID       string            `json:"channel_id,omitempty"`
+	Provider        string            `json:"provider"`
+	BaseURL         string            `json:"base_url"`
+	APIKey          string            `json:"api_key"`
+	Model           string            `json:"model"`
+	Headers         map[string]string `json:"headers,omitempty"`
 }
 
 // TestOpenAI 测试OpenAI API连接是否可用
@@ -1267,12 +1280,23 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 		return
 	}
 
+	resolvedKey, resolveErr := h.resolveProbeSecret(req.APIKey, req.ChannelID, req.BaseURL, req.CredentialScope)
+	if resolveErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": resolveErr.Error()})
+		return
+	}
+	req.APIKey = resolvedKey
+	resolvedHeaders, headerErr := h.resolveProbeHeaders(req)
+	if headerErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": headerErr.Error()})
+		return
+	}
 	if strings.TrimSpace(req.APIKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key 不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key cannot be empty"})
 		return
 	}
 	if strings.TrimSpace(req.Model) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "模型不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Model cannot be empty"})
 		return
 	}
 
@@ -1301,11 +1325,15 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 		BaseURL:  baseURL,
 		APIKey:   strings.TrimSpace(req.APIKey),
 		Model:    req.Model,
+		Headers:  resolvedHeaders,
 	}
 	client := openai.NewClient(tmpCfg, nil, h.logger)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
+	// 连接测试没有真实对话上下文，用一个明确的探测值填充 %session_id%，
+	// 这样带会话占位符的渠道也能在测试时把自定义头真实发出去。
+	ctx = openai.WithSessionID(ctx, "connect-test")
 
 	start := time.Now()
 	if llm.IsClaudeProvider(req.Provider) {
@@ -1364,14 +1392,14 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 	if len(chatResp.Choices) == 0 {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"error":   "API 响应缺少 choices 字段，请检查 Base URL 路径是否正确",
+			"error":   "API response has no choices field; check the Base URL path",
 		})
 		return
 	}
 	if chatResp.ID == "" && chatResp.Model == "" {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"error":   "API 响应格式不符合预期，请检查 Base URL 是否正确",
+			"error":   "Unexpected API response format; check the Base URL",
 		})
 		return
 	}
@@ -1385,9 +1413,11 @@ func (h *ConfigHandler) TestOpenAI(c *gin.Context) {
 
 // TestTypeSafeRequest tests the TypeSafe / Jev connection.
 type TestTypeSafeRequest struct {
-	BaseURL string `json:"base_url"`
-	APIKey  string `json:"api_key"`
-	Model   string `json:"model"`
+	CredentialScope string `json:"credential_scope,omitempty"`
+	ChannelID       string `json:"channel_id,omitempty"`
+	BaseURL         string `json:"base_url"`
+	APIKey          string `json:"api_key"`
+	Model           string `json:"model"`
 }
 
 // TestTypeSafe verifies TypeSafe System One availability with a minimal Noul request.
@@ -1397,6 +1427,12 @@ func (h *ConfigHandler) TestTypeSafe(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters: " + err.Error()})
 		return
 	}
+	resolvedKey, resolveErr := h.resolveProbeSecret(req.APIKey, req.ChannelID, req.BaseURL, req.CredentialScope)
+	if resolveErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": resolveErr.Error()})
+		return
+	}
+	req.APIKey = resolvedKey
 	if strings.TrimSpace(req.APIKey) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "TypeSafe API Key must not be empty"})
 		return
@@ -1440,9 +1476,11 @@ func (h *ConfigHandler) TestTypeSafe(c *gin.Context) {
 
 // ListModelsRequest 获取模型列表请求（OpenAI 兼容 GET /models）。
 type ListModelsRequest struct {
-	Provider string `json:"provider"`
-	BaseURL  string `json:"base_url"`
-	APIKey   string `json:"api_key"`
+	CredentialScope string `json:"credential_scope,omitempty"`
+	ChannelID       string `json:"channel_id,omitempty"`
+	Provider        string `json:"provider"`
+	BaseURL         string `json:"base_url"`
+	APIKey          string `json:"api_key"`
 }
 
 // ListModels 代理调用上游 GET /models，返回可用模型 id 列表。
@@ -1453,6 +1491,12 @@ func (h *ConfigHandler) ListModels(c *gin.Context) {
 		return
 	}
 
+	resolvedKey, resolveErr := h.resolveProbeSecret(req.APIKey, req.ChannelID, req.BaseURL, req.CredentialScope)
+	if resolveErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": resolveErr.Error()})
+		return
+	}
+	req.APIKey = resolvedKey
 	provider := strings.TrimSpace(req.Provider)
 	if provider == "" {
 		provider = "openai"
@@ -1461,13 +1505,13 @@ func (h *ConfigHandler) ListModels(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"success":   false,
 			"supported": false,
-			"error":     "Claude (Anthropic Messages API) 不支持自动获取模型列表，请手动填写",
+			"error":     "Claude (Anthropic Messages API) does not support automatic model listing; enter a model manually",
 		})
 		return
 	}
 
 	if strings.TrimSpace(req.APIKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key 不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key cannot be empty"})
 		return
 	}
 
@@ -1492,7 +1536,7 @@ func (h *ConfigHandler) ListModels(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{
 				"success":   false,
 				"supported": true,
-				"error":     fmt.Sprintf("API 返回错误 (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
+				"error":     fmt.Sprintf("API error (HTTP %d): %s", apiErr.StatusCode, apiErr.Body),
 			})
 			return
 		}
@@ -1514,8 +1558,9 @@ func (h *ConfigHandler) ListModels(c *gin.Context) {
 
 // TestVisionRequest 测试 Vision 模型连接；vision.api_key/base_url 留空时可传 openai 段作回退。
 type TestVisionRequest struct {
-	Vision config.VisionConfig `json:"vision"`
-	OpenAI config.OpenAIConfig `json:"openai,omitempty"`
+	ChannelID string              `json:"channel_id,omitempty"`
+	Vision    config.VisionConfig `json:"vision"`
+	OpenAI    config.OpenAIConfig `json:"openai,omitempty"`
 }
 
 // TestVision 测试视觉模型 API 连接（最小 chat completion）。
@@ -1525,13 +1570,26 @@ func (h *ConfigHandler) TestVision(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request parameters: " + err.Error()})
 		return
 	}
+	mainKey, mainErr := h.resolveProbeSecret(req.OpenAI.APIKey, req.ChannelID, req.OpenAI.BaseURL, "openai")
+	if mainErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": mainErr.Error()})
+		return
+	}
+	req.OpenAI.APIKey = mainKey
+	h.mu.RLock()
+	restoreErr := restoreConfigRequestSecrets(&req, h.config)
+	h.mu.RUnlock()
+	if restoreErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": restoreErr.Error()})
+		return
+	}
 	oa := req.Vision.OpenAICfgEffective(req.OpenAI)
 	if strings.TrimSpace(oa.APIKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key 不能为空（可填写 vision.api_key 或 openai.api_key）"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "API Key is required in vision.api_key or openai.api_key"})
 		return
 	}
 	if strings.TrimSpace(oa.Model) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "视觉模型不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Vision model cannot be empty"})
 		return
 	}
 
@@ -1593,7 +1651,7 @@ func (h *ConfigHandler) TestVision(c *gin.Context) {
 	if len(chatResp.Choices) == 0 {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"error":   "API 响应缺少 choices 字段，请检查 Base URL 与视觉模型名称",
+			"error":   "API response has no choices field; check the Base URL and vision model name",
 		})
 		return
 	}
@@ -1620,16 +1678,16 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 
 	// 如果需要动态初始化知识库，在锁外执行（这是耗时操作）
 	if needInitKnowledge {
-		h.logger.Info("检测到知识库从禁用变为启用，开始动态初始化知识库组件")
+		h.logger.Info("Knowledge retrieval was enabled; initializing its components")
 		if _, err := knowledgeInitializer(); err != nil {
-			h.logger.Error("动态初始化知识库失败", zap.Error(err))
+			h.logger.Error("Dynamic initialization of knowledge base failed", zap.Error(err))
 			if h.audit != nil {
-				h.audit.RecordFail(c, "config", "apply", "应用配置失败：初始化知识库", map[string]interface{}{"error": err.Error()})
+				h.audit.RecordFail(c, "config", "apply", "Failed to apply config: knowledge base init", map[string]interface{}{"error": err.Error()})
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "初始化知识库失败: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initialize knowledge base: " + err.Error()})
 			return
 		}
-		h.logger.Debug("知识库动态初始化完成，工具已注册")
+		h.logger.Debug("The dynamic initialization of the knowledge base is completed and the tool has been registered.")
 	}
 
 	// 检查嵌入模型配置是否变更（需要在锁外执行，避免阻塞）
@@ -1645,7 +1703,7 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 			currentEmbedding.APIKey != h.lastEmbeddingConfig.APIKey {
 			needReinitKnowledge = true
 			reinitKnowledgeInitializer = h.knowledgeInitializer
-			h.logger.Info("检测到嵌入模型配置变更，需要重新初始化知识库组件",
+			h.logger.Info("Embedding model configuration changed; knowledge components require reinitialization",
 				zap.String("old_model", h.lastEmbeddingConfig.Model),
 				zap.String("new_model", currentEmbedding.Model),
 				zap.String("old_base_url", h.lastEmbeddingConfig.BaseURL),
@@ -1657,16 +1715,16 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 
 	// 如果需要重新初始化知识库（嵌入模型配置变更），在锁外执行
 	if needReinitKnowledge {
-		h.logger.Info("开始重新初始化知识库组件（嵌入模型配置已变更）")
+		h.logger.Info("Reinitializing knowledge components after embedding configuration change")
 		if _, err := reinitKnowledgeInitializer(); err != nil {
-			h.logger.Error("重新初始化知识库失败", zap.Error(err))
+			h.logger.Error("Failed to reinitialize knowledge base", zap.Error(err))
 			if h.audit != nil {
-				h.audit.RecordFail(c, "config", "apply", "应用配置失败：重新初始化知识库", map[string]interface{}{"error": err.Error()})
+				h.audit.RecordFail(c, "config", "apply", "Failed to apply config: knowledge base re-init", map[string]interface{}{"error": err.Error()})
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "重新初始化知识库失败: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reinitialize knowledge base: " + err.Error()})
 			return
 		}
-		h.logger.Info("知识库组件重新初始化完成")
+		h.logger.Info("Knowledge base component reinitialization completed")
 	}
 
 	// C2：在 ClearTools 之前按配置启停（随后由 c2ToolRegistrar 注册 MCP 工具）
@@ -1675,11 +1733,11 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 	h.mu.RUnlock()
 	if c2Rt != nil {
 		if err := c2Rt.ReconcileC2AfterConfigApply(); err != nil {
-			h.logger.Error("C2 配置应用失败", zap.Error(err))
+			h.logger.Error("C2 configuration application failed", zap.Error(err))
 			if h.audit != nil {
-				h.audit.RecordFail(c, "config", "apply", "应用配置失败：C2", map[string]interface{}{"error": err.Error()})
+				h.audit.RecordFail(c, "config", "apply", "Failed to apply config: C2", map[string]interface{}{"error": err.Error()})
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "C2 启动失败: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "C2 startup failed: " + err.Error()})
 			return
 		}
 	}
@@ -1696,22 +1754,22 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 			BaseURL:  h.config.Knowledge.Embedding.BaseURL,
 			APIKey:   h.config.Knowledge.Embedding.APIKey,
 		}
-		h.logger.Info("已更新嵌入模型配置记录")
+		h.logger.Info("Embed model configuration record updated")
 	}
 
 	// 从 tools 目录重新加载工具配置（新增/修改/删除 yaml 后无需重启）
 	if err := config.ReloadSecurityToolsFromDir(h.config, h.configPath); err != nil {
-		h.logger.Error("重新加载工具配置失败", zap.Error(err))
+		h.logger.Error("Failed to reload tool configuration", zap.Error(err))
 		if h.audit != nil {
-			h.audit.RecordFail(c, "config", "apply", "应用配置失败：重新加载工具", map[string]interface{}{"error": err.Error()})
+			h.audit.RecordFail(c, "config", "apply", "Application configuration failed: reload tool", map[string]interface{}{"error": err.Error()})
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "重新加载工具配置失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reload tool configuration: " + err.Error()})
 		return
 	}
-	h.logger.Debug("已从 tools 目录重新加载工具配置", zap.Int("tools_count", len(h.config.Security.Tools)))
+	h.logger.Debug("Reloaded tool configuration from tools directory", zap.Int("tools_count", len(h.config.Security.Tools)))
 
 	// 重新注册工具（根据新的启用状态）
-	h.logger.Debug("重新注册工具")
+	h.logger.Debug("Re-register tool")
 
 	// 清空MCP服务器中的工具
 	h.mcpServer.ClearTools()
@@ -1724,61 +1782,61 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 
 	// 重新注册漏洞记录工具（内置工具，必须注册）
 	if h.vulnerabilityToolRegistrar != nil {
-		h.logger.Info("重新注册漏洞记录工具")
+		h.logger.Info("Re-register the vulnerability logging tool")
 		if err := h.vulnerabilityToolRegistrar(); err != nil {
-			h.logger.Error("重新注册漏洞记录工具失败", zap.Error(err))
+			h.logger.Error("Failed to re-register vulnerability recording tool", zap.Error(err))
 		} else {
-			h.logger.Info("漏洞记录工具已重新注册")
+			h.logger.Info("The vulnerability logging tool has been re-registered")
 		}
 	}
 
 	// 重新注册 WebShell 工具（内置工具，必须注册）
 	if h.webshellToolRegistrar != nil {
-		h.logger.Info("重新注册 WebShell 工具")
+		h.logger.Info("Re-register the WebShell tool")
 		if err := h.webshellToolRegistrar(); err != nil {
-			h.logger.Error("重新注册 WebShell 工具失败", zap.Error(err))
+			h.logger.Error("Failed to re-register WebShell tool", zap.Error(err))
 		} else {
-			h.logger.Info("WebShell 工具已重新注册")
+			h.logger.Info("WebShell Tool has been re-registered")
 		}
 	}
 
 	// 重新注册Skills工具（内置工具，必须注册）
 	if h.skillsToolRegistrar != nil {
-		h.logger.Info("重新注册Skills工具")
+		h.logger.Info("Re-register Skills tools")
 		if err := h.skillsToolRegistrar(); err != nil {
-			h.logger.Error("重新注册Skills工具失败", zap.Error(err))
+			h.logger.Error("Failed to re-register Skills tool", zap.Error(err))
 		} else {
-			h.logger.Info("Skills工具已重新注册")
+			h.logger.Info("Skills tool has been re-registered")
 		}
 	}
 
 	// 重新注册批量任务 MCP 工具
 	if h.batchTaskToolRegistrar != nil {
-		h.logger.Info("重新注册批量任务 MCP 工具")
+		h.logger.Info("Re-register batch task MCP tool")
 		if err := h.batchTaskToolRegistrar(); err != nil {
-			h.logger.Error("重新注册批量任务 MCP 工具失败", zap.Error(err))
+			h.logger.Error("Failed to re-register batch task MCP tool", zap.Error(err))
 		} else {
-			h.logger.Info("批量任务 MCP 工具已重新注册")
+			h.logger.Info("Batch task MCP tool has been re-registered")
 		}
 	}
 
 	// 重新注册 C2 MCP 工具（仅当 C2 已启动）
 	if h.c2ToolRegistrar != nil {
-		h.logger.Info("重新注册 C2 MCP 工具")
+		h.logger.Info("Re-register the C2 MCP tool")
 		if err := h.c2ToolRegistrar(); err != nil {
-			h.logger.Error("重新注册 C2 MCP 工具失败", zap.Error(err))
+			h.logger.Error("Failed to re-register C2 MCP tool", zap.Error(err))
 		} else {
-			h.logger.Info("C2 MCP 工具已处理")
+			h.logger.Info("C2 MCP tool processed")
 		}
 	}
 
 	// 如果知识库启用，重新注册知识库工具
 	if h.config.Knowledge.Enabled && h.knowledgeToolRegistrar != nil {
-		h.logger.Info("重新注册知识库工具")
+		h.logger.Info("Re-register the knowledge base tool")
 		if err := h.knowledgeToolRegistrar(); err != nil {
-			h.logger.Error("重新注册知识库工具失败", zap.Error(err))
+			h.logger.Error("Failed to re-register the knowledge base tool", zap.Error(err))
 		} else {
-			h.logger.Info("知识库工具已重新注册")
+			h.logger.Info("The knowledge base tool has been re-registered")
 		}
 	}
 
@@ -1787,7 +1845,7 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 		h.agent.UpdateConfig(&h.config.OpenAI)
 		h.agent.UpdateMaxIterations(h.config.Agent.MaxIterations)
 		h.agent.UpdateToolDescriptionMode(h.config.Security.ToolDescriptionMode)
-		h.logger.Info("Agent配置已更新")
+		h.logger.Info("Agent configuration has been updated")
 	}
 	if h.mcpServer != nil {
 		h.mcpServer.ConfigureHTTPToolCallTimeoutFromAgentMinutes(h.config.Agent.ToolTimeoutMinutes)
@@ -1814,14 +1872,14 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 	// 更新AttackChainHandler的OpenAI配置
 	if h.attackChainHandler != nil {
 		h.attackChainHandler.UpdateConfig(&h.config.OpenAI)
-		h.logger.Info("AttackChainHandler配置已更新")
+		h.logger.Info("AttackChainHandlerConfig updated")
 	}
 
 	// 更新检索器配置（如果知识库启用）
 	if h.config.Knowledge.Enabled && h.retrieverUpdater != nil {
 		retrievalConfig := knowledge.RetrievalConfigFromYAML(h.config.Knowledge.Retrieval)
 		h.retrieverUpdater.UpdateConfig(retrievalConfig)
-		h.logger.Info("检索器配置已更新",
+		h.logger.Info("Retriever configuration updated",
 			zap.Int("top_k", retrievalConfig.TopK),
 			zap.Float64("similarity_threshold", retrievalConfig.SimilarityThreshold),
 		)
@@ -1840,10 +1898,10 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 	// 重启钉钉/飞书长连接，使前端修改的机器人配置立即生效（无需重启服务）
 	if h.robotRestarter != nil {
 		h.robotRestarter.RestartRobotConnections()
-		h.logger.Info("已触发机器人连接重启（钉钉/飞书）")
+		h.logger.Info("Robot connection restart has been triggered (DingTalk/Feishu)")
 	}
 
-	h.logger.Info("配置已应用",
+	h.logger.Info("Configuration applied",
 		zap.Int("tools_count", len(h.config.Security.Tools)),
 	)
 
@@ -1852,7 +1910,7 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 			Category: "config",
 			Action:   "apply",
 			Result:   "success",
-			Message:  "配置已应用",
+			Message:  "Configuration applied",
 			Detail: map[string]interface{}{
 				"tools_count":       len(h.config.Security.Tools),
 				"knowledge_enabled": h.config.Knowledge.Enabled,
@@ -1862,9 +1920,30 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":     "配置已应用",
+		"message":     "Configuration applied",
 		"tools_count": len(h.config.Security.Tools),
 	})
+}
+
+// SetUpdateSource 记录一键更新的更新源（单个仓库地址；空 = 回到官方仓库）。
+// 走与其他设置相同的写入路径：备份旧文件、按 YAML 文档只改 update 段、原子落盘。
+func (h *ConfigHandler) SetUpdateSource(repo string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	previous := h.config.Update
+	h.config.Update = config.UpdateConfig{Repo: strings.TrimSpace(repo)}
+	if err := h.saveConfig(); err != nil {
+		h.config.Update = previous
+		return err
+	}
+	return nil
+}
+
+// UpdateSource 读当前配置的更新源地址（加读锁；更新处理器每次请求现读，保存后立即生效）。
+func (h *ConfigHandler) UpdateSource() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.config.Update.Repo
 }
 
 // saveConfig 保存配置到文件
@@ -1876,16 +1955,16 @@ func (h *ConfigHandler) saveConfig() error {
 	// 读取现有配置文件并创建备份
 	data, err := os.ReadFile(h.configPath)
 	if err != nil {
-		return fmt.Errorf("读取配置文件失败: %w", err)
+		return fmt.Errorf("Failed to read configuration file: %w", err)
 	}
 
 	if err := os.WriteFile(h.configPath+".backup", data, 0644); err != nil {
-		h.logger.Warn("创建配置备份失败", zap.Error(err))
+		h.logger.Warn("Failed to create config backup", zap.Error(err))
 	}
 
 	root, err := loadYAMLDocument(h.configPath)
 	if err != nil {
-		return fmt.Errorf("解析配置文件失败: %w", err)
+		return fmt.Errorf("Failed to parse configuration file: %w", err)
 	}
 
 	updateAgentConfig(root, h.config.Agent)
@@ -1893,6 +1972,7 @@ func (h *ConfigHandler) saveConfig() error {
 	updateAIConfig(root, h.config.AI)
 	removeKeyFromMap(root.Content[0], "openai")
 	updateVisionConfig(root, h.config.Vision)
+	updateUpdateSourceConfig(root, h.config.Update)
 	updateFOFAConfig(root, h.config.FOFA)
 	updateSpaceSearchConfig(root, "zoomeye", h.config.ZoomEye)
 	updateSpaceSearchConfig(root, "quake", h.config.Quake)
@@ -1907,7 +1987,7 @@ func (h *ConfigHandler) saveConfig() error {
 	updateExternalMCPConfig(root, h.config.ExternalMCP)
 
 	if err := writeYAMLDocument(h.configPath, root); err != nil {
-		return fmt.Errorf("保存配置文件失败: %w", err)
+		return fmt.Errorf("Failed to save configuration file: %w", err)
 	}
 
 	// 更新工具配置文件中的enabled状态
@@ -1925,29 +2005,29 @@ func (h *ConfigHandler) saveConfig() error {
 				// 尝试.yml扩展名
 				toolFile = filepath.Join(toolsDir, tool.Name+".yml")
 				if _, err := os.Stat(toolFile); os.IsNotExist(err) {
-					h.logger.Warn("工具配置文件不存在", zap.String("tool", tool.Name))
+					h.logger.Warn("Tool configuration file does not exist", zap.String("tool", tool.Name))
 					continue
 				}
 			}
 
 			toolDoc, err := loadYAMLDocument(toolFile)
 			if err != nil {
-				h.logger.Warn("解析工具配置失败", zap.String("tool", tool.Name), zap.Error(err))
+				h.logger.Warn("Parsing tool configuration failed", zap.String("tool", tool.Name), zap.Error(err))
 				continue
 			}
 
 			setBoolInMap(toolDoc.Content[0], "enabled", tool.Enabled)
 
 			if err := writeYAMLDocument(toolFile, toolDoc); err != nil {
-				h.logger.Warn("保存工具配置文件失败", zap.String("tool", tool.Name), zap.Error(err))
+				h.logger.Warn("Failed to save tool configuration file", zap.String("tool", tool.Name), zap.Error(err))
 				continue
 			}
 
-			h.logger.Info("更新工具配置", zap.String("tool", tool.Name), zap.Bool("enabled", tool.Enabled))
+			h.logger.Info("Update tool configuration", zap.String("tool", tool.Name), zap.Bool("enabled", tool.Enabled))
 		}
 	}
 
-	h.logger.Info("配置已保存", zap.String("path", h.configPath))
+	h.logger.Info("Configuration saved", zap.String("path", h.configPath))
 	return nil
 }
 
@@ -2020,6 +2100,20 @@ func updateMCPConfig(doc *yaml.Node, cfg config.MCPConfig) {
 	setIntInMap(mcpNode, "port", cfg.Port)
 }
 
+// updateUpdateSourceConfig 写入一键更新的更新源（update 段的单个 repo 字段）。
+// 留空时把整段删掉，而不是留下一个空的 update: 块——"没有配置"应当就是文件里没有这一段，
+// 运行时按官方仓库处理。
+func updateUpdateSourceConfig(doc *yaml.Node, cfg config.UpdateConfig) {
+	root := doc.Content[0]
+	repo := strings.TrimSpace(cfg.Repo)
+	if repo == "" {
+		removeKeyFromMap(root, "update")
+		return
+	}
+	node := ensureMap(root, "update")
+	setStringInMap(node, "repo", repo)
+}
+
 func updateVisionConfig(doc *yaml.Node, cfg config.VisionConfig) {
 	root := doc.Content[0]
 	visionNode := ensureMap(root, "vision")
@@ -2068,6 +2162,7 @@ func updateOpenAIConfig(doc *yaml.Node, cfg config.OpenAIConfig) {
 	setStringInMap(openaiNode, "api_key", cfg.APIKey)
 	setStringInMap(openaiNode, "base_url", cfg.BaseURL)
 	setStringInMap(openaiNode, "model", cfg.Model)
+	setStringMapInMap(openaiNode, "headers", cfg.Headers)
 	if cfg.MaxTotalTokens > 0 {
 		setIntInMap(openaiNode, "max_total_tokens", cfg.MaxTotalTokens)
 	}
@@ -2124,6 +2219,7 @@ func updateAIConfig(doc *yaml.Node, cfg config.AIConfig) {
 		setStringInMap(channelNode, "api_key", ch.APIKey)
 		setStringInMap(channelNode, "base_url", ch.BaseURL)
 		setStringInMap(channelNode, "model", ch.Model)
+		setStringMapInMap(channelNode, "headers", ch.Headers)
 		if ch.MaxTotalTokens > 0 {
 			setIntInMap(channelNode, "max_total_tokens", ch.MaxTotalTokens)
 		}
@@ -2247,7 +2343,7 @@ func (h *ConfigHandler) SetHitlToolWhitelist(tools []string) error {
 	if err := h.saveConfig(); err != nil {
 		return err
 	}
-	h.logger.Info("HITL 全局工具白名单已写入配置文件",
+	h.logger.Info("Saved global HITL tool allowlist to configuration",
 		zap.Int("count", len(h.config.Hitl.ToolWhitelist)),
 	)
 	return nil
@@ -2262,7 +2358,7 @@ func (h *ConfigHandler) MergeHitlToolWhitelistIntoConfig(add []string) error {
 	if err := h.saveConfig(); err != nil {
 		return err
 	}
-	h.logger.Info("HITL 全局工具白名单已合并写入配置文件",
+	h.logger.Info("Merged global HITL tool allowlist into configuration",
 		zap.Int("count", len(merged)),
 	)
 	return nil
@@ -2277,6 +2373,8 @@ func updateHitlConfig(doc *yaml.Node, cfg config.HitlConfig) {
 	setStringInMap(auditModelNode, "base_url", cfg.AuditModel.BaseURL)
 	setStringInMap(auditModelNode, "api_key", cfg.AuditModel.APIKey)
 	setStringInMap(auditModelNode, "model", cfg.AuditModel.Model)
+	setStringMapInMap(auditModelNode, "headers", cfg.AuditModel.Headers)
+	setStringInMap(ensureMap(auditModelNode, "reasoning"), "profile", cfg.AuditModel.Reasoning.Profile)
 	// flow 样式 [a, b, c] 单行展示，工具多时比块序列省行数
 	setFlowStringSliceInMap(hitlNode, "tool_whitelist", cfg.ToolWhitelist)
 	setStringInMap(hitlNode, "default_mode", cfg.EffectiveDefaultMode())
@@ -2334,7 +2432,7 @@ func (h *ConfigHandler) UpdateHitlDefaultReviewer(reviewer string) error {
 	if err := h.saveConfig(); err != nil {
 		return err
 	}
-	h.logger.Info("HITL 全局默认审批方已写入配置文件", zap.String("default_reviewer", h.config.Hitl.DefaultReviewer))
+	h.logger.Info("Saved global HITL default reviewer to configuration", zap.String("default_reviewer", h.config.Hitl.DefaultReviewer))
 	return nil
 }
 
@@ -2347,7 +2445,7 @@ func (h *ConfigHandler) UpdateHitlAuditAgentStrategy(approvalPrompt, reviewEditP
 	if err := h.saveConfig(); err != nil {
 		return err
 	}
-	h.logger.Info("HITL 审计 Agent 提示词已写入配置文件")
+	h.logger.Info("Saved HITL audit agent prompt to configuration")
 	return nil
 }
 
@@ -2524,6 +2622,34 @@ func setStringInMap(mapNode *yaml.Node, key, value string) {
 	valueNode.Value = value
 }
 
+// setStringMapInMap 把 map[string]string 写成 YAML 映射节点（键排序，空值删除）。
+func setStringMapInMap(mapNode *yaml.Node, key string, values map[string]string) {
+	if len(values) == 0 {
+		removeKeyFromMap(mapNode, key)
+		return
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		if strings.TrimSpace(k) == "" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		removeKeyFromMap(mapNode, key)
+		return
+	}
+	sort.Strings(keys)
+	mapValue := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	for _, k := range keys {
+		mapValue.Content = append(mapValue.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: k},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: values[k]})
+	}
+	_, valueNode := ensureKeyValue(mapNode, key)
+	*valueNode = *mapValue
+}
+
 func removeKeyFromMap(mapNode *yaml.Node, key string) {
 	if mapNode == nil || mapNode.Kind != yaml.MappingNode {
 		return
@@ -2652,9 +2778,9 @@ func (h *ConfigHandler) getExternalMCPToolsWithManager(
 
 	externalTools, err := mgr.GetAllTools(timeoutCtx)
 	if err != nil {
-		h.logger.Warn("获取外部MCP工具失败（可能连接断开），尝试返回缓存的工具",
+		h.logger.Warn("Failed to retrieve external MCP tools; returning cached tools if available",
 			zap.Error(err),
-			zap.String("hint", "如果外部MCP工具未显示，请检查连接状态或点击刷新按钮"),
+			zap.String("hint", "If external MCP tools are missing, check the connection or refresh"),
 		)
 	}
 
@@ -2753,7 +2879,7 @@ func pickToolDescriptionWithMode(mode, shortDesc, fullDesc string) string {
 func (h *ConfigHandler) GetToolSchema(c *gin.Context) {
 	toolName := c.Param("name")
 	if toolName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "工具名称不能为空"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Tool name cannot be empty"})
 		return
 	}
 
@@ -2775,7 +2901,7 @@ func (h *ConfigHandler) GetToolSchema(c *gin.Context) {
 				}
 			}
 		}
-		c.JSON(http.StatusNotFound, gin.H{"error": "外部工具未找到"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "External tool not found"})
 		return
 	}
 
@@ -2801,7 +2927,7 @@ func (h *ConfigHandler) GetToolSchema(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusNotFound, gin.H{"error": "工具未找到"})
+	c.JSON(http.StatusNotFound, gin.H{"error": "Tool not found"})
 }
 
 // buildInputSchemaFromParams 从 YAML 工具的 ParameterConfig 构建 JSON Schema（用于前端展示）。

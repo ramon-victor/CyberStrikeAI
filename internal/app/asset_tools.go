@@ -38,7 +38,7 @@ func registerAssetTools(server *mcp.Server, db *database.DB, logger *zap.Logger)
 		access, owner, global := assetAccessFromToolContext(ctx, "asset:write")
 		result, err := db.UpsertAssets([]*database.Asset{asset}, owner, global)
 		if err != nil {
-			logger.Error("Agent 保存资产失败", zap.Error(err))
+			logger.Error("Agent failed to save assets", zap.Error(err))
 			return textResult("Error: "+err.Error(), true), nil
 		}
 		if result.Skipped > 0 || asset.ID == "" {

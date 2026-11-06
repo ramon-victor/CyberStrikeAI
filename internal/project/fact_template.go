@@ -58,6 +58,12 @@ func IsSparseFactBody(category, factKey, body string) bool {
 
 // FactBodyTemplate returns the suggested body Markdown skeleton by category (for the Agent to fill in real content).
 func FactBodyTemplate(category, factKey string) string {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(factKey)), "artifact/") {
+		return artifactFactBodyTemplate
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(factKey)), "test/") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(factKey)), "negative/") {
+		return testResultFactBodyTemplate
+	}
 	if RequiresAttackChainBody(category, factKey) {
 		return attackChainFactBodyTemplate
 	}
@@ -133,3 +139,7 @@ func SparseBodyWarningIfNeeded(category, factKey, body string) string {
 	}
 	return SparseBodyWarning(category, factKey)
 }
+
+const artifactFactBodyTemplate = "## Result and verification status\n<Purpose, applicable target/entry point; verified success, failed or unverified>\n\n## Files and invocation\n- Relative project workspace path: artifacts/<filename>\n- Dependencies and versions: <files and installation/runtime environment>\n- Invocation and parameters: <command, inputs, outputs; reference auth/* credentials>\n\n## Verification evidence\n<Time, original command/output and conditions; file existence does not prove success>\n\n## Relationships\n<Source conversation, dependent fact_key and related_vulnerability_id>"
+
+const testResultFactBodyTemplate = "## Tested conditions\n<Target, entry point, parameters, identity/authentication, version and time>\n\n## Method and evidence\n<Requests, commands, response differences and tool output; identify errors and timeouts separately>\n\n## Conclusion and limits\n<Success, not found under tested conditions, blocked or pending; do not generalize to untested entry points>\n\n## Retest triggers\n<Target, entry point, identity or version changed; insufficient evidence or explicit user request>\n\n## Relationships\n<Source conversation, artifact/* scripts and related facts/vulnerability IDs>"

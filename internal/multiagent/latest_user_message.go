@@ -36,7 +36,7 @@ func prepareLatestUserMessageForModel(userMessage string, appCfg *config.Config,
 	head, tail := splitHeadTailRunes(userMessage, headRunes, tailRunes)
 	artifactPath, writeErr := persistLatestUserMessageArtifact(userMessage, appCfg, conversationID)
 	if writeErr != nil && logger != nil {
-		logger.Warn("latest user message artifact 写入失败，将仅使用预览",
+		logger.Warn("Failed to write latest user message artifact; using preview only",
 			zap.String("conversationId", conversationID),
 			zap.Error(writeErr),
 		)

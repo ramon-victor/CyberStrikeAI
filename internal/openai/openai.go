@@ -29,8 +29,6 @@ type Client struct {
 type APIError struct {
 	StatusCode int
 	Body       string
-	// RetryAfter is populated from the Retry-After response header (if present) so that
-	// the retry layer can honour provider-issued rate-limit hints.
 	RetryAfter time.Duration
 }
 
@@ -84,9 +82,7 @@ func (c *Client) UpdateConfig(cfg *config.OpenAIConfig) {
 	c.config = cfg
 }
 
-// ChatCompletion 调用 /chat/completions 接口（带自动重试）。
-// 对于 HTTP 429、500、502、503、504 及网络瞬时错误，最多重试 5 次，
-// 退避延迟依次为 10 s、20 s、40 s、80 s、160 s（附加 ±20 % 抖动）。
+// ChatCompletion 调用 /chat/completions 接口。
 func (c *Client) ChatCompletion(ctx context.Context, payload interface{}, out interface{}) error {
 	if c == nil {
 		return fmt.Errorf("openai client is not initialized")
@@ -121,9 +117,10 @@ func (c *Client) ChatCompletion(ctx context.Context, payload interface{}, out in
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+		applyCustomHeaders(req, c.config)
 
 		requestStart := time.Now()
-		resp, err := c.httpClient.Do(req)
+		resp, err := customHeaderHTTPClient(c.httpClient, c.config).Do(req)
 		if err != nil {
 			return 0, fmt.Errorf("call openai api: %w", err)
 		}
@@ -184,7 +181,6 @@ func (c *Client) ChatCompletion(ctx context.Context, payload interface{}, out in
 
 // ChatCompletionStream 调用 /chat/completions 的流式模式（stream=true），并在每个 delta 到达时回调 onDelta。
 // 返回最终拼接的 content（只拼 content delta；工具调用 delta 未做处理）。
-// 重试策略：仅在尚未向调用方回调任何 delta 时才重试，避免重复输出内容。
 func (c *Client) ChatCompletionStream(ctx context.Context, payload interface{}, onDelta func(delta string) error) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("openai client is not initialized")
@@ -247,9 +243,10 @@ func (c *Client) ChatCompletionStream(ctx context.Context, payload interface{}, 
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+		applyCustomHeaders(req, c.config)
 
 		requestStart := time.Now()
-		resp, err := c.httpClient.Do(req)
+		resp, err := customHeaderHTTPClient(c.httpClient, c.config).Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("call openai api: %w", err)
 			continue
@@ -456,9 +453,10 @@ func (c *Client) ChatCompletionStreamWithToolCalls(
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+		applyCustomHeaders(req, c.config)
 
 		requestStart := time.Now()
-		resp, err := c.httpClient.Do(req)
+		resp, err := customHeaderHTTPClient(c.httpClient, c.config).Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("call openai api: %w", err)
 			continue
@@ -659,8 +657,9 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("build openai models request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+	applyCustomHeaders(req, c.config)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := customHeaderHTTPClient(c.httpClient, c.config).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("call openai models api: %w", err)
 	}

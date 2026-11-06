@@ -116,8 +116,11 @@ function hitlPaginationT(key, opts, fallback) {
 }
 
 function hitlLocale() {
+    if (typeof window.uiLocale === 'function') return window.uiLocale();
     if (typeof window.__locale === 'string' && window.__locale.length) {
-        return window.__locale.startsWith('zh') ? 'zh-CN' : 'en-US';
+        if (window.__locale.startsWith('zh')) return 'zh-CN';
+        if (window.__locale.startsWith('ru')) return 'ru-RU';
+        return 'en-US';
     }
     return (typeof navigator !== 'undefined' && navigator.language) ? navigator.language : 'en-US';
 }
@@ -144,14 +147,14 @@ function renderHitlPagination(containerId, state, goPageFnName, pageSizeChangeFn
     const start = total === 0 ? 0 : (currentPage - 1) * pageSize + 1;
     const end = total === 0 ? 0 : Math.min(currentPage * pageSize, total);
     const infoText = hitlPaginationT('paginationInfo', { start: start, end: end, total: total },
-        '显示 ' + start + '-' + end + ' / 共 ' + total + ' 条记录');
-    const perPageLabel = hitlPaginationT('perPageLabel', null, '每页显示');
-    const firstPageLabel = hitlPaginationT('firstPage', null, '首页');
-    const prevPageLabel = hitlPaginationT('prevPage', null, '上一页');
+        "show " + start + '-' + end + " / common " + total + " records");
+    const perPageLabel = hitlPaginationT('perPageLabel', null, "Per page");
+    const firstPageLabel = hitlPaginationT('firstPage', null, "First");
+    const prevPageLabel = hitlPaginationT('prevPage', null, "Previous");
     const pageInfoText = hitlPaginationT('pageInfo', { page: currentPage, total: totalPages },
-        '第 ' + currentPage + ' / ' + totalPages + ' 页');
-    const nextPageLabel = hitlPaginationT('nextPage', null, '下一页');
-    const lastPageLabel = hitlPaginationT('lastPage', null, '末页');
+        "No. " + currentPage + ' / ' + totalPages + " Page");
+    const nextPageLabel = hitlPaginationT('nextPage', null, "Next");
+    const lastPageLabel = hitlPaginationT('lastPage', null, "Last");
     const disabledFirst = currentPage === 1 || total === 0;
     const disabledLast = currentPage >= totalPages || total === 0;
     let html = '<div class="monitor-pagination">';
@@ -171,6 +174,7 @@ function renderHitlPagination(containerId, state, goPageFnName, pageSizeChangeFn
     html += '<button type="button" class="btn-secondary" onclick="' + esc(goPageFnName) + '(' + totalPages + ')"' + (disabledLast ? ' disabled' : '') + '>' + esc(lastPageLabel) + '</button>';
     html += '</div></div>';
     container.innerHTML = html;
+    if (typeof initPaginationSelects === 'function') initPaginationSelects(container);
 }
 
 function hitlEffectiveEnabled(cfg) {

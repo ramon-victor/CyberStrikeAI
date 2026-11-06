@@ -90,11 +90,14 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 			return nil, fmt.Errorf("no permission to access this conversation")
 		}
 	}
+	if h.tasks != nil && h.tasks.GetTask(conversationID) != nil {
+		return nil, ErrTaskAlreadyRunning
+	}
 	if err := h.db.SetConversationRoleName(conversationID, req.Role); err != nil {
-		h.logger.Warn("更新对话角色失败", zap.String("conversationId", conversationID), zap.String("role", req.Role), zap.Error(err))
+		h.logger.Warn("Failed to update dialogue character", zap.String("conversationId", conversationID), zap.String("role", req.Role), zap.Error(err))
 	}
 	if err := h.db.SetConversationAgentMode(conversationID, chatRequestAgentMode(req, source)); err != nil {
-		h.logger.Warn("更新对话模式失败", zap.String("conversationId", conversationID), zap.String("source", source), zap.String("orchestration", req.Orchestration), zap.Error(err))
+		h.logger.Warn("Failed to update conversation mode", zap.String("conversationId", conversationID), zap.String("source", source), zap.String("orchestration", req.Orchestration), zap.Error(err))
 	}
 
 	agentHistoryMessages, err := h.loadHistoryFromAgentTrace(conversationID)
@@ -107,6 +110,11 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		}
 	}
 
+	resolvedMessage, resolveErr := h.db.ResolveConversationPlaceholders(conversationID, req.Message)
+	if resolveErr != nil {
+		return nil, fmt.Errorf("Failed to parse conversation placeholder: %w", resolveErr)
+	}
+	req.Message = resolvedMessage
 	finalMessage := req.Message
 	var roleTools []string
 	if webshellID != "" {
@@ -135,6 +143,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 			builtin.ToolRecordVulnerability,
 			builtin.ToolListVulnerabilities,
 			builtin.ToolGetVulnerability,
+			builtin.ToolUpdateVulnerabilityStatus,
 			builtin.ToolUpsertProjectFact,
 			builtin.ToolGetProjectFact,
 			builtin.ToolListProjectFacts,
@@ -153,6 +162,21 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		}
 	}
 
+	retest, retestErr := h.db.GetVulnerabilityRetest(conversationID)
+	if retestErr != nil {
+		return nil, fmt.Errorf("Failed to read retest context: %w", retestErr)
+	}
+	if retest != nil && len(roleTools) > 0 {
+		// Retesting requires these tools even when the inherited role has an
+		// older tool allowlist. MCP still enforces user and finding permissions.
+		roleTools = append(append([]string(nil), roleTools...), builtin.ToolGetVulnerability, builtin.ToolUpdateVulnerabilityStatus)
+	}
+
+	finalMessage, resolveErr = h.db.ResolveConversationPlaceholders(conversationID, finalMessage)
+	if resolveErr != nil {
+		return nil, fmt.Errorf("Failed to parse prompt word placeholder: %w", resolveErr)
+	}
+
 	var savedPaths []string
 	if len(req.Attachments) > 0 {
 		var aerr error
@@ -168,6 +192,11 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 	if uerr != nil {
 		h.logger.Error("Failed to save user message", zap.Error(uerr))
 		return nil, fmt.Errorf("Failed to save user message: %w", uerr)
+	}
+	if retest != nil {
+		if err := h.db.SetVulnerabilityRetestPrompt(conversationID, ""); err != nil {
+			h.logger.Warn("Failed to clear sent retest prompt words", zap.Error(err))
+		}
 	}
 	userMessageID := ""
 	if userMsgRow != nil {

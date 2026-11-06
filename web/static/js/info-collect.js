@@ -9,131 +9,131 @@ const FOFA_HIDDEN_FIELDS_STORAGE_KEY = 'info-collect-fofa-hidden-fields';
 const INFO_COLLECT_PROVIDERS = {
     fofa: {
         label: 'FOFA',
-        placeholder: '例如：app="Apache" && country="CN"',
-        nlPlaceholder: '例如：找美国 Missouri 的 Apache 站点，标题包含 Home',
-        hint: '查询语法参考 FOFA 文档，支持 && / || / () 等。',
-        parseHint: '解析后会弹窗展示 FOFA 语法（可编辑），确认无误后再填入查询框并执行查询。',
+        placeholder: "e.g. app=\"Apache\" && country=\"CN\"",
+        nlPlaceholder: "e.g. Apache sites in Missouri, US, title contains Home",
+        hint: "See FOFA docs for query syntax; supports && / || / ().",
+        parseHint: "Result will open in a popup for editing before running the query.",
         maxSize: 10000,
-        sizeHint: 'FOFA 返回数量上限与账号权限相关，前端最多允许 10000。',
+        sizeHint: "The upper limit of the number returned by FOFA is related to account permissions, and the front end allows up to 10,000.",
         fullOption: {
-            label: '完整模式',
-            hint: '向 FOFA 传 full=true，返回更完整/更实时的数据，可能消耗更多额度。'
+            label: "full mode",
+            hint: "Pass full=true to FOFA to return more complete/more real-time data, which may consume more credits."
         },
-        fields: 'host,ip,port,domain,title,protocol,country,province,city,server',
+        fields: 'host,ip,port,domain,title,protocol,country,region,city,server',
         presets: [
-            ['Apache + 中国', 'app="Apache" && country="CN"'],
-            ['登录页 + 中国', 'title="登录" && country="CN"'],
-            ['指定域名', 'domain="example.com"'],
-            ['指定 IP', 'ip="1.1.1.1"']
+            ["Apache + China", 'app="Apache" && country="CN"'],
+            ["Login page + China", "title=\"Login\" && country=\"CN\""],
+            ["By domain", 'domain="example.com"'],
+            ["By IP", 'ip="1.1.1.1"']
         ],
         fieldPresets: [
-            ['最小字段', 'host,ip,port,domain'],
-            ['Web 常用', 'host,title,ip,port,domain,protocol,server,icp,country,province,city'],
-            ['情报增强', 'host,ip,port,domain,title,protocol,country,province,city,server,as_number,as_organization,icp,header,banner']
+            ["Min fields", 'host,ip,port,domain'],
+            ["Web common", 'host,title,ip,port,domain,protocol,server,icp,country,region,city'],
+            ["Intel enhanced", 'host,ip,port,domain,title,protocol,country,region,city,server,asn,org,icp,header,banner']
         ],
         syntaxGuide: {
-            summary: 'FOFA 使用 field="value" 精确匹配，支持 &&、||、! 和括号组合；字符串建议用双引号包裹。',
+            summary: "FOFA uses field=\"value\" for exact matching and supports &&, ||, ! and bracket combinations; it is recommended that strings be wrapped in double quotes.",
             docsUrl: 'https://en.fofa.info/api',
             sections: [
-                ['常用字段', ['app="Apache"', 'title="后台管理"', 'body="Powered by"', 'domain="example.com"', 'host="https://example.com"', 'ip="1.1.1.1"', 'port="443"', 'country="CN"', 'city="Hangzhou"', 'server="nginx"']],
-                ['组合写法', ['app="nginx" && country="CN"', 'title="login" || title="登录"', '(app="Apache" || app="nginx") && port="443"', 'domain="example.com" && !title="404"']],
-                ['场景示例', ['cert="example.com" && port="443"', 'header="JSESSIONID" && country="CN"', 'icon_hash="-247388890"', 'fid="sZyXkR9e" && domain="example.com"']]
+                ["Common fields", ['app="Apache"', "title=\"Backend management\"", 'body="Powered by"', 'domain="example.com"', 'host="https://example.com"', 'ip="1.1.1.1"', 'port="443"', 'country="CN"', 'city="Hangzhou"', 'server="nginx"']],
+                ["Combination writing", ['app="nginx" && country="CN"', "title=\"login\" || title=\"login\"", '(app="Apache" || app="nginx") && port="443"', 'domain="example.com" && !title="404"']],
+                ["Scenario example", ['cert="example.com" && port="443"', 'header="JSESSIONID" && country="CN"', 'icon_hash="-247388890"', 'fid="sZyXkR9e" && domain="example.com"']]
             ]
         }
     },
     zoomeye: {
         label: 'ZoomEye',
-        placeholder: '例如：app="Apache" && country="CN"',
-        nlPlaceholder: '例如：找中国的 SSH 服务，排除蜜罐',
-        hint: 'ZoomEye 支持 app/title/domain/ip/port/country/city 等语法。',
-        parseHint: '解析后会弹窗展示 ZoomEye 语法（可编辑），确认无误后再填入查询框并执行查询。',
+        placeholder: "e.g. app=\"Apache\" && country=\"CN\"",
+        nlPlaceholder: "For example: Find SSH services in China and exclude honeypots",
+        hint: "ZoomEye supports syntax such as app/title/domain/ip/port/country/city.",
+        parseHint: "After parsing, a pop-up window will display the ZoomEye syntax (editable). After confirming it is correct, fill in the query box and execute the query.",
         maxSize: 10000,
-        sizeHint: 'ZoomEye pagesize 最高支持到 10000，实际额度以账号为准。',
+        sizeHint: "ZoomEye pagesize supports up to 10,000, and the actual limit is subject to the account number.",
         fullOption: null,
         fields: 'ip,port,domain,hostname,title,service,app,country,city',
         presets: [
-            ['Apache + 中国', 'app="Apache" && country="CN"'],
-            ['SSH 服务', 'service="ssh"'],
-            ['指定域名', 'domain="example.com"'],
-            ['指定 IP', 'ip="1.1.1.1"']
+            ["Apache + China", 'app="Apache" && country="CN"'],
+            ["SSH service", 'service="ssh"'],
+            ["By domain", 'domain="example.com"'],
+            ["By IP", 'ip="1.1.1.1"']
         ],
         fieldPresets: [
-            ['最小字段', 'ip,port,domain,hostname'],
-            ['Web 常用', 'ip,port,domain,hostname,title,service,app,country,city'],
-            ['情报增强', 'ip,port,domain,hostname,title,service,app,country,city,org,isp,ssl']
+            ["Min fields", 'ip,port,domain,hostname'],
+            ["Web common", 'ip,port,domain,hostname,title,service,app,country,city'],
+            ["Intel enhanced", 'ip,port,domain,hostname,title,service,app,country,city,org,isp,ssl']
         ],
         syntaxGuide: {
-            summary: 'ZoomEye 支持字段检索、引号短语、AND/OR/NOT 与括号组合；字段名以官方控制台实际支持为准。',
+            summary: "ZoomEye supports field retrieval, quoted phrases, AND/OR/NOT and bracket combinations; field names are subject to actual support of the official console.",
             docsUrl: 'https://www.zoomeye.ai/help',
             sections: [
-                ['常用字段', ['app="Apache"', 'service="ssh"', 'title="登录"', 'domain="example.com"', 'hostname="example.com"', 'ip="1.1.1.1"', 'port=443', 'country="CN"', 'city="Beijing"', 'org="Tencent"']],
-                ['组合写法', ['app="nginx" AND country="CN"', 'service="http" AND (title="login" OR title="登录")', 'domain="example.com" AND NOT app="cloudflare"', 'port=443 AND country="US"']],
-                ['场景示例', ['ssl.cert.fingerprint="SHA256值"', 'iconhash="-247388890"', 'service="rdp" AND country="CN"', 'app="Elasticsearch" AND port=9200']]
+                ["Common fields", ['app="Apache"', 'service="ssh"', "title=\"Login\"", 'domain="example.com"', 'hostname="example.com"', 'ip="1.1.1.1"', 'port=443', 'country="CN"', 'city="Beijing"', 'org="Tencent"']],
+                ["Combination writing", ['app="nginx" AND country="CN"', "service=\"http\" AND (title=\"login\" OR title=\"login\")", 'domain="example.com" AND NOT app="cloudflare"', 'port=443 AND country="US"']],
+                ["Scenario example", ["ssl.cert.fingerprint=\"SHA256 value\"", 'iconhash="-247388890"', 'service="rdp" AND country="CN"', 'app="Elasticsearch" AND port=9200']]
             ]
         }
     },
     quake: {
         label: 'Quake',
-        placeholder: '例如：service.name:"http" AND country_cn:"中国"',
-        nlPlaceholder: '例如：找中国的 HTTP 服务，标题包含登录',
-        hint: 'Quake 使用 DSL 语法，常见字段如 service.name、domain、ip、port、country_cn。',
-        parseHint: '解析后会弹窗展示 Quake DSL（可编辑），确认无误后再填入查询框并执行查询。',
+        placeholder: "For example: service.name:\"http\" AND country_cn:\"China\"",
+        nlPlaceholder: "For example: Looking for HTTP services in China, the title contains login",
+        hint: "Quake uses DSL syntax, common fields such as service.name, domain, ip, port, country_cn.",
+        parseHint: "After parsing, a pop-up window will display the Quake DSL (editable). After confirming it is correct, fill in the query box and execute the query.",
         maxSize: 10000,
-        sizeHint: 'Quake size 会消耗积分，建议按需控制返回数量。',
+        sizeHint: "Quake size will consume points, and it is recommended to control the returned quantity as needed.",
         fullOption: {
-            label: '最新数据',
-            hint: '向 Quake 传 latest=true，优先查询最新数据。'
+            label: "latest data",
+            hint: "Pass latest=true to Quake to query the latest data first."
         },
         fields: 'ip,port,domain,service.name,service.http.title,location.country_cn,location.province_cn,location.city_cn',
         presets: [
-            ['HTTP + 中国', 'service.name:"http" AND country_cn:"中国"'],
-            ['443 端口', 'port:443'],
-            ['指定域名', 'domain:"example.com"'],
-            ['指定 IP', 'ip:"1.1.1.1"']
+            ["HTTP + China", "service.name:\"http\" AND country_cn:\"China\""],
+            ["port 443", 'port:443'],
+            ["By domain", 'domain:"example.com"'],
+            ["By IP", 'ip:"1.1.1.1"']
         ],
         fieldPresets: [
-            ['最小字段', 'ip,port,domain'],
-            ['Web 常用', 'ip,port,domain,service.name,service.http.title,location.country_cn,location.city_cn'],
-            ['情报增强', 'ip,port,domain,service.name,service.http.title,service.http.server,location.country_cn,location.province_cn,location.city_cn,asn']
+            ["Min fields", 'ip,port,domain'],
+            ["Web common", 'ip,port,domain,service.name,service.http.title,location.country_cn,location.city_cn'],
+            ["Intel enhanced", 'ip,port,domain,service.name,service.http.title,service.http.server,location.country_cn,location.province_cn,location.city_cn,asn']
         ],
         syntaxGuide: {
-            summary: 'Quake 使用 Lucene/DSL 风格查询，常见形式是 field:"value"，逻辑运算符通常使用 AND、OR、NOT。',
+            summary: "Quake uses Lucene/DSL style query, the common form is field: \"value\", and the logical operators usually use AND, OR, NOT.",
             docsUrl: 'https://quake.360.net/quake/#/help',
             sections: [
-                ['常用字段', ['service.name:"http"', 'service.http.title:"登录"', 'service.http.server:"nginx"', 'domain:"example.com"', 'ip:"1.1.1.1"', 'port:443', 'country_cn:"中国"', 'province_cn:"浙江"', 'city_cn:"杭州"']],
-                ['组合写法', ['service.name:"http" AND country_cn:"中国"', '(service.name:"http" OR service.name:"https") AND port:443', 'domain:"example.com" AND NOT service.http.title:"404"', 'service.http.title:"login" AND port:443']],
-                ['场景示例', ['service.http.favicon.hash:"-247388890"', 'service.http.response.header:"JSESSIONID"', 'service.name:"ssh" AND country_cn:"中国"', 'service.http.title:"Dashboard" AND NOT ip:"127.0.0.1"']]
+                ["Common fields", ['service.name:"http"', "service.http.title:\"Login\"", 'service.http.server:"nginx"', 'domain:"example.com"', 'ip:"1.1.1.1"', 'port:443', "country_cn:\"China\"", "province_cn:\"Zhejiang\"", "city_cn:\"Hangzhou\""]],
+                ["Combination writing", ["service.name:\"http\" AND country_cn:\"China\"", '(service.name:"http" OR service.name:"https") AND port:443', 'domain:"example.com" AND NOT service.http.title:"404"', 'service.http.title:"login" AND port:443']],
+                ["Scenario example", ['service.http.favicon.hash:"-247388890"', 'service.http.response.header:"JSESSIONID"', "service.name:\"ssh\" AND country_cn:\"China\"", 'service.http.title:"Dashboard" AND NOT ip:"127.0.0.1"']]
             ]
         }
     },
     shodan: {
         label: 'Shodan',
-        placeholder: '例如：product:nginx country:CN',
-        nlPlaceholder: '例如：找中国的 nginx 资产，端口 443',
-        hint: 'Shodan 使用 filter:value 语法，常见字段如 product、port、country、org。',
-        parseHint: '解析后会弹窗展示 Shodan filter 语法（可编辑），确认无误后再填入查询框并执行查询。',
+        placeholder: "For example: product:nginx country:CN",
+        nlPlaceholder: "For example: Find China’s nginx assets, port 443",
+        hint: "Shodan uses filter:value syntax, and common fields include product, port, country, and org.",
+        parseHint: "After parsing, a pop-up window will display the Shodan filter syntax (editable). After confirming it is correct, fill in the query box and execute the query.",
         maxSize: 1000,
-        sizeHint: 'Shodan 官方每页 100 条；后端会自动翻页聚合，单次最多 1000 条以控制额度消耗。',
+        sizeHint: "Shodan officially has 100 items per page; the backend will automatically turn pages for aggregation, with a maximum of 1,000 items at a time to control quota consumption.",
         fullOption: null,
         fields: 'ip_str,port,hostnames,domains,org,isp,location.country_name,location.city,product,transport',
         presets: [
-            ['Nginx + 中国', 'product:nginx country:CN'],
-            ['SSH 服务', 'port:22'],
-            ['证书域名', 'ssl.cert.subject.cn:example.com'],
+            ["Nginx + China", 'product:nginx country:CN'],
+            ["SSH service", 'port:22'],
+            ["Certificate domain name", 'ssl.cert.subject.cn:example.com'],
             ['Amazon 443', 'org:"Amazon" port:443']
         ],
         fieldPresets: [
-            ['最小字段', 'ip_str,port,hostnames,domains'],
-            ['Web 常用', 'ip_str,port,hostnames,domains,product,org,location.country_name,location.city'],
-            ['情报增强', 'ip_str,port,hostnames,domains,org,isp,asn,location.country_name,location.city,product,transport,ssl.cert.subject.cn']
+            ["Min fields", 'ip_str,port,hostnames,domains'],
+            ["Web common", 'ip_str,port,hostnames,domains,product,org,location.country_name,location.city'],
+            ["Intel enhanced", 'ip_str,port,hostnames,domains,org,isp,asn,location.country_name,location.city,product,transport,ssl.cert.subject.cn']
         ],
         syntaxGuide: {
-            summary: 'Shodan 默认搜索 banner data；精确条件使用 filter:value，值含空格时用双引号，多个过滤器并列表示收窄结果。',
+            summary: "Shodan searches banner data by default; use filter:value for precise conditions, use double quotes when the value contains spaces, and use multiple filters in parallel to narrow the results.",
             docsUrl: 'https://help.shodan.io/the-basics/search-query-fundamentals',
             sections: [
-                ['常用过滤器', ['product:nginx', 'port:443', 'country:CN', 'city:Shanghai', 'org:"Amazon"', 'asn:AS15169', 'hostname:example.com', 'ssl.cert.subject.cn:example.com', 'http.title:"Dashboard"']],
-                ['组合写法', ['product:nginx country:CN', 'apache port:443 country:DE', 'org:"Amazon" port:443', 'ssl.cert.subject.cn:example.com port:443']],
-                ['场景示例', ['http.title:"login" country:CN', 'ssl:true port:443 hostname:example.com', 'vuln:CVE-2021-41773', 'has_screenshot:true product:nginx']]
+                ["Common filters", ['product:nginx', 'port:443', 'country:CN', 'city:Shanghai', 'org:"Amazon"', 'asn:AS15169', 'hostname:example.com', 'ssl.cert.subject.cn:example.com', 'http.title:"Dashboard"']],
+                ["Combination writing", ['product:nginx country:CN', 'apache port:443 country:DE', 'org:"Amazon" port:443', 'ssl.cert.subject.cn:example.com port:443']],
+                ["Scenario example", ['http.title:"login" country:CN', 'ssl:true port:443 hostname:example.com', 'vuln:CVE-2021-41773', 'has_screenshot:true product:nginx']]
             ]
         }
     }
@@ -268,6 +268,7 @@ function initInfoCollectPage() {
         const savedFields = String(saved.fields || '').trim();
         shouldResetProviderFields = provider !== 'fofa' && (
             savedFields === INFO_COLLECT_PROVIDERS.fofa.fields ||
+            savedFields === 'host,ip,port,domain,title,protocol,country,province,city,server' ||
             savedFields === 'host,ip,port,domain'
         );
     }
@@ -346,11 +347,11 @@ function setInfoCollectQueryMode(mode, options) {
     const queryLabel = document.getElementById('info-collect-query-label');
     const cfg = INFO_COLLECT_PROVIDERS[getInfoCollectProvider()] || INFO_COLLECT_PROVIDERS.fofa;
     if (queryLabel) {
-        queryLabel.textContent = cfg.label + ' 查询语法（可编辑，可直接查询）';
+        queryLabel.textContent = cfg.label + " Query syntax (editable, direct query)";
     }
     const nlLabel = document.getElementById('info-collect-nl-label');
     if (nlLabel) {
-        nlLabel.textContent = '自然语言（可选，AI 解析为 ' + cfg.label + ' 语法）';
+        nlLabel.textContent = "Natural language (optional, AI parses as " + cfg.label + " grammar)";
     }
 
     if (shouldFocus) {
@@ -400,7 +401,7 @@ function stabilizeInfoCollectQueryCardHeight() {
     const queryLabel = clone.querySelector('#info-collect-query-label');
     if (queryLabel) {
         const cfg = INFO_COLLECT_PROVIDERS[getInfoCollectProvider()] || INFO_COLLECT_PROVIDERS.fofa;
-        queryLabel.textContent = cfg.label + ' 查询语法（可编辑，可直接查询）';
+        queryLabel.textContent = cfg.label + " Query syntax (editable, direct query)";
     }
 
     document.body.appendChild(clone);
@@ -590,7 +591,7 @@ function renderInfoCollectSyntaxGuide(cfg) {
         return;
     }
     const docsLink = guide.docsUrl
-        ? `<a class="info-collect-doc-link" href="${presetDataAttr(guide.docsUrl)}" target="_blank" rel="noopener noreferrer">官方文档</a>`
+        ? `<a class="info-collect-doc-link" href="${presetDataAttr(guide.docsUrl)}" target="_blank" rel="noopener noreferrer">Official document </a>`
         : '';
     const expanded = !!infoCollectState.syntaxGuideExpanded;
     const sections = (guide.sections || []).map(([title, examples]) => {
@@ -606,7 +607,7 @@ function renderInfoCollectSyntaxGuide(cfg) {
             <div class="syntax-guide-summary">${escapeHtml(guide.summary || '')}</div>
             <div class="syntax-guide-actions">
                 ${docsLink}
-                <button class="syntax-guide-toggle" type="button" data-info-syntax-guide-toggle aria-expanded="${expanded ? 'true' : 'false'}">${expanded ? '收起示例' : '展开示例'}</button>
+                <button class="syntax-guide-toggle" type="button" data-info-syntax-guide-toggle aria-expanded="${expanded ? 'true' : 'false'}">${expanded ? "Collapse example" : "Expand example"}</button>
             </div>
         </div>
         <div class="syntax-guide-body"${expanded ? '' : ' hidden'}>${sections}</div>
@@ -636,12 +637,12 @@ function refreshInfoCollectProviderUI(resetProviderFields) {
     const fullOption = document.getElementById('info-collect-full-option');
     const fullText = fullOption ? fullOption.querySelector('.checkbox-text') : null;
     const fullConfig = getInfoCollectFullOption(provider);
-    if (queryLabel) queryLabel.textContent = cfg.label + ' 查询语法';
-    if (nlLabel) nlLabel.textContent = '自然语言（AI 解析为 ' + cfg.label + ' 语法）';
+    if (queryLabel) queryLabel.textContent = cfg.label + " Query syntax";
+    if (nlLabel) nlLabel.textContent = "Natural language (AI parses as " + cfg.label + " grammar)";
     if (queryHint) queryHint.textContent = cfg.hint;
     if (parseHint) parseHint.textContent = cfg.parseHint;
     if (sizeHint) sizeHint.textContent = cfg.sizeHint;
-    if (parseBtn && parseBtn.dataset.loading !== '1') parseBtn.title = '将自然语言解析为 ' + cfg.label + ' 查询语法';
+    if (parseBtn && parseBtn.dataset.loading !== '1') parseBtn.title = "Parse natural language into " + cfg.label + " Query syntax";
     if (els.query) els.query.placeholder = cfg.placeholder;
     if (els.nl) els.nl.placeholder = cfg.nlPlaceholder;
     if (els.size) {
@@ -748,7 +749,7 @@ async function submitFofaSearch() {
     if (size > maxSize) {
         size = maxSize;
         if (els.size) els.size.value = String(maxSize);
-        showInlineToast(providerCfg.label + ' 单次最多返回 ' + maxSize + ' 条，已自动调整。');
+        showInlineToast(providerCfg.label + " Maximum return per time " + maxSize + " The bar has been automatically adjusted.");
     }
     const page = parseInt(els.page?.value, 10) || 1;
     const fields = (els.fields?.value || '').trim();
@@ -776,7 +777,7 @@ async function submitFofaSearch() {
         }
         renderFofaResults(result);
     } catch (e) {
-        console.error(providerLabel(provider) + ' 查询失败:', e);
+        console.error(providerLabel(provider) + " Query failed:", e);
         setFofaMeta(_t('infoCollect.queryFailed'));
         renderFofaResults({ provider, query, fields: [], results: [], total: 0, page: 1, size: 0 });
         alert(_t('infoCollect.queryFailed') + ': ' + (e && e.message ? e.message : String(e)));
@@ -869,7 +870,7 @@ function setFofaParseLoading(loading, statusText) {
             const cfg = INFO_COLLECT_PROVIDERS[provider] || INFO_COLLECT_PROVIDERS.fofa;
             btn.classList.remove('btn-loading');
             btn.textContent = btn.dataset.originalText || _t('infoCollectPage.parseBtn');
-            btn.title = '将自然语言解析为 ' + cfg.label + ' 查询语法';
+            btn.title = "Parse natural language into " + cfg.label + " Query syntax";
             btn.disabled = false;
             delete btn.dataset.loading;
             btn.removeAttribute('aria-busy');
@@ -920,7 +921,7 @@ function showFofaParseModal(nlText, parsed) {
                 </div>
 
                 <div class="form-group info-collect-parse-form-group">
-                    <label for="fofa-parse-query">${escapeHtml(cfg.label)} 查询语法（可编辑）</label>
+                    <label for="fofa-parse-query">${escapeHtml(cfg.label)} Query syntax (editable) </label>
                     <textarea id="fofa-parse-query" class="info-collect-query-input" rows="2" placeholder="${escapeHtml(cfg.placeholder)}"></textarea>
                     <small class="form-hint">${_t('infoCollect.confirmBeforeQuery')}</small>
                 </div>

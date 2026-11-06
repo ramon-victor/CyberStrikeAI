@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/multiagent"
+	"cyberstrike-ai/internal/openai"
 	"cyberstrike-ai/internal/runlease"
 	"cyberstrike-ai/internal/security"
 )
@@ -37,6 +38,7 @@ type AgentTask struct {
 	IsolationBackend string `json:"isolationBackend,omitempty"`
 	finishing        chan struct{}
 	stopping         chan struct{}
+	cancelRequested  bool
 	finalStatus      string
 	ConversationID   string    `json:"conversationId"`
 	Title            string    `json:"title,omitempty"`
@@ -486,6 +488,11 @@ func (m *AgentTaskManager) CancelTask(conversationID string, cause error) (bool,
 		return true, nil
 	}
 
+	if cause == nil || errors.Is(cause, ErrTaskCancelled) {
+		task.cancelRequested = true
+		task.finalStatus = "cancelled"
+	}
+
 	// ErrInterruptContinue：仅掐断当前推理步骤，随后由处理器续跑，不进入长时间「取消中」态。
 	if cause != nil && errors.Is(cause, multiagent.ErrInterruptContinue) {
 		task.Status = "running"
@@ -563,6 +570,9 @@ func (m *AgentTaskManager) UpdateTaskStatus(conversationID string, status string
 	if task.finishing != nil || task.Status == "cleanup_failed" {
 		return
 	}
+	if task.cancelRequested {
+		status = "cancelled"
+	}
 	switch status {
 	case "completed", "cancelled", "failed", "timeout":
 		task.finalStatus = status
@@ -579,6 +589,9 @@ func (m *AgentTaskManager) UpdateTaskStatus(conversationID string, status string
 // BindProcessScope snapshots ownership once at task start. Continuations must
 // derive from this context, never resolve ownership again using conversation ID.
 func (m *AgentTaskManager) BindProcessScope(ctx context.Context, conversationID, runID string) context.Context {
+	// 把对话 ID 放进 ctx：自定义请求头的 %session_id% 占位符据此替换，
+	// 保证每次对话发出的 x-opencode-session 等头对应当前 session。
+	ctx = openai.WithSessionID(ctx, conversationID)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if task := m.tasks[conversationID]; task != nil && task.RunID == runID {
@@ -631,6 +644,9 @@ func (m *AgentTaskManager) FinishTaskRun(conversationID, runID, finalStatus stri
 			return errors.New(cleanupError)
 		}
 		return nil
+	}
+	if task.cancelRequested {
+		finalStatus = "cancelled"
 	}
 	done := make(chan struct{})
 	task.finishing = done

@@ -281,7 +281,7 @@ func (db *DB) ListC2Listeners() ([]*C2Listener, error) {
 			&l.ConfigJSON, &l.Remark,
 			&l.OwnerUserID, &l.CreatedAt, &startedAt, &l.LastError,
 		); err != nil {
-			db.logger.Warn("扫描 c2_listeners 行失败", zap.Error(err))
+			db.logger.Warn("Scanning c2_listeners row failed", zap.Error(err))
 			continue
 		}
 		if startedAt.Valid {
@@ -712,7 +712,7 @@ func (db *DB) scanC2SessionRows(rows *sql.Rows) ([]*C2Session, error) {
 			&s.Status, &s.FirstSeenAt, &s.LastCheckIn, &metadataJSON,
 			&s.Note,
 		); err != nil {
-			db.logger.Warn("扫描 c2_sessions 行失败", zap.Error(err))
+			db.logger.Warn("Scanning c2_sessions row failed", zap.Error(err))
 			continue
 		}
 		s.IsAdmin = isAdminInt != 0
@@ -865,6 +865,7 @@ func (db *DB) CreateC2Task(t *C2Task) error {
 
 // SetC2TaskStatus 更新任务的状态/结果/错误/时间戳
 type C2TaskUpdate struct {
+	ExpectedStatus *string // Optional compare-and-swap guard for terminal transitions.
 	Status         *string
 	ResultText     *string
 	ResultBlobPath *string
@@ -921,6 +922,10 @@ func (db *DB) UpdateC2Task(id string, u C2TaskUpdate) error {
 	}
 	query := "UPDATE c2_tasks SET " + strings.Join(sets, ", ") + " WHERE id = ?"
 	args = append(args, id)
+	if u.ExpectedStatus != nil {
+		query += " AND status = ?"
+		args = append(args, *u.ExpectedStatus)
+	}
 	res, err := db.Exec(query, args...)
 	if err != nil {
 		return err
@@ -1243,7 +1248,7 @@ func (db *DB) scanC2TaskRows(rows *sql.Rows) ([]*C2Task, error) {
 			&t.ConversationID, &t.ApprovalStatus,
 			&t.CreatedAt, &sentAt, &startedAt, &completedAt, &t.DurationMS,
 		); err != nil {
-			db.logger.Warn("扫描 c2_tasks 行失败", zap.Error(err))
+			db.logger.Warn("Scanning c2_tasks row failed", zap.Error(err))
 			continue
 		}
 		if payloadJSON != "" && payloadJSON != "{}" {

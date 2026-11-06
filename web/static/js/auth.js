@@ -92,7 +92,27 @@ function resolveAuthPromises(success) {
     authPromise = null;
 }
 
+function setLoginPasswordVisible(visible) {
+    const input = document.getElementById('login-password');
+    const button = document.getElementById('login-password-toggle');
+    if (input) input.type = visible ? 'text' : 'password';
+    if (button) {
+        button.setAttribute('aria-pressed', String(visible));
+        const key = visible ? 'login.hidePassword' : 'login.showPassword';
+        button.setAttribute('data-i18n', key);
+        const label = typeof window.t === 'function' ? window.t(key) : (visible ? "Hide password" : "Show password");
+        button.setAttribute('aria-label', label);
+        button.setAttribute('title', label);
+    }
+}
+
+function toggleLoginPasswordVisibility() {
+    const input = document.getElementById('login-password');
+    setLoginPasswordVisible(input && input.type === 'password');
+}
+
 function showLoginOverlay(message = '') {
+    setLoginPasswordVisible(false);
     const overlay = document.getElementById('login-overlay');
     const errorBox = document.getElementById('login-error');
     const usernameInput = document.getElementById('login-username');
@@ -120,6 +140,7 @@ function showLoginOverlay(message = '') {
 }
 
 function hideLoginOverlay() {
+    setLoginPasswordVisible(false);
     const overlay = document.getElementById('login-overlay');
     const errorBox = document.getElementById('login-error');
     const usernameInput = document.getElementById('login-username');
@@ -131,7 +152,9 @@ function hideLoginOverlay() {
     }
     if (passwordInput) {
         passwordInput.value = '';
+        passwordInput.setAttribute('aria-invalid', 'false');
     }
+    if (usernameInput) usernameInput.setAttribute('aria-invalid', 'false');
     if (usernameInput && !authUser) {
         usernameInput.value = '';
     }
@@ -244,6 +267,14 @@ async function apiUploadWithProgress(url, formData, options = {}) {
     });
 }
 
+function clearLoginFormError(event) {
+    const input = event.target;
+    if (!input || (input.id !== 'login-username' && input.id !== 'login-password')) return;
+    input.setAttribute('aria-invalid', 'false');
+    const error = document.getElementById('login-error');
+    if (error) { error.textContent = ''; error.style.display = 'none'; }
+}
+
 async function submitLogin(event) {
     event.preventDefault();
     const usernameInput = document.getElementById('login-username');
@@ -251,13 +282,25 @@ async function submitLogin(event) {
     const errorBox = document.getElementById('login-error');
     const submitBtn = document.querySelector('.login-submit');
 
+    [usernameInput, passwordInput].forEach(input => input && input.setAttribute('aria-invalid', 'false'));
+
     if (!passwordInput) {
         return;
     }
 
     const username = usernameInput ? usernameInput.value.trim() : '';
     const password = passwordInput.value.trim();
+    if (!username || Array.from(username).length > 64) {
+        if (usernameInput) usernameInput.setAttribute('aria-invalid', 'true');
+        if (errorBox) {
+            errorBox.textContent = typeof window.t === 'function' ? window.t('auth.usernameRequired') : "Enter a username of at most 64 characters";
+            errorBox.style.display = 'block';
+        }
+        if (usernameInput) usernameInput.focus();
+        return;
+    }
     if (!password) {
+        passwordInput.setAttribute('aria-invalid', 'true');
         if (errorBox) {
             const msgEmpty = (typeof window !== 'undefined' && typeof window.t === 'function')
                 ? window.t('auth.enterPassword')
@@ -265,6 +308,7 @@ async function submitLogin(event) {
             errorBox.textContent = msgEmpty;
             errorBox.style.display = 'block';
         }
+        passwordInput.focus();
         return;
     }
 
@@ -327,7 +371,7 @@ async function refreshAppData(showTaskErrors = false) {
         try {
             await initChatAgentModeFromConfig();
         } catch (error) {
-            console.warn('刷新对话模式配置失败:', error);
+            console.warn("Failed to refresh conversation mode configuration:", error);
         }
     }
     await Promise.allSettled([
@@ -340,7 +384,7 @@ async function refreshAppData(showTaskErrors = false) {
         try {
             await window.refreshChatProjectSelector({ reloadFolders: true });
         } catch (error) {
-            console.warn('刷新项目侧栏失败:', error);
+            console.warn("Failed to refresh project sidebar:", error);
         }
     }
 }
@@ -477,11 +521,18 @@ function applyPermissionElement(el) {
     const allowed = permissionAllowedForElement(el);
     el.hidden = !allowed;
     el.classList.toggle('rbac-permission-denied', !allowed);
+    // Permission decides whether this user may ever use the control; it does not decide
+    // whether the control is ready. A page that disables one for a reason of its own marks
+    // it with data-state-disabled, because writing el.disabled = !allowed here otherwise
+    // re-enables it for exactly the users who are allowed - and a button whose preconditions
+    // are unmet is then pressed, and fails.
+    const blockedByState = el.dataset && el.dataset.stateDisabled === 'true';
+    const disabled = !allowed || blockedByState;
     if ('disabled' in el) {
-        el.disabled = !allowed;
+        el.disabled = disabled;
     }
     el.setAttribute('aria-hidden', allowed ? 'false' : 'true');
-    el.setAttribute('aria-disabled', allowed ? 'false' : 'true');
+    el.setAttribute('aria-disabled', disabled ? 'true' : 'false');
 }
 
 let permissionClickGuardInstalled = false;
@@ -569,12 +620,12 @@ function getScopeLabel(scope) {
         own: 'header.scopeOwn',
     };
     const fallbackMap = {
-        all: '全部资源',
-        assigned: '指定资源',
-        own: '自己的资源',
+        all: "All resources",
+        assigned: "Assigned resources",
+        own: "Own resources",
     };
     const key = keyMap[normalized] || 'header.scopeUnknown';
-    const fallback = fallbackMap[normalized] || '资源范围未知';
+    const fallback = fallbackMap[normalized] || "Unknown scope";
     return authT(key, fallback);
 }
 
@@ -621,7 +672,7 @@ function setUserMenuOpen(open) {
 function getStatusText(status) {
     const s = (status && String(status).toLowerCase()) || '';
     if (typeof window.t !== 'function') {
-        const fallback = { pending: '等待中', queued: '排队中', running: '执行中', background_running: '后台执行中', completed: '已完成', failed: '失败', blocked: '已拦截', cancelled: '已终止', hard_timeout: '硬超时', orphaned: '孤儿记录' };
+        const fallback = { pending: "Pending", queued: "Queued", running: "Running", background_running: "Running in background", completed: "Succeeded", failed: "Failed", blocked: "Blocked", cancelled: "Cancelled", hard_timeout: "hard timeout", orphaned: "Orphan records" };
         return fallback[s] || status;
     }
     const keyMap = { pending: 'mcpDetailModal.statusPending', queued: 'mcpDetailModal.statusQueued', running: 'mcpDetailModal.statusRunning', background_running: 'timeline.backgroundRunning', completed: 'mcpDetailModal.statusCompleted', failed: 'mcpDetailModal.statusFailed', blocked: 'mcpMonitor.statusBlocked', cancelled: 'mcpDetailModal.statusCancelled', hard_timeout: 'mcpMonitor.statusHardTimeout', orphaned: 'mcpMonitor.statusOrphaned' };
@@ -675,6 +726,7 @@ function setupLoginUI() {
     const loginForm = document.getElementById('login-form');
     if (loginForm) {
         loginForm.addEventListener('submit', submitLogin);
+        loginForm.addEventListener('input', clearLoginFormError);
     }
 }
 
@@ -752,7 +804,7 @@ async function generateRobotBindingCode() {
     const generateBtn = document.getElementById('robot-binding-generate-btn');
     if (generateBtn) {
         generateBtn.disabled = true;
-        generateBtn.textContent = '正在生成…';
+        generateBtn.textContent = "Generating…";
     }
     let response;
     let data;
@@ -760,12 +812,12 @@ async function generateRobotBindingCode() {
         response = await apiFetch('/api/auth/robot-binding-code', { method: 'POST' });
         data = await response.json().catch(() => ({}));
     } catch (error) {
-        if (typeof showNotification === 'function') showNotification('生成绑定码失败，请检查网络连接', 'error');
+        if (typeof showNotification === 'function') showNotification("Failed to generate binding code, please check the network connection", 'error');
         resetRobotBindingGenerateButton();
         return;
     }
     if (!response.ok || !data.code) {
-        if (typeof showNotification === 'function') showNotification(data.error || '生成绑定码失败', 'error');
+        if (typeof showNotification === 'function') showNotification(data.error || "Failed to generate binding code", 'error');
         resetRobotBindingGenerateButton();
         return;
     }
@@ -783,10 +835,10 @@ async function generateRobotBindingCode() {
     if (copyBtn) copyBtn.disabled = false;
     if (card) card.className = 'robot-binding-code-card is-active';
     if (timer) timer.hidden = false;
-    if (state) state.textContent = '等待绑定';
+    if (state) state.textContent = "Waiting for binding";
     if (generateBtn) {
         generateBtn.disabled = false;
-        generateBtn.textContent = '重新生成';
+        generateBtn.textContent = "Regenerate";
     }
     startRobotBindingCountdown();
 }
@@ -795,7 +847,7 @@ function resetRobotBindingGenerateButton() {
     const generateBtn = document.getElementById('robot-binding-generate-btn');
     if (generateBtn) {
         generateBtn.disabled = false;
-        generateBtn.textContent = activeRobotBindingCode ? '重新生成' : '生成绑定码';
+        generateBtn.textContent = activeRobotBindingCode ? "Regenerate" : "Generate binding code";
     }
 }
 
@@ -816,7 +868,7 @@ function updateRobotBindingCountdown() {
     const expiry = document.getElementById('robot-binding-expiry');
     if (countdown) countdown.textContent = `${minutesPart}:${secondsPart}`;
     if (progress) progress.style.width = `${Math.max(0, Math.min(100, remaining / robotBindingLifetimeMs * 100))}%`;
-    if (expiry && activeRobotBindingCode) expiry.textContent = `请发送：绑定 ${activeRobotBindingCode}`;
+    if (expiry && activeRobotBindingCode) expiry.textContent = `Please send: bind ${activeRobotBindingCode}`;
     if (remaining <= 0) expireRobotBindingCode();
 }
 
@@ -833,21 +885,21 @@ function expireRobotBindingCode() {
     const progress = document.getElementById('robot-binding-progress-bar');
     const copyBtn = document.getElementById('robot-binding-copy-btn');
     if (card) card.className = 'robot-binding-code-card is-expired';
-    if (codeEl) codeEl.textContent = '已失效';
-    if (state) state.textContent = '已过期';
-    if (expiry) expiry.textContent = '绑定码已过期，请重新生成';
+    if (codeEl) codeEl.textContent = "Expired";
+    if (state) state.textContent = "Expired";
+    if (expiry) expiry.textContent = "The binding code has expired, please regenerate it";
     if (countdown) countdown.textContent = '00:00';
     if (progress) progress.style.width = '0%';
     if (copyBtn) copyBtn.disabled = true;
     resetRobotBindingGenerateButton();
     const generateBtn = document.getElementById('robot-binding-generate-btn');
-    if (generateBtn) generateBtn.textContent = '重新生成';
+    if (generateBtn) generateBtn.textContent = "Regenerate";
     loadRobotAccountBindings();
 }
 
 async function copyRobotBindingCode() {
     if (!activeRobotBindingCode || !robotBindingExpiresAt || robotBindingExpiresAt <= Date.now()) return;
-    const command = `绑定 ${activeRobotBindingCode}`;
+    const command = `bind ${activeRobotBindingCode}`;
     try {
         await navigator.clipboard.writeText(command);
     } catch (_) {
@@ -862,9 +914,9 @@ async function copyRobotBindingCode() {
     }
     const copyBtn = document.getElementById('robot-binding-copy-btn');
     const label = copyBtn?.querySelector('span');
-    if (label) label.textContent = '已复制';
-    setTimeout(() => { if (label) label.textContent = '复制命令'; }, 1400);
-    if (typeof showNotification === 'function') showNotification('绑定命令已复制', 'success');
+    if (label) label.textContent = "Copied";
+    setTimeout(() => { if (label) label.textContent = "copy command"; }, 1400);
+    if (typeof showNotification === 'function') showNotification("Bind command copied", 'success');
 }
 
 async function loadRobotAccountBindings() {
@@ -873,26 +925,26 @@ async function loadRobotAccountBindings() {
     const response = await apiFetch('/api/auth/robot-bindings');
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-        list.textContent = data.error || '获取绑定失败';
+        list.textContent = data.error || "Failed to get binding";
         return;
     }
     const bindings = Array.isArray(data.bindings) ? data.bindings : [];
     if (!bindings.length) {
         list.innerHTML = `<div class="robot-binding-empty-state">
             <span class="robot-binding-empty-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" stroke="currentColor" stroke-width="2"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" stroke="currentColor" stroke-width="2"/></svg></span>
-            <div><strong>暂无绑定账号</strong><p>生成绑定码并在机器人中发送，即可完成首次绑定。</p></div>
+            <div><strong> currently has no bound account. </strong><p> generates a binding code and sends it to the robot to complete the first binding. </p></div>
         </div>`;
         return;
     }
-    const platformLabels = { wechat: '微信', wecom: '企业微信', dingtalk: '钉钉', lark: '飞书', telegram: 'Telegram', slack: 'Slack', discord: 'Discord', qq: 'QQ' };
+    const platformLabels = { wechat: "WeChat", wecom: "WeCom", dingtalk: "DingTalk", lark: "Feishu", telegram: 'Telegram', slack: 'Slack', discord: 'Discord', qq: 'QQ' };
     list.innerHTML = bindings.map(binding => `
         <div class="robot-binding-account-card">
             <span class="robot-binding-platform-icon">${escapeHtml((platformLabels[binding.platform] || binding.platform || '?').slice(0, 1).toUpperCase())}</span>
             <div class="robot-binding-account-main">
-                <div class="robot-binding-account-name"><strong>${escapeHtml(platformLabels[binding.platform] || binding.platform || '-')}</strong><span>已连接</span></div>
-                <small>账号标识 ${escapeHtml(binding.external_user_hint || '-')} · 更新于 ${escapeHtml(formatRobotBindingTime(binding.updated_at))}</small>
+                <div class="robot-binding-account-name"><strong>${escapeHtml(platformLabels[binding.platform] || binding.platform || '-')}</strong><span> is connected</span></div>
+                <small> account ID ${escapeHtml(binding.external_user_hint || '-')} · Updated on ${escapeHtml(formatRobotBindingTime(binding.updated_at))}</small>
             </div>
-            <button type="button" class="btn-secondary btn-small robot-binding-unbind-btn" onclick="deleteRobotAccountBinding(${escapeJsStringAttr(binding.id || '')})">解除绑定</button>
+            <button type="button" class="btn-secondary btn-small robot-binding-unbind-btn" onclick="deleteRobotAccountBinding(${escapeJsStringAttr(binding.id || '')})">Unbind </button>
         </div>`).join('');
 	if (typeof window.loadVulnerabilityAlertSubscription === 'function') {
 		window.loadVulnerabilityAlertSubscription();
@@ -901,16 +953,16 @@ async function loadRobotAccountBindings() {
 
 function formatRobotBindingTime(value) {
     const date = new Date(value || '');
-    if (Number.isNaN(date.getTime())) return '未知时间';
+    if (Number.isNaN(date.getTime())) return "Unknown time";
     return date.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
 async function deleteRobotAccountBinding(id) {
-    if (!id || !window.confirm('确定解除该机器人账号绑定吗？')) return;
+    if (!id || !window.confirm("Are you sure you want to unbind this robot account?")) return;
     const response = await apiFetch(`/api/auth/robot-bindings/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        if (typeof showNotification === 'function') showNotification(data.error || '解绑失败', 'error');
+        if (typeof showNotification === 'function') showNotification(data.error || "Unbind failed", 'error');
         return;
     }
     await loadRobotAccountBindings();
@@ -951,6 +1003,7 @@ window.generateRobotBindingCode = generateRobotBindingCode;
 window.copyRobotBindingCode = copyRobotBindingCode;
 window.deleteRobotAccountBinding = deleteRobotAccountBinding;
 window.logout = logout;
+window.toggleLoginPasswordVisibility = toggleLoginPasswordVisibility;
 window.hasPermission = hasPermission;
 window.hasAnyPermission = hasAnyPermission;
 window.readApiError = readApiError;

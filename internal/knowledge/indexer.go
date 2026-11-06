@@ -85,7 +85,7 @@ func NewIndexer(ctx context.Context, db *sql.DB, embedder *Embedder, logger *zap
 	fl, err = fileloader.NewFileLoader(ctx, nil)
 	if err != nil {
 		if logger != nil {
-			logger.Warn("Eino FileLoader 初始化失败，prefer_source_file 将回退数据库正文", zap.Error(err))
+			logger.Warn("Eino FileLoader initialization failed; prefer_source_file will fall back to database content", zap.Error(err))
 		}
 		fl = nil
 		err = nil
@@ -161,7 +161,7 @@ func (idx *Indexer) IndexItem(ctx context.Context, itemID string) error {
 				body = s
 			}
 		} else if idx.logger != nil {
-			idx.logger.Warn("优先源文件读取失败，使用数据库正文",
+			idx.logger.Warn("Failed to read priority source file, use database body",
 				zap.String("itemId", itemID),
 				zap.String("path", filePath),
 				zap.Error(lerr))
@@ -194,7 +194,7 @@ func (idx *Indexer) IndexItem(ctx context.Context, itemID string) error {
 	}
 
 	if idx.logger != nil {
-		idx.logger.Info("知识项索引完成", zap.String("itemId", itemID), zap.Int("chunks", len(ids)))
+		idx.logger.Info("Knowledge item index completed", zap.String("itemId", itemID), zap.Int("chunks", len(ids)))
 	}
 	idx.rebuildMu.Lock()
 	idx.rebuildLastItemID = itemID
@@ -298,9 +298,9 @@ func (idx *Indexer) runRebuildIndex(ctx context.Context) error {
 	}
 
 	idx.setIndexRunTotal(len(itemIDs))
-	idx.logger.Info("开始重建索引", zap.Int("totalItems", len(itemIDs)))
+	idx.logger.Info("Start rebuilding index", zap.Int("totalItems", len(itemIDs)))
 
-	return idx.indexItemIDs(ctx, itemIDs, "索引重建完成")
+	return idx.indexItemIDs(ctx, itemIDs, "Index rebuild completed")
 }
 
 func (idx *Indexer) runIndexMissing(ctx context.Context) error {
@@ -324,9 +324,9 @@ func (idx *Indexer) runIndexMissing(ctx context.Context) error {
 	}
 
 	idx.setIndexRunTotal(len(itemIDs))
-	idx.logger.Info("开始补齐缺失索引", zap.Int("totalItems", len(itemIDs)))
+	idx.logger.Info("Start filling in missing indexes", zap.Int("totalItems", len(itemIDs)))
 
-	return idx.indexItemIDs(ctx, itemIDs, "索引构建完成")
+	return idx.indexItemIDs(ctx, itemIDs, "Index building completed")
 }
 
 func scanKnowledgeItemIDs(rows *sql.Rows) ([]string, error) {
@@ -359,7 +359,7 @@ func (idx *Indexer) indexItemIDs(ctx context.Context, itemIDs []string, doneMess
 			if consecutiveFailures == 1 {
 				firstFailureItemID = itemID
 				firstFailureError = err
-				idx.logger.Warn("索引知识项失败",
+				idx.logger.Warn("Indexing knowledge items failed",
 					zap.String("itemId", itemID),
 					zap.Int("totalItems", len(itemIDs)),
 					zap.Error(err),
@@ -373,7 +373,7 @@ func (idx *Indexer) indexItemIDs(ctx context.Context, itemIDs []string, doneMess
 				idx.lastErrorTime = time.Now()
 				idx.mu.Unlock()
 
-				idx.logger.Error("连续索引失败次数过多，立即停止索引",
+				idx.logger.Error("There are too many consecutive indexing failures. Stop indexing immediately.",
 					zap.Int("consecutiveFailures", consecutiveFailures),
 					zap.Int("totalItems", len(itemIDs)),
 					zap.Int("processedItems", i+1),
@@ -390,7 +390,7 @@ func (idx *Indexer) indexItemIDs(ctx context.Context, itemIDs []string, doneMess
 				idx.lastErrorTime = time.Now()
 				idx.mu.Unlock()
 
-				idx.logger.Error("索引失败的知识项过多，可能存在配置问题",
+				idx.logger.Error("Too many knowledge items failed indexing; check configuration",
 					zap.Int("failedCount", failedCount),
 					zap.Int("totalItems", len(itemIDs)),
 					zap.String("firstFailureItemId", firstFailureItemID),
@@ -412,7 +412,7 @@ func (idx *Indexer) indexItemIDs(ctx context.Context, itemIDs []string, doneMess
 		idx.rebuildMu.Unlock()
 
 		if (i+1)%10 == 0 || (len(itemIDs) > 0 && (i+1)*100/len(itemIDs)%10 == 0 && (i+1)*100/len(itemIDs) > 0) {
-			idx.logger.Info("索引进度", zap.Int("current", i+1), zap.Int("total", len(itemIDs)), zap.Int("failed", failedCount))
+			idx.logger.Info("Index progress", zap.Int("current", i+1), zap.Int("total", len(itemIDs)), zap.Int("failed", failedCount))
 		}
 	}
 

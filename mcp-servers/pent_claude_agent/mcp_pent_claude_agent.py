@@ -55,8 +55,8 @@ def _load_config(config_path: str | None) -> dict[str, Any]:
         },
         "mcp_servers": {},
         "system_prompt": (
-            "你是一名专业的渗透测试工程师。根据用户给出的任务，进行安全测试、漏洞分析、信息收集等。"
-            "请按步骤执行，输出清晰、可复现的结果。仅在授权范围内进行测试。"
+            "You are a professional penetration tester. Perform security testing, vulnerability analysis and information gathering according to the assigned task. "
+            "Work step by step and deliver clear, reproducible results within the authorized scope."
         ),
     }
     path = config_path or os.environ.get("PENT_CLAUDE_AGENT_CONFIG", _DEFAULT_CONFIG_PATH)
@@ -118,7 +118,7 @@ async def _run_claude_agent(prompt: str, config_path: str | None = None, cwd: st
     _task_count += 1
 
     if not _claude_sdk_available:
-        _last_result = "错误：未安装 claude-agent-sdk，请执行 pip install claude-agent-sdk"
+        _last_result = "Error: claude-agent-sdk is unavailable; install it with pip install claude-agent-sdk"
         return _last_result
 
     config = _load_config(config_path)
@@ -129,11 +129,11 @@ async def _run_claude_agent(prompt: str, config_path: str | None = None, cwd: st
         async for message in query(prompt=prompt, options=options):
             messages.append(message)
     except Exception as e:
-        _last_result = f"Agent 执行异常: {e}"
+        _last_result = f"Agent Execution error: {e}"
         return _last_result
 
     if not messages:
-        _last_result = "(无输出)"
+        _last_result = "(no output)"
         return _last_result
 
     # 多轮迭代时，取最后一个 ResultMessage（最后一波结果）
@@ -147,9 +147,9 @@ async def _run_claude_agent(prompt: str, config_path: str | None = None, cwd: st
         for block in last.content:
             if hasattr(block, "text") and block.text:
                 parts.append(block.text)
-        text = "\n".join(parts) if parts else "(无输出)"
+        text = "\n".join(parts) if parts else "(no output)"
     else:
-        text = "(无输出)"
+        text = "(no output)"
     _last_result = text
     return _last_result
 
@@ -160,12 +160,12 @@ async def _run_claude_agent(prompt: str, config_path: str | None = None, cwd: st
 
 app = FastMCP(
     name="pent-claude-agent",
-    instructions="渗透测试工程师 MCP：接收任务后，内部启动 Claude Agent 独立执行渗透测试、漏洞分析等，并返回结果。",
+    instructions="Penetration testing MCP: run an independent Claude Agent for assigned testing and analysis, then return its results.",
 )
 
 
 @app.tool(
-    description="执行渗透测试任务。下发任务描述后，pent_claude_agent 会作为独立的渗透测试工程师，使用 Claude Agent 执行任务并返回结果。支持：端口扫描、漏洞探测、Web 安全测试、信息收集等。",
+    description="Execute a penetration testing assignment using an independent Claude Agent and return results, including port scanning, vulnerability discovery, web testing and information gathering.",
 )
 async def pent_claude_run_pentest_task(task: str) -> str:
     """Run a penetration testing task. The agent executes independently and returns results."""
@@ -173,16 +173,16 @@ async def pent_claude_run_pentest_task(task: str) -> str:
 
 
 @app.tool(
-    description="分析漏洞信息。传入漏洞描述、PoC、影响范围等，由 Agent 进行专业分析并给出修复建议。",
+    description="Analyze supplied vulnerability details, POC and impact, then provide remediation guidance.",
 )
 async def pent_claude_analyze_vulnerability(vuln_info: str) -> str:
     """Analyze vulnerability information and provide remediation suggestions."""
-    prompt = f"请对以下漏洞信息进行专业分析，包括：风险等级、影响范围、利用方式、修复建议。\n\n{vuln_info}"
+    prompt = f"Analyze the following vulnerability, including severity, affected scope, exploitation and remediation.\n\n{vuln_info}"
     return await _run_claude_agent(prompt)
 
 
 @app.tool(
-    description="执行指定任务。通用任务执行入口，Agent 会根据任务内容自动选择合适的工具和方法。",
+    description="Execute an assigned task, selecting appropriate tools and methods.",
 )
 async def pent_agent_execute(task: str) -> str:
     """Execute a task. The agent chooses appropriate tools and methods."""
@@ -190,25 +190,25 @@ async def pent_agent_execute(task: str) -> str:
 
 
 @app.tool(
-    description="对目标进行安全诊断。可传入 URL、IP、域名等，Agent 会进行初步的安全评估和诊断。",
+    description="Perform an initial security assessment of a URL, IP or domain.",
 )
 async def pent_agent_diagnose(target: str) -> str:
     """Diagnose a target (URL, IP, domain) for security assessment."""
-    prompt = f"请对以下目标进行安全诊断和初步评估：{target}\n\n包括：可达性、开放服务、常见漏洞面等。"
+    prompt = f"Perform an initial security assessment of: {target}\n\nInclude reachability, exposed services and common vulnerability surfaces."
     return await _run_claude_agent(prompt)
 
 
 @app.tool(
-    description="获取 pent_claude_agent 的当前状态：最近任务、结果摘要、执行次数等。",
+    description="Get pent_claude_agent status, including latest task, result summary and execution count.",
 )
 def pent_claude_status() -> str:
     """Get the current status of pent_claude_agent."""
     global _last_task, _last_result, _task_count
     lines = [
-        f"任务执行次数: {_task_count}",
-        f"最近任务: {_last_task or '-'}",
-        f"最近结果摘要: {(str(_last_result or '-')[:200] + '...') if _last_result and len(str(_last_result)) > 200 else (_last_result or '-')}",
-        f"Claude SDK 可用: {_claude_sdk_available}",
+        f"Execution count: {_task_count}",
+        f"Latest task: {_last_task or '-'}",
+        f"Latest result summary: {(str(_last_result or '-')[:200] + '...') if _last_result and len(str(_last_result)) > 200 else (_last_result or '-')}",
+        f"Claude SDK available: {_claude_sdk_available}",
     ]
     return "\n".join(lines)
 

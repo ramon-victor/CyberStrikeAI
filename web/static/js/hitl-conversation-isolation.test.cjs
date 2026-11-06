@@ -25,8 +25,12 @@ test('已有会话缺少本地配置时不会继承其他会话的最近审批�
 test('服务端默认审批人只更新默认值，不覆盖最近会话选择', () => {
     const source = functionSource(hitl, 'applyHitlDefaultReviewerFromServer', 'fetchHitlDefaultReviewer');
 
-    assert.match(source, /window\.csaiHitlDefaultReviewer = reviewer/);
+    assert.match(source, /return applyHitlDefaultConfigFromServer\(\{ defaultReviewer: reviewer \}\)/);
+    const configSource = functionSource(hitl, 'applyHitlDefaultConfigFromServer', 'fetchHitlDefaultConfig');
+    assert.match(configSource, /const reviewer = hitlReviewerNormalize\(src\.defaultReviewer \|\| src\.reviewer \|\| 'human'\)/);
+    assert.match(configSource, /window\.csaiHitlDefaultReviewer = reviewer/);
     assert.doesNotMatch(source, /saveHitlLastGlobalConfig/);
+    assert.doesNotMatch(configSource, /saveHitlLastGlobalConfig|saveHitlConversationConfig/);
 });
 
 test('恢复会话审批配置时保留该会话自己的审批人', () => {

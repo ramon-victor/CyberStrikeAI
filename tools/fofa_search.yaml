@@ -310,7 +310,7 @@ parameters:
 
       Fields to return, separated by commas.
       Default fields: ip,port,domain
-      Available fields: host,title,ip,domain,port,protocol,country,province,city,server,icp,header,banner,body,as_number,as_organization
+      Available fields: host,title,ip,domain,port,protocol,country,region,city,server,icp,header,banner,body,asn,org
     required: false
     position: 5
     format: "positional"

@@ -57,7 +57,7 @@ func (r *Retriever) UpdateConfig(cfg *RetrievalConfig) {
 	if cfg != nil {
 		r.config = cfg
 		if r.logger != nil {
-			r.logger.Info("检索器配置已更新",
+			r.logger.Info("Retriever configuration updated",
 				zap.Int("top_k", cfg.TopK),
 				zap.Float64("similarity_threshold", cfg.SimilarityThreshold),
 				zap.String("sub_index_filter", cfg.SubIndexFilter),
@@ -70,7 +70,7 @@ func (r *Retriever) UpdateConfig(cfg *RetrievalConfig) {
 	}
 	if r.wireOpenAI != nil {
 		if err := WireRetrieverPipeline(context.Background(), r, r.wireOpenAI); err != nil && r.logger != nil {
-			r.logger.Warn("检索流水线重建失败", zap.Error(err))
+			r.logger.Warn("Retrieval pipeline rebuild failed", zap.Error(err))
 		}
 	}
 }
@@ -253,26 +253,26 @@ func (r *Retriever) vectorSearch(ctx context.Context, req *SearchRequest) ([]*Re
 		var chunkIndex, rowDim int
 
 		if err := rows.Scan(&chunkID, &itemID, &chunkIndex, &chunkText, &embeddingJSON, &rowModel, &rowDim, &category, &title); err != nil {
-			r.logger.Warn("扫描向量失败", zap.Error(err))
+			r.logger.Warn("Scan vector failed", zap.Error(err))
 			continue
 		}
 
 		var embedding []float32
 		if err := json.Unmarshal([]byte(embeddingJSON), &embedding); err != nil {
-			r.logger.Warn("解析向量失败", zap.Error(err))
+			r.logger.Warn("Failed to parse vector", zap.Error(err))
 			continue
 		}
 
 		if rowDim > 0 && len(embedding) != rowDim {
-			r.logger.Debug("跳过维度不一致的向量行", zap.String("chunkId", chunkID), zap.Int("rowDim", rowDim), zap.Int("got", len(embedding)))
+			r.logger.Debug("Skip vector rows with inconsistent dimensions", zap.String("chunkId", chunkID), zap.Int("rowDim", rowDim), zap.Int("got", len(embedding)))
 			continue
 		}
 		if queryDim > 0 && len(embedding) != queryDim {
-			r.logger.Debug("跳过与查询维度不一致的向量", zap.String("chunkId", chunkID), zap.Int("queryDim", queryDim), zap.Int("got", len(embedding)))
+			r.logger.Debug("Skip vectors that are inconsistent with query dimensions", zap.String("chunkId", chunkID), zap.Int("queryDim", queryDim), zap.Int("got", len(embedding)))
 			continue
 		}
 		if expectedModel != "" && strings.TrimSpace(rowModel) != "" && strings.TrimSpace(rowModel) != expectedModel {
-			r.logger.Debug("跳过嵌入模型不一致的行", zap.String("chunkId", chunkID), zap.String("rowModel", rowModel), zap.String("expected", expectedModel))
+			r.logger.Debug("Skip rows with inconsistent embedding models", zap.String("chunkId", chunkID), zap.String("rowModel", rowModel), zap.String("expected", expectedModel))
 			continue
 		}
 

@@ -244,21 +244,21 @@ function refreshProjectsFilterSelects() {
 }
 
 /** 与后端 internal/project/fact_template.go 对齐 */
-const FACT_ATTACK_CHAIN_BODY_TEMPLATE = `## 结论（可验证，一句话）
-<勿仅写「存在漏洞」；写明类型 + 位置 + 触发条件>
+const FACT_ATTACK_CHAIN_BODY_TEMPLATE = `## Conclusion (verifiable, one sentence)
+<Don’t just write “there is a vulnerability”; state the type + location + triggering conditions>
 
-## 目标与入口
-- 目标: <URL / IP:Port / 主机名>
-- 入口: <路径 / 接口 / 参数>
-- 前置条件: <匿名 / 角色 / Cookie / 其他依赖>
+## Goals and Entrances
+- Target: <URL/IP:Port/Hostname>
+- Entry: <path/interface/parameter>
+- Preconditions: <Anonymous/Role/Cookie/Other Dependencies>
 
-## 攻击链（逐步可复现）
-1. <侦察/发现>
-2. <利用/触发>
-3. <影响证明（读文件、RCE 回显、越权数据等）>
+## Attack chain (reproducible step by step)
+1. <Reconnaissance/Discovery>
+2. <Exploit/Trigger>
+3. <Proof of impact (reading files, RCE echo, unauthorized data, etc.)>
 
-## Exploit / POC
-### 请求
+## Exploit/POC
+### Request
 \`\`\`http
 <METHOD> <path> HTTP/1.1
 Host: ...
@@ -267,37 +267,37 @@ Host: ...
 <body>
 \`\`\`
 
-### 响应 / 现象
-<关键响应片段、状态码、差异点>
+### Response / Phenomenon
+<Key response fragments, status codes, differences>
 
-### 命令 / 脚本（如有）
+### Command/Script (if any)
 \`\`\`bash
 <command>
 \`\`\`
 
-## 关键证据
-- <工具输出摘要 / 截图路径 / 会话或消息 ID>
+## Key evidence
+- <Tool output summary / screenshot path / session or message ID>
 
-## 关联
-- related_vulnerability_id: <可选>
-- 依赖事实: <fact_key，如 auth/session_cookie>
-  - 结构化关系边（自动同步；links 文本格式 type: source_fact_key）:
+## Association
+- related_vulnerability_id: <optional>
+- Rely on fact: <fact_key, such as auth/session_cookie>
+  - Structured relationship edges (automatic synchronization; links text format type: source_fact_key):
   - discovered_on: target/primary_domain
 
-## 备注与不确定性
-<待验证假设、环境差异、绕过尝试记录>`;
+## Remarks and Uncertainties
+<Assumptions to be verified, environment differences, bypass attempt records>`;
 
-const FACT_ENV_BODY_TEMPLATE = `## 摘要
-<该事实的核心认知>
+const FACT_ENV_BODY_TEMPLATE = `## Summary
+<Core knowledge of this fact>
 
-## 细节
-<端口/版本/路径/凭据特征/业务规则等>
+## Details
+<port/version/path/credential characteristics/business rules, etc.>
 
-## 来源与证据
-<命令输出、响应片段、发现时间>
+## Sources and Evidence
+<Command output, response fragment, discovery time>
 
-## 关联
-- 相关 fact_key: <可选>`;
+## Association
+- related fact_key: <optional>`;
 
 const FACT_ATTACK_CHAIN_PREFIXES = ['finding/', 'chain/', 'exploit/', 'poc/'];
 const FACT_ATTACK_CHAIN_CATEGORIES = new Set(['finding', 'chain', 'exploit', 'poc', 'vuln']);
@@ -1094,7 +1094,7 @@ async function loadProjectAssets(page) {
         const service = [asset.protocol, asset.port ? ':' + asset.port : ''].join('') || '-';
         const fingerprint = [asset.title, asset.server].filter(Boolean).join(' · ') || '-';
         const updated = asset.last_seen_at ? new Date(asset.last_seen_at).toLocaleString() : '-';
-        const status = asset.status === 'inactive' ? tpFmt('assets.statusInactive', '停用') : tpFmt('assets.statusActive', '活跃');
+        const status = asset.status === 'inactive' ? tpFmt('assets.statusInactive', "Inactive") : tpFmt('assets.statusActive', "Active");
         return `<tr>
             <td class="cell-summary"><button type="button" class="projects-asset-target" onclick="openProjectAssetDetail(${index})" title="${escapeHtml(target)}">${escapeHtml(target)}</button></td>
             <td><code>${escapeHtml(service)}</code></td>
@@ -1135,6 +1135,7 @@ function renderProjectAssetsPagination() {
             <button type="button" class="btn-secondary" onclick="loadProjectAssets(${totalPages})" ${atLast ? 'disabled' : ''}>${escapeHtml(tpFmt('skillsPage.lastPage', 'Last'))}</button>
         </div>
     </div>`;
+    if (typeof initPaginationSelects === 'function') initPaginationSelects(root);
 }
 
 function changeProjectAssetsPageSize(value) {
@@ -1518,7 +1519,7 @@ async function loadProjectFacts() {
         const keyEsc = escapeHtml(f.fact_key);
         const idEsc = escapeHtml(f.id);
         const vulnLink = f.related_vulnerability_id
-            ? `<span class="projects-fact-vuln-link" title="${escapeHtml(tp('projects.relatedVulnIdTitle'))}">${escapeHtml(f.related_vulnerability_id.slice(0, 8))}…</span>`
+            ? `<span class="projects-fact-vuln-link" title="${escapeHtml(tp('projects.relatedVulnIdTitle') + ': ' + f.related_vulnerability_id)}">${escapeHtml(tp('projects.relatedVulnIdTitle'))}: ${escapeHtml(f.related_vulnerability_id.slice(0, 8))}…</span>`
             : '';
         const pinBadge = f.pinned
             ? `<span class="projects-list-item-badge" title="${escapeHtml(tp('projects.pinned'))}">${escapeHtml(tp('projects.pinned'))}</span>`
@@ -1529,7 +1530,7 @@ async function loadProjectFacts() {
                 ? `<span class="projects-fact-link-badge" title="${escapeHtml(tp('projects.linkCountsTitle'))}">↑${lc.outgoing || 0} ↓${lc.incoming || 0}</span>`
                 : '<span class="projects-fact-link-badge projects-fact-link-badge--empty">—</span>';
         return `<tr>
-            <td class="cell-fact-key"><code class="projects-fact-key-chip" title="${keyEsc}">${keyEsc}</code>${pinBadge}${vulnLink}</td>
+            <td class="cell-fact-key"><code class="projects-fact-key-chip" title="${keyEsc}">${keyEsc}</code>${pinBadge || vulnLink ? `<div class="projects-fact-meta">${pinBadge}${vulnLink}</div>` : ''}</td>
             <td class="cell-fact-category">${formatCategoryBadge(f.category)}</td>
             <td class="cell-summary" title="${escapeHtml(f.summary)}">${escapeHtml(f.summary)}</td>
             <td class="cell-fact-links">${linkBadge}</td>
@@ -1901,28 +1902,16 @@ function openVulnerabilityDetail(vulnId) {
 
 async function viewFactsForVulnerability(vulnId) {
     if (!currentProjectId) return;
-    switchProjectTab('facts');
-    const searchEl = document.getElementById('project-facts-search');
-    const catEl = document.getElementById('project-facts-filter-category');
-    const confEl = document.getElementById('project-facts-filter-confidence');
-    const sparseEl = document.getElementById('project-facts-filter-sparse');
-    const hideDepEl = document.getElementById('project-facts-filter-hide-deprecated');
-    if (searchEl) searchEl.value = '';
-    if (catEl) catEl.value = '';
-    if (confEl) confEl.value = '';
-    if (sparseEl) sparseEl.checked = false;
-    if (hideDepEl) hideDepEl.checked = true;
     const params = new URLSearchParams({ limit: '50', related_vulnerability_id: vulnId });
     const res = await apiFetch(`/api/projects/${currentProjectId}/facts?${params}`);
     if (!res.ok) return alert(tp('projects.loadRelatedFactsFailed'));
     const facts = await res.json();
     if (!facts.length) {
         alert(tp('projects.noFactsForVulnerability'));
-        loadProjectFacts();
         return;
     }
     if (facts.length === 1) {
-        viewProjectFactBody(facts[0].fact_key);
+        await viewProjectFactBody(facts[0].fact_key);
         return;
     }
     const pick = prompt(
@@ -1933,12 +1922,10 @@ async function viewFactsForVulnerability(vulnId) {
         }) || `This vulnerability is linked to ${facts.length} facts. Enter index to view:\n${facts.map((f, i) => `${i + 1}. ${f.fact_key}`).join('\n')}`,
     );
     if (pick == null || pick === '') {
-        loadProjectFacts();
         return;
     }
     const idx = parseInt(pick, 10) - 1;
-    if (facts[idx]) viewProjectFactBody(facts[idx].fact_key);
-    else loadProjectFacts();
+    if (facts[idx]) await viewProjectFactBody(facts[idx].fact_key);
 }
 
 function openProjectsOverlay(id, opts) {
@@ -2099,6 +2086,8 @@ function insertProjectScopeExample() {
 
 async function saveProjectSettings() {
     if (!currentProjectId || !requireProjectWrite()) return;
+    const name = document.getElementById('project-edit-name').value.trim();
+    if (!name) return alert(tp('projects.enterProjectName'));
     const scopeRaw = document.getElementById('project-edit-scope').value.trim();
     if (scopeRaw) {
         try {
@@ -2109,7 +2098,7 @@ async function saveProjectSettings() {
         }
     }
     const body = {
-        name: document.getElementById('project-edit-name').value.trim(),
+        name,
         description: clampProjectDescription(document.getElementById('project-edit-description').value),
         scope_json: scopeRaw,
         status: document.getElementById('project-edit-status')?.value || 'active',
@@ -2188,13 +2177,13 @@ function showProjectListActionMenu(event, projectId, source = '') {
     const deleteText = document.getElementById('projects-list-menu-delete-text');
     if (editText) {
         editText.textContent = source === 'chat'
-            ? pickerMessage(tp, 'projects.renameProject', '重命名')
+            ? pickerMessage(tp, 'projects.renameProject', "Rename")
             : tp('projects.editProject');
     }
     if (pinText) {
         pinText.textContent = p.pinned
-            ? pickerMessage(tp, 'projects.unpinProjectAction', '取消置顶')
-            : pickerMessage(tp, 'projects.pinProjectAction', '置顶项目');
+            ? pickerMessage(tp, 'projects.unpinProjectAction', "Unpin project")
+            : pickerMessage(tp, 'projects.pinProjectAction', "Pin project");
     }
     if (archiveText) {
         archiveText.textContent = p.status === 'archived'
@@ -2232,7 +2221,7 @@ async function toggleProjectPinnedFromListMenu() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pinned: nextPinned }),
     });
-    if (!(await notifyProjectApiFailure(res, 'projects.operationFailed', '操作失败'))) return;
+    if (!(await notifyProjectApiFailure(res, 'projects.operationFailed', "Operation failed"))) return;
 
     updateCachedProjectPinnedState(projectId, nextPinned);
     await loadProjectsList();
@@ -2752,16 +2741,16 @@ function getProjectApprovalUrgency(details) {
     if (!timing.timeoutSeconds || !timing.expiresAt) {
         return {
             level: 'normal',
-            label: pickerMessage(tp, 'hitl.approvalUrgencyUnlimited', '审批不限时'),
+            label: pickerMessage(tp, 'hitl.approvalUrgencyUnlimited', "Approval has no time limit"),
             remaining: 0,
         };
     }
     const remaining = Math.max(0, timing.expiresAt - Date.now());
     const level = projectApprovalUrgencyLevel(remaining, true);
     const urgencyLabels = {
-        critical: pickerMessage(tp, 'hitl.approvalUrgencyWithinOne', '最早审批将在 1 分钟内到期'),
-        warning: pickerMessage(tp, 'hitl.approvalUrgencyOneToThree', '最早审批将在 1–3 分钟内到期'),
-        normal: pickerMessage(tp, 'hitl.approvalUrgencyMoreThanThree', '最早审批将在 3 分钟后到期'),
+        critical: pickerMessage(tp, 'hitl.approvalUrgencyWithinOne', "Earliest approval expires within 1 minute"),
+        warning: pickerMessage(tp, 'hitl.approvalUrgencyOneToThree', "Earliest approval expires in 1–3 minutes"),
+        normal: pickerMessage(tp, 'hitl.approvalUrgencyMoreThanThree', "Earliest approval expires in more than 3 minutes"),
     };
     return {
         level,
@@ -2796,12 +2785,12 @@ function createProjectTaskStatus(kind, details, options) {
     const status = document.createElement('span');
     status.className = `project-task-status project-task-status--${kind}`;
     const label = isApprovalSummary
-        ? tpFmt('hitl.waitingApprovalCount', `等待批准 ${approvalCount}`, { count: approvalCount })
+        ? tpFmt('hitl.waitingApprovalCount', `Waiting for approval ${approvalCount}`, { count: approvalCount })
         : (kind === 'approval'
-        ? pickerMessage(tp, 'hitl.waitingApprovalShort', '等待批准')
+        ? pickerMessage(tp, 'hitl.waitingApprovalShort', "Waiting for approval")
         : (kind === 'running'
-            ? pickerMessage(tp, 'tasks.statusRunning', '运行中')
-            : pickerMessage(tp, 'chat.completedUnread', '已完成，尚未查看')));
+            ? pickerMessage(tp, 'tasks.statusRunning', "Running")
+            : pickerMessage(tp, 'chat.completedUnread', "Completed, not viewed")));
     if (kind === 'approval') {
         const timing = getProjectApprovalTiming(details);
         status.innerHTML = '<span class="project-approval-label"></span>' +
@@ -2914,7 +2903,7 @@ function ensureProjectFolderPreview() {
     preview.className = 'project-folder-preview';
     preview.hidden = true;
     preview.setAttribute('role', 'dialog');
-    preview.setAttribute('aria-label', pickerMessage(tp, 'chat.projectPreviewLabel', '项目信息'));
+    preview.setAttribute('aria-label', pickerMessage(tp, 'chat.projectPreviewLabel', "Project information"));
     preview.innerHTML = `
         <div class="project-folder-preview-header">
             <span class="project-folder-preview-icon" aria-hidden="true">
@@ -2991,9 +2980,9 @@ function showProjectFolderPreview(project, row, conversations) {
     const title = project.name || tp('common.untitled');
     const total = conversations.length;
     const active = conversations.filter((conversation) => chatProjectFolderContext.runningIds.has(conversation.id)).length;
-    const fallbackStats = `${total} 个任务 · ${active} 个已开启`;
+    const fallbackStats = `${total} tasks · ${active} opened`;
     const description = clampProjectPreviewText(project.description)
-        || pickerMessage(tp, 'chat.projectPreviewNoDescription', '暂无项目说明');
+        || pickerMessage(tp, 'chat.projectPreviewNoDescription', "No project description");
     const scope = getProjectScopePreview(project);
 
     preview.dataset.projectId = project.id || '';
@@ -3010,13 +2999,13 @@ function showProjectFolderPreview(project, row, conversations) {
     const scopeRow = preview.querySelector('.project-folder-preview-scope');
     scopeRow.hidden = isUnassigned || !scope;
     scopeRow.querySelector('span').textContent = scope
-        ? tpFmt('chat.projectPreviewScope', `测试范围：${scope}`, { scope })
+        ? tpFmt('chat.projectPreviewScope', `Test scope:${scope}`, { scope })
         : '';
     const editButton = preview.querySelector('.project-folder-preview-edit');
     editButton.hidden = isUnassigned;
     editButton.querySelector('span').textContent = tpFmt(
         'chat.projectPreviewEdit',
-        '编辑项目'
+        "Edit project"
     );
     preview.hidden = false;
     row.querySelector('.project-folder-item')?.setAttribute('aria-controls', preview.id);
@@ -3064,7 +3053,7 @@ function formatProjectConversationPreviewAge(value) {
     };
     return tpFmt(
         'chat.conversationPreviewDateTime',
-        `${parts.year}年${parts.month}月${parts.day}日 ${parts.hour}:${parts.minute}`,
+        `${parts.year}Year${parts.month}moon${parts.day}day ${parts.hour}:${parts.minute}`,
         parts
     );
 }
@@ -3072,14 +3061,14 @@ function formatProjectConversationPreviewAge(value) {
 function getProjectConversationModeLabel(conversation) {
     const mode = String(conversation?.agentMode || conversation?.agent_mode || '').trim().toLowerCase();
     const labels = {
-        eino_single: ['chat.agentModeEinoSingle', 'Eino 单代理（ADK）'],
+        eino_single: ['chat.agentModeEinoSingle', "Eino single (ADK)"],
         deep: ['chat.agentModeDeep', 'Deep（DeepAgent）'],
         plan_execute: ['chat.agentModePlanExecuteLabel', 'Plan-Execute'],
-        supervisor: ['chat.agentModeSupervisorLabel', 'Supervisor（专家路由）'],
+        supervisor: ['chat.agentModeSupervisorLabel', "Supervisor (Expert routing)"],
     };
     if (labels[mode]) return tpFmt(labels[mode][0], labels[mode][1]);
     return clampProjectPreviewText(
-        conversation?.roleName || conversation?.role_name || pickerMessage(tp, 'chat.conversationPreviewDefaultMode', '默认'),
+        conversation?.roleName || conversation?.role_name || pickerMessage(tp, 'chat.conversationPreviewDefaultMode', "Default"),
         80
     );
 }
@@ -3155,25 +3144,25 @@ function showProjectConversationPreview(conversation, project, row) {
     const completed = chatProjectFolderContext.completedByConversation.get(conversation.id);
     const isUnread = !isRunning && isProjectConversationUnread(conversation.id);
     const status = isWaitingApproval
-        ? pickerMessage(tp, 'hitl.waitingApprovalShort', '等待批准')
+        ? pickerMessage(tp, 'hitl.waitingApprovalShort', "Waiting for approval")
         : (isRunning
-        ? pickerMessage(tp, 'tasks.statusRunning', '执行中')
+        ? pickerMessage(tp, 'tasks.statusRunning', "Running")
         : (isUnread
-            ? pickerMessage(tp, 'chat.conversationPreviewUnread', '有未读更新')
+            ? pickerMessage(tp, 'chat.conversationPreviewUnread', "Unread update")
             : (completed
-                ? pickerMessage(tp, 'chat.conversationPreviewViewed', '已查看')
-                : pickerMessage(tp, 'chat.conversationPreviewConversation', '对话'))));
+                ? pickerMessage(tp, 'chat.conversationPreviewViewed', "Viewed")
+                : pickerMessage(tp, 'chat.conversationPreviewConversation', "Chat"))));
     const statusEl = preview.querySelector('.project-conversation-preview-status');
 
     preview.querySelector('.project-conversation-preview-title').textContent = conversation.title
-        || pickerMessage(tp, 'projects.untitledConversation', '未命名对话');
+        || pickerMessage(tp, 'projects.untitledConversation', "Untitled conversation");
     const ageEl = preview.querySelector('.project-conversation-preview-age');
     ageEl.textContent = formatProjectConversationPreviewAge(
         conversation.updatedAt || conversation.updated_at || conversation.createdAt || conversation.created_at
     );
     ageEl.hidden = !ageEl.textContent;
     preview.querySelector('.project-conversation-preview-project').textContent = project?.name
-        || pickerMessage(tp, 'chat.conversationPreviewNoProject', '未绑定项目');
+        || pickerMessage(tp, 'chat.conversationPreviewNoProject', "No project");
     const modeIcon = preview.querySelector('.project-conversation-preview-mode-icon');
     if (modeIcon) {
         modeIcon.className = 'project-conversation-preview-mode-icon agent-mode-logo agent-mode-logo--' + getProjectConversationModeIconClass(conversation);
@@ -3249,7 +3238,7 @@ function appendChatProjectFolderItem(list, project, expandedIds, conversations) 
         const pinIcon = document.createElement('span');
         pinIcon.className = 'project-folder-pinned';
         pinIcon.textContent = '📌';
-        pinIcon.title = pickerMessage(tp, 'projects.pinned', '已置顶');
+        pinIcon.title = pickerMessage(tp, 'projects.pinned', "Pinned");
         pinIcon.setAttribute('aria-label', pinIcon.title);
         label.appendChild(pinIcon);
     }
@@ -3306,8 +3295,8 @@ function appendChatProjectFolderItem(list, project, expandedIds, conversations) 
     newConversationButton.setAttribute(
         'aria-label',
         isUnassigned
-            ? pickerMessage(tp, 'chat.newUnassignedConversation', '新建无项目对话')
-            : pickerMessage(tp, 'chat.newConversationInProject', '在此项目中新建对话')
+            ? pickerMessage(tp, 'chat.newUnassignedConversation', "Start a new conversation without a project")
+            : pickerMessage(tp, 'chat.newConversationInProject', "Start a new conversation in this project")
     );
     newConversationButton.title = newConversationButton.getAttribute('aria-label');
     newConversationButton.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
@@ -3343,7 +3332,7 @@ function appendChatProjectConversationItem(list, conversation, project) {
 
     const title = document.createElement('span');
     title.className = 'project-conversation-title';
-    title.textContent = conversation.title || pickerMessage(tp, 'projects.untitledConversation', '未命名对话');
+    title.textContent = conversation.title || pickerMessage(tp, 'projects.untitledConversation', "Untitled conversation");
 
     const label = document.createElement('span');
     label.className = 'project-conversation-label';
@@ -3352,7 +3341,7 @@ function appendChatProjectConversationItem(list, conversation, project) {
         const pinIcon = document.createElement('span');
         pinIcon.className = 'conversation-item-pinned project-conversation-pinned';
         pinIcon.textContent = '📌';
-        pinIcon.title = pickerMessage(tp, 'projects.pinned', '已置顶');
+        pinIcon.title = pickerMessage(tp, 'projects.pinned', "Pinned");
         pinIcon.setAttribute('aria-label', pinIcon.title);
         label.appendChild(pinIcon);
     }
@@ -3391,7 +3380,7 @@ function appendChatProjectConversationItem(list, conversation, project) {
     menuButton.className = 'project-conversation-menu';
     menuButton.setAttribute(
         'aria-label',
-        pickerMessage(tp, 'chat.conversationActions', '对话操作')
+        pickerMessage(tp, 'chat.conversationActions', "Conversation actions")
     );
     menuButton.title = menuButton.getAttribute('aria-label');
     menuButton.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>';
@@ -3522,7 +3511,7 @@ function removeChatProjectConversation(conversationId) {
 
 function refreshChatProjectFoldersAfterAction() {
     Promise.resolve().then(() => refreshChatProjectFolders()).catch((error) => {
-        console.warn('刷新项目对话列表失败:', error);
+        console.warn("Failed to refresh project conversation list:", error);
     });
 }
 
@@ -3541,12 +3530,12 @@ function resolveChatProjectFolderSelection() {
 function appendChatProjectFoldersLoadMore(list, remainingCount) {
     if (!list || remainingCount <= 0) return;
     const button = document.createElement('button');
-    const label = pickerMessage(tp, 'common.loadMore', '加载更多');
+    const label = pickerMessage(tp, 'common.loadMore', "Load more");
     button.type = 'button';
     button.className = 'project-folders-load-more';
     button.setAttribute('aria-label', tpFmt(
         'chat.projectFoldersLoadMoreRemaining',
-        `${label}，剩余 ${remainingCount} 个项目`,
+        `${label}, remaining ${remainingCount} items`,
         { count: remainingCount }
     ));
     button.innerHTML = `<span>${escapeHtml(label)}</span><span class="project-folders-load-more-count">${remainingCount}</span>`;
@@ -3608,8 +3597,8 @@ function renderChatProjectFolders(projects) {
         const empty = document.createElement('div');
         empty.className = 'project-folders-empty';
         empty.textContent = chatProjectFolderSearchQuery
-            ? pickerMessage(tp, 'chat.filterProjectSearchEmpty', '没有匹配的项目')
-            : pickerMessage(tp, 'projects.noProjects', '暂无项目');
+            ? pickerMessage(tp, 'chat.filterProjectSearchEmpty', "No matching projects")
+            : pickerMessage(tp, 'projects.noProjects', "No projects");
         list.appendChild(empty);
         return;
     }
@@ -3633,7 +3622,7 @@ async function refreshChatProjectFolders() {
     const seq = ++chatProjectFolderRenderSeq;
     if (!isProjectsCacheReady()) {
         list.innerHTML = '';
-        appendChatProjectPanelMessage(list, 'project-folders-empty', pickerMessage(tp, 'common.loading', '加载中…'));
+        appendChatProjectPanelMessage(list, 'project-folders-empty', pickerMessage(tp, 'common.loading', "Loading…"));
     }
     try {
         const [projects] = await Promise.all([
@@ -3648,7 +3637,7 @@ async function refreshChatProjectFolders() {
         appendChatProjectPanelMessage(
             list,
             'project-folders-empty',
-            pickerMessage(tp, 'projects.loadProjectsFailed', '加载项目失败')
+            pickerMessage(tp, 'projects.loadProjectsFailed', "Failed to load projects")
         );
     }
 }

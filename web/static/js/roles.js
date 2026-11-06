@@ -308,7 +308,7 @@ async function loadRoles() {
     try {
         const response = await apiFetch('/api/roles');
         if (!response.ok) {
-            throw new Error('加载角色失败');
+            throw new Error("Failed to load roles");
         }
         const data = await response.json();
         roles = data.roles || [];
@@ -316,11 +316,11 @@ async function loadRoles() {
         renderRoleSelectionSidebar(); // 渲染侧边栏角色列表
         return roles;
     } catch (error) {
-        console.error('加载角色失败:', error);
+        console.error("Failed to load character:", error);
         // 提示文案使用 i18n；若此时 i18n 尚未初始化，则回退为可读中文，而不是暴露 key（roles.loadFailed）
         var loadFailedLabel = (typeof window !== 'undefined' && typeof window.t === 'function')
             ? window.t('roles.loadFailed')
-            : '加载角色失败';
+            : "Failed to load roles";
         showNotification(loadFailedLabel + ': ' + error.message, 'error');
         return [];
     }
@@ -369,7 +369,7 @@ function updateRoleSelectorDisplay() {
                     icon = String.fromCodePoint(codePoint);
                 } catch (e) {
                     // 如果转换失败，使用默认图标
-                    console.warn('转换 icon Unicode 转义失败:', icon, e);
+                    console.warn("Converting icon to Unicode escaping failed:", icon, e);
                     icon = '🔵';
                 }
             }
@@ -410,7 +410,7 @@ function renderRoleSelectionSidebar() {
                     icon = String.fromCodePoint(codePoint);
                 } catch (e) {
                     // 如果转换失败，使用原值
-                    console.warn('转换 icon Unicode 转义失败:', icon, e);
+                    console.warn("Converting icon to Unicode escaping failed:", icon, e);
                 }
             }
             return icon;
@@ -574,7 +574,7 @@ async function refreshRoles() {
     }
     // 始终更新侧边栏角色选择列表
     renderRoleSelectionSidebar();
-    showNotification('已刷新', 'success');
+    showNotification("Refreshed", 'success');
 }
 
 // 渲染角色列表
@@ -615,7 +615,7 @@ function renderRolesList() {
                     roleIcon = String.fromCodePoint(codePoint);
                 } catch (e) {
                     // 如果转换失败，使用默认图标
-                    console.warn('转换 icon Unicode 转义失败:', roleIcon, e);
+                    console.warn("Converting icon to Unicode escaping failed:", roleIcon, e);
                     roleIcon = '👤';
                 }
             }
@@ -787,7 +787,7 @@ async function fetchAllRoleToolsIntoCache(searchKeyword) {
         }
         const response = await apiFetch(url);
         if (!response.ok) {
-            throw new Error('获取工具列表失败');
+            throw new Error("Failed to get tool list");
         }
         const result = await response.json();
         const tools = result.tools || [];
@@ -869,7 +869,7 @@ async function loadRoleTools(page = 1, searchKeyword = '') {
 
             const response = await apiFetch(url);
             if (!response.ok) {
-                throw new Error('获取工具列表失败');
+                throw new Error("Failed to get tool list");
             }
 
             const result = await response.json();
@@ -896,7 +896,7 @@ async function loadRoleTools(page = 1, searchKeyword = '') {
         renderRoleToolsPagination();
         updateRoleToolsStats();
     } catch (error) {
-        console.error('加载工具列表失败:', error);
+        console.error("Failed to load tool list:", error);
         const toolsList = document.getElementById('role-tools-list');
         if (toolsList) {
             toolsList.innerHTML = `<div class="tools-error">${_t('roleModal.loadToolsFailed')}: ${escapeHtml(error.message)}</div>`;
@@ -958,8 +958,8 @@ function renderRoleToolsList() {
         let externalBadge = '';
         if (toolState.is_external || tool.is_external) {
             const externalMcpName = toolState.external_mcp || tool.external_mcp || '';
-            const badgeText = externalMcpName ? `外部 (${escapeHtml(externalMcpName)})` : '外部';
-            const badgeTitle = externalMcpName ? `外部MCP工具 - 来源：${escapeHtml(externalMcpName)}` : '外部MCP工具';
+            const badgeText = externalMcpName ? `external (${escapeHtml(externalMcpName)})` : "External";
+            const badgeTitle = externalMcpName ? `External MCP Tools - Source:${escapeHtml(externalMcpName)}` : "External MCP tools";
             externalBadge = `<span class="external-tool-badge" title="${escapeAttr(badgeTitle)}">${badgeText}</span>`;
         }
         let mcpDisabledBadge = '';
@@ -979,7 +979,7 @@ function renderRoleToolsList() {
                     ${externalBadge}
                     ${mcpDisabledBadge}
                 </div>
-                <div class="role-tool-item-desc">${escapeHtml(tool.description || '无描述')}</div>
+                <div class="role-tool-item-desc">${escapeHtml(tool.description || "No description")}</div>
             </div>
         `;
         listContainer.appendChild(toolItem);
@@ -1032,6 +1032,7 @@ function renderRoleToolsPagination() {
     `;
     
     toolsList.appendChild(pagination);
+    if (typeof initPaginationSelects === 'function') initPaginationSelects(pagination);
 }
 
 function syncRoleToolsFilterButtons() {
@@ -1588,7 +1589,7 @@ async function loadAllToolsToStateMap() {
             const url = `/api/config/tools?page=${page}&page_size=${pageSize}`;
             const response = await apiFetch(url);
             if (!response.ok) {
-                throw new Error('获取工具列表失败');
+                throw new Error("Failed to get tool list");
             }
             
             const result = await response.json();
@@ -1633,7 +1634,7 @@ async function loadAllToolsToStateMap() {
             }
         }
     } catch (error) {
-        console.error('加载所有工具到状态映射失败:', error);
+        console.error("Failed to load all tools to state map:", error);
         throw error;
     }
 }
@@ -1750,7 +1751,7 @@ async function saveRole() {
         // 如果有未启用的工具，提示用户
         if (disabledTools.length > 0) {
             const toolNames = disabledTools.map(t => t.name).join('、');
-            const message = `以下 ${disabledTools.length} 个工具未在MCP管理中启用，无法在角色中配置：\n\n${toolNames}\n\n请先在"MCP管理"中启用这些工具，然后再在角色中配置。\n\n是否继续保存？（将只保存已启用的工具）`;
+            const message = `the following ${disabledTools.length} tool is not enabled in MCP management and cannot be configured in the role:\n\n${toolNames}\n\nPlease enable these tools in "MCP Management" first, and then configure them in the role. \n\nDo you want to continue saving? (Only enabled tools will be saved)`;
             
             if (!confirm(message)) {
                 return; // 用户取消保存
@@ -1789,7 +1790,7 @@ async function saveRole() {
 
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.error || '保存角色失败');
+            throw new Error(error.error || "Unable to save role");
         }
 
         // 如果有未启用的工具被过滤掉了，提示用户
@@ -1800,18 +1801,18 @@ async function saveRole() {
                 toolNames = toolNames.substring(0, 100) + '...';
             }
             showNotification(
-                `${isEdit ? '角色已更新' : '角色已创建'}，但已过滤 ${disabledTools.length} 个未在MCP管理中启用的工具：${toolNames}。请先在"MCP管理"中启用这些工具，然后再在角色中配置。`,
+                `${isEdit ? "Role updated" : "Role created"}, but filtered ${disabledTools.length} tools not enabled in MCP Management:${toolNames}. Please enable these tools in "MCP Management" first, and then configure them in the role.`,
                 'warning'
             );
         } else {
-            showNotification(isEdit ? '角色已更新' : '角色已创建', 'success');
+            showNotification(isEdit ? "Role updated" : "Role created", 'success');
         }
         
         closeRoleModal();
         await refreshRoles();
     } catch (error) {
-        console.error('保存角色失败:', error);
-        showNotification('保存角色失败: ' + error.message, 'error');
+        console.error("Failed to save character:", error);
+        showNotification("Failed to save character: " + error.message, 'error');
     }
 }
 
@@ -1822,7 +1823,7 @@ async function deleteRole(roleName) {
         return;
     }
 
-    if (!confirm(`确定要删除角色"${roleName}"吗？此操作不可撤销。`)) {
+    if (!confirm(`Are you sure you want to delete the role"${roleName}"? This operation cannot be undone.`)) {
         return;
     }
 
@@ -1833,10 +1834,10 @@ async function deleteRole(roleName) {
 
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.error || '删除角色失败');
+            throw new Error(error.error || "Unable to delete role");
         }
 
-        showNotification('角色已删除', 'success');
+        showNotification("Role deleted", 'success');
         
         // 如果删除的是当前选中的角色,切换到默认角色
         if (currentRole === roleName) {
@@ -1845,8 +1846,8 @@ async function deleteRole(roleName) {
 
         await refreshRoles();
     } catch (error) {
-        console.error('删除角色失败:', error);
-        showNotification('删除角色失败: ' + error.message, 'error');
+        console.error("Failed to delete role:", error);
+        showNotification("Failed to delete role: " + error.message, 'error');
     }
 }
 

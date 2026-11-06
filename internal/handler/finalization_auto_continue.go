@@ -54,7 +54,7 @@ func (h *AgentHandler) tryAutoContinueAfterFinalization(
 	// Agent 无感续跑：不追加新的 user/system 文案，只使用上一段模型可见轨迹继续 Runner。
 	*curFinalMessage = ""
 	if progressCallback != nil {
-		progressCallback("finalization_auto_continue", "最终回复检查尚未收敛，正在基于已有轨迹继续执行…", map[string]interface{}{
+		progressCallback("finalization_auto_continue", "Final response checks are incomplete; continuing from the existing trace...", map[string]interface{}{
 			"conversationId":      conversationID,
 			"source":              "finalizer",
 			"attempt":             *attempt,
